@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      ANIME_PATH: /media/anime
+      DATABASE_URL: sqlite:////data/anime.db
+    volumes:
+      - /mnt/nas-anime:/media/anime:ro
+      - ./data:/data
+    restart: unless-stopped

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="heading"><div><h1>Přehled knihovny</h1><p>Lokální katalog videí a titulkových stop.</p></div>
+<form method="post" action="/scan"><button type="submit">Spustit sken</button></form></div>
+{% if message %}<div class="notice success">{{ message }}</div>{% endif %}
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+<section class="stats">
+  <article><strong>{{ totals.total }}</strong><span>videí</span></article>
+  <article><strong>{{ totals.cs }}</strong><span>s českými titulky</span></article>
+  <article><strong>{{ totals.sk }}</strong><span>se slovenskými titulky</span></article>
+  <article><strong>{{ totals.missing }}</strong><span>bez CZ/SK titulků</span></article>
+</section>
+<section class="panel"><h2>Kořenové složky</h2>
+<div class="table-wrap"><table><thead><tr><th>Složka</th><th>Videa</th><th>Čeština</th><th>Slovenština</th><th>Bez CZ/SK</th></tr></thead><tbody>
+{% for name, data in folders %}<tr><td><a href="{{ url_for('folder_detail', folder=name) }}">{{ name }}</a></td><td>{{ data.total }}</td><td>{{ data.cs }}</td><td>{{ data.sk }}</td><td>{{ data.missing }}</td></tr>
+{% else %}<tr><td colspan="5">Databáze je prázdná. Spusťte první sken.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}

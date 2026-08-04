@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}{{ folder }} · AnimeDB{% endblock %}
+{% block content %}<p><a href="/">← Zpět na přehled</a></p><h1>{{ folder }}</h1>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>Soubor</th><th>Velikost</th><th>Délka</th><th>Video</th><th>Audio</th><th>Titulky</th></tr></thead><tbody>
+{% for video in videos %}<tr>
+<td title="{{ video.relative_path }}">{{ video.filename }}<small>{{ video.relative_path }}</small></td>
+<td>{{ "%.2f"|format(video.size / 1073741824) }} GB</td>
+<td>{% if video.duration is not none %}{{ "%02d:%02d"|format((video.duration // 60)|int, (video.duration % 60)|int) }}{% else %}—{% endif %}</td>
+<td>{{ video.video_codec or "—" }}{% if video.width %}<small>{{ video.width }}×{{ video.height }}</small>{% endif %}</td>
+<td>{% for track in video.audio_tracks %}<span class="tag">{{ track.language }} · {{ track.codec }}</span>{% else %}—{% endfor %}</td>
+<td>{% for track in video.internal_subtitles %}<span class="tag">int: {{ track.language }} · {{ track.codec }}{% if track.title %} · {{ track.title }}{% endif %}</span>{% endfor %}{% for track in video.external_subtitles %}<span class="tag accent">ext: {{ track.language }} · {{ track.codec }}</span>{% endfor %}{% if not video.internal_subtitles and not video.external_subtitles %}—{% endif %}</td>
+</tr>{% else %}<tr><td colspan="6">Ve složce nejsou videa.</td></tr>{% endfor %}
+</tbody></table></div></section>{% endblock %}
