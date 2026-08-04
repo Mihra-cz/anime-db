@@ -5,14 +5,17 @@
 {% if message %}<div class="notice success">{{ message }}</div>{% endif %}
 {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
 <section class="stats">
-  <article><strong>{{ totals.total }}</strong><span>videí</span></article>
-  <article><strong>{{ totals.cs }}</strong><span>s českými titulky</span></article>
-  <article><strong>{{ totals.sk }}</strong><span>se slovenskými titulky</span></article>
-  <article><strong>{{ totals.missing }}</strong><span>bez CZ/SK titulků</span></article>
+  <article><strong>{{ totals.episodes }}</strong><span>běžných epizod</span></article>
+  <article><strong>{{ totals.bonus }}</strong><span>bonusových / ostatních videí</span></article>
+  <article><strong>{{ totals.cs }}</strong><span>videí s CZ</span></article>
+  <article><strong>{{ totals.sk }}</strong><span>videí se SK</span></article>
+  <article><strong>{{ totals.translated }}</strong><span>videí s CZ/SK celkem</span></article>
+  <article><strong>{{ totals.missing }}</strong><span>skutečně bez CZ/SK</span></article>
+  <article><strong>{{ totals.unknown }}</strong><span>s neznámými titulky</span></article>
 </section>
 <section class="panel"><h2>Kořenové složky</h2>
-<div class="table-wrap"><table><thead><tr><th>Složka</th><th>Videa</th><th>Čeština</th><th>Slovenština</th><th>Bez CZ/SK</th></tr></thead><tbody>
-{% for name, data in folders %}<tr><td><a href="{{ url_for('folder_detail', folder=name) }}">{{ name }}</a></td><td>{{ data.total }}</td><td>{{ data.cs }}</td><td>{{ data.sk }}</td><td>{{ data.missing }}</td></tr>
-{% else %}<tr><td colspan="5">Databáze je prázdná. Spusťte první sken.</td></tr>{% endfor %}
+<div class="table-wrap"><table><thead><tr><th>Složka</th><th>Epizody</th><th>Bonusy</th><th>CZ</th><th>SK</th><th>CZ/SK</th><th>Bez CZ/SK</th><th>Neznámé</th></tr></thead><tbody>
+{% for name, data in folders %}<tr><td><a href="{{ url_for('folder_detail', folder=name) }}">{{ name }}</a></td><td>{{ data.episodes }}</td><td>{{ data.bonus }}</td><td>{{ data.cs }}</td><td>{{ data.sk }}</td><td>{{ data.translated }}</td><td>{{ data.missing }}</td><td>{{ data.unknown }}</td></tr>
+{% else %}<tr><td colspan="8">Databáze je prázdná. Spusťte první sken.</td></tr>{% endfor %}
 </tbody></table></div></section>
 {% endblock %}

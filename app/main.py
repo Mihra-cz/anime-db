@@ -11,8 +11,10 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from .catalog import translation_status
 from .config import Settings, get_settings
 from .database import Base, make_engine, make_session_factory
+from .migrations import migrate_schema
 from .models import Video
 from .scanner import scan_library
 
@@ -22,11 +24,19 @@ PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 
 
-def _language_group(video: Video) -> set[str]:
-    aliases = {"cs": "cs", "ces": "cs", "cze": "cs", "sk": "sk", "slk": "sk", "slo": "sk"}
-    languages = {track.language for track in video.internal_subtitles}
-    languages.update(track.language for track in video.external_subtitles)
-    return {aliases.get(language.casefold(), language.casefold()) for language in languages}
+def _empty_stats() -> dict[str, int]:
+    return {key: 0 for key in ("total", "episodes", "bonus", "cs", "sk", "translated", "missing", "unknown")}
+
+
+def _add_video(stats: dict[str, int], video: Video) -> None:
+    status = translation_status(video)
+    stats["total"] += 1
+    stats["episodes" if video.file_type == "episode" else "bonus"] += 1
+    stats["cs"] += status.has_cs
+    stats["sk"] += status.has_sk
+    stats["translated"] += status.has_cs_or_sk
+    stats["missing"] += not status.has_cs_or_sk
+    stats["unknown"] += status.has_unknown
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -37,6 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         Base.metadata.create_all(engine)
+        migrate_schema(engine)
         logger.info("AnimeDB spuštěno; knihovna=%s", settings.anime_path)
         yield
         engine.dispose()
@@ -57,14 +68,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(Video.internal_subtitles), selectinload(Video.external_subtitles)
             )).all()
         folders: dict[str, dict[str, int]] = {}
+        totals = _empty_stats()
         for video in videos:
-            item = folders.setdefault(video.root_folder, {"total": 0, "cs": 0, "sk": 0, "missing": 0})
-            item["total"] += 1
-            languages = _language_group(video)
-            item["cs"] += "cs" in languages
-            item["sk"] += "sk" in languages
-            item["missing"] += not ({"cs", "sk"} & languages)
-        totals = {key: sum(folder[key] for folder in folders.values()) for key in ("total", "cs", "sk", "missing")}
+            _add_video(folders.setdefault(video.root_folder, _empty_stats()), video)
+            _add_video(totals, video)
         return templates.TemplateResponse(request, "index.html", {
             "folders": sorted(folders.items()), "totals": totals, "message": message, "error": error,
         })
@@ -76,7 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(Video.audio_tracks), selectinload(Video.internal_subtitles),
                 selectinload(Video.external_subtitles)).order_by(Video.relative_path)).all()
         return templates.TemplateResponse(request, "folder.html", {
-            "folder": folder, "videos": videos, "language_group": _language_group,
+            "folder": folder, "videos": videos, "translation_status": translation_status,
         })
 
     @app.post("/scan")

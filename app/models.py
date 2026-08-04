@@ -19,6 +19,7 @@ class Video(Base):
     video_codec: Mapped[str | None] = mapped_column(String, nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_type: Mapped[str] = mapped_column(String, default="other", server_default="other", index=True)
 
     audio_tracks: Mapped[list[AudioTrack]] = relationship(cascade="all, delete-orphan")
     internal_subtitles: Mapped[list[InternalSubtitle]] = relationship(cascade="all, delete-orphan")
@@ -42,6 +43,7 @@ class InternalSubtitle(Base):
     stream_index: Mapped[int] = mapped_column(Integer)
     codec: Mapped[str | None] = mapped_column(String, nullable=True)
     language: Mapped[str] = mapped_column(String, default="unknown")
+    normalized_language: Mapped[str] = mapped_column(String, default="unknown", server_default="unknown")
     title: Mapped[str | None] = mapped_column(String, nullable=True)
     __table_args__ = (UniqueConstraint("video_id", "stream_index"),)
 
@@ -53,4 +55,5 @@ class ExternalSubtitle(Base):
     relative_path: Mapped[str] = mapped_column(String)
     codec: Mapped[str] = mapped_column(String)
     language: Mapped[str] = mapped_column(String, default="unknown")
+    normalized_language: Mapped[str] = mapped_column(String, default="unknown", server_default="unknown")
     __table_args__ = (UniqueConstraint("video_id", "relative_path"),)

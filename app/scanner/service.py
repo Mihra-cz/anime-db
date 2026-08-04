@@ -8,6 +8,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.catalog import classify_video, normalize_language
 from app.models import AudioTrack, ExternalSubtitle, InternalSubtitle, Video
 from app.probe import ProbeError, probe_video
 from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, subtitle_matches
@@ -48,15 +49,17 @@ def _external_subtitles(video_path: Path, library_root: Path) -> list[dict[str, 
         candidates = video_path.parent.iterdir()
     except OSError:
         return []
-    return [
-        {
-            "relative_path": path.relative_to(library_root).as_posix(),
-            "codec": path.suffix.lower().lstrip("."),
-            "language": read_and_detect(path),
-        }
-        for path in candidates
-        if path.is_file() and path.suffix.lower() in SUBTITLE_EXTENSIONS and subtitle_matches(video_path, path)
-    ]
+    result = []
+    for path in candidates:
+        if path.is_file() and path.suffix.lower() in SUBTITLE_EXTENSIONS and subtitle_matches(video_path, path):
+            language = read_and_detect(path)
+            result.append({
+                "relative_path": path.relative_to(library_root).as_posix(),
+                "codec": path.suffix.lower().lstrip("."),
+                "language": language,
+                "normalized_language": normalize_language(language),
+            })
+    return result
 
 
 def _sync_external_subtitles(
@@ -74,6 +77,7 @@ def _sync_external_subtitles(
             else:
                 subtitle.codec = data["codec"]
                 subtitle.language = data["language"]
+                subtitle.normalized_language = data["normalized_language"]
 
         for relative_path, subtitle in existing.items():
             if relative_path not in incoming:
@@ -99,7 +103,8 @@ def _scan_library(session: Session, root: Path) -> ScanResult:
             changed = video is None or video.size != stat.st_size or video.mtime_ns != stat.st_mtime_ns
             if video is None:
                 video = Video(relative_path=key, root_folder=_root_folder(relative), filename=path.name,
-                              size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+                              size=stat.st_size, mtime_ns=stat.st_mtime_ns,
+                              file_type=classify_video(key))
                 session.add(video)
                 result.created += 1
             elif changed:
@@ -110,11 +115,18 @@ def _scan_library(session: Session, root: Path) -> ScanResult:
             if changed:
                 metadata = probe_video(path)
                 video.filename, video.root_folder = path.name, _root_folder(relative)
+                video.file_type = classify_video(key)
                 video.size, video.mtime_ns = stat.st_size, stat.st_mtime_ns
                 video.duration, video.video_codec = metadata["duration"], metadata["video_codec"]
                 video.width, video.height = metadata["width"], metadata["height"]
                 video.audio_tracks = [AudioTrack(**track) for track in metadata["audio"]]
-                video.internal_subtitles = [InternalSubtitle(**track) for track in metadata["subtitles"]]
+                video.internal_subtitles = [
+                    InternalSubtitle(
+                        **track,
+                        normalized_language=normalize_language(track.get("language"), track.get("title")),
+                    )
+                    for track in metadata["subtitles"]
+                ]
             _sync_external_subtitles(session, video, _external_subtitles(path, root))
         except (OSError, ProbeError, ValueError) as exc:
             result.errors += 1
