@@ -2,7 +2,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from app.migrations import migrate_schema
-from app.models import InternalSubtitle, Video
+from app.models import CatalogTitle, InternalSubtitle, Video
 
 
 def test_migrates_existing_database_and_backfills_values(tmp_path):
@@ -54,3 +54,57 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         assert video.manual_hardsub_verified_at is None
         assert session.scalar(select(InternalSubtitle.language)) == "unknown"
         assert session.scalar(select(InternalSubtitle.normalized_language)) == "eng"
+
+
+def test_v5_migration_creates_stable_titles_and_is_idempotent(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'v4.db'}")
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE videos (
+                id INTEGER PRIMARY KEY, relative_path VARCHAR UNIQUE NOT NULL,
+                root_folder VARCHAR NOT NULL, filename VARCHAR NOT NULL,
+                size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
+                duration FLOAT, video_codec VARCHAR, width INTEGER, height INTEGER,
+                file_type VARCHAR NOT NULL DEFAULT 'other',
+                manual_hardsub_cs BOOLEAN NOT NULL DEFAULT 0,
+                manual_hardsub_sk BOOLEAN NOT NULL DEFAULT 0,
+                manual_hardsub_verified_at DATETIME
+            )
+        """))
+        connection.execute(text("""
+            CREATE TABLE internal_subtitles (
+                id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL,
+                stream_index INTEGER NOT NULL, codec VARCHAR, language VARCHAR NOT NULL,
+                normalized_language VARCHAR NOT NULL DEFAULT 'unknown', title VARCHAR,
+                UNIQUE(video_id, stream_index)
+            )
+        """))
+        connection.execute(text("""
+            CREATE TABLE external_subtitles (
+                id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL,
+                relative_path VARCHAR NOT NULL, codec VARCHAR NOT NULL,
+                language VARCHAR NOT NULL, normalized_language VARCHAR NOT NULL DEFAULT 'unknown',
+                UNIQUE(video_id, relative_path)
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO videos (id, relative_path, root_folder, filename, size, mtime_ns,
+              manual_hardsub_cs, manual_hardsub_sk)
+            VALUES
+              (1, 'Anime/Show/Season 01/E01.mkv', 'Anime', 'E01.mkv', 1, 1, 1, 0),
+              (2, 'Anime/Show/Season 02/E01.mkv', 'Anime', 'E01.mkv', 1, 1, 0, 1),
+              (3, 'Anime/Other/E01.mkv', 'Anime', 'E01.mkv', 1, 1, 0, 0)
+        """))
+
+    migrate_schema(engine)
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        titles = session.scalars(select(CatalogTitle).order_by(CatalogTitle.id)).all()
+        videos = session.scalars(select(Video).order_by(Video.id)).all()
+        assert len(titles) == 2
+        assert titles[0].metadata_status == "unlinked"
+        assert all(video.catalog_title_id is not None for video in videos)
+        assert videos[0].catalog_title_id == videos[1].catalog_title_id
+        assert videos[0].manual_hardsub_cs is True
+        assert videos[1].manual_hardsub_sk is True

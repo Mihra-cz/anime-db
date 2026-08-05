@@ -8,8 +8,8 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.catalog import classify_video, normalize_language
-from app.models import AudioTrack, ExternalSubtitle, InternalSubtitle, Video
+from app.catalog import classify_video, determine_parent_series, normalize_language, normalize_title
+from app.models import AudioTrack, CatalogTitle, ExternalSubtitle, InternalSubtitle, Video
 from app.probe import ProbeError, probe_video
 from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, subtitle_matches
 
@@ -125,6 +125,10 @@ def _scan_library(
 
     result = ScanResult()
     existing = {v.relative_path: v for v in session.scalars(select(Video)).all()}
+    catalog_titles = {
+        title.relative_root_path: title
+        for title in session.scalars(select(CatalogTitle)).all()
+    }
     seen: set[str] = set()
     for path in iter_videos(root):
         result.found += 1
@@ -161,6 +165,17 @@ def _scan_library(
                     )
                     for track in metadata["subtitles"]
                 ]
+            identity = determine_parent_series(key)
+            catalog_title = catalog_titles.get(identity.relative_path)
+            if catalog_title is None:
+                catalog_title = CatalogTitle(
+                    local_title=identity.name,
+                    normalized_local_title=normalize_title(identity.name),
+                    relative_root_path=identity.relative_path,
+                )
+                session.add(catalog_title)
+                catalog_titles[identity.relative_path] = catalog_title
+            video.catalog_title = catalog_title
             _sync_external_subtitles(session, video, _external_subtitles(path, root))
         except (OSError, ProbeError, ValueError) as exc:
             result.errors += 1

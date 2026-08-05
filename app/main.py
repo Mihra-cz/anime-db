@@ -29,27 +29,34 @@ from .catalog import (
 from .config import Settings, get_settings
 from .database import Base, make_engine, make_session_factory
 from .migrations import migrate_schema
-from .models import Video
+from .metadata.providers.anilist import AniListProvider
+from .metadata.providers.base import MetadataProviderError
+from .models import CatalogTitle, Video
 from .scanner import LibrarySafetyError, scan_library
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
+METADATA_STATUS_LABELS = {
+    "unlinked": "Bez metadat", "candidates_available": "Čeká na potvrzení",
+    "linked_auto": "Spárováno automaticky", "linked_manual": "Spárováno ručně",
+    "conflict": "Konflikt", "unavailable": "Bez externího záznamu", "error": "Chyba",
+}
 def _load_videos(sessions) -> list[Video]:
     with sessions() as session:
         return list(session.scalars(select(Video).options(
             selectinload(Video.audio_tracks), selectinload(Video.internal_subtitles),
-            selectinload(Video.external_subtitles),
+            selectinload(Video.external_subtitles), selectinload(Video.catalog_title),
         ).order_by(Video.relative_path)).all())
 
 
 def hardsub_return_url(
-    filter_name: str, series_path: str, video_id: int, query: str = "",
+    filter_name: str, series_path: str | int, video_id: int, query: str = "",
     sort: str = "", direction: str = "", video_sort: str = "",
     video_direction: str = "",
 ) -> str:
-    parameters = {"series_path": series_path}
+    parameters = {"catalog_title_id": series_path} if isinstance(series_path, int) else {"series_path": series_path}
     if normalized_query := normalize_search_query(query):
         parameters["q"] = normalized_query
     if sort:
@@ -72,10 +79,10 @@ def catalog_state_url(
 
 
 def series_state_url(
-    filter_name: str, series_path: str, query: str, sort: str, direction: str,
+    filter_name: str, series_path: str | int, query: str, sort: str, direction: str,
     video_sort: str = "", video_direction: str = "",
 ) -> str:
-    parameters = {"series_path": series_path}
+    parameters = {"catalog_title_id": series_path} if isinstance(series_path, int) else {"series_path": series_path}
     if query:
         parameters["q"] = query
     parameters.update(sort=sort, direction=direction)
@@ -125,6 +132,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="AnimeDB", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
     app.state.sessions = sessions
+    app.state.metadata_provider = AniListProvider(settings.metadata_request_timeout_seconds)
     app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
 
     @app.get("/health")
@@ -198,7 +206,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/catalog/{filter_name}/series", response_class=HTMLResponse)
     def series_detail(
-        request: Request, filter_name: str, series_path: str, q: str = "",
+        request: Request, filter_name: str, catalog_title_id: int | None = None,
+        series_path: str | None = None, q: str = "",
         sort: str | None = None, direction: str | None = None,
         video_sort: str | None = None, video_direction: str | None = None,
     ):
@@ -207,20 +216,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         results = build_catalog_results(
             _load_videos(sessions), filter_name, q, sort, direction
         )
+        with sessions() as session:
+            catalog_title = session.get(CatalogTitle, catalog_title_id) if catalog_title_id else None
+            if catalog_title is None and series_path:
+                catalog_title = session.scalar(select(CatalogTitle).where(
+                    CatalogTitle.relative_root_path == series_path
+                ))
+        selected_path = catalog_title.relative_root_path if catalog_title else series_path
         videos, normalized_video_sort, normalized_video_direction = sort_title_videos(
-            results.videos_by_title.get(series_path, []), video_sort, video_direction
+            results.videos_by_title.get(selected_path or "", []), video_sort, video_direction
         )
         if not videos:
             raise HTTPException(status_code=404, detail="Série nebyla nalezena")
         def video_sort_url(column: str) -> str:
             return series_state_url(
-                filter_name, series_path, results.query, results.sort, results.direction,
+                filter_name, catalog_title.id if catalog_title else (series_path or selected_path or ""),
+                results.query, results.sort, results.direction,
                 column, toggled_direction(column, normalized_video_sort, normalized_video_direction),
             )
         return templates.TemplateResponse(request, "series.html", {
             "filter_name": filter_name,
             "filter_label": FILTER_LABELS[filter_name],
             "series": determine_parent_series(videos[0].relative_path),
+            "catalog_title": catalog_title,
+            "metadata_status_labels": METADATA_STATUS_LABELS,
+            "metadata_candidates": [], "metadata_error": None,
             "videos": videos,
             "translation_status": translation_status,
             "video_matches_filter": video_matches_filter,
@@ -236,12 +256,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         })
 
+    @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/search", response_class=HTMLResponse)
+    def search_metadata(
+        request: Request, filter_name: str, catalog_title_id: int,
+        metadata_query: str = Form(...), q: str = Form(""), sort: str = Form(""),
+        direction: str = Form(""), video_sort: str = Form(""),
+        video_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=404, detail="Neznámý filtr")
+        with sessions() as session:
+            catalog_title = session.get(CatalogTitle, catalog_title_id)
+        if catalog_title is None:
+            raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+        candidates, metadata_error = [], None
+        if not settings.metadata_enabled or not settings.anilist_enabled:
+            metadata_error = "Vyhledávání metadat je vypnuté v konfiguraci."
+        else:
+            try:
+                candidates = app.state.metadata_provider.search_titles(metadata_query)
+            except (ValueError, MetadataProviderError) as exc:
+                metadata_error = str(exc)
+        all_videos = _load_videos(sessions)
+        results = build_catalog_results(all_videos, filter_name, q, sort, direction)
+        videos, normalized_video_sort, normalized_video_direction = sort_title_videos(
+            results.videos_by_title.get(catalog_title.relative_root_path, []),
+            video_sort, video_direction,
+        )
+        if not videos:
+            raise HTTPException(status_code=404, detail="Titul neodpovídá aktivnímu filtru")
+        def video_sort_url(column: str) -> str:
+            return series_state_url(
+                filter_name, catalog_title.id, results.query, results.sort, results.direction,
+                column, toggled_direction(column, normalized_video_sort, normalized_video_direction),
+            )
+        return templates.TemplateResponse(request, "series.html", {
+            "filter_name": filter_name, "filter_label": FILTER_LABELS[filter_name],
+            "series": determine_parent_series(videos[0].relative_path),
+            "catalog_title": catalog_title, "videos": videos,
+            "translation_status": translation_status, "video_matches_filter": video_matches_filter,
+            "derive_season_info": derive_season_info, "derive_episode_number": derive_episode_number,
+            "q": results.query, "sort": results.sort, "direction": results.direction,
+            "video_sort": normalized_video_sort, "video_direction": normalized_video_direction,
+            "video_sort_url": video_sort_url,
+            "back_url": catalog_state_url(filter_name, results.query, results.sort, results.direction),
+            "metadata_status_labels": METADATA_STATUS_LABELS,
+            "metadata_candidates": candidates, "metadata_error": metadata_error,
+            "metadata_query": metadata_query[:200],
+        })
+
     @app.post("/videos/{video_id}/hardsub")
     def update_hardsub(
         video_id: int,
         mode: str = Form(...),
         filter_name: str = Form(...),
         series_path: str = Form(""),
+        catalog_title_id: int | None = Form(None),
         q: str = Form(""),
         sort: str = Form(""),
         direction: str = Form(""),
@@ -259,9 +329,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             session.commit()
-        if series_path:
+        if catalog_title_id or series_path:
             target = hardsub_return_url(
-                filter_name, series_path, video_id, q, sort, direction,
+                filter_name, catalog_title_id or series_path, video_id, q, sort, direction,
                 video_sort, video_direction,
             )
         else:

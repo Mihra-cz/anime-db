@@ -151,10 +151,21 @@ def determine_parent_series(relative_path: str) -> SeriesIdentity:
     return SeriesIdentity(all_directories[actual_series_index], PurePosixPath(*selected).as_posix())
 
 
+def normalize_title(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value.casefold())
+    return " ".join(
+        re.sub(r"[^a-z0-9]+", " ", "".join(
+            character for character in normalized if not unicodedata.combining(character)
+        )).split()
+    )
+
+
 @dataclass
 class SeriesSummary:
     name: str
     relative_path: str
+    catalog_title_id: int | None = None
+    metadata_status: str = "unlinked"
     total: int = 0
     problematic: int = 0
     unknown: int = 0
@@ -291,7 +302,11 @@ def build_catalog_results(
         all_by_title.setdefault(identity.relative_path, []).append(video)
         summary = groups.setdefault(
             identity.relative_path,
-            SeriesSummary(identity.name, identity.relative_path),
+            SeriesSummary(
+                identity.name, identity.relative_path,
+                video.catalog_title_id,
+                video.catalog_title.metadata_status if video.catalog_title else "unlinked",
+            ),
         )
         summary.total += 1
         status = translation_status(video)

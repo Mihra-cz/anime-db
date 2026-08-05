@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Protocol
+
+
+class MetadataProviderError(RuntimeError):
+    """Bezpečně zobrazitelná chyba externího provideru."""
+
+
+class MetadataRateLimitError(MetadataProviderError):
+    pass
+
+
+@dataclass(frozen=True)
+class ProviderTitleMetadata:
+    provider: str
+    external_id: str
+    title_romaji: str | None = None
+    title_english: str | None = None
+    title_native: str | None = None
+    synonyms: list[str] = field(default_factory=list)
+    release_year: int | None = None
+    season: str | None = None
+    format: str | None = None
+    status: str | None = None
+    episode_count: int | None = None
+    description: str | None = None
+    cover_image_url: str | None = None
+    site_url: str | None = None
+
+
+@dataclass(frozen=True)
+class ProviderRelation:
+    provider: str
+    external_id: str
+    relation_type: str
+
+
+@dataclass(frozen=True)
+class ProviderArtwork:
+    provider: str
+    external_id: str
+    artwork_type: str
+    remote_url: str
+
+
+class MetadataProvider(Protocol):
+    name: str
+
+    def search_titles(self, query: str) -> list[ProviderTitleMetadata]: ...
+    def fetch_title(self, external_id: str) -> ProviderTitleMetadata: ...
+    def fetch_relations(self, external_id: str) -> list[ProviderRelation]: ...
+    def fetch_artwork(self, external_id: str) -> list[ProviderArtwork]: ...
