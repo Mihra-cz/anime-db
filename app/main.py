@@ -21,6 +21,7 @@ from .catalog import (
     group_videos_by_series,
     normalize_search_query,
     set_manual_hardsub,
+    sort_title_videos,
     title_videos,
     translation_status,
     video_matches_filter,
@@ -44,13 +45,47 @@ def _load_videos(sessions) -> list[Video]:
 
 
 def hardsub_return_url(
-    filter_name: str, series_path: str, video_id: int, query: str = ""
+    filter_name: str, series_path: str, video_id: int, query: str = "",
+    sort: str = "", direction: str = "", video_sort: str = "",
+    video_direction: str = "",
 ) -> str:
     parameters = {"series_path": series_path}
     if normalized_query := normalize_search_query(query):
         parameters["q"] = normalized_query
+    if sort:
+        parameters.update(sort=sort, direction=direction)
+    if video_sort:
+        parameters.update(video_sort=video_sort, video_direction=video_direction)
     query = urlencode(parameters)
     return f"/catalog/{filter_name}/series?{query}#video-{video_id}"
+
+
+def catalog_state_url(
+    filter_name: str, query: str = "", sort: str = "", direction: str = ""
+) -> str:
+    parameters = {}
+    if query:
+        parameters["q"] = query
+    if sort:
+        parameters.update(sort=sort, direction=direction)
+    return f"/catalog/{filter_name}" + (f"?{urlencode(parameters)}" if parameters else "")
+
+
+def series_state_url(
+    filter_name: str, series_path: str, query: str, sort: str, direction: str,
+    video_sort: str = "", video_direction: str = "",
+) -> str:
+    parameters = {"series_path": series_path}
+    if query:
+        parameters["q"] = query
+    parameters.update(sort=sort, direction=direction)
+    if video_sort:
+        parameters.update(video_sort=video_sort, video_direction=video_direction)
+    return f"/catalog/{filter_name}/series?{urlencode(parameters)}"
+
+
+def toggled_direction(column: str, active_sort: str, active_direction: str) -> str:
+    return "desc" if column == active_sort and active_direction == "asc" else "asc"
 
 
 def _empty_stats() -> dict[str, int]:
@@ -123,35 +158,65 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def folder_detail(request: Request, folder: str):
         videos = [video for video in _load_videos(sessions) if video.root_folder == folder]
         results = build_catalog_results(videos, "all")
+        def sort_url(column: str) -> str:
+            return catalog_state_url(
+                "all", "", column,
+                toggled_direction(column, results.sort, results.direction),
+            )
         return templates.TemplateResponse(request, "catalog.html", {
             "filter_name": "all", "filter_label": f"Složka: {folder}",
             "groups": results.groups, "video_count": results.video_count, "q": "",
-            "all_filters": FILTER_LABELS,
+            "all_filters": FILTER_LABELS, "sort": results.sort,
+            "direction": results.direction, "sort_url": sort_url,
+            "catalog_state_url": catalog_state_url,
         })
 
     @app.get("/catalog/{filter_name}", response_class=HTMLResponse)
-    def catalog(request: Request, filter_name: str, q: str = ""):
+    def catalog(
+        request: Request, filter_name: str, q: str = "",
+        sort: str | None = None, direction: str | None = None,
+    ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
         videos = _load_videos(sessions)
-        results = build_catalog_results(videos, filter_name, q)
+        results = build_catalog_results(videos, filter_name, q, sort, direction)
+        def sort_url(column: str) -> str:
+            return catalog_state_url(
+                filter_name, results.query, column,
+                toggled_direction(column, results.sort, results.direction),
+            )
         return templates.TemplateResponse(request, "catalog.html", {
             "filter_name": filter_name,
             "filter_label": FILTER_LABELS[filter_name],
             "groups": results.groups,
             "video_count": results.video_count,
             "q": results.query,
+            "sort": results.sort, "direction": results.direction,
+            "sort_url": sort_url, "catalog_state_url": catalog_state_url,
             "all_filters": FILTER_LABELS,
         })
 
     @app.get("/catalog/{filter_name}/series", response_class=HTMLResponse)
-    def series_detail(request: Request, filter_name: str, series_path: str, q: str = ""):
+    def series_detail(
+        request: Request, filter_name: str, series_path: str, q: str = "",
+        sort: str | None = None, direction: str | None = None,
+        video_sort: str | None = None, video_direction: str | None = None,
+    ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
-        results = build_catalog_results(_load_videos(sessions), filter_name, q)
-        videos = results.videos_by_title.get(series_path, [])
+        results = build_catalog_results(
+            _load_videos(sessions), filter_name, q, sort, direction
+        )
+        videos, normalized_video_sort, normalized_video_direction = sort_title_videos(
+            results.videos_by_title.get(series_path, []), video_sort, video_direction
+        )
         if not videos:
             raise HTTPException(status_code=404, detail="Série nebyla nalezena")
+        def video_sort_url(column: str) -> str:
+            return series_state_url(
+                filter_name, series_path, results.query, results.sort, results.direction,
+                column, toggled_direction(column, normalized_video_sort, normalized_video_direction),
+            )
         return templates.TemplateResponse(request, "series.html", {
             "filter_name": filter_name,
             "filter_label": FILTER_LABELS[filter_name],
@@ -162,6 +227,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "derive_season_info": derive_season_info,
             "derive_episode_number": derive_episode_number,
             "q": results.query,
+            "sort": results.sort, "direction": results.direction,
+            "video_sort": normalized_video_sort,
+            "video_direction": normalized_video_direction,
+            "video_sort_url": video_sort_url,
+            "back_url": catalog_state_url(
+                filter_name, results.query, results.sort, results.direction
+            ),
         })
 
     @app.post("/videos/{video_id}/hardsub")
@@ -171,6 +243,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         filter_name: str = Form(...),
         series_path: str = Form(""),
         q: str = Form(""),
+        sort: str = Form(""),
+        direction: str = Form(""),
+        video_sort: str = Form(""),
+        video_direction: str = Form(""),
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=400, detail="Neplatný návratový filtr")
@@ -184,7 +260,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             session.commit()
         if series_path:
-            target = hardsub_return_url(filter_name, series_path, video_id, q)
+            target = hardsub_return_url(
+                filter_name, series_path, video_id, q, sort, direction,
+                video_sort, video_direction,
+            )
         else:
             target = f"/catalog/{filter_name}"
         return RedirectResponse(target, status_code=303)

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 import re
+import unicodedata
 
 from .models import Video
 
@@ -166,7 +167,7 @@ class SeriesSummary:
 
     @property
     def translated(self) -> int:
-        return self.total - self.problematic
+        return self.total - self.missing
 
 
 @dataclass
@@ -174,6 +175,8 @@ class CatalogResults:
     groups: list[SeriesSummary]
     videos_by_title: dict[str, list[Video]]
     query: str
+    sort: str
+    direction: str
 
     @property
     def video_count(self) -> int:
@@ -229,6 +232,32 @@ def normalize_search_query(query: str | None) -> str:
     return (query or "").strip()[:200]
 
 
+def natural_sort_key(value: str):
+    normalized = unicodedata.normalize("NFKD", value.casefold())
+    normalized = "".join(character for character in normalized if not unicodedata.combining(character))
+    return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", normalized))
+
+
+GROUP_SORT_FIELDS = {
+    "title": lambda group: natural_sort_key(group.name),
+    "total": lambda group: group.total,
+    "episodes": lambda group: group.episodes,
+    "bonus": lambda group: group.bonus,
+    "cs": lambda group: group.cs,
+    "sk": lambda group: group.sk,
+    "missing": lambda group: group.missing,
+    "unknown": lambda group: group.unknown,
+    "matched": lambda group: group.matched,
+    "translated": lambda group: group.translated,
+}
+
+
+def normalize_group_sort(sort: str | None, direction: str | None, query: str) -> tuple[str, str]:
+    if sort not in GROUP_SORT_FIELDS:
+        return ("relevance", "asc") if query else ("matched", "desc")
+    return sort, direction if direction in {"asc", "desc"} else "asc"
+
+
 def _contains_query(value: str | None, query: str) -> bool:
     return query in (value or "").casefold()
 
@@ -250,7 +279,8 @@ def video_matches_search(video: Video, query: str) -> bool:
 
 
 def build_catalog_results(
-    videos: Iterable[Video], filter_name: str, query: str | None = None
+    videos: Iterable[Video], filter_name: str, query: str | None = None,
+    sort: str | None = None, direction: str | None = None,
 ) -> CatalogResults:
     query_text = normalize_search_query(query)
     folded_query = query_text.casefold()
@@ -288,11 +318,35 @@ def build_catalog_results(
             matches_by_title[title_path] = sorted(matched_videos, key=video_sort_key)
             groups[title_path].matched = len(matched_videos)
 
-    ordered_groups = sorted(
-        (groups[path] for path in matches_by_title),
-        key=lambda summary: (-summary.matched, summary.name.casefold()),
+    normalized_sort, normalized_direction = normalize_group_sort(sort, direction, query_text)
+    selected_groups = [groups[path] for path in matches_by_title]
+    if normalized_sort == "relevance":
+        def relevance(summary: SeriesSummary):
+            name = summary.name.casefold()
+            if name == folded_query:
+                rank = 0
+            elif name.startswith(folded_query):
+                rank = 1
+            elif folded_query in name:
+                rank = 2
+            else:
+                rank = 3
+            return rank, natural_sort_key(summary.name)
+        ordered_groups = sorted(selected_groups, key=relevance)
+    else:
+        field = GROUP_SORT_FIELDS[normalized_sort]
+        if normalized_sort == "title":
+            ordered_groups = sorted(
+                selected_groups, key=field, reverse=normalized_direction == "desc"
+            )
+        else:
+            ordered_groups = sorted(selected_groups, key=lambda summary: natural_sort_key(summary.name))
+            ordered_groups = sorted(
+                ordered_groups, key=field, reverse=normalized_direction == "desc"
+            )
+    return CatalogResults(
+        ordered_groups, matches_by_title, query_text, normalized_sort, normalized_direction
     )
-    return CatalogResults(ordered_groups, matches_by_title, query_text)
 
 
 @dataclass(frozen=True)
@@ -353,6 +407,7 @@ def video_sort_key(video: Video):
         season_key = (2, 0, season.casefold())
     episode = derive_episode_number(video.filename)
     return (
+        video.file_type != "episode",
         season_key,
         episode is None,
         episode if episode is not None else 0,
@@ -365,6 +420,46 @@ def title_videos(videos: Iterable[Video], title_path: str) -> list[Video]:
     return sorted(
         (video for video in videos if determine_parent_series(video.relative_path).relative_path == title_path),
         key=video_sort_key,
+    )
+
+
+VIDEO_SORT_FIELDS = {"season", "episode", "filename", "type", "resolution", "audio", "path"}
+
+
+def normalize_video_sort(sort: str | None, direction: str | None) -> tuple[str, str]:
+    if sort not in VIDEO_SORT_FIELDS:
+        return "default", "asc"
+    return sort, direction if direction in {"asc", "desc"} else "asc"
+
+
+def sort_title_videos(
+    videos: Iterable[Video], sort: str | None = None, direction: str | None = None
+) -> tuple[list[Video], str, str]:
+    normalized_sort, normalized_direction = normalize_video_sort(sort, direction)
+    values = list(videos)
+    if normalized_sort == "default":
+        return sorted(values, key=video_sort_key), normalized_sort, normalized_direction
+
+    def field(video: Video):
+        season = derive_season_info(video.relative_path).label or ""
+        episode = derive_episode_number(video.filename)
+        fields = {
+            "season": natural_sort_key(season),
+            "episode": (episode is None, episode or 0),
+            "filename": natural_sort_key(video.filename),
+            "type": (TYPE_ORDER.get(video.file_type, 99), natural_sort_key(video.file_type)),
+            "resolution": (video.width or 0) * (video.height or 0),
+            "audio": natural_sort_key(" ".join(
+                f"{track.language} {track.codec or ''}" for track in video.audio_tracks
+            )),
+            "path": natural_sort_key(video.relative_path),
+        }
+        return fields[normalized_sort]
+
+    return (
+        sorted(values, key=field, reverse=normalized_direction == "desc"),
+        normalized_sort,
+        normalized_direction,
     )
 
 

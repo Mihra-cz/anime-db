@@ -13,6 +13,7 @@ from app.catalog import (
     group_videos_by_series,
     normalize_language,
     set_manual_hardsub,
+    sort_title_videos,
     title_videos,
     translation_status,
 )
@@ -192,8 +193,8 @@ def test_title_detail_sorting_orders_seasons_episodes_and_bonus():
     ]
     videos[-1].file_type = "ncop"
     ordered = title_videos(videos, "Anime/Show")
-    assert [video.filename for video in ordered] == ["02.mkv", "10.mkv", "NCOP.mkv", "02.mkv"]
-    assert [derive_season_info(video.relative_path).label for video in ordered] == ["S1", "S1", "S1", "S2"]
+    assert [video.filename for video in ordered] == ["02.mkv", "10.mkv", "02.mkv", "NCOP.mkv"]
+    assert [derive_season_info(video.relative_path).label for video in ordered] == ["S1", "S1", "S2", "S1"]
 
 
 def test_all_main_catalog_filters_return_grouped_title_summaries():
@@ -268,6 +269,50 @@ def test_empty_search_returns_regular_filtered_overview():
         group.relative_path for group in normal.groups
     ]
     assert whitespace.video_count == normal.video_count == 2
+
+
+def test_title_sorting_ascending_descending_and_naturally():
+    videos = [
+        _video("Anime/B/01.mkv"), _video("Anime/A/01.mkv"),
+        _video("Anime/Anime 10/01.mkv"), _video("Anime/Anime 2/01.mkv"),
+    ]
+    ascending = build_catalog_results(videos, "all", sort="title", direction="asc")
+    descending = build_catalog_results(videos, "all", sort="title", direction="desc")
+    names = [group.name for group in ascending.groups]
+    assert names.index("A") < names.index("B")
+    assert names.index("Anime 2") < names.index("Anime 10")
+    assert [group.name for group in descending.groups] == list(reversed(names))
+
+
+def test_search_relevance_is_stable_and_prefers_exact_then_title_prefix():
+    videos = [
+        _video("Anime/Star/01.mkv"),
+        _video("Anime/Star Wars/01.mkv"),
+        _video("Anime/Lone Star/01.mkv"),
+        _video("Anime/Other/Star-file.mkv"),
+    ]
+    results = build_catalog_results(videos, "all", "Star")
+    assert [group.name for group in results.groups] == ["Star", "Star Wars", "Lone Star", "Other"]
+
+    stable = build_catalog_results([
+        _video("Anime/Saga 10/01.mkv"), _video("Anime/Saga 2/01.mkv")
+    ], "all", "S")
+    assert [group.name for group in stable.groups] == ["Saga 2", "Saga 10"]
+
+
+def test_invalid_sort_and_direction_use_safe_defaults():
+    videos = [_video("Anime/A/01.mkv"), _video("Anime/B/01.mkv")]
+    results = build_catalog_results(videos, "all", sort="drop table", direction="sideways")
+    assert (results.sort, results.direction) == ("matched", "desc")
+    bad_direction = build_catalog_results(videos, "all", sort="title", direction="sideways")
+    assert (bad_direction.sort, bad_direction.direction) == ("title", "asc")
+
+
+def test_explicit_video_sorting_uses_natural_filename_order():
+    videos = [_video("Anime/Show/E10.mkv"), _video("Anime/Show/E2.mkv")]
+    ordered, sort, direction = sort_title_videos(videos, "filename", "asc")
+    assert [video.filename for video in ordered] == ["E2.mkv", "E10.mkv"]
+    assert (sort, direction) == ("filename", "asc")
 
 
 def test_manual_hardsub_sets_independent_language_flags_and_timestamp():
