@@ -2,10 +2,10 @@
 {% block title %}{{ filter_label }} · AnimeDB{% endblock %}
 {% block content %}<p><a href="/">← Zpět na přehled</a></p><h1>{{ filter_label }}</h1>
 {% if grouped %}
-<p>Nejdříve jsou zobrazené série, nikoli jednotlivá videa.</p>
-<section class="panel"><div class="table-wrap"><table><thead><tr><th>Série</th><th>Nadřazená cesta</th><th>Všechna videa</th><th>Problematická</th><th>Neznámé titulky</th></tr></thead><tbody>
-{% for group in groups %}<tr><td><a href="{{ url_for('series_detail', filter_name=filter_name) }}?series_path={{ group.relative_path|urlencode }}">{{ group.name }}</a></td><td>{{ group.relative_path }}</td><td>{{ group.total }}</td><td>{{ group.problematic }}</td><td>{{ group.unknown }}</td></tr>
-{% else %}<tr><td colspan="5">Filtr neobsahuje žádné série.</td></tr>{% endfor %}
+<p>Nejdříve jsou zobrazené tituly, nikoli jednotlivá videa.</p>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>Titul</th><th>Nadřazená cesta</th><th>Všechna videa</th><th>Problematická</th><th>S překladem</th><th>Neznámé titulky</th></tr></thead><tbody>
+{% for group in groups %}<tr><td><a href="{{ url_for('series_detail', filter_name=filter_name) }}?series_path={{ group.relative_path|urlencode }}">{{ group.name }}</a></td><td>{{ group.relative_path }}</td><td>{{ group.total }}</td><td>{{ group.problematic }}</td><td>{{ group.translated }}</td><td>{{ group.unknown }}</td></tr>
+{% else %}<tr><td colspan="6">Filtr neobsahuje žádné tituly.</td></tr>{% endfor %}
 </tbody></table></div></section>
 {% else %}
 <section class="panel"><div class="table-wrap"><table><thead><tr><th>Soubor</th><th>Série</th><th>Typ</th><th>Stav</th></tr></thead><tbody>

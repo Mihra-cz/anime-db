@@ -102,9 +102,15 @@ def translation_status(video: Video) -> TranslationStatus:
 
 GENERIC_ROOTS = {"anime", "library", "media", "videos", "video"}
 STRUCTURAL_DIRECTORY = re.compile(
-    r"^(?:season|series|cour|part)\s*[-_. ]*\d+$|^(?:specials?|extras?|bonus|ova|oad)$",
+    r"^(?:(?:s[ée]rie|series|season|cour|part)\s*[-_. ]*\d+|s\s*[-_. ]*\d+)"
+    r"(?:\s*\([^)]*\))?$"
+    r"|^(?:specials?|extras?|bonus|ova|oad)(?:\s*\([^)]*\))?$",
     re.IGNORECASE,
 )
+
+
+def is_technical_series_directory(name: str) -> bool:
+    return STRUCTURAL_DIRECTORY.fullmatch(name.strip()) is not None
 
 
 @dataclass(frozen=True)
@@ -126,14 +132,20 @@ def determine_parent_series(relative_path: str) -> SeriesIdentity:
         return SeriesIdentity("Knihovna", ".")
 
     structural_index = next(
-        (index for index, name in enumerate(directories) if STRUCTURAL_DIRECTORY.match(name)),
+        (index for index, name in enumerate(directories) if is_technical_series_directory(name)),
         None,
     )
-    if structural_index is not None and structural_index > 0:
-        series_index = structural_index - 1
+    if structural_index is not None:
+        actual_series_index = first_meaningful + structural_index - 1
+        while (
+            actual_series_index >= 0
+            and is_technical_series_directory(all_directories[actual_series_index])
+        ):
+            actual_series_index -= 1
+        if actual_series_index < 0:
+            return SeriesIdentity("Knihovna", ".")
     else:
-        series_index = len(directories) - 1
-    actual_series_index = first_meaningful + series_index
+        actual_series_index = len(all_directories) - 1
     selected = all_directories[:actual_series_index + 1]
     return SeriesIdentity(all_directories[actual_series_index], PurePosixPath(*selected).as_posix())
 
@@ -145,6 +157,10 @@ class SeriesSummary:
     total: int = 0
     problematic: int = 0
     unknown: int = 0
+
+    @property
+    def translated(self) -> int:
+        return self.total - self.problematic
 
 
 def group_videos_by_series(

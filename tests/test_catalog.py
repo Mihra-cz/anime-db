@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from app.catalog import (
     classify_video,
     determine_parent_series,
@@ -88,6 +90,15 @@ def test_parent_series_in_deeper_structure():
     assert (series.name, series.relative_path) == ("Naruto", "Anime/Collection/Naruto")
 
 
+@pytest.mark.parametrize(
+    "technical_directory",
+    ["Serie 1", "Série 2", "Season 01", "S01", "Cour 2", "Part 1", "Specials", "OVA"],
+)
+def test_parent_series_ignores_all_supported_technical_directories(technical_directory):
+    series = determine_parent_series(f"Anime/Naruto/{technical_directory}/episode01.mkv")
+    assert (series.name, series.relative_path) == ("Naruto", "Anime/Naruto")
+
+
 def _video(path: str, *, language: str | None = None) -> Video:
     subtitles = [] if language is None else [
         InternalSubtitle(stream_index=1, codec="ass", language=language, normalized_language=language)
@@ -109,6 +120,43 @@ def test_groups_episodes_and_counts_missing_videos():
     assert groups[0].name == "Naruto"
     assert groups[0].total == 3
     assert groups[0].problematic == 2
+    assert groups[0].translated == 1
+
+
+def test_multiple_seasons_are_merged_into_one_series_row():
+    videos = [
+        _video("Anime/Naruto/Serie 1/01.mkv"),
+        _video("Anime/Naruto/Série 2/01.mkv"),
+        _video("Anime/Naruto/Season 03/01.mkv"),
+    ]
+    groups = group_videos_by_series(videos, lambda _: True)
+    assert len(groups) == 1
+    assert groups[0].name == "Naruto"
+    assert groups[0].relative_path == "Anime/Naruto"
+    assert groups[0].total == 3
+
+
+@pytest.mark.parametrize(
+    ("title", "first_season", "second_season"),
+    [
+        ("Ansatsu Kyoushitsu (Z15-Z16)", "Serie 1 (Z15)", "Serie 2 (Z16)"),
+        ("Darker than Black (J07-P09)", "Serie 1 (J07)", "Serie 2 (P09)"),
+    ],
+)
+def test_season_directories_with_technical_suffix_merge_under_real_title(
+    title, first_season, second_season
+):
+    videos = [
+        _video(f"{title}/{first_season}/01.mkv"),
+        _video(f"{title}/{second_season}/01.mkv"),
+    ]
+
+    groups = group_videos_by_series(videos, lambda _: True)
+
+    assert len(groups) == 1
+    assert groups[0].name == title
+    assert groups[0].relative_path == title
+    assert groups[0].total == 2
 
 
 def test_manual_hardsub_sets_independent_language_flags_and_timestamp():
