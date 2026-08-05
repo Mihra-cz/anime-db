@@ -16,7 +16,12 @@ season
 format
 status
 episodes
+duration
 description(asHtml: false)
+genres
+tags { name rank isMediaSpoiler }
+countryOfOrigin
+isAdult
 coverImage { medium large }
 siteUrl
 """
@@ -84,6 +89,10 @@ class AniListProvider:
             release_year=media.get("seasonYear"), season=media.get("season"),
             format=media.get("format"), status=media.get("status"),
             episode_count=media.get("episodes"), description=media.get("description"),
+            episode_duration_minutes=media.get("duration"),
+            genres=list(media.get("genres") or []),
+            tags=[tag.get("name") for tag in (media.get("tags") or []) if tag.get("name")],
+            country_of_origin=media.get("countryOfOrigin"), is_adult=media.get("isAdult"),
             cover_image_url=cover.get("medium") or cover.get("large"),
             site_url=media.get("siteUrl"),
         )
@@ -102,6 +111,8 @@ class AniListProvider:
             numeric_id = int(external_id)
         except (TypeError, ValueError) as exc:
             raise ValueError("AniList ID musí být číslo.") from exc
+        if numeric_id <= 0 or str(numeric_id) != str(external_id).strip():
+            raise ValueError("AniList ID musí být kladné celé číslo.")
         data = self._request(TITLE_QUERY, {"id": numeric_id})
         media = data.get("Media")
         if not media:

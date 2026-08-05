@@ -25,7 +25,12 @@ class ProviderTitleMetadata:
     format: str | None = None
     status: str | None = None
     episode_count: int | None = None
+    episode_duration_minutes: int | None = None
     description: str | None = None
+    genres: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    country_of_origin: str | None = None
+    is_adult: bool | None = None
     cover_image_url: str | None = None
     site_url: str | None = None
 

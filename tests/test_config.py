@@ -18,3 +18,8 @@ def test_loads_dotenv_but_system_environment_has_priority(tmp_path: Path, monkey
     assert settings.anime_path == Path("/from-dotenv")
     assert settings.database_url == "sqlite:////from-system.db"
     assert settings.require_mount is False
+
+
+def test_remote_images_can_be_disabled(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("METADATA_ALLOW_REMOTE_IMAGES", "false")
+    assert get_settings(tmp_path / "missing.env").metadata_allow_remote_images is False

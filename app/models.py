@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class Video(Base):
@@ -52,8 +56,8 @@ class CatalogTitle(Base):
     preferred_external_id: Mapped[str | None] = mapped_column(String, nullable=True)
     metadata_status: Mapped[str] = mapped_column(String, default="unlinked", server_default="unlinked")
     metadata_locked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     videos: Mapped[list[Video]] = relationship(back_populates="catalog_title")
     external_links: Mapped[list[ExternalTitleLink]] = relationship(cascade="all, delete-orphan")
     metadata_record: Mapped[TitleMetadata | None] = relationship(cascade="all, delete-orphan")
@@ -75,9 +79,15 @@ class ExternalTitleLink(Base):
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     is_manual: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
-    __table_args__ = (UniqueConstraint("catalog_title_id", "provider", "external_id"),)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    __table_args__ = (
+        UniqueConstraint("catalog_title_id", "provider", "external_id"),
+        Index(
+            "ux_external_title_primary", "catalog_title_id", unique=True,
+            sqlite_where=(is_primary == True),  # noqa: E712
+        ),
+    )
 
 
 class TitleMetadata(Base):
@@ -101,6 +111,7 @@ class TitleMetadata(Base):
     is_adult: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     metadata_provider: Mapped[str | None] = mapped_column(String, nullable=True)
     metadata_external_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    cover_image_url: Mapped[str | None] = mapped_column(String, nullable=True)
     metadata_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     metadata_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

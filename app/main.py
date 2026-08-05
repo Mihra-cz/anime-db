@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import json
 import logging
 from pathlib import Path
 from urllib.parse import urlencode
@@ -31,7 +32,11 @@ from .database import Base, make_engine, make_session_factory
 from .migrations import migrate_schema
 from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
-from .models import CatalogTitle, Video
+from .metadata.service import (
+    MetadataConflictError, MetadataLockedError, confirm_anilist_candidate,
+    refresh_title_metadata, set_manual_display_title, unlink_title_metadata,
+)
+from .models import CatalogTitle, ExternalTitleLink, TitleMetadata, Video
 from .scanner import LibrarySafetyError, scan_library
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -49,6 +54,38 @@ def _load_videos(sessions) -> list[Video]:
             selectinload(Video.audio_tracks), selectinload(Video.internal_subtitles),
             selectinload(Video.external_subtitles), selectinload(Video.catalog_title),
         ).order_by(Video.relative_path)).all())
+
+
+def _load_catalog_title(session, catalog_title_id: int | None):
+    if catalog_title_id is None:
+        return None
+    return session.scalar(select(CatalogTitle).options(
+        selectinload(CatalogTitle.external_links),
+        selectinload(CatalogTitle.metadata_record),
+    ).where(CatalogTitle.id == catalog_title_id))
+
+
+def _metadata_template_values(title: CatalogTitle | None, allow_remote_images: bool) -> dict:
+    metadata = title.metadata_record if title else None
+    def decoded(value: str | None) -> list:
+        try:
+            result = json.loads(value or "[]")
+            return result if isinstance(result, list) else []
+        except (TypeError, ValueError):
+            return []
+    return {
+        "title_metadata": metadata,
+        "external_links": sorted(
+            title.external_links if title else [],
+            key=lambda link: (not link.is_primary, link.provider, link.external_id),
+        ),
+        "metadata_genres": decoded(metadata.genres_json if metadata else None),
+        "metadata_tags": decoded(metadata.tags_json if metadata else None),
+        "metadata_synonyms": decoded(metadata.synonyms_json if metadata else None),
+        "show_remote_cover": bool(
+            allow_remote_images and metadata and metadata.cover_image_url
+        ),
+    }
 
 
 def hardsub_return_url(
@@ -89,6 +126,22 @@ def series_state_url(
     if video_sort:
         parameters.update(video_sort=video_sort, video_direction=video_direction)
     return f"/catalog/{filter_name}/series?{urlencode(parameters)}"
+
+
+def metadata_return_url(
+    filter_name: str, catalog_title_id: int, q: str = "", sort: str = "",
+    direction: str = "", detail_sort: str = "", detail_direction: str = "",
+    **messages: str,
+) -> str:
+    parameters: dict[str, str | int] = {"catalog_title_id": catalog_title_id}
+    if q:
+        parameters["q"] = normalize_search_query(q)
+    if sort:
+        parameters.update(sort=sort, direction=direction)
+    if detail_sort:
+        parameters.update(video_sort=detail_sort, video_direction=detail_direction)
+    parameters.update({key: value for key, value in messages.items() if value})
+    return f"/catalog/{filter_name}/series?{urlencode(parameters)}#metadata"
 
 
 def toggled_direction(column: str, active_sort: str, active_direction: str) -> str:
@@ -210,6 +263,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         series_path: str | None = None, q: str = "",
         sort: str | None = None, direction: str | None = None,
         video_sort: str | None = None, video_direction: str | None = None,
+        message: str | None = None, metadata_error: str | None = None,
+        pending_external_id: str | None = None,
+        require_conflict_confirmation: bool = False,
+        require_locked_confirmation: bool = False,
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
@@ -217,9 +274,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             _load_videos(sessions), filter_name, q, sort, direction
         )
         with sessions() as session:
-            catalog_title = session.get(CatalogTitle, catalog_title_id) if catalog_title_id else None
+            catalog_title = _load_catalog_title(session, catalog_title_id)
             if catalog_title is None and series_path:
-                catalog_title = session.scalar(select(CatalogTitle).where(
+                catalog_title = session.scalar(select(CatalogTitle).options(
+                    selectinload(CatalogTitle.external_links),
+                    selectinload(CatalogTitle.metadata_record),
+                ).where(
                     CatalogTitle.relative_root_path == series_path
                 ))
         selected_path = catalog_title.relative_root_path if catalog_title else series_path
@@ -234,13 +294,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 results.query, results.sort, results.direction,
                 column, toggled_direction(column, normalized_video_sort, normalized_video_direction),
             )
-        return templates.TemplateResponse(request, "series.html", {
+        context = {
             "filter_name": filter_name,
             "filter_label": FILTER_LABELS[filter_name],
             "series": determine_parent_series(videos[0].relative_path),
             "catalog_title": catalog_title,
             "metadata_status_labels": METADATA_STATUS_LABELS,
-            "metadata_candidates": [], "metadata_error": None,
+            "metadata_candidates": [], "metadata_error": metadata_error,
+            "metadata_message": message,
+            "pending_external_id": pending_external_id,
+            "require_conflict_confirmation": require_conflict_confirmation,
+            "require_locked_confirmation": require_locked_confirmation,
+            "metadata_allow_remote_images": settings.metadata_allow_remote_images,
             "videos": videos,
             "translation_status": translation_status,
             "video_matches_filter": video_matches_filter,
@@ -254,7 +319,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "back_url": catalog_state_url(
                 filter_name, results.query, results.sort, results.direction
             ),
-        })
+        }
+        context.update(_metadata_template_values(
+            catalog_title, settings.metadata_allow_remote_images
+        ))
+        return templates.TemplateResponse(request, "series.html", context)
 
     @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/search", response_class=HTMLResponse)
     def search_metadata(
@@ -266,7 +335,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
         with sessions() as session:
-            catalog_title = session.get(CatalogTitle, catalog_title_id)
+            catalog_title = _load_catalog_title(session, catalog_title_id)
         if catalog_title is None:
             raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
         candidates, metadata_error = [], None
@@ -290,7 +359,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 filter_name, catalog_title.id, results.query, results.sort, results.direction,
                 column, toggled_direction(column, normalized_video_sort, normalized_video_direction),
             )
-        return templates.TemplateResponse(request, "series.html", {
+        context = {
             "filter_name": filter_name, "filter_label": FILTER_LABELS[filter_name],
             "series": determine_parent_series(videos[0].relative_path),
             "catalog_title": catalog_title, "videos": videos,
@@ -303,7 +372,188 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "metadata_status_labels": METADATA_STATUS_LABELS,
             "metadata_candidates": candidates, "metadata_error": metadata_error,
             "metadata_query": metadata_query[:200],
-        })
+            "metadata_message": None, "pending_external_id": None,
+            "require_conflict_confirmation": False,
+            "require_locked_confirmation": False,
+            "metadata_allow_remote_images": settings.metadata_allow_remote_images,
+        }
+        context.update(_metadata_template_values(
+            catalog_title, settings.metadata_allow_remote_images
+        ))
+        return templates.TemplateResponse(request, "series.html", context)
+
+    def action_redirect(
+        filter_name: str, catalog_title_id: int, q: str, sort: str, direction: str,
+        detail_sort: str, detail_direction: str, **messages: str,
+    ):
+        return RedirectResponse(metadata_return_url(
+            filter_name, catalog_title_id, q, sort, direction,
+            detail_sort, detail_direction, **messages,
+        ), status_code=303)
+
+    @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/confirm")
+    def confirm_metadata(
+        filter_name: str, catalog_title_id: int, external_id: str = Form(...),
+        confirm_conflict: bool = Form(False), confirm_locked: bool = Form(False),
+        q: str = Form(""), sort: str = Form(""), direction: str = Form(""),
+        detail_sort: str = Form(""), detail_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=404, detail="Neznámý filtr")
+        with sessions() as session:
+            title = session.get(CatalogTitle, catalog_title_id)
+            if title is None:
+                raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+            if not settings.metadata_enabled or not settings.anilist_enabled:
+                return action_redirect(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction,
+                    metadata_error="AniList metadata jsou vypnutá v konfiguraci.",
+                )
+            try:
+                confirm_anilist_candidate(
+                    session, title, external_id, app.state.metadata_provider,
+                    confirm_conflict=confirm_conflict, confirm_locked=confirm_locked,
+                )
+                session.commit()
+            except MetadataConflictError as exc:
+                session.rollback()
+                return action_redirect(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction, metadata_error=str(exc),
+                    pending_external_id=external_id,
+                    require_conflict_confirmation="true",
+                    require_locked_confirmation="true" if confirm_locked else "",
+                )
+            except MetadataLockedError as exc:
+                session.rollback()
+                return action_redirect(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction, metadata_error=str(exc),
+                    pending_external_id=external_id,
+                    require_locked_confirmation="true",
+                    require_conflict_confirmation="true" if confirm_conflict else "",
+                )
+            except (ValueError, MetadataProviderError) as exc:
+                session.rollback()
+                return action_redirect(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction, metadata_error=str(exc),
+                )
+        return action_redirect(
+            filter_name, catalog_title_id, q, sort, direction,
+            detail_sort, detail_direction, message="Metadata byla ručně potvrzena.",
+        )
+
+    @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/update")
+    def update_metadata(
+        filter_name: str, catalog_title_id: int, q: str = Form(""),
+        sort: str = Form(""), direction: str = Form(""),
+        detail_sort: str = Form(""), detail_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=404, detail="Neznámý filtr")
+        with sessions() as session:
+            title = session.get(CatalogTitle, catalog_title_id)
+            if title is None:
+                raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+            if not settings.metadata_enabled or not settings.anilist_enabled:
+                return action_redirect(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction,
+                    metadata_error="AniList metadata jsou vypnutá v konfiguraci.",
+                )
+            try:
+                refresh_title_metadata(session, title, app.state.metadata_provider)
+                session.commit()
+            except (ValueError, MetadataLockedError, MetadataProviderError) as exc:
+                session.rollback()
+                return action_redirect(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction, metadata_error=str(exc),
+                )
+        return action_redirect(
+            filter_name, catalog_title_id, q, sort, direction,
+            detail_sort, detail_direction, message="Metadata byla aktualizována.",
+        )
+
+    @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/unlink")
+    def unlink_metadata(
+        filter_name: str, catalog_title_id: int, confirm_unlink: bool = Form(False),
+        confirm_locked: bool = Form(False), q: str = Form(""), sort: str = Form(""),
+        direction: str = Form(""), detail_sort: str = Form(""),
+        detail_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=404, detail="Neznámý filtr")
+        with sessions() as session:
+            title = session.get(CatalogTitle, catalog_title_id)
+            if title is None:
+                raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+            if not confirm_unlink:
+                return action_redirect(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction,
+                    metadata_error="Odpojení je nutné výslovně potvrdit.",
+                )
+            if title.metadata_locked and not confirm_locked:
+                return action_redirect(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction,
+                    metadata_error="Metadata jsou zamknutá; potvrďte i odpojení zamknutých metadat.",
+                )
+            unlink_title_metadata(session, title)
+            session.commit()
+        return action_redirect(
+            filter_name, catalog_title_id, q, sort, direction,
+            detail_sort, detail_direction, message="Metadata byla odpojena.",
+        )
+
+    @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/lock")
+    def set_metadata_lock(
+        filter_name: str, catalog_title_id: int, locked: bool = Form(...),
+        q: str = Form(""), sort: str = Form(""), direction: str = Form(""),
+        detail_sort: str = Form(""), detail_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=404, detail="Neznámý filtr")
+        with sessions() as session:
+            title = session.get(CatalogTitle, catalog_title_id)
+            if title is None:
+                raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+            title.metadata_locked = locked
+            session.commit()
+        return action_redirect(
+            filter_name, catalog_title_id, q, sort, direction,
+            detail_sort, detail_direction,
+            message="Metadata byla zamknuta." if locked else "Metadata byla odemknuta.",
+        )
+
+    @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/display-title")
+    def update_display_title(
+        filter_name: str, catalog_title_id: int, manual_display_title: str = Form(""),
+        q: str = Form(""), sort: str = Form(""), direction: str = Form(""),
+        detail_sort: str = Form(""), detail_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=404, detail="Neznámý filtr")
+        with sessions() as session:
+            title = session.get(CatalogTitle, catalog_title_id)
+            if title is None:
+                raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+            try:
+                set_manual_display_title(session, title, manual_display_title)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                return action_redirect(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction, metadata_error=str(exc),
+                )
+        return action_redirect(
+            filter_name, catalog_title_id, q, sort, direction,
+            detail_sort, detail_direction, message="Zobrazovaný název byl uložen.",
+        )
 
     @app.post("/videos/{video_id}/hardsub")
     def update_hardsub(

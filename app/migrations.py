@@ -29,14 +29,21 @@ def migrate_schema(engine) -> None:
         ],
         "internal_subtitles": [("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'")],
         "external_subtitles": [("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'")],
+        "title_metadata": [("cover_image_url", "VARCHAR NULL")],
     }
     with engine.begin() as connection:
         for table, columns in additions.items():
+            if table not in inspect(connection).get_table_names():
+                continue
             existing = {column["name"] for column in inspect(connection).get_columns(table)}
             for name, definition in columns:
                 if name not in existing:
                     logger.info("Migrace databáze: přidávám %s.%s", table, name)
                     connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_external_title_primary "
+            "ON external_title_links(catalog_title_id) WHERE is_primary = 1"
+        ))
 
     with Session(engine) as session:
         for video in session.scalars(select(Video)):

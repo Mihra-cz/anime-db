@@ -56,3 +56,11 @@ def test_provider_catches_timeout():
     request = httpx.Request("POST", "https://graphql.anilist.co")
     with pytest.raises(MetadataProviderError):
         AniListProvider(client=StubClient(error=httpx.ReadTimeout("timeout", request=request))).search_titles("Show")
+
+
+@pytest.mark.parametrize("external_id", ["", "abc", "0", "-1", "1.5"])
+def test_fetch_rejects_invalid_external_id_without_request(external_id):
+    client = StubClient()
+    with pytest.raises(ValueError):
+        AniListProvider(client=client).fetch_title(external_id)
+    assert client.calls == []

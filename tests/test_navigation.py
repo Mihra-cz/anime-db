@@ -1,4 +1,4 @@
-from app.main import catalog_state_url, hardsub_return_url, series_state_url
+from app.main import catalog_state_url, hardsub_return_url, metadata_return_url, series_state_url
 
 
 def test_hardsub_return_url_preserves_filter_title_and_video_anchor():
@@ -17,4 +17,13 @@ def test_filter_search_and_sort_are_preserved_in_catalog_links():
     )
     assert series_state_url("only-cs", "Anime/Show", "show", "title", "desc") == (
         "/catalog/only-cs/series?series_path=Anime%2FShow&q=show&sort=title&direction=desc"
+    )
+
+
+def test_metadata_return_preserves_catalog_and_detail_state():
+    assert metadata_return_url(
+        "missing", 7, "show", "title", "desc", "episode", "asc"
+    ) == (
+        "/catalog/missing/series?catalog_title_id=7&q=show&sort=title&direction=desc&"
+        "video_sort=episode&video_direction=asc#metadata"
     )

@@ -18,6 +18,7 @@ class Settings:
     metadata_auto_confirm_threshold: float = 0.95
     metadata_download_artwork: bool = True
     anilist_enabled: bool = True
+    metadata_allow_remote_images: bool = True
 
 
 def _get_bool(name: str, default: bool = False) -> bool:
@@ -42,4 +43,5 @@ def get_settings(dotenv_path: str | Path | None = None) -> Settings:
         metadata_auto_confirm_threshold=float(os.getenv("METADATA_AUTO_CONFIRM_THRESHOLD", "0.95")),
         metadata_download_artwork=_get_bool("METADATA_DOWNLOAD_ARTWORK", True),
         anilist_enabled=_get_bool("ANILIST_ENABLED", True),
+        metadata_allow_remote_images=_get_bool("METADATA_ALLOW_REMOTE_IMAGES", True),
     )
