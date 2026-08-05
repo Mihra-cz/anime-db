@@ -1,5 +1,5 @@
 from app.catalog import classify_video, normalize_language, translation_status
-from app.models import InternalSubtitle, Video
+from app.models import ExternalSubtitle, InternalSubtitle, Video
 
 
 def test_normalizes_czech_variants():
@@ -27,6 +27,29 @@ def test_internal_czech_marks_video_as_translated():
     assert status.has_cs
     assert status.has_cs_or_sk
     assert status.subtitle_source == "internal"
+
+
+def test_video_can_have_czech_and_slovak_at_the_same_time():
+    video = Video(
+        relative_path="Show/02.mkv", root_folder="Show", filename="02.mkv",
+        size=1, mtime_ns=1, file_type="episode",
+        internal_subtitles=[
+            InternalSubtitle(stream_index=2, codec="ass", language="cze", normalized_language="cs")
+        ],
+        external_subtitles=[
+            ExternalSubtitle(
+                relative_path="Show/02.sk.srt", codec="srt", language="sk",
+                normalized_language="sk",
+            )
+        ],
+    )
+
+    status = translation_status(video)
+
+    assert status.has_cs is True
+    assert status.has_sk is True
+    assert status.has_cs_or_sk is True
+    assert status.subtitle_source == "both"
 
 
 def test_classifies_bonus_video_types():

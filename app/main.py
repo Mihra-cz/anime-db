@@ -26,7 +26,10 @@ templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 
 
 def _empty_stats() -> dict[str, int]:
-    return {key: 0 for key in ("total", "episodes", "bonus", "cs", "sk", "translated", "missing", "unknown")}
+    return {key: 0 for key in (
+        "total", "episodes", "bonus", "cs", "sk", "only_cs", "only_sk", "both_cs_sk",
+        "translated", "missing", "unknown",
+    )}
 
 
 def _add_video(stats: dict[str, int], video: Video) -> None:
@@ -35,6 +38,9 @@ def _add_video(stats: dict[str, int], video: Video) -> None:
     stats["episodes" if video.file_type == "episode" else "bonus"] += 1
     stats["cs"] += status.has_cs
     stats["sk"] += status.has_sk
+    stats["only_cs"] += status.has_cs and not status.has_sk
+    stats["only_sk"] += status.has_sk and not status.has_cs
+    stats["both_cs_sk"] += status.has_cs and status.has_sk
     stats["translated"] += status.has_cs_or_sk
     stats["missing"] += not status.has_cs_or_sk
     stats["unknown"] += status.has_unknown
