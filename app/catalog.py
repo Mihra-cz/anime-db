@@ -169,6 +169,17 @@ class SeriesSummary:
         return self.total - self.problematic
 
 
+@dataclass
+class CatalogResults:
+    groups: list[SeriesSummary]
+    videos_by_title: dict[str, list[Video]]
+    query: str
+
+    @property
+    def video_count(self) -> int:
+        return sum(len(videos) for videos in self.videos_by_title.values())
+
+
 FILTER_LABELS = {
     "all": "Všechna videa",
     "only-cs": "Pouze CZ",
@@ -211,28 +222,77 @@ def video_matches_filter(video: Video, filter_name: str) -> bool:
 def group_videos_by_series(
     videos: Iterable[Video], filter_name: str
 ) -> list[SeriesSummary]:
+    return build_catalog_results(videos, filter_name).groups
+
+
+def normalize_search_query(query: str | None) -> str:
+    return (query or "").strip()[:200]
+
+
+def _contains_query(value: str | None, query: str) -> bool:
+    return query in (value or "").casefold()
+
+
+def video_matches_search(video: Video, query: str) -> bool:
+    if not query:
+        return True
+    season = derive_season_info(video.relative_path)
+    episode = derive_episode_number(video.filename)
+    values = (
+        video.filename,
+        video.relative_path,
+        video.file_type,
+        season.label,
+        season.original,
+        str(episode) if episode is not None else None,
+    )
+    return any(_contains_query(value, query) for value in values)
+
+
+def build_catalog_results(
+    videos: Iterable[Video], filter_name: str, query: str | None = None
+) -> CatalogResults:
+    query_text = normalize_search_query(query)
+    folded_query = query_text.casefold()
     groups: dict[str, SeriesSummary] = {}
-    for video in videos:
+    all_by_title: dict[str, list[Video]] = {}
+    for video in list(videos):
         identity = determine_parent_series(video.relative_path)
+        all_by_title.setdefault(identity.relative_path, []).append(video)
         summary = groups.setdefault(
             identity.relative_path,
             SeriesSummary(identity.name, identity.relative_path),
         )
         summary.total += 1
         status = translation_status(video)
-        matches = video_matches_filter(video, filter_name)
-        summary.matched += matches
-        summary.problematic += matches
+        filter_match = video_matches_filter(video, filter_name)
+        summary.problematic += filter_match
         summary.episodes += video.file_type == "episode"
         summary.bonus += video.file_type != "episode"
         summary.cs += status.has_cs
         summary.sk += status.has_sk
         summary.missing += not status.has_cs_or_sk
         summary.unknown += status.has_unknown
-    return sorted(
-        (summary for summary in groups.values() if summary.matched),
+    matches_by_title: dict[str, list[Video]] = {}
+    for title_path, title_videos_list in all_by_title.items():
+        identity = determine_parent_series(title_videos_list[0].relative_path)
+        filtered = [video for video in title_videos_list if video_matches_filter(video, filter_name)]
+        title_matches = bool(folded_query) and (
+            _contains_query(identity.name, folded_query)
+            or _contains_query(identity.relative_path, folded_query)
+        )
+        matched_videos = filtered if not folded_query or title_matches else [
+            video for video in filtered if video_matches_search(video, folded_query)
+        ]
+        if matched_videos:
+            matches_by_title[title_path] = sorted(matched_videos, key=video_sort_key)
+            groups[title_path].matched = len(matched_videos)
+
+    ordered_groups = sorted(
+        (groups[path] for path in matches_by_title),
         key=lambda summary: (-summary.matched, summary.name.casefold()),
     )
+    return CatalogResults(ordered_groups, matches_by_title, query_text)
 
 
 @dataclass(frozen=True)

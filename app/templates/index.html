@@ -2,17 +2,18 @@
 {% block content %}
 <div class="heading"><div><h1>Přehled knihovny</h1><p>Lokální katalog videí a titulkových stop.</p></div>
 <form method="post" action="/scan"><button type="submit">Spustit sken</button></form></div>
+{% with search_action='/catalog/all', search_cancel='/' %}{% include '_search.html' %}{% endwith %}
 {% if message %}<div class="notice success">{{ message }}</div>{% endif %}
 {% if error %}<div class="notice error"><strong>Sken byl zastaven.</strong> {{ error }}
 {% if confirm_deletions %}<form method="post" action="/scan"><input type="hidden" name="confirm_deletions" value="true"><button type="submit">Potvrdit odstranění chybějících záznamů</button></form>{% endif %}</div>{% endif %}
 <section class="stats">
-  <a class="stat-link" href="/catalog/episodes"><article><strong>{{ totals.episodes }}</strong><span>běžných epizod</span></article></a>
-  <a class="stat-link" href="/catalog/bonus"><article><strong>{{ totals.bonus }}</strong><span>bonusových / ostatních videí</span></article></a>
-  <a class="stat-link" href="/catalog/only-cs"><article><strong>{{ totals.only_cs }}</strong><span>pouze CZ</span></article></a>
-  <a class="stat-link" href="/catalog/only-sk"><article><strong>{{ totals.only_sk }}</strong><span>pouze SK</span></article></a>
-  <a class="stat-link" href="/catalog/both"><article><strong>{{ totals.both_cs_sk }}</strong><span>CZ i SK</span></article></a>
-  <a class="stat-link" href="/catalog/missing"><article><strong>{{ totals.missing }}</strong><span>bez CZ/SK</span></article></a>
-  <a class="stat-link" href="/catalog/unknown"><article><strong>{{ totals.unknown }}</strong><span>s neznámými titulky</span></article></a>
+  <a class="stat-link" href="/catalog/episodes{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.episodes }}</strong><span>běžných epizod</span></article></a>
+  <a class="stat-link" href="/catalog/bonus{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.bonus }}</strong><span>bonusových / ostatních videí</span></article></a>
+  <a class="stat-link" href="/catalog/only-cs{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.only_cs }}</strong><span>pouze CZ</span></article></a>
+  <a class="stat-link" href="/catalog/only-sk{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.only_sk }}</strong><span>pouze SK</span></article></a>
+  <a class="stat-link" href="/catalog/both{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.both_cs_sk }}</strong><span>CZ i SK</span></article></a>
+  <a class="stat-link" href="/catalog/missing{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.missing }}</strong><span>bez CZ/SK</span></article></a>
+  <a class="stat-link" href="/catalog/unknown{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.unknown }}</strong><span>s neznámými titulky</span></article></a>
 </section>
 <section class="panel"><h2>Kořenové složky</h2>
 <div class="table-wrap"><table><thead><tr><th>Složka</th><th>Epizody</th><th>Bonusy</th><th>CZ</th><th>SK</th><th>CZ/SK</th><th>Bez CZ/SK</th><th>Neznámé</th></tr></thead><tbody>

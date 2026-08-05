@@ -1,9 +1,11 @@
 {% extends "base.html" %}
 {% block title %}{{ filter_label }} · AnimeDB{% endblock %}
 {% block content %}<p><a href="/">← Zpět na přehled</a></p><h1>{{ filter_label }}</h1>
-<nav class="filter-nav">{% for key, label in all_filters.items() %}{% if key != 'all' %}<a {% if key == filter_name %}class="active"{% endif %} href="/catalog/{{ key }}">{{ label }}</a>{% endif %}{% endfor %}</nav>
+{% with search_action='/catalog/' ~ filter_name, search_cancel='/catalog/' ~ filter_name %}{% include '_search.html' %}{% endwith %}
+<nav class="filter-nav">{% for key, label in all_filters.items() %}{% if key != 'all' %}<a {% if key == filter_name %}class="active"{% endif %} href="/catalog/{{ key }}{% if q %}?q={{ q|urlencode }}{% endif %}">{{ label }}</a>{% endif %}{% endfor %}</nav>
+<p class="result-count">Nalezeno {{ groups|length }} titulů / {{ video_count }} videí{% if q %} pro „{{ q }}“{% endif %}.</p>
 <p>Nejdříve jsou zobrazené tituly. Jednotlivá videa jsou dostupná po rozkliknutí.</p>
 <section class="panel"><div class="table-wrap"><table><thead><tr><th>Titul</th><th>Nadřazená cesta</th><th>Celkem</th><th>Epizody</th><th>Bonusy / ostatní</th><th>S CZ</th><th>Se SK</th><th>Bez CZ/SK</th><th>Neznámé</th><th>V aktivním filtru</th></tr></thead><tbody>
-{% for group in groups %}<tr><td><a href="{{ url_for('series_detail', filter_name=filter_name) }}?series_path={{ group.relative_path|urlencode }}">{{ group.name }}</a></td><td>{{ group.relative_path }}</td><td>{{ group.total }}</td><td>{{ group.episodes }}</td><td>{{ group.bonus }}</td><td>{{ group.cs }}</td><td>{{ group.sk }}</td><td>{{ group.missing }}</td><td>{{ group.unknown }}</td><td class="highlight-count">{{ group.matched }}</td></tr>
-{% else %}<tr><td colspan="10">Filtr neobsahuje žádné tituly.</td></tr>{% endfor %}
+{% for group in groups %}<tr><td><a href="{{ url_for('series_detail', filter_name=filter_name) }}?series_path={{ group.relative_path|urlencode }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}">{{ group.name }}</a></td><td>{{ group.relative_path }}</td><td>{{ group.total }}</td><td>{{ group.episodes }}</td><td>{{ group.bonus }}</td><td>{{ group.cs }}</td><td>{{ group.sk }}</td><td>{{ group.missing }}</td><td>{{ group.unknown }}</td><td class="highlight-count">{{ group.matched }}</td></tr>
+{% else %}<tr><td colspan="10">Pro zvolený filtr a hledání nebyly nalezeny žádné tituly.</td></tr>{% endfor %}
 </tbody></table></div></section>{% endblock %}

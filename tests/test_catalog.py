@@ -5,6 +5,7 @@ import pytest
 from app.catalog import (
     FILTER_LABELS,
     SeriesSummary,
+    build_catalog_results,
     classify_video,
     derive_episode_number,
     derive_season_info,
@@ -214,6 +215,59 @@ def test_all_main_catalog_filters_return_grouped_title_summaries():
         assert groups
         assert all(isinstance(group, SeriesSummary) for group in groups)
     assert set(FILTER_LABELS) >= {"only-cs", "only-sk", "both", "missing", "unknown", "episodes", "bonus"}
+
+
+def test_search_by_title_is_case_insensitive_and_returns_all_filtered_title_videos():
+    videos = [
+        _video("Anime/Overlord/Season 01/01.mkv"),
+        _video("Anime/Overlord/Season 02/02.mkv"),
+    ]
+    results = build_catalog_results(videos, "all", "oVeRlOrD")
+    assert [group.name for group in results.groups] == ["Overlord"]
+    assert results.video_count == 2
+
+
+def test_search_by_filename_and_relative_path_keeps_parent_title():
+    videos = [
+        _video("Anime/Overlord/Season 01/Rare Episode E03.mkv"),
+        _video("Anime/Overlord/Season 01/ordinary.mkv"),
+    ]
+    filename_results = build_catalog_results(videos, "all", "rare episode")
+    path_results = build_catalog_results(videos, "all", "season 01/rare")
+    assert filename_results.groups[0].name == "Overlord"
+    assert filename_results.video_count == 1
+    assert path_results.video_count == 1
+
+
+def test_search_by_season_label_and_episode_number_limits_title_detail():
+    videos = [
+        _video("Anime/Show/Serie 1/E02.mkv"),
+        _video("Anime/Show/Serie 2/E10.mkv"),
+    ]
+    season_one = build_catalog_results(videos, "all", "S1")
+    season_two = build_catalog_results(videos, "all", "S2")
+    episode = build_catalog_results(videos, "all", "10")
+    assert [video.filename for video in season_one.videos_by_title["Anime/Show"]] == ["E02.mkv"]
+    assert [video.filename for video in season_two.videos_by_title["Anime/Show"]] == ["E10.mkv"]
+    assert [video.filename for video in episode.videos_by_title["Anime/Show"]] == ["E10.mkv"]
+
+
+def test_search_combines_with_missing_translation_filter():
+    missing = _video("Anime/Show/Season 01/Wanted E01.mkv")
+    translated = _video("Anime/Show/Season 01/Wanted E02.mkv", language="cs")
+    results = build_catalog_results([missing, translated], "missing", "wanted")
+    assert results.video_count == 1
+    assert results.videos_by_title["Anime/Show"] == [missing]
+
+
+def test_empty_search_returns_regular_filtered_overview():
+    videos = [_video("Anime/One/01.mkv"), _video("Anime/Two/01.mkv")]
+    normal = build_catalog_results(videos, "all")
+    whitespace = build_catalog_results(videos, "all", "   ")
+    assert [group.relative_path for group in whitespace.groups] == [
+        group.relative_path for group in normal.groups
+    ]
+    assert whitespace.video_count == normal.video_count == 2
 
 
 def test_manual_hardsub_sets_independent_language_flags_and_timestamp():

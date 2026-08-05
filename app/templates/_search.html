@@ -1,0 +1,6 @@
+<form class="search-form" method="get" action="{{ search_action }}">
+  <input class="search-input" type="search" name="q" value="{{ q or '' }}" maxlength="200" placeholder="Hledat titul, sezónu, epizodu nebo soubor…" aria-label="Hledat">
+  <button type="submit">Hledat</button>
+  <a class="button-secondary" href="{{ search_cancel }}">Zrušit</a>
+</form>
+<script>document.querySelectorAll('.search-input').forEach(function(input){input.addEventListener('keydown',function(event){if(event.key==='Escape'){event.preventDefault();input.value='';window.location.href='{{ search_cancel }}';}});});</script>

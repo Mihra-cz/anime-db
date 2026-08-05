@@ -14,10 +14,12 @@ from sqlalchemy.orm import selectinload
 
 from .catalog import (
     FILTER_LABELS,
+    build_catalog_results,
     derive_episode_number,
     derive_season_info,
     determine_parent_series,
     group_videos_by_series,
+    normalize_search_query,
     set_manual_hardsub,
     title_videos,
     translation_status,
@@ -41,8 +43,13 @@ def _load_videos(sessions) -> list[Video]:
         ).order_by(Video.relative_path)).all())
 
 
-def hardsub_return_url(filter_name: str, series_path: str, video_id: int) -> str:
-    query = urlencode({"series_path": series_path})
+def hardsub_return_url(
+    filter_name: str, series_path: str, video_id: int, query: str = ""
+) -> str:
+    parameters = {"series_path": series_path}
+    if normalized_query := normalize_search_query(query):
+        parameters["q"] = normalized_query
+    query = urlencode(parameters)
     return f"/catalog/{filter_name}/series?{query}#video-{video_id}"
 
 
@@ -95,6 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         message: str | None = None,
         error: str | None = None,
         confirm_deletions: bool = False,
+        q: str = "",
     ):
         with sessions() as session:
             videos = session.scalars(select(Video).options(
@@ -108,34 +116,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return templates.TemplateResponse(request, "index.html", {
             "folders": sorted(folders.items()), "totals": totals, "message": message,
             "error": error, "confirm_deletions": confirm_deletions,
+            "q": normalize_search_query(q),
         })
 
     @app.get("/folders/{folder:path}", response_class=HTMLResponse)
     def folder_detail(request: Request, folder: str):
         videos = [video for video in _load_videos(sessions) if video.root_folder == folder]
+        results = build_catalog_results(videos, "all")
         return templates.TemplateResponse(request, "catalog.html", {
             "filter_name": "all", "filter_label": f"Složka: {folder}",
-            "groups": group_videos_by_series(videos, "all"),
+            "groups": results.groups, "video_count": results.video_count, "q": "",
             "all_filters": FILTER_LABELS,
         })
 
     @app.get("/catalog/{filter_name}", response_class=HTMLResponse)
-    def catalog(request: Request, filter_name: str):
+    def catalog(request: Request, filter_name: str, q: str = ""):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
         videos = _load_videos(sessions)
+        results = build_catalog_results(videos, filter_name, q)
         return templates.TemplateResponse(request, "catalog.html", {
             "filter_name": filter_name,
             "filter_label": FILTER_LABELS[filter_name],
-            "groups": group_videos_by_series(videos, filter_name),
+            "groups": results.groups,
+            "video_count": results.video_count,
+            "q": results.query,
             "all_filters": FILTER_LABELS,
         })
 
     @app.get("/catalog/{filter_name}/series", response_class=HTMLResponse)
-    def series_detail(request: Request, filter_name: str, series_path: str):
+    def series_detail(request: Request, filter_name: str, series_path: str, q: str = ""):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
-        videos = title_videos(_load_videos(sessions), series_path)
+        results = build_catalog_results(_load_videos(sessions), filter_name, q)
+        videos = results.videos_by_title.get(series_path, [])
         if not videos:
             raise HTTPException(status_code=404, detail="Série nebyla nalezena")
         return templates.TemplateResponse(request, "series.html", {
@@ -147,6 +161,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "video_matches_filter": video_matches_filter,
             "derive_season_info": derive_season_info,
             "derive_episode_number": derive_episode_number,
+            "q": results.query,
         })
 
     @app.post("/videos/{video_id}/hardsub")
@@ -155,6 +170,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mode: str = Form(...),
         filter_name: str = Form(...),
         series_path: str = Form(""),
+        q: str = Form(""),
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=400, detail="Neplatný návratový filtr")
@@ -168,7 +184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             session.commit()
         if series_path:
-            target = hardsub_return_url(filter_name, series_path, video_id)
+            target = hardsub_return_url(filter_name, series_path, video_id, q)
         else:
             target = f"/catalog/{filter_name}"
         return RedirectResponse(target, status_code=303)
