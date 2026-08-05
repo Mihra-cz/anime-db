@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import Float, ForeignKey, Integer, String, UniqueConstraint
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -20,6 +22,9 @@ class Video(Base):
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     file_type: Mapped[str] = mapped_column(String, default="other", server_default="other", index=True)
+    manual_hardsub_cs: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    manual_hardsub_sk: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    manual_hardsub_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     audio_tracks: Mapped[list[AudioTrack]] = relationship(cascade="all, delete-orphan")
     internal_subtitles: Mapped[list[InternalSubtitle]] = relationship(cascade="all, delete-orphan")

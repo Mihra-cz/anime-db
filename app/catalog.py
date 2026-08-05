@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import PurePosixPath
 import re
 
 from .models import Video
@@ -71,6 +74,8 @@ class TranslationStatus:
     has_cs_or_sk: bool
     subtitle_source: str | None
     has_unknown: bool
+    automatic_has_cs: bool
+    automatic_has_sk: bool
 
 
 def translation_status(video: Video) -> TranslationStatus:
@@ -80,10 +85,99 @@ def translation_status(video: Video) -> TranslationStatus:
     internal_target = bool(internal & target)
     external_target = bool(external & target)
     source = "both" if internal_target and external_target else "internal" if internal_target else "external" if external_target else None
+    automatic_has_cs = "cs" in internal or "cs" in external
+    automatic_has_sk = "sk" in internal or "sk" in external
+    has_cs = automatic_has_cs or bool(video.manual_hardsub_cs)
+    has_sk = automatic_has_sk or bool(video.manual_hardsub_sk)
     return TranslationStatus(
-        has_cs="cs" in internal or "cs" in external,
-        has_sk="sk" in internal or "sk" in external,
-        has_cs_or_sk=bool((internal | external) & target),
+        has_cs=has_cs,
+        has_sk=has_sk,
+        has_cs_or_sk=has_cs or has_sk,
         subtitle_source=source,
         has_unknown="unknown" in internal or "unknown" in external,
+        automatic_has_cs=automatic_has_cs,
+        automatic_has_sk=automatic_has_sk,
+    )
+
+
+GENERIC_ROOTS = {"anime", "library", "media", "videos", "video"}
+STRUCTURAL_DIRECTORY = re.compile(
+    r"^(?:season|series|cour|part)\s*[-_. ]*\d+$|^(?:specials?|extras?|bonus|ova|oad)$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class SeriesIdentity:
+    name: str
+    relative_path: str
+
+
+def determine_parent_series(relative_path: str) -> SeriesIdentity:
+    all_directories = list(PurePosixPath(relative_path).parts[:-1])
+    first_meaningful = 0
+    while (
+        first_meaningful < len(all_directories)
+        and all_directories[first_meaningful].casefold() in GENERIC_ROOTS
+    ):
+        first_meaningful += 1
+    directories = all_directories[first_meaningful:]
+    if not directories:
+        return SeriesIdentity("Knihovna", ".")
+
+    structural_index = next(
+        (index for index, name in enumerate(directories) if STRUCTURAL_DIRECTORY.match(name)),
+        None,
+    )
+    if structural_index is not None and structural_index > 0:
+        series_index = structural_index - 1
+    else:
+        series_index = len(directories) - 1
+    actual_series_index = first_meaningful + series_index
+    selected = all_directories[:actual_series_index + 1]
+    return SeriesIdentity(all_directories[actual_series_index], PurePosixPath(*selected).as_posix())
+
+
+@dataclass
+class SeriesSummary:
+    name: str
+    relative_path: str
+    total: int = 0
+    problematic: int = 0
+    unknown: int = 0
+
+
+def group_videos_by_series(
+    videos: Iterable[Video], is_problematic: Callable[[Video], bool]
+) -> list[SeriesSummary]:
+    groups: dict[str, SeriesSummary] = {}
+    for video in videos:
+        identity = determine_parent_series(video.relative_path)
+        summary = groups.setdefault(
+            identity.relative_path,
+            SeriesSummary(identity.name, identity.relative_path),
+        )
+        summary.total += 1
+        summary.problematic += is_problematic(video)
+        summary.unknown += translation_status(video).has_unknown
+    return sorted(
+        (summary for summary in groups.values() if summary.problematic),
+        key=lambda summary: (-summary.problematic, summary.name.casefold()),
+    )
+
+
+def set_manual_hardsub(
+    video: Video, mode: str, *, verified_at: datetime | None = None
+) -> None:
+    values = {
+        "none": (False, False),
+        "cs": (True, False),
+        "sk": (False, True),
+        "both": (True, True),
+    }
+    if mode not in values:
+        raise ValueError("Neplatná hodnota ručního hardsubu")
+    video.manual_hardsub_cs, video.manual_hardsub_sk = values[mode]
+    video.manual_hardsub_verified_at = (
+        (verified_at or datetime.now(timezone.utc)) if mode != "none" else None
     )

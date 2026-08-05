@@ -8,11 +8,11 @@
 <section class="stats">
   <article><strong>{{ totals.episodes }}</strong><span>běžných epizod</span></article>
   <article><strong>{{ totals.bonus }}</strong><span>bonusových / ostatních videí</span></article>
-  <article><strong>{{ totals.only_cs }}</strong><span>pouze CZ</span></article>
-  <article><strong>{{ totals.only_sk }}</strong><span>pouze SK</span></article>
-  <article><strong>{{ totals.both_cs_sk }}</strong><span>CZ i SK</span></article>
-  <article><strong>{{ totals.missing }}</strong><span>bez CZ/SK</span></article>
-  <article><strong>{{ totals.unknown }}</strong><span>s neznámými titulky</span></article>
+  <a class="stat-link" href="/catalog/only-cs"><article><strong>{{ totals.only_cs }}</strong><span>pouze CZ</span></article></a>
+  <a class="stat-link" href="/catalog/only-sk"><article><strong>{{ totals.only_sk }}</strong><span>pouze SK</span></article></a>
+  <a class="stat-link" href="/catalog/both"><article><strong>{{ totals.both_cs_sk }}</strong><span>CZ i SK</span></article></a>
+  <a class="stat-link" href="/catalog/missing"><article><strong>{{ totals.missing }}</strong><span>bez CZ/SK</span></article></a>
+  <a class="stat-link" href="/catalog/unknown"><article><strong>{{ totals.unknown }}</strong><span>s neznámými titulky</span></article></a>
 </section>
 <section class="panel"><h2>Kořenové složky</h2>
 <div class="table-wrap"><table><thead><tr><th>Složka</th><th>Epizody</th><th>Bonusy</th><th>CZ</th><th>SK</th><th>CZ/SK</th><th>Bez CZ/SK</th><th>Neznámé</th></tr></thead><tbody>

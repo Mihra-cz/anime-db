@@ -47,5 +47,10 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
 
     with Session(engine) as session:
         assert session.scalar(select(Video.file_type)) == "ncop"
+        video = session.scalar(select(Video))
+        assert video.filename == "NCOP.mkv"
+        assert video.manual_hardsub_cs is False
+        assert video.manual_hardsub_sk is False
+        assert video.manual_hardsub_verified_at is None
         assert session.scalar(select(InternalSubtitle.language)) == "unknown"
         assert session.scalar(select(InternalSubtitle.normalized_language)) == "eng"

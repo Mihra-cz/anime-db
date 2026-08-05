@@ -1,10 +1,12 @@
 from pathlib import Path
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
+from app.catalog import set_manual_hardsub
 from app.models import ExternalSubtitle, Video
 from app.scanner import LibrarySafetyError, iter_videos, scan_library
 
@@ -155,3 +157,31 @@ def test_removing_more_than_twenty_percent_requires_confirmation(tmp_path: Path,
         result = scan_library(session, tmp_path, confirm_deletions=True)
         assert result.removed == 3
         assert session.scalar(select(func.count()).select_from(Video)) == 7
+
+
+def test_scan_preserves_manual_hardsub_and_verification_date(tmp_path: Path, monkeypatch):
+    video_path = tmp_path / "Show" / "episode.mkv"
+    video_path.parent.mkdir()
+    video_path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    verified_at = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        video = session.scalar(select(Video))
+        set_manual_hardsub(video, "both", verified_at=verified_at)
+        session.commit()
+        stored_timestamp = video.manual_hardsub_verified_at
+
+        scan_library(session, tmp_path)
+        video = session.scalar(select(Video))
+        assert video.manual_hardsub_cs is True
+        assert video.manual_hardsub_sk is True
+        assert video.manual_hardsub_verified_at == stored_timestamp
+
+        set_manual_hardsub(video, "none")
+        session.commit()
+        assert video.manual_hardsub_verified_at is None

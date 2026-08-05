@@ -17,7 +17,12 @@ def migrate_schema(engine) -> None:
     if "videos" not in inspector.get_table_names():
         return
     additions = {
-        "videos": [("file_type", "VARCHAR NOT NULL DEFAULT 'other'")],
+        "videos": [
+            ("file_type", "VARCHAR NOT NULL DEFAULT 'other'"),
+            ("manual_hardsub_cs", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("manual_hardsub_sk", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("manual_hardsub_verified_at", "DATETIME NULL"),
+        ],
         "internal_subtitles": [("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'")],
         "external_subtitles": [("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'")],
     }
