@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from html import unescape
 from html.parser import HTMLParser
 import json
+import re
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,6 +12,31 @@ from sqlalchemy.orm import Session
 from app.models import CatalogTitle, ExternalTitleLink, TitleMetadata
 
 from .providers.base import MetadataProvider, ProviderTitleMetadata
+
+
+_PARENTHESIZED_INTERNAL_CODE = re.compile(
+    r"\s*\([A-Z]\d{2}(?:-[A-Z]\d{2})?\)\s*$", re.IGNORECASE
+)
+_TRAILING_INTERNAL_CODE = re.compile(
+    r"\s+[A-Z]\d{2}(?:-[A-Z]\d{2})?\s*$", re.IGNORECASE
+)
+_TRAILING_LANGUAGE_MARK = re.compile(
+    r"\s+(?:cz-xx%|cz-sk|sk-cz|cz|sk)\s*$", re.IGNORECASE
+)
+
+
+def normalize_metadata_search_query(local_title: str) -> str:
+    """Remove only recognized trailing library annotations for a search default."""
+    original = (local_title or "").strip()
+    cleaned = original
+    while cleaned:
+        previous = cleaned
+        cleaned = _TRAILING_LANGUAGE_MARK.sub("", cleaned).rstrip()
+        cleaned = _PARENTHESIZED_INTERNAL_CODE.sub("", cleaned).rstrip()
+        cleaned = _TRAILING_INTERNAL_CODE.sub("", cleaned).rstrip()
+        if cleaned == previous:
+            break
+    return cleaned if len(cleaned) >= 2 else original
 
 
 class MetadataConflictError(RuntimeError):

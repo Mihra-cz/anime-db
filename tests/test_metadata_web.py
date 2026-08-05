@@ -20,6 +20,7 @@ def test_detail_template_displays_anilist_candidates():
         catalog_title=title, metadata_status_labels={"unlinked": "Bez metadat"},
         metadata_candidates=[candidate], metadata_error=None, filter_name="all",
         metadata_allow_remote_images=True,
+        metadata_default_query="Local Test",
         filter_label="Všechna videa", back_url="/catalog/all", videos=[], q="",
         sort="title", direction="asc", video_sort="default", video_direction="asc",
         video_sort_url=lambda _: "#", translation_status=lambda _: None,
@@ -48,6 +49,7 @@ def test_remote_candidate_image_can_be_disabled():
         catalog_title=title, metadata_status_labels={"unlinked": "Bez metadat"},
         metadata_candidates=[candidate], metadata_error=None, metadata_message=None,
         metadata_allow_remote_images=False, filter_name="all", filter_label="Všechna videa",
+        metadata_default_query="Local",
         back_url="/catalog/all", videos=[], q="", sort="title", direction="asc",
         video_sort="default", video_direction="asc", video_sort_url=lambda _: "#",
         translation_status=lambda _: None, video_matches_filter=lambda *_: False,
@@ -55,6 +57,26 @@ def test_remote_candidate_image_can_be_disabled():
     )
     assert "https://img/secret.jpg" not in rendered
     assert "Test" in rendered
+
+
+def test_manual_metadata_query_is_not_normalized_again():
+    source = templates.env.get_template("series.html").render(
+        request=type("Request", (), {"url_for": lambda self, *args, **kwargs: "/static/style.css"})(),
+        series=type("Series", (), {"name": "Local", "relative_path": "Anime/Local"})(),
+        catalog_title=CatalogTitle(
+            id=1, local_title="Local (J19)", normalized_local_title="local j19",
+            relative_root_path="Anime/Local (J19)", metadata_status="unlinked",
+        ),
+        metadata_status_labels={"unlinked": "Bez metadat"}, metadata_candidates=[],
+        metadata_error=None, metadata_message=None, metadata_allow_remote_images=True,
+        metadata_default_query="Local", metadata_query="My exact query (J19)",
+        filter_name="all", filter_label="Všechna videa", back_url="/catalog/all",
+        videos=[], q="", sort="title", direction="asc", video_sort="default",
+        video_direction="asc", video_sort_url=lambda _: "#",
+        translation_status=lambda _: None, video_matches_filter=lambda *_: False,
+        derive_season_info=lambda _: None, derive_episode_number=lambda _: None,
+    )
+    assert 'value="My exact query (J19)"' in source
 
 
 def test_all_metadata_mutations_are_post_only():

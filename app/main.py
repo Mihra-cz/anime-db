@@ -34,7 +34,8 @@ from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
 from .metadata.service import (
     MetadataConflictError, MetadataLockedError, confirm_anilist_candidate,
-    refresh_title_metadata, set_manual_display_title, unlink_title_metadata,
+    normalize_metadata_search_query, refresh_title_metadata,
+    set_manual_display_title, unlink_title_metadata,
 )
 from .models import CatalogTitle, ExternalTitleLink, TitleMetadata, Video
 from .scanner import LibrarySafetyError, scan_library
@@ -306,6 +307,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "require_conflict_confirmation": require_conflict_confirmation,
             "require_locked_confirmation": require_locked_confirmation,
             "metadata_allow_remote_images": settings.metadata_allow_remote_images,
+            "metadata_default_query": normalize_metadata_search_query(
+                catalog_title.local_title
+            ) if catalog_title else "",
             "videos": videos,
             "translation_status": translation_status,
             "video_matches_filter": video_matches_filter,
@@ -376,6 +380,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "require_conflict_confirmation": False,
             "require_locked_confirmation": False,
             "metadata_allow_remote_images": settings.metadata_allow_remote_images,
+            # Ručně odeslaný dotaz se znovu nenormalizuje.
+            "metadata_default_query": metadata_query,
         }
         context.update(_metadata_template_values(
             catalog_title, settings.metadata_allow_remote_images
