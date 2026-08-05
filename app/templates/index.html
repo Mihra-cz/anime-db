@@ -3,7 +3,8 @@
 <div class="heading"><div><h1>Přehled knihovny</h1><p>Lokální katalog videí a titulkových stop.</p></div>
 <form method="post" action="/scan"><button type="submit">Spustit sken</button></form></div>
 {% if message %}<div class="notice success">{{ message }}</div>{% endif %}
-{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+{% if error %}<div class="notice error"><strong>Sken byl zastaven.</strong> {{ error }}
+{% if confirm_deletions %}<form method="post" action="/scan"><input type="hidden" name="confirm_deletions" value="true"><button type="submit">Potvrdit odstranění chybějících záznamů</button></form>{% endif %}</div>{% endif %}
 <section class="stats">
   <article><strong>{{ totals.episodes }}</strong><span>běžných epizod</span></article>
   <article><strong>{{ totals.bonus }}</strong><span>bonusových / ostatních videí</span></article>

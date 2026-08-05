@@ -10,9 +10,11 @@ def test_loads_dotenv_but_system_environment_has_priority(tmp_path: Path, monkey
         encoding="utf-8",
     )
     monkeypatch.delenv("ANIME_PATH", raising=False)
+    monkeypatch.delenv("REQUIRE_MOUNT", raising=False)
     monkeypatch.setenv("DATABASE_URL", "sqlite:////from-system.db")
 
     settings = get_settings(dotenv_path)
 
     assert settings.anime_path == Path("/from-dotenv")
     assert settings.database_url == "sqlite:////from-system.db"
+    assert settings.require_mount is False

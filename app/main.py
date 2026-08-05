@@ -3,8 +3,9 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
+from urllib.parse import urlencode
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -16,7 +17,7 @@ from .config import Settings, get_settings
 from .database import Base, make_engine, make_session_factory
 from .migrations import migrate_schema
 from .models import Video
-from .scanner import scan_library
+from .scanner import LibrarySafetyError, scan_library
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -62,7 +63,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/", response_class=HTMLResponse)
-    def index(request: Request, message: str | None = None, error: str | None = None):
+    def index(
+        request: Request,
+        message: str | None = None,
+        error: str | None = None,
+        confirm_deletions: bool = False,
+    ):
         with sessions() as session:
             videos = session.scalars(select(Video).options(
                 selectinload(Video.internal_subtitles), selectinload(Video.external_subtitles)
@@ -73,7 +79,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             _add_video(folders.setdefault(video.root_folder, _empty_stats()), video)
             _add_video(totals, video)
         return templates.TemplateResponse(request, "index.html", {
-            "folders": sorted(folders.items()), "totals": totals, "message": message, "error": error,
+            "folders": sorted(folders.items()), "totals": totals, "message": message,
+            "error": error, "confirm_deletions": confirm_deletions,
         })
 
     @app.get("/folders/{folder:path}", response_class=HTMLResponse)
@@ -87,16 +94,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         })
 
     @app.post("/scan")
-    def scan():
+    def scan(confirm_deletions: bool = Form(False)):
         try:
             with sessions() as session:
-                result = scan_library(session, settings.anime_path)
+                result = scan_library(
+                    session,
+                    settings.anime_path,
+                    require_mount=settings.require_mount,
+                    confirm_deletions=confirm_deletions,
+                )
             message = (f"Sken dokončen: {result.found} videí, {result.created} nových, "
                        f"{result.updated} změněných, {result.errors} chyb.")
-            return RedirectResponse(url=f"/?message={message}", status_code=303)
+            return RedirectResponse(url=f"/?{urlencode({'message': message})}", status_code=303)
+        except LibrarySafetyError as exc:
+            logger.warning("Sken bezpečnostně přerušen: %s", exc)
+            query = {"error": str(exc)}
+            if exc.confirmation_allowed:
+                query["confirm_deletions"] = "true"
+            return RedirectResponse(url=f"/?{urlencode(query)}", status_code=303)
         except Exception as exc:
             logger.exception("Sken selhal")
-            return RedirectResponse(url=f"/?error={str(exc)}", status_code=303)
+            message = f"Sken selhal. Knihovna může být odpojená: {exc}"
+            return RedirectResponse(url=f"/?{urlencode({'error': message})}", status_code=303)
 
     return app
 

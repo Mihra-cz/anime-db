@@ -16,6 +16,13 @@ from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, subtitle_matches
 logger = logging.getLogger(__name__)
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi"}
 IGNORED_DIRECTORIES = {"#recycle", "@eadir"}
+MAX_REMOVAL_PERCENT = 20
+
+
+class LibrarySafetyError(RuntimeError):
+    def __init__(self, message: str, *, confirmation_allowed: bool = False):
+        super().__init__(message)
+        self.confirmation_allowed = confirmation_allowed
 
 
 @dataclass
@@ -29,7 +36,12 @@ class ScanResult:
 
 
 def iter_videos(root: Path):
-    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for current, directories, files in os.walk(
+        root, topdown=True, onerror=raise_walk_error, followlinks=False
+    ):
         directories[:] = sorted(
             d for d in directories
             if d.casefold() not in IGNORED_DIRECTORIES and not d.startswith(".")
@@ -38,6 +50,16 @@ def iter_videos(root: Path):
             path = Path(current) / filename
             if path.suffix.lower() in VIDEO_EXTENSIONS:
                 yield path
+
+
+def is_on_mounted_source(root: Path) -> bool:
+    """Return true for a path at or below a mount other than the root filesystem."""
+    current = root.resolve()
+    while current != current.parent:
+        if os.path.ismount(current):
+            return True
+        current = current.parent
+    return False
 
 
 def _root_folder(relative: Path) -> str:
@@ -84,10 +106,22 @@ def _sync_external_subtitles(
                 video.external_subtitles.remove(subtitle)
 
 
-def _scan_library(session: Session, root: Path) -> ScanResult:
+def _scan_library(
+    session: Session,
+    root: Path,
+    *,
+    require_mount: bool = False,
+    confirm_deletions: bool = False,
+) -> ScanResult:
     root = root.resolve()
     if not root.is_dir():
-        raise ValueError(f"ANIME_PATH není dostupný adresář: {root}")
+        raise LibrarySafetyError(
+            f"ANIME_PATH není dostupný adresář: {root}. Knihovna může být odpojená."
+        )
+    if require_mount and not is_on_mounted_source(root):
+        raise LibrarySafetyError(
+            f"ANIME_PATH {root} neleží na připojeném zdroji. Knihovna může být odpojená."
+        )
 
     result = ScanResult()
     existing = {v.relative_path: v for v in session.scalars(select(Video)).all()}
@@ -134,19 +168,49 @@ def _scan_library(session: Session, root: Path) -> ScanResult:
             if key not in existing and video is not None:
                 session.expunge(video)
 
-    for key, video in existing.items():
-        if key not in seen:
-            session.delete(video)
-            result.removed += 1
+    missing = [(key, video) for key, video in existing.items() if key not in seen]
+    existing_count = len(existing)
+    if existing_count and result.found == 0:
+        raise LibrarySafetyError(
+            f"Sken nenašel žádná videa, ale databáze jich obsahuje {existing_count}. "
+            "Knihovna může být odpojená; databáze nebyla změněna."
+        )
+    if (
+        existing_count
+        and len(missing) * 100 > existing_count * MAX_REMOVAL_PERCENT
+        and not confirm_deletions
+    ):
+        percent = len(missing) * 100 / existing_count
+        raise LibrarySafetyError(
+            f"Sken by odstranil {len(missing)} z {existing_count} videí ({percent:.1f} %). "
+            "Knihovna může být odpojená. Zkontrolujte ji a případné odstranění explicitně potvrďte.",
+            confirmation_allowed=True,
+        )
+
+    # Mazání je záměrně až poslední operace po dokončení průchodu a bezpečnostních kontrolách.
+    for _, video in missing:
+        session.delete(video)
+        result.removed += 1
     session.commit()
     logger.info("Sken dokončen: found=%d created=%d updated=%d unchanged=%d removed=%d errors=%d",
                 result.found, result.created, result.updated, result.unchanged, result.removed, result.errors)
     return result
 
 
-def scan_library(session: Session, root: Path) -> ScanResult:
+def scan_library(
+    session: Session,
+    root: Path,
+    *,
+    require_mount: bool = False,
+    confirm_deletions: bool = False,
+) -> ScanResult:
     try:
-        return _scan_library(session, root)
+        return _scan_library(
+            session,
+            root,
+            require_mount=require_mount,
+            confirm_deletions=confirm_deletions,
+        )
     except Exception:
         session.rollback()
         logger.exception("Sken byl vrácen zpět kvůli neočekávané chybě")

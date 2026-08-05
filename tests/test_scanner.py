@@ -1,11 +1,18 @@
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import ExternalSubtitle, Video
-from app.scanner import iter_videos, scan_library
+from app.scanner import LibrarySafetyError, iter_videos, scan_library
+
+
+PROBE_RESULT = {
+    "duration": 60.0, "video_codec": "h264", "width": 1920, "height": 1080,
+    "audio": [], "subtitles": [],
+}
 
 
 def test_ignores_recycle(tmp_path: Path):
@@ -88,3 +95,63 @@ def test_preserves_two_external_subtitles_with_same_language(tmp_path: Path, mon
         assert len(subtitles) == 2
         assert {subtitle.normalized_language for subtitle in subtitles} == {"cs"}
         assert len({subtitle.relative_path for subtitle in subtitles}) == 2
+
+
+def test_empty_existing_root_does_not_delete_database_records(tmp_path: Path, monkeypatch):
+    video_path = tmp_path / "Show" / "episode.mkv"
+    video_path.parent.mkdir()
+    video_path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        video_path.unlink()
+
+        with pytest.raises(LibrarySafetyError, match="může být odpojená"):
+            scan_library(session, tmp_path)
+
+        assert session.scalar(select(func.count()).select_from(Video)) == 1
+
+
+def test_required_mount_stops_scan_before_changes(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("app.scanner.service.is_on_mounted_source", lambda _: False)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        with pytest.raises(LibrarySafetyError, match="neleží na připojeném zdroji"):
+            scan_library(session, tmp_path, require_mount=True)
+        assert session.scalar(select(func.count()).select_from(Video)) == 0
+
+
+def test_removing_more_than_twenty_percent_requires_confirmation(tmp_path: Path, monkeypatch):
+    show = tmp_path / "Show"
+    show.mkdir()
+    video_paths = []
+    for number in range(10):
+        path = show / f"episode-{number:02}.mkv"
+        path.write_bytes(b"video")
+        video_paths.append(path)
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        for path in video_paths[:3]:
+            path.unlink()
+
+        with pytest.raises(LibrarySafetyError, match="explicitně potvrďte") as error:
+            scan_library(session, tmp_path)
+
+        assert error.value.confirmation_allowed
+        assert session.scalar(select(func.count()).select_from(Video)) == 10
+
+        result = scan_library(session, tmp_path, confirm_deletions=True)
+        assert result.removed == 3
+        assert session.scalar(select(func.count()).select_from(Video)) == 7

@@ -6,6 +6,7 @@ services:
     environment:
       ANIME_PATH: /media/anime
       DATABASE_URL: sqlite:////data/anime.db
+      REQUIRE_MOUNT: ${REQUIRE_MOUNT:-true}
     volumes:
       - /mnt/nas-anime:/media/anime:ro
       - ./data:/data
