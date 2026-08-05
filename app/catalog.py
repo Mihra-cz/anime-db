@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -157,14 +157,59 @@ class SeriesSummary:
     total: int = 0
     problematic: int = 0
     unknown: int = 0
+    episodes: int = 0
+    bonus: int = 0
+    cs: int = 0
+    sk: int = 0
+    missing: int = 0
+    matched: int = 0
 
     @property
     def translated(self) -> int:
         return self.total - self.problematic
 
 
+FILTER_LABELS = {
+    "all": "Všechna videa",
+    "only-cs": "Pouze CZ",
+    "only-sk": "Pouze SK",
+    "both": "CZ i SK",
+    "missing": "Bez CZ/SK",
+    "unknown": "Neznámé titulky",
+    "episodes": "Běžné epizody",
+    "bonus": "Bonusová / ostatní videa",
+    "type-special": "Specials",
+    "type-ova": "OVA",
+    "type-ncop": "NCOP",
+    "type-nced": "NCED",
+    "type-pv": "PV",
+    "type-cm": "CM",
+    "type-menu": "Menu",
+    "type-other": "Ostatní",
+}
+
+
+def video_matches_filter(video: Video, filter_name: str) -> bool:
+    status = translation_status(video)
+    predicates = {
+        "all": True,
+        "only-cs": status.has_cs and not status.has_sk,
+        "only-sk": status.has_sk and not status.has_cs,
+        "both": status.has_cs and status.has_sk,
+        "missing": not status.has_cs_or_sk,
+        "unknown": status.has_unknown,
+        "episodes": video.file_type == "episode",
+        "bonus": video.file_type != "episode",
+    }
+    if filter_name.startswith("type-"):
+        return video.file_type == filter_name.removeprefix("type-")
+    if filter_name not in predicates:
+        raise ValueError(f"Neznámý filtr: {filter_name}")
+    return predicates[filter_name]
+
+
 def group_videos_by_series(
-    videos: Iterable[Video], is_problematic: Callable[[Video], bool]
+    videos: Iterable[Video], filter_name: str
 ) -> list[SeriesSummary]:
     groups: dict[str, SeriesSummary] = {}
     for video in videos:
@@ -174,11 +219,92 @@ def group_videos_by_series(
             SeriesSummary(identity.name, identity.relative_path),
         )
         summary.total += 1
-        summary.problematic += is_problematic(video)
-        summary.unknown += translation_status(video).has_unknown
+        status = translation_status(video)
+        matches = video_matches_filter(video, filter_name)
+        summary.matched += matches
+        summary.problematic += matches
+        summary.episodes += video.file_type == "episode"
+        summary.bonus += video.file_type != "episode"
+        summary.cs += status.has_cs
+        summary.sk += status.has_sk
+        summary.missing += not status.has_cs_or_sk
+        summary.unknown += status.has_unknown
     return sorted(
-        (summary for summary in groups.values() if summary.problematic),
-        key=lambda summary: (-summary.problematic, summary.name.casefold()),
+        (summary for summary in groups.values() if summary.matched),
+        key=lambda summary: (-summary.matched, summary.name.casefold()),
+    )
+
+
+@dataclass(frozen=True)
+class SeasonInfo:
+    label: str | None
+    original: str | None
+
+
+SEASON_NUMBER = re.compile(
+    r"^(?:s[ée]rie|series|season)\s*[-_. ]*0*(\d+)(?:\s*\([^)]*\))?$",
+    re.IGNORECASE,
+)
+SHORT_SEASON = re.compile(r"^s\s*[-_. ]*0*(\d+)(?:\s*\([^)]*\))?$", re.IGNORECASE)
+COUR_PART = re.compile(r"^(cour|part)\s*[-_. ]*0*(\d+)(?:\s*\([^)]*\))?$", re.IGNORECASE)
+
+
+def derive_season_info(relative_path: str) -> SeasonInfo:
+    for directory in PurePosixPath(relative_path).parts[:-1]:
+        if match := SEASON_NUMBER.fullmatch(directory.strip()):
+            return SeasonInfo(f"S{int(match.group(1))}", directory)
+        if match := SHORT_SEASON.fullmatch(directory.strip()):
+            return SeasonInfo(f"S{int(match.group(1))}", directory)
+        if match := COUR_PART.fullmatch(directory.strip()):
+            return SeasonInfo(f"{match.group(1).title()} {int(match.group(2))}", directory)
+        if directory.strip().casefold() in {"special", "specials"}:
+            return SeasonInfo("Specials", directory)
+        if directory.strip().casefold() in {"ova", "oad"}:
+            return SeasonInfo("OVA", directory)
+    return SeasonInfo(None, None)
+
+
+EXPLICIT_EPISODE = re.compile(
+    r"(?:^|[^a-z0-9])(?:episode|ep|e)\s*[-_. ]*0*(\d{1,3})(?:v\d+)?(?:[^a-z0-9]|$)",
+    re.IGNORECASE,
+)
+BARE_EPISODE = re.compile(r"(?:^|[^a-z0-9])0*(\d{1,3})(?:v\d+)?(?:[^a-z0-9]|$)", re.IGNORECASE)
+
+
+def derive_episode_number(filename: str) -> int | None:
+    stem = PurePosixPath(filename).stem
+    if match := EXPLICIT_EPISODE.search(stem):
+        return int(match.group(1))
+    candidates = {int(value) for value in BARE_EPISODE.findall(stem)}
+    candidates = {value for value in candidates if value not in {720} and value < 190}
+    return candidates.pop() if len(candidates) == 1 else None
+
+
+TYPE_ORDER = {"episode": 0, "special": 1, "ova": 2, "ncop": 3, "nced": 4, "pv": 5, "cm": 6, "menu": 7, "other": 8}
+
+
+def video_sort_key(video: Video):
+    season = derive_season_info(video.relative_path).label
+    if season and (match := re.fullmatch(r"S(\d+)", season)):
+        season_key = (0, int(match.group(1)), "")
+    elif season is None:
+        season_key = (1, 0, "")
+    else:
+        season_key = (2, 0, season.casefold())
+    episode = derive_episode_number(video.filename)
+    return (
+        season_key,
+        episode is None,
+        episode if episode is not None else 0,
+        TYPE_ORDER.get(video.file_type, 99),
+        video.filename.casefold(),
+    )
+
+
+def title_videos(videos: Iterable[Video], title_path: str) -> list[Video]:
+    return sorted(
+        (video for video in videos if determine_parent_series(video.relative_path).relative_path == title_path),
+        key=video_sort_key,
     )
 
 

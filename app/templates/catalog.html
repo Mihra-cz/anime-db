@@ -1,15 +1,9 @@
 {% extends "base.html" %}
 {% block title %}{{ filter_label }} · AnimeDB{% endblock %}
 {% block content %}<p><a href="/">← Zpět na přehled</a></p><h1>{{ filter_label }}</h1>
-{% if grouped %}
-<p>Nejdříve jsou zobrazené tituly, nikoli jednotlivá videa.</p>
-<section class="panel"><div class="table-wrap"><table><thead><tr><th>Titul</th><th>Nadřazená cesta</th><th>Všechna videa</th><th>Problematická</th><th>S překladem</th><th>Neznámé titulky</th></tr></thead><tbody>
-{% for group in groups %}<tr><td><a href="{{ url_for('series_detail', filter_name=filter_name) }}?series_path={{ group.relative_path|urlencode }}">{{ group.name }}</a></td><td>{{ group.relative_path }}</td><td>{{ group.total }}</td><td>{{ group.problematic }}</td><td>{{ group.translated }}</td><td>{{ group.unknown }}</td></tr>
-{% else %}<tr><td colspan="6">Filtr neobsahuje žádné tituly.</td></tr>{% endfor %}
-</tbody></table></div></section>
-{% else %}
-<section class="panel"><div class="table-wrap"><table><thead><tr><th>Soubor</th><th>Série</th><th>Typ</th><th>Stav</th></tr></thead><tbody>
-{% for video in videos %}{% set status = translation_status(video) %}<tr><td>{{ video.filename }}<small>{{ video.relative_path }}</small></td><td>{{ video.root_folder }}</td><td>{{ video.file_type }}</td><td>{% if status.has_cs %}CZ {% endif %}{% if status.has_sk %}SK{% endif %}</td></tr>
-{% else %}<tr><td colspan="4">Filtr neobsahuje žádná videa.</td></tr>{% endfor %}
-</tbody></table></div></section>
-{% endif %}{% endblock %}
+<nav class="filter-nav">{% for key, label in all_filters.items() %}{% if key != 'all' %}<a {% if key == filter_name %}class="active"{% endif %} href="/catalog/{{ key }}">{{ label }}</a>{% endif %}{% endfor %}</nav>
+<p>Nejdříve jsou zobrazené tituly. Jednotlivá videa jsou dostupná po rozkliknutí.</p>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>Titul</th><th>Nadřazená cesta</th><th>Celkem</th><th>Epizody</th><th>Bonusy / ostatní</th><th>S CZ</th><th>Se SK</th><th>Bez CZ/SK</th><th>Neznámé</th><th>V aktivním filtru</th></tr></thead><tbody>
+{% for group in groups %}<tr><td><a href="{{ url_for('series_detail', filter_name=filter_name) }}?series_path={{ group.relative_path|urlencode }}">{{ group.name }}</a></td><td>{{ group.relative_path }}</td><td>{{ group.total }}</td><td>{{ group.episodes }}</td><td>{{ group.bonus }}</td><td>{{ group.cs }}</td><td>{{ group.sk }}</td><td>{{ group.missing }}</td><td>{{ group.unknown }}</td><td class="highlight-count">{{ group.matched }}</td></tr>
+{% else %}<tr><td colspan="10">Filtr neobsahuje žádné tituly.</td></tr>{% endfor %}
+</tbody></table></div></section>{% endblock %}

@@ -6,8 +6,8 @@
 {% if error %}<div class="notice error"><strong>Sken byl zastaven.</strong> {{ error }}
 {% if confirm_deletions %}<form method="post" action="/scan"><input type="hidden" name="confirm_deletions" value="true"><button type="submit">Potvrdit odstranění chybějících záznamů</button></form>{% endif %}</div>{% endif %}
 <section class="stats">
-  <article><strong>{{ totals.episodes }}</strong><span>běžných epizod</span></article>
-  <article><strong>{{ totals.bonus }}</strong><span>bonusových / ostatních videí</span></article>
+  <a class="stat-link" href="/catalog/episodes"><article><strong>{{ totals.episodes }}</strong><span>běžných epizod</span></article></a>
+  <a class="stat-link" href="/catalog/bonus"><article><strong>{{ totals.bonus }}</strong><span>bonusových / ostatních videí</span></article></a>
   <a class="stat-link" href="/catalog/only-cs"><article><strong>{{ totals.only_cs }}</strong><span>pouze CZ</span></article></a>
   <a class="stat-link" href="/catalog/only-sk"><article><strong>{{ totals.only_sk }}</strong><span>pouze SK</span></article></a>
   <a class="stat-link" href="/catalog/both"><article><strong>{{ totals.both_cs_sk }}</strong><span>CZ i SK</span></article></a>

@@ -13,10 +13,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from .catalog import (
+    FILTER_LABELS,
+    derive_episode_number,
+    derive_season_info,
     determine_parent_series,
     group_videos_by_series,
     set_manual_hardsub,
+    title_videos,
     translation_status,
+    video_matches_filter,
 )
 from .config import Settings, get_settings
 from .database import Base, make_engine, make_session_factory
@@ -28,31 +33,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
-FILTER_LABELS = {
-    "only-cs": "Pouze CZ",
-    "only-sk": "Pouze SK",
-    "both": "CZ i SK",
-    "missing": "Bez CZ/SK",
-    "unknown": "Neznámé titulky",
-}
-
-
-def _matches_filter(video: Video, filter_name: str) -> bool:
-    status = translation_status(video)
-    return {
-        "only-cs": status.has_cs and not status.has_sk,
-        "only-sk": status.has_sk and not status.has_cs,
-        "both": status.has_cs and status.has_sk,
-        "missing": not status.has_cs_or_sk,
-        "unknown": status.has_unknown,
-    }[filter_name]
-
-
 def _load_videos(sessions) -> list[Video]:
     with sessions() as session:
         return list(session.scalars(select(Video).options(
-            selectinload(Video.internal_subtitles), selectinload(Video.external_subtitles)
+            selectinload(Video.audio_tracks), selectinload(Video.internal_subtitles),
+            selectinload(Video.external_subtitles),
         ).order_by(Video.relative_path)).all())
+
+
+def hardsub_return_url(filter_name: str, series_path: str, video_id: int) -> str:
+    query = urlencode({"series_path": series_path})
+    return f"/catalog/{filter_name}/series?{query}#video-{video_id}"
 
 
 def _empty_stats() -> dict[str, int]:
@@ -121,12 +112,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/folders/{folder:path}", response_class=HTMLResponse)
     def folder_detail(request: Request, folder: str):
-        with sessions() as session:
-            videos = session.scalars(select(Video).where(Video.root_folder == folder).options(
-                selectinload(Video.audio_tracks), selectinload(Video.internal_subtitles),
-                selectinload(Video.external_subtitles)).order_by(Video.relative_path)).all()
-        return templates.TemplateResponse(request, "folder.html", {
-            "folder": folder, "videos": videos, "translation_status": translation_status,
+        videos = [video for video in _load_videos(sessions) if video.root_folder == folder]
+        return templates.TemplateResponse(request, "catalog.html", {
+            "filter_name": "all", "filter_label": f"Složka: {folder}",
+            "groups": group_videos_by_series(videos, "all"),
+            "all_filters": FILTER_LABELS,
         })
 
     @app.get("/catalog/{filter_name}", response_class=HTMLResponse)
@@ -134,30 +124,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
         videos = _load_videos(sessions)
-        grouped = filter_name in {"missing", "unknown"}
-        groups = group_videos_by_series(
-            videos, lambda video: _matches_filter(video, filter_name)
-        ) if grouped else []
-        filtered_videos = [] if grouped else [
-            video for video in videos if _matches_filter(video, filter_name)
-        ]
         return templates.TemplateResponse(request, "catalog.html", {
             "filter_name": filter_name,
             "filter_label": FILTER_LABELS[filter_name],
-            "grouped": grouped,
-            "groups": groups,
-            "videos": filtered_videos,
-            "translation_status": translation_status,
+            "groups": group_videos_by_series(videos, filter_name),
+            "all_filters": FILTER_LABELS,
         })
 
     @app.get("/catalog/{filter_name}/series", response_class=HTMLResponse)
     def series_detail(request: Request, filter_name: str, series_path: str):
-        if filter_name not in {"missing", "unknown"}:
-            raise HTTPException(status_code=404, detail="Neznámý seskupený filtr")
-        videos = [
-            video for video in _load_videos(sessions)
-            if determine_parent_series(video.relative_path).relative_path == series_path
-        ]
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=404, detail="Neznámý filtr")
+        videos = title_videos(_load_videos(sessions), series_path)
         if not videos:
             raise HTTPException(status_code=404, detail="Série nebyla nalezena")
         return templates.TemplateResponse(request, "series.html", {
@@ -166,6 +144,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "series": determine_parent_series(videos[0].relative_path),
             "videos": videos,
             "translation_status": translation_status,
+            "video_matches_filter": video_matches_filter,
+            "derive_season_info": derive_season_info,
+            "derive_episode_number": derive_episode_number,
         })
 
     @app.post("/videos/{video_id}/hardsub")
@@ -187,8 +168,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             session.commit()
         if series_path:
-            query = urlencode({"series_path": series_path})
-            target = f"/catalog/{filter_name}/series?{query}"
+            target = hardsub_return_url(filter_name, series_path, video_id)
         else:
             target = f"/catalog/{filter_name}"
         return RedirectResponse(target, status_code=303)

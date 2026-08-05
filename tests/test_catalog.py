@@ -3,11 +3,16 @@ from datetime import datetime, timezone
 import pytest
 
 from app.catalog import (
+    FILTER_LABELS,
+    SeriesSummary,
     classify_video,
+    derive_episode_number,
+    derive_season_info,
     determine_parent_series,
     group_videos_by_series,
     normalize_language,
     set_manual_hardsub,
+    title_videos,
     translation_status,
 )
 from app.models import ExternalSubtitle, InternalSubtitle, Video
@@ -115,7 +120,7 @@ def test_groups_episodes_and_counts_missing_videos():
         _video("Anime/Naruto/Season 01/02.mkv"),
         _video("Anime/Naruto/Season 01/03.mkv", language="cs"),
     ]
-    groups = group_videos_by_series(videos, lambda video: not translation_status(video).has_cs_or_sk)
+    groups = group_videos_by_series(videos, "missing")
     assert len(groups) == 1
     assert groups[0].name == "Naruto"
     assert groups[0].total == 3
@@ -129,7 +134,7 @@ def test_multiple_seasons_are_merged_into_one_series_row():
         _video("Anime/Naruto/Série 2/01.mkv"),
         _video("Anime/Naruto/Season 03/01.mkv"),
     ]
-    groups = group_videos_by_series(videos, lambda _: True)
+    groups = group_videos_by_series(videos, "all")
     assert len(groups) == 1
     assert groups[0].name == "Naruto"
     assert groups[0].relative_path == "Anime/Naruto"
@@ -151,12 +156,64 @@ def test_season_directories_with_technical_suffix_merge_under_real_title(
         _video(f"{title}/{second_season}/01.mkv"),
     ]
 
-    groups = group_videos_by_series(videos, lambda _: True)
+    groups = group_videos_by_series(videos, "all")
 
     assert len(groups) == 1
     assert groups[0].name == title
     assert groups[0].relative_path == title
     assert groups[0].total == 2
+
+
+@pytest.mark.parametrize("directory, expected", [
+    ("Serie 1", "S1"), ("Serie 2", "S2"), ("Season 01", "S1"),
+    ("S01", "S1"), ("Specials", "Specials"), ("OVA", "OVA"),
+])
+def test_derives_season_label(directory, expected):
+    info = derive_season_info(f"Anime/Show/{directory}/01.mkv")
+    assert info.label == expected
+    assert info.original == directory
+
+
+def test_derives_safe_episode_numbers():
+    assert derive_episode_number("E01.mkv") == 1
+    assert derive_episode_number("EP02.mkv") == 2
+    assert derive_episode_number("Episode 10.mkv") == 10
+    assert derive_episode_number("01v2.mkv") == 1
+    assert derive_episode_number("Show 2024 1080p.mkv") is None
+
+
+def test_title_detail_sorting_orders_seasons_episodes_and_bonus():
+    videos = [
+        _video("Anime/Show/Serie 2/02.mkv"),
+        _video("Anime/Show/Serie 1/10.mkv"),
+        _video("Anime/Show/Serie 1/02.mkv"),
+        _video("Anime/Show/Serie 1/NCOP.mkv"),
+    ]
+    videos[-1].file_type = "ncop"
+    ordered = title_videos(videos, "Anime/Show")
+    assert [video.filename for video in ordered] == ["02.mkv", "10.mkv", "NCOP.mkv", "02.mkv"]
+    assert [derive_season_info(video.relative_path).label for video in ordered] == ["S1", "S1", "S1", "S2"]
+
+
+def test_all_main_catalog_filters_return_grouped_title_summaries():
+    videos = [
+        _video("Anime/CS/01.mkv", language="cs"),
+        _video("Anime/SK/01.mkv", language="sk"),
+        _video("Anime/Missing/01.mkv"),
+        _video("Anime/Unknown/01.mkv", language="unknown"),
+    ]
+    both = _video("Anime/Both/01.mkv", language="cs")
+    both.external_subtitles = [ExternalSubtitle(
+        relative_path="Anime/Both/01.sk.srt", codec="srt", language="sk",
+        normalized_language="sk",
+    )]
+    videos.append(both)
+
+    for filter_name in ("only-cs", "only-sk", "both", "missing", "unknown", "episodes"):
+        groups = group_videos_by_series(videos, filter_name)
+        assert groups
+        assert all(isinstance(group, SeriesSummary) for group in groups)
+    assert set(FILTER_LABELS) >= {"only-cs", "only-sk", "both", "missing", "unknown", "episodes", "bonus"}
 
 
 def test_manual_hardsub_sets_independent_language_flags_and_timestamp():
