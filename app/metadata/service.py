@@ -10,6 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import CatalogTitle, ExternalTitleLink, TitleMetadata
+from app.numbering import recalculate_title_numbering
+from app.hierarchy import parse_explicit_part
 
 from .providers.base import MetadataProvider, ProviderTitleMetadata
 
@@ -37,6 +39,20 @@ def normalize_metadata_search_query(local_title: str) -> str:
         if cleaned == previous:
             break
     return cleaned if len(cleaned) >= 2 else original
+
+
+def default_metadata_search_query(title: CatalogTitle) -> str:
+    if (
+        title.effective_season_number
+        and title.collection
+        and (
+            title.season_number_manual is not None
+            or parse_explicit_part(title.local_title)
+        )
+    ):
+        collection_name = normalize_metadata_search_query(title.collection.local_title)
+        return f"{collection_name} Season {title.effective_season_number}"
+    return normalize_metadata_search_query(title.local_title)
 
 
 class MetadataConflictError(RuntimeError):
@@ -186,6 +202,7 @@ def confirm_anilist_candidate(
     title.metadata_status = "linked_manual"
     _write_metadata(session, title, data, timestamp)
     session.flush()
+    recalculate_title_numbering(title, list(title.videos), external_linked=True)
     return link
 
 
@@ -206,7 +223,10 @@ def refresh_title_metadata(
         raise ValueError("AniList vrátil neočekávanou identitu titulu.")
     timestamp = now or datetime.now(timezone.utc)
     link.external_url = data.site_url
-    return _write_metadata(session, title, data, timestamp)
+    metadata = _write_metadata(session, title, data, timestamp)
+    session.flush()
+    recalculate_title_numbering(title, list(title.videos), external_linked=True)
+    return metadata
 
 
 def unlink_title_metadata(session: Session, title: CatalogTitle) -> None:
@@ -219,6 +239,7 @@ def unlink_title_metadata(session: Session, title: CatalogTitle) -> None:
     title.preferred_metadata_provider = None
     title.preferred_external_id = None
     title.metadata_status = "unlinked"
+    recalculate_title_numbering(title, list(title.videos), external_linked=False)
 
 
 def set_manual_display_title(session: Session, title: CatalogTitle, value: str) -> None:

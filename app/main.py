@@ -26,18 +26,26 @@ from .catalog import (
     title_videos,
     translation_status,
     video_matches_filter,
+    video_matches_search,
 )
 from .config import Settings, get_settings
 from .database import Base, make_engine, make_session_factory
 from .migrations import migrate_schema
+from .hierarchy_review import (
+    apply_manual_split, definitions_as_json, parse_manual_definitions,
+    preview_assignments,
+)
 from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
 from .metadata.service import (
     MetadataConflictError, MetadataLockedError, confirm_anilist_candidate,
-    normalize_metadata_search_query, refresh_title_metadata,
+    default_metadata_search_query, normalize_metadata_search_query, refresh_title_metadata,
     set_manual_display_title, unlink_title_metadata,
 )
-from .models import CatalogTitle, ExternalTitleLink, TitleMetadata, Video
+from .models import CatalogCollection, CatalogTitle, ExternalTitleLink, TitleMetadata, Video, utc_now
+from .numbering import (
+    recalculate_title_numbering, set_title_numbering, set_video_episode_override,
+)
 from .scanner import LibrarySafetyError, scan_library
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -47,13 +55,16 @@ templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 METADATA_STATUS_LABELS = {
     "unlinked": "Bez metadat", "candidates_available": "Čeká na potvrzení",
     "linked_auto": "Spárováno automaticky", "linked_manual": "Spárováno ručně",
-    "conflict": "Konflikt", "unavailable": "Bez externího záznamu", "error": "Chyba",
+    "conflict": "Konflikt", "migration_review_required": "Vyžaduje kontrolu migrace",
+    "unavailable": "Bez externího záznamu", "error": "Chyba",
 }
 def _load_videos(sessions) -> list[Video]:
     with sessions() as session:
         return list(session.scalars(select(Video).options(
             selectinload(Video.audio_tracks), selectinload(Video.internal_subtitles),
-            selectinload(Video.external_subtitles), selectinload(Video.catalog_title),
+            selectinload(Video.external_subtitles),
+            selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
+            selectinload(Video.catalog_collection),
         ).order_by(Video.relative_path)).all())
 
 
@@ -63,6 +74,7 @@ def _load_catalog_title(session, catalog_title_id: int | None):
     return session.scalar(select(CatalogTitle).options(
         selectinload(CatalogTitle.external_links),
         selectinload(CatalogTitle.metadata_record),
+        selectinload(CatalogTitle.collection),
     ).where(CatalogTitle.id == catalog_title_id))
 
 
@@ -94,7 +106,7 @@ def hardsub_return_url(
     sort: str = "", direction: str = "", video_sort: str = "",
     video_direction: str = "",
 ) -> str:
-    parameters = {"catalog_title_id": series_path} if isinstance(series_path, int) else {"series_path": series_path}
+    parameters = {"filter_name": filter_name} if isinstance(series_path, int) else {"series_path": series_path}
     if normalized_query := normalize_search_query(query):
         parameters["q"] = normalized_query
     if sort:
@@ -102,7 +114,8 @@ def hardsub_return_url(
     if video_sort:
         parameters.update(video_sort=video_sort, video_direction=video_direction)
     query = urlencode(parameters)
-    return f"/catalog/{filter_name}/series?{query}#video-{video_id}"
+    base = f"/titles/{series_path}" if isinstance(series_path, int) else f"/catalog/{filter_name}/series"
+    return f"{base}?{query}#video-{video_id}"
 
 
 def catalog_state_url(
@@ -134,7 +147,7 @@ def metadata_return_url(
     direction: str = "", detail_sort: str = "", detail_direction: str = "",
     **messages: str,
 ) -> str:
-    parameters: dict[str, str | int] = {"catalog_title_id": catalog_title_id}
+    parameters: dict[str, str | int] = {"filter_name": filter_name}
     if q:
         parameters["q"] = normalize_search_query(q)
     if sort:
@@ -142,7 +155,7 @@ def metadata_return_url(
     if detail_sort:
         parameters.update(video_sort=detail_sort, video_direction=detail_direction)
     parameters.update({key: value for key, value in messages.items() if value})
-    return f"/catalog/{filter_name}/series?{urlencode(parameters)}#metadata"
+    return f"/titles/{catalog_title_id}?{urlencode(parameters)}#metadata"
 
 
 def toggled_direction(column: str, active_sort: str, active_direction: str) -> str:
@@ -271,9 +284,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
-        results = build_catalog_results(
-            _load_videos(sessions), filter_name, q, sort, direction
-        )
+        all_videos = _load_videos(sessions)
+        results = build_catalog_results(all_videos, filter_name, q, sort, direction)
         with sessions() as session:
             catalog_title = _load_catalog_title(session, catalog_title_id)
             if catalog_title is None and series_path:
@@ -283,9 +295,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ).where(
                     CatalogTitle.relative_root_path == series_path
                 ))
+                if catalog_title is None:
+                    legacy_collection = session.scalar(select(CatalogCollection).options(
+                        selectinload(CatalogCollection.titles),
+                    ).where(CatalogCollection.relative_root_path == series_path))
+                    if legacy_collection and len(legacy_collection.titles) == 1:
+                        catalog_title = _load_catalog_title(
+                            session, legacy_collection.titles[0].id
+                        )
+        if catalog_title and request.url.path.startswith("/catalog/"):
+            parameters = {"filter_name": filter_name}
+            if q:
+                parameters["q"] = normalize_search_query(q)
+            if sort:
+                parameters.update(sort=sort, direction=direction or "asc")
+            if video_sort:
+                parameters.update(
+                    video_sort=video_sort, video_direction=video_direction or "asc"
+                )
+            return RedirectResponse(
+                f"/titles/{catalog_title.id}?{urlencode(parameters)}", status_code=307
+            )
         selected_path = catalog_title.relative_root_path if catalog_title else series_path
+        title_candidates = [
+            video for video in all_videos
+            if (
+                video.catalog_title_id == catalog_title.id
+                if catalog_title else video.catalog_title
+                and video.catalog_title.relative_root_path == selected_path
+            )
+        ]
+        filtered_candidates = [
+            video for video in title_candidates if video_matches_filter(video, filter_name)
+        ]
+        folded_query = results.query.casefold()
+        title_query_match = bool(folded_query) and catalog_title and (
+            folded_query in catalog_title.local_title.casefold()
+            or folded_query in catalog_title.relative_root_path.casefold()
+            or catalog_title.collection
+            and folded_query in catalog_title.collection.local_title.casefold()
+        )
+        detail_videos = (
+            filtered_candidates
+            if not folded_query or title_query_match
+            else [video for video in filtered_candidates if video_matches_search(video, folded_query)]
+        )
         videos, normalized_video_sort, normalized_video_direction = sort_title_videos(
-            results.videos_by_title.get(selected_path or "", []), video_sort, video_direction
+            detail_videos, video_sort, video_direction
         )
         if not videos:
             raise HTTPException(status_code=404, detail="Série nebyla nalezena")
@@ -307,8 +363,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "require_conflict_confirmation": require_conflict_confirmation,
             "require_locked_confirmation": require_locked_confirmation,
             "metadata_allow_remote_images": settings.metadata_allow_remote_images,
-            "metadata_default_query": normalize_metadata_search_query(
-                catalog_title.local_title
+            "metadata_default_query": default_metadata_search_query(
+                catalog_title
             ) if catalog_title else "",
             "videos": videos,
             "translation_status": translation_status,
@@ -320,14 +376,285 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "video_sort": normalized_video_sort,
             "video_direction": normalized_video_direction,
             "video_sort_url": video_sort_url,
-            "back_url": catalog_state_url(
-                filter_name, results.query, results.sort, results.direction
+            "back_url": (
+                f"/collections/{catalog_title.catalog_collection_id}?"
+                f"{urlencode({'filter_name': filter_name, 'q': results.query, 'sort': results.sort, 'direction': results.direction})}"
+                if catalog_title and catalog_title.catalog_collection_id
+                else catalog_state_url(filter_name, results.query, results.sort, results.direction)
             ),
         }
         context.update(_metadata_template_values(
             catalog_title, settings.metadata_allow_remote_images
         ))
         return templates.TemplateResponse(request, "series.html", context)
+
+    @app.get("/titles/{catalog_title_id}", response_class=HTMLResponse)
+    def title_detail(
+        request: Request, catalog_title_id: int, filter_name: str = "all", q: str = "",
+        sort: str | None = None, direction: str | None = None,
+        video_sort: str | None = None, video_direction: str | None = None,
+        message: str | None = None, metadata_error: str | None = None,
+        pending_external_id: str | None = None,
+        require_conflict_confirmation: bool = False,
+        require_locked_confirmation: bool = False,
+    ):
+        return series_detail(
+            request, filter_name, catalog_title_id, None, q, sort, direction,
+            video_sort, video_direction, message, metadata_error, pending_external_id,
+            require_conflict_confirmation, require_locked_confirmation,
+        )
+
+    @app.get("/collections/{collection_id}", response_class=HTMLResponse)
+    def collection_detail(
+        request: Request, collection_id: int, filter_name: str = "all", q: str = "",
+        sort: str | None = None, direction: str | None = None,
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=404, detail="Neznámý filtr")
+        with sessions() as session:
+            collection = session.scalar(select(CatalogCollection).options(
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
+            ).where(CatalogCollection.id == collection_id))
+        if collection is None:
+            raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
+        all_videos = _load_videos(sessions)
+        videos_by_part: dict[int, list[Video]] = {}
+        for video in all_videos:
+            if video.catalog_title and video.catalog_title.catalog_collection_id == collection.id:
+                videos_by_part.setdefault(video.catalog_title_id, []).append(video)
+        parts = []
+        folded_query = normalize_search_query(q).casefold()
+        collection_query_match = bool(folded_query) and (
+            folded_query in collection.local_title.casefold()
+            or folded_query in collection.relative_root_path.casefold()
+        )
+        for title in sorted(
+            collection.titles,
+            key=lambda value: (
+                value.effective_sort_order,
+                value.effective_season_number or 0,
+                value.local_title.casefold(),
+            ),
+        ):
+            title_videos_list = videos_by_part.get(title.id, [])
+            stats = _empty_stats()
+            for video in title_videos_list:
+                _add_video(stats, video)
+            filtered = [
+                video for video in title_videos_list if video_matches_filter(video, filter_name)
+            ]
+            title_query_match = bool(folded_query) and (
+                folded_query in title.local_title.casefold()
+                or folded_query in title.relative_root_path.casefold()
+            )
+            matched = (
+                filtered if not folded_query or collection_query_match or title_query_match
+                else [video for video in filtered if video_matches_search(video, folded_query)]
+            )
+            if matched or title.metadata_status == "migration_review_required":
+                parts.append({"title": title, "stats": stats, "metadata": title.metadata_record})
+        state = {"filter_name": filter_name, "q": normalize_search_query(q)}
+        if sort:
+            state.update(sort=sort, direction=direction or "asc")
+        return templates.TemplateResponse(request, "collection.html", {
+            "collection": collection, "parts": parts, "filter_name": filter_name,
+            "filter_label": FILTER_LABELS[filter_name], "q": normalize_search_query(q),
+            "sort": sort or "", "direction": direction or "",
+            "title_state_query": urlencode(state),
+            "back_url": catalog_state_url(filter_name, q, sort or "", direction or ""),
+            "metadata_status_labels": METADATA_STATUS_LABELS,
+        })
+
+    def hierarchy_review_context(
+        request: Request, collection_id: int, definitions_json: str | None = None,
+        preview=None, error: str | None = None, external_search_candidates=None,
+    ):
+        with sessions() as session:
+            collection = session.scalar(select(CatalogCollection).options(
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
+                selectinload(CatalogCollection.videos),
+            ).where(CatalogCollection.id == collection_id))
+            if collection is None:
+                raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
+            videos = sorted(collection.videos, key=lambda video: video.relative_path)
+            definitions_json = definitions_json or definitions_as_json(collection)
+            preview_rows = []
+            if preview is not None:
+                definitions = parse_manual_definitions(definitions_json)
+                for video in videos:
+                    indexes = preview.conflicts.get(video.id)
+                    target = preview.assignments.get(video.id)
+                    labels = (
+                        [definitions[index].local_title for index in indexes]
+                        if indexes else [definitions[target].local_title]
+                        if target is not None else []
+                    )
+                    preview_rows.append({
+                        "video": video, "targets": labels,
+                        "conflict": indexes is not None,
+                    })
+            episode_numbers = [
+                number for video in videos
+                if (number := video.local_episode_number or derive_episode_number(video.filename))
+                is not None
+            ]
+            external_candidates = [
+                {"title": title, "metadata": title.metadata_record, "links": title.external_links}
+                for title in collection.titles
+                if title.metadata_record or title.external_links
+            ]
+            return templates.TemplateResponse(request, "hierarchy_review_detail.html", {
+                "collection": collection, "videos": videos,
+                "episode_min": min(episode_numbers) if episode_numbers else None,
+                "episode_max": max(episode_numbers) if episode_numbers else None,
+                "definitions_json": definitions_json, "preview": preview,
+                "preview_rows": preview_rows, "error": error,
+                "external_candidates": external_candidates,
+                "external_search_candidates": external_search_candidates or [],
+                "metadata_status_labels": METADATA_STATUS_LABELS,
+            })
+
+    @app.get("/hierarchy-review", response_class=HTMLResponse)
+    def hierarchy_review_list(request: Request):
+        with sessions() as session:
+            collections = list(session.scalars(select(CatalogCollection).options(
+                selectinload(CatalogCollection.titles), selectinload(CatalogCollection.videos),
+            ).where(CatalogCollection.hierarchy_status.in_(("review_required", "conflict"))).order_by(
+                CatalogCollection.local_title
+            )).all())
+        return templates.TemplateResponse(request, "hierarchy_review.html", {
+            "collections": collections,
+        })
+
+    @app.get("/hierarchy-review/{collection_id}", response_class=HTMLResponse)
+    def hierarchy_review_detail(request: Request, collection_id: int):
+        return hierarchy_review_context(request, collection_id)
+
+    @app.post("/hierarchy-review/{collection_id}/preview", response_class=HTMLResponse)
+    def hierarchy_review_preview(
+        request: Request, collection_id: int, definitions_json: str = Form(...),
+    ):
+        try:
+            definitions = parse_manual_definitions(definitions_json)
+            with sessions() as session:
+                collection = session.scalar(select(CatalogCollection).options(
+                    selectinload(CatalogCollection.videos)
+                ).where(CatalogCollection.id == collection_id))
+                if collection is None:
+                    raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
+                preview = preview_assignments(collection.videos, definitions)
+            return hierarchy_review_context(
+                request, collection_id, definitions_json, preview
+            )
+        except ValueError as exc:
+            return hierarchy_review_context(
+                request, collection_id, definitions_json, error=str(exc)
+            )
+
+    @app.post("/hierarchy-review/{collection_id}/metadata-search", response_class=HTMLResponse)
+    def hierarchy_review_metadata_search(
+        request: Request, collection_id: int, metadata_query: str = Form(...),
+    ):
+        if not settings.metadata_enabled or not settings.anilist_enabled:
+            return hierarchy_review_context(
+                request, collection_id, error="Vyhledávání metadat je vypnuté."
+            )
+        try:
+            provider = AniListProvider(settings.metadata_request_timeout_seconds)
+            candidates = provider.search_titles(metadata_query)
+            return hierarchy_review_context(
+                request, collection_id, external_search_candidates=candidates
+            )
+        except (ValueError, MetadataProviderError) as exc:
+            return hierarchy_review_context(request, collection_id, error=str(exc))
+
+    @app.post("/hierarchy-review/{collection_id}/apply")
+    def hierarchy_review_apply(
+        collection_id: int, definitions_json: str = Form(...),
+        confirm_conflicts: bool = Form(False),
+    ):
+        with sessions() as session:
+            try:
+                definitions = parse_manual_definitions(definitions_json)
+                apply_manual_split(
+                    session, collection_id, definitions,
+                    confirm_conflicts=confirm_conflicts,
+                )
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(
+            f"/hierarchy-review/{collection_id}#result", status_code=303
+        )
+
+    @app.post("/hierarchy-review/{collection_id}/status")
+    def hierarchy_review_status(
+        collection_id: int, hierarchy_status: str = Form(...),
+        hierarchy_note: str = Form(""),
+    ):
+        allowed = {"automatic", "review_required", "verified", "conflict", "not_applicable"}
+        if hierarchy_status not in allowed:
+            raise HTTPException(status_code=400, detail="Neplatný stav hierarchie.")
+        note = hierarchy_note.strip()[:1000] or None
+        with sessions() as session:
+            collection = session.get(CatalogCollection, collection_id)
+            if collection is None:
+                raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
+            collection.hierarchy_status = hierarchy_status
+            collection.hierarchy_note = note
+            collection.hierarchy_verified_at = (
+                utc_now() if hierarchy_status in {"verified", "not_applicable"} else None
+            )
+            session.commit()
+        return RedirectResponse(f"/hierarchy-review/{collection_id}", status_code=303)
+
+    @app.post("/collections/{collection_id}/titles/{catalog_title_id}/hierarchy")
+    def update_title_hierarchy(
+        collection_id: int, catalog_title_id: int,
+        season_number_manual: str = Form(""), season_label_manual: str = Form(""),
+        part_type_manual: str = Form(""), sort_order_manual: str = Form(""),
+        hierarchy_verified: bool = Form(False), filter_name: str = Form("all"),
+        q: str = Form(""), sort: str = Form(""), direction: str = Form(""),
+    ):
+        allowed_types = {"", "title", "season", "part", "cour", "film", "ova", "special"}
+        with sessions() as session:
+            title = session.get(CatalogTitle, catalog_title_id)
+            if title is None or title.catalog_collection_id != collection_id:
+                raise HTTPException(status_code=404, detail="Část kolekce nebyla nalezena")
+            try:
+                number = int(season_number_manual) if season_number_manual.strip() else None
+                order = int(sort_order_manual) if sort_order_manual.strip() else None
+                label = season_label_manual.strip() or None
+                part_type = part_type_manual.strip().casefold() or None
+                if number is not None and number <= 0:
+                    raise ValueError("Pořadí sezóny musí být kladné číslo.")
+                if order is not None and order < 0:
+                    raise ValueError("Pořadí části nesmí být záporné.")
+                if label and len(label) > 50:
+                    raise ValueError("Označení části může mít nejvýše 50 znaků.")
+                if (part_type or "") not in allowed_types:
+                    raise ValueError("Neplatný typ části.")
+                has_manual = any(value is not None for value in (number, label, part_type, order))
+                if has_manual and not hierarchy_verified:
+                    raise ValueError("Ruční hierarchii je nutné potvrdit jako ověřenou.")
+                title.season_number_manual = number
+                title.season_label_manual = label
+                title.part_type_manual = part_type
+                title.sort_order_manual = order
+                title.hierarchy_manual_override = has_manual
+                title.hierarchy_verified_at = utc_now() if hierarchy_verified else None
+                recalculate_title_numbering(title, list(title.videos))
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        params = {"filter_name": filter_name, "q": q, "sort": sort, "direction": direction}
+        return RedirectResponse(
+            f"/collections/{collection_id}?{urlencode(params)}#title-{catalog_title_id}",
+            status_code=303,
+        )
 
     @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/search", response_class=HTMLResponse)
     def search_metadata(
@@ -352,8 +679,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 metadata_error = str(exc)
         all_videos = _load_videos(sessions)
         results = build_catalog_results(all_videos, filter_name, q, sort, direction)
+        title_videos_for_detail = [
+            video for video in all_videos
+            if video.catalog_title_id == catalog_title.id
+            and video_matches_filter(video, filter_name)
+        ]
         videos, normalized_video_sort, normalized_video_direction = sort_title_videos(
-            results.videos_by_title.get(catalog_title.relative_root_path, []),
+            title_videos_for_detail,
             video_sort, video_direction,
         )
         if not videos:
@@ -372,7 +704,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "q": results.query, "sort": results.sort, "direction": results.direction,
             "video_sort": normalized_video_sort, "video_direction": normalized_video_direction,
             "video_sort_url": video_sort_url,
-            "back_url": catalog_state_url(filter_name, results.query, results.sort, results.direction),
+            "back_url": (
+                f"/collections/{catalog_title.catalog_collection_id}?"
+                f"{urlencode({'filter_name': filter_name, 'q': results.query, 'sort': results.sort, 'direction': results.direction})}"
+                if catalog_title.catalog_collection_id
+                else catalog_state_url(filter_name, results.query, results.sort, results.direction)
+            ),
             "metadata_status_labels": METADATA_STATUS_LABELS,
             "metadata_candidates": candidates, "metadata_error": metadata_error,
             "metadata_query": metadata_query[:200],
@@ -593,6 +930,65 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             target = f"/catalog/{filter_name}"
         return RedirectResponse(target, status_code=303)
+
+    @app.post("/titles/{catalog_title_id}/numbering")
+    def update_title_numbering(
+        catalog_title_id: int, numbering_mode: str = Form("auto"),
+        episode_start_offset: str = Form(""), filter_name: str = Form("all"),
+        q: str = Form(""), sort: str = Form(""), direction: str = Form(""),
+        detail_sort: str = Form(""), detail_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=400, detail="Neplatný filtr")
+        with sessions() as session:
+            title = session.get(CatalogTitle, catalog_title_id)
+            if title is None:
+                raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+            try:
+                offset = int(episode_start_offset) if episode_start_offset.strip() else None
+                set_title_numbering(
+                    title, "unknown" if numbering_mode == "auto" else numbering_mode, offset
+                )
+                recalculate_title_numbering(title, list(title.videos))
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                return action_redirect(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction, metadata_error=str(exc),
+                )
+        return RedirectResponse(metadata_return_url(
+            filter_name, catalog_title_id, q, sort, direction,
+            detail_sort, detail_direction, message="Číslování bylo uloženo.",
+        ).replace("#metadata", "#numbering"), status_code=303)
+
+    @app.post("/videos/{video_id}/episode-number")
+    def update_video_episode_number(
+        video_id: int, manual_episode_number: str = Form(""),
+        filter_name: str = Form("all"), q: str = Form(""), sort: str = Form(""),
+        direction: str = Form(""), detail_sort: str = Form(""),
+        detail_direction: str = Form(""),
+    ):
+        with sessions() as session:
+            video = session.get(Video, video_id)
+            if video is None or video.catalog_title_id is None:
+                raise HTTPException(status_code=404, detail="Video nebylo nalezeno")
+            try:
+                value = int(manual_episode_number) if manual_episode_number.strip() else None
+                set_video_episode_override(video, value)
+                title = video.catalog_title
+                recalculate_title_numbering(title, list(title.videos))
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(
+            metadata_return_url(
+                filter_name, video.catalog_title_id, q, sort, direction,
+                detail_sort, detail_direction,
+            ).replace("#metadata", f"#video-{video_id}"),
+            status_code=303,
+        )
 
     @app.post("/scan")
     def scan(confirm_deletions: bool = Form(False)):

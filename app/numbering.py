@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from .catalog import derive_episode_number
+from .models import CatalogCollection, CatalogTitle, Video
+
+NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
+
+
+def recalculate_title_numbering(
+    title: CatalogTitle,
+    videos: list[Video],
+    *,
+    known_preceding_episodes: int | None = None,
+    external_linked: bool | None = None,
+) -> None:
+    detected = [derive_episode_number(video.filename) for video in videos]
+    effective_values = [
+        video.episode_number_manual_override
+        if video.episode_number_manual_override is not None else local
+        for video, local in zip(videos, detected)
+    ]
+    numeric_values = [value for value in effective_values if value is not None]
+    explicit_offset = title.episode_start_offset
+    effective_part_number = (
+        title.season_number_manual
+        if title.season_number_manual is not None
+        else title.part_number or title.season_number
+    )
+    inferred_offset = (
+        known_preceding_episodes
+        if explicit_offset is None and effective_part_number and effective_part_number > 1
+        else None
+    )
+    offset = explicit_offset if explicit_offset is not None else inferred_offset
+    local_is_absolute = bool(offset is not None and numeric_values and min(numeric_values) > offset)
+    has_external = title.metadata_record is not None if external_linked is None else external_linked
+
+    for video, local, effective in zip(videos, detected, effective_values):
+        video.local_episode_number = local
+        if effective is None:
+            video.season_episode_number = None
+            video.absolute_episode_number = None
+            video.external_episode_number = None
+            video.episode_number_source = "unknown"
+            video.episode_number_confidence = None
+            continue
+        is_manual = video.episode_number_manual_override is not None
+        if title.numbering_mode == "absolute":
+            absolute = effective
+            season = effective - offset if offset is not None and effective > offset else None
+        elif title.numbering_mode == "season_local":
+            season = effective
+            absolute = effective + offset if offset is not None else (
+                effective if (effective_part_number or 1) == 1 else None
+            )
+        elif offset is not None:
+            season = effective - offset if local_is_absolute else effective
+            absolute = effective if local_is_absolute else effective + offset
+        else:
+            season = effective
+            absolute = effective if (effective_part_number or 1) == 1 else None
+        video.season_episode_number = season if season and season > 0 else None
+        video.absolute_episode_number = absolute if absolute and absolute > 0 else None
+        video.external_episode_number = video.season_episode_number if has_external else None
+        video.episode_number_source = (
+            "manual" if is_manual else "derived_from_part_offset" if offset is not None
+            else "filename"
+        )
+        video.episode_number_confidence = 1.0 if is_manual else 0.9 if offset is not None else 0.95
+
+
+def recalculate_collection_numbering(
+    collection: CatalogCollection, videos_by_title: dict[int, list[Video]]
+) -> None:
+    preceding = 0
+    preceding_known = True
+    for title in sorted(
+        collection.titles,
+        key=lambda value: (
+            value.effective_sort_order,
+            value.part_number or value.effective_season_number or 0,
+        ),
+    ):
+        known = preceding if preceding_known and preceding else None
+        recalculate_title_numbering(
+            title, videos_by_title.get(title.id, []), known_preceding_episodes=known
+        )
+        official_count = title.metadata_record.episode_count if title.metadata_record else None
+        if official_count is not None:
+            preceding += official_count
+        elif title.part_number == 1:
+            preceding_known = False
+
+
+def set_title_numbering(
+    title: CatalogTitle, mode: str, offset: int | None
+) -> None:
+    if mode not in NUMBERING_MODES:
+        raise ValueError("Neplatný režim číslování.")
+    if offset is not None and offset < 0:
+        raise ValueError("Offset nesmí být záporný.")
+    title.numbering_mode = mode
+    title.episode_start_offset = offset
+    title.numbering_manual = mode != "unknown" or offset is not None
+    title.numbering_verified_at = (
+        datetime.now(timezone.utc) if title.numbering_manual else None
+    )
+
+
+def set_video_episode_override(video: Video, value: int | None) -> None:
+    if value is not None and value <= 0:
+        raise ValueError("Číslo epizody musí být kladné.")
+    video.episode_number_manual_override = value
+    video.episode_number_verified_at = datetime.now(timezone.utc) if value else None

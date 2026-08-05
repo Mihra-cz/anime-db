@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 import re
@@ -165,7 +165,10 @@ class SeriesSummary:
     name: str
     relative_path: str
     catalog_title_id: int | None = None
+    catalog_collection_id: int | None = None
     metadata_status: str = "unlinked"
+    part_ids: set[int] = field(default_factory=set)
+    linked_part_ids: set[int] = field(default_factory=set)
     total: int = 0
     problematic: int = 0
     unknown: int = 0
@@ -179,6 +182,14 @@ class SeriesSummary:
     @property
     def translated(self) -> int:
         return self.total - self.missing
+
+    @property
+    def parts(self) -> int:
+        return len(self.part_ids) or 1
+
+    @property
+    def linked_parts(self) -> int:
+        return len(self.linked_part_ids)
 
 
 @dataclass
@@ -211,6 +222,9 @@ FILTER_LABELS = {
     "type-cm": "CM",
     "type-menu": "Menu",
     "type-other": "Ostatní",
+    "unassigned": "Nezařazená videa",
+    "hierarchy-conflict": "Konflikt hierarchie",
+    "hierarchy-review": "Hierarchie ke kontrole",
 }
 
 
@@ -225,6 +239,15 @@ def video_matches_filter(video: Video, filter_name: str) -> bool:
         "unknown": status.has_unknown,
         "episodes": video.file_type == "episode",
         "bonus": video.file_type != "episode",
+        "unassigned": video.catalog_title_id is None,
+        "hierarchy-conflict": bool(
+            video.catalog_collection
+            and video.catalog_collection.hierarchy_status == "conflict"
+        ),
+        "hierarchy-review": bool(
+            video.catalog_collection
+            and video.catalog_collection.hierarchy_status == "review_required"
+        ),
     }
     if filter_name.startswith("type-"):
         return video.file_type == filter_name.removeprefix("type-")
@@ -298,16 +321,25 @@ def build_catalog_results(
     groups: dict[str, SeriesSummary] = {}
     all_by_title: dict[str, list[Video]] = {}
     for video in list(videos):
+        catalog_title = video.catalog_title
+        collection = catalog_title.collection if catalog_title else video.catalog_collection
         identity = determine_parent_series(video.relative_path)
-        all_by_title.setdefault(identity.relative_path, []).append(video)
+        group_path = collection.relative_root_path if collection else identity.relative_path
+        group_name = collection.local_title if collection else identity.name
+        all_by_title.setdefault(group_path, []).append(video)
         summary = groups.setdefault(
-            identity.relative_path,
+            group_path,
             SeriesSummary(
-                identity.name, identity.relative_path,
-                video.catalog_title_id,
-                video.catalog_title.metadata_status if video.catalog_title else "unlinked",
+                name=group_name, relative_path=group_path,
+                catalog_title_id=video.catalog_title_id,
+                catalog_collection_id=collection.id if collection else None,
+                metadata_status=catalog_title.metadata_status if catalog_title else "unlinked",
             ),
         )
+        if catalog_title:
+            summary.part_ids.add(catalog_title.id)
+            if catalog_title.metadata_status in {"linked_auto", "linked_manual"}:
+                summary.linked_part_ids.add(catalog_title.id)
         summary.total += 1
         status = translation_status(video)
         filter_match = video_matches_filter(video, filter_name)
@@ -320,11 +352,21 @@ def build_catalog_results(
         summary.unknown += status.has_unknown
     matches_by_title: dict[str, list[Video]] = {}
     for title_path, title_videos_list in all_by_title.items():
+        first_title = title_videos_list[0].catalog_title
+        first_collection = (
+            first_title.collection if first_title else title_videos_list[0].catalog_collection
+        )
         identity = determine_parent_series(title_videos_list[0].relative_path)
+        display_name = first_collection.local_title if first_collection else identity.name
+        display_path = first_collection.relative_root_path if first_collection else identity.relative_path
         filtered = [video for video in title_videos_list if video_matches_filter(video, filter_name)]
         title_matches = bool(folded_query) and (
-            _contains_query(identity.name, folded_query)
-            or _contains_query(identity.relative_path, folded_query)
+            _contains_query(display_name, folded_query)
+            or _contains_query(display_path, folded_query)
+            or any(
+                _contains_query(video.catalog_title.local_title, folded_query)
+                for video in title_videos_list if video.catalog_title
+            )
         )
         matched_videos = filtered if not folded_query or title_matches else [
             video for video in filtered if video_matches_search(video, folded_query)

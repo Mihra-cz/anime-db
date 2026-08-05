@@ -29,28 +29,90 @@ class Video(Base):
     manual_hardsub_cs: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     manual_hardsub_sk: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     manual_hardsub_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    local_episode_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    season_episode_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    absolute_episode_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    external_episode_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    episode_number_source: Mapped[str] = mapped_column(String, default="unknown", server_default="unknown")
+    episode_number_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    episode_number_manual_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    episode_number_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     catalog_title_id: Mapped[int | None] = mapped_column(
         ForeignKey("catalog_titles.id"), nullable=True, index=True
+    )
+    catalog_collection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("catalog_collections.id"), nullable=True, index=True
     )
 
     audio_tracks: Mapped[list[AudioTrack]] = relationship(cascade="all, delete-orphan")
     internal_subtitles: Mapped[list[InternalSubtitle]] = relationship(cascade="all, delete-orphan")
     external_subtitles: Mapped[list[ExternalSubtitle]] = relationship(cascade="all, delete-orphan")
     catalog_title: Mapped[CatalogTitle | None] = relationship(back_populates="videos")
+    catalog_collection: Mapped[CatalogCollection | None] = relationship(back_populates="videos")
 
 
 METADATA_STATUSES = (
     "unlinked", "candidates_available", "linked_auto", "linked_manual",
-    "conflict", "unavailable", "error",
+    "conflict", "migration_review_required", "unavailable", "error",
 )
+HIERARCHY_STATUSES = (
+    "automatic", "review_required", "verified", "conflict", "not_applicable",
+)
+
+
+class CatalogCollection(Base):
+    __tablename__ = "catalog_collections"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    local_title: Mapped[str] = mapped_column(String, nullable=False)
+    normalized_local_title: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    relative_root_path: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    manual_display_title: Mapped[str | None] = mapped_column(String, nullable=True)
+    hierarchy_status: Mapped[str] = mapped_column(
+        String, default="automatic", server_default="automatic", index=True
+    )
+    hierarchy_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    hierarchy_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    local_period_hint: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    titles: Mapped[list[CatalogTitle]] = relationship(back_populates="collection")
+    videos: Mapped[list[Video]] = relationship(back_populates="catalog_collection")
+    __table_args__ = (CheckConstraint(
+        "hierarchy_status IN ('automatic','review_required','verified','conflict','not_applicable')",
+        name="ck_catalog_collection_hierarchy_status",
+    ),)
 
 
 class CatalogTitle(Base):
     __tablename__ = "catalog_titles"
     id: Mapped[int] = mapped_column(primary_key=True)
+    catalog_collection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("catalog_collections.id"), nullable=True, index=True
+    )
     local_title: Mapped[str] = mapped_column(String, nullable=False)
     normalized_local_title: Mapped[str] = mapped_column(String, nullable=False, index=True)
     relative_root_path: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    part_type: Mapped[str] = mapped_column(String, default="title", server_default="title")
+    season_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    season_label: Mapped[str | None] = mapped_column(String, nullable=True)
+    original_folder_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    part_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    episode_start_offset: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    numbering_mode: Mapped[str] = mapped_column(String, default="unknown", server_default="unknown")
+    numbering_manual: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    numbering_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    hierarchy_manual_override: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    season_number_manual: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    season_label_manual: Mapped[str | None] = mapped_column(String, nullable=True)
+    part_type_manual: Mapped[str | None] = mapped_column(String, nullable=True)
+    sort_order_manual: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    hierarchy_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    episode_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    episode_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    episode_filename_pattern: Mapped[str | None] = mapped_column(String, nullable=True)
     manual_display_title: Mapped[str | None] = mapped_column(String, nullable=True)
     preferred_metadata_provider: Mapped[str | None] = mapped_column(String, nullable=True)
     preferred_external_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -59,12 +121,33 @@ class CatalogTitle(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     videos: Mapped[list[Video]] = relationship(back_populates="catalog_title")
+    collection: Mapped[CatalogCollection | None] = relationship(back_populates="titles")
     external_links: Mapped[list[ExternalTitleLink]] = relationship(cascade="all, delete-orphan")
     metadata_record: Mapped[TitleMetadata | None] = relationship(cascade="all, delete-orphan")
     __table_args__ = (CheckConstraint(
-        "metadata_status IN ('unlinked','candidates_available','linked_auto','linked_manual','conflict','unavailable','error')",
+        "metadata_status IN ('unlinked','candidates_available','linked_auto','linked_manual','conflict','migration_review_required','unavailable','error')",
         name="ck_catalog_title_metadata_status",
     ),)
+
+    @property
+    def effective_season_number(self) -> int | None:
+        return self.season_number_manual if self.season_number_manual is not None else self.season_number
+
+    @property
+    def effective_season_label(self) -> str | None:
+        return self.season_label_manual or self.season_label
+
+    @property
+    def effective_part_type(self) -> str:
+        return self.part_type_manual or self.part_type
+
+    @property
+    def effective_sort_order(self) -> int:
+        if self.sort_order_manual is not None:
+            return self.sort_order_manual
+        if self.season_number_manual is not None:
+            return self.season_number_manual
+        return self.sort_order
 
 
 class ExternalTitleLink(Base):

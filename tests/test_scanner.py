@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.catalog import set_manual_hardsub
-from app.models import ExternalSubtitle, Video
+from app.models import CatalogTitle, ExternalSubtitle, Video
 from app.scanner import LibrarySafetyError, iter_videos, scan_library
 
 
@@ -44,6 +44,51 @@ def test_repeated_scan_has_no_duplicates(tmp_path: Path, monkeypatch):
         assert second.unchanged == 1
         assert session.scalar(select(func.count()).select_from(Video)) == 1
         assert session.scalar(select(func.count()).select_from(ExternalSubtitle)) == 1
+
+
+def test_scan_preserves_manual_episode_override(tmp_path: Path, monkeypatch):
+    video_path = tmp_path / "Show" / "Part 2" / "Episode 14.mkv"
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        video = session.scalar(select(Video))
+        video.episode_number_manual_override = 20
+        session.commit()
+        scan_library(session, tmp_path)
+        video = session.scalar(select(Video))
+        assert video.episode_number_manual_override == 20
+        assert video.episode_number_source == "manual"
+
+
+def test_scan_preserves_manual_hierarchy_values(tmp_path: Path, monkeypatch):
+    video_path = tmp_path / "OVERLORD" / "Overlord (L15)" / "Episode 01.mkv"
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        title = session.scalar(select(CatalogTitle))
+        title.season_number_manual = 1
+        title.season_label_manual = "S1"
+        title.part_type_manual = "season"
+        title.sort_order_manual = 10
+        title.hierarchy_manual_override = True
+        session.commit()
+
+        scan_library(session, tmp_path)
+        title = session.scalar(select(CatalogTitle))
+        assert title.season_number_manual == 1
+        assert title.season_label_manual == "S1"
+        assert title.part_type_manual == "season"
+        assert title.sort_order_manual == 10
 
 
 def test_updates_language_of_existing_external_subtitle(tmp_path: Path, monkeypatch):

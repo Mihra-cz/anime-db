@@ -11,7 +11,7 @@ from app.metadata.service import (
     refresh_title_metadata, sanitize_description, set_manual_display_title,
     unlink_title_metadata,
 )
-from app.models import CatalogTitle, ExternalTitleLink, TitleMetadata, Video
+from app.models import CatalogCollection, CatalogTitle, ExternalTitleLink, TitleMetadata, Video
 
 
 class Provider:
@@ -174,3 +174,21 @@ def test_description_is_plain_text_and_scripts_are_removed():
     cleaned = sanitize_description("<p>Hello <b>world</b></p><script>alert(1)</script>")
     assert cleaned == "Hello world"
     assert "<" not in cleaned
+
+
+def test_two_seasons_keep_independent_external_metadata(session):
+    collection = CatalogCollection(
+        local_title="Show", normalized_local_title="show", relative_root_path="Anime/Show",
+    )
+    session.add(collection)
+    session.flush()
+    first, _ = add_title(session, "Season 1", "Anime/Show/Season 1")
+    second, _ = add_title(session, "Season 2", "Anime/Show/Season 2")
+    first.collection = second.collection = collection
+    provider = Provider({"1": data("1", "First"), "2": data("2", "Second")})
+    confirm_anilist_candidate(session, first, "1", provider)
+    confirm_anilist_candidate(session, second, "2", provider)
+    assert session.get(TitleMetadata, first.id).display_title == "First"
+    assert session.get(TitleMetadata, second.id).display_title == "Second"
+    assert first.preferred_external_id == "1"
+    assert second.preferred_external_id == "2"

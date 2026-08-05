@@ -6,10 +6,18 @@ import os
 from pathlib import Path
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
-from app.catalog import classify_video, determine_parent_series, normalize_language, normalize_title
-from app.models import AudioTrack, CatalogTitle, ExternalSubtitle, InternalSubtitle, Video
+from app.catalog import classify_video, normalize_language, normalize_title
+from app.hierarchy import derive_library_hierarchy
+from app.hierarchy_review import (
+    collection_requires_review, definition_from_title, extract_local_period_hint,
+    manual_split_titles, preview_assignments,
+)
+from app.models import (
+    AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, Video,
+)
+from app.numbering import recalculate_collection_numbering
 from app.probe import ProbeError, probe_video
 from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, subtitle_matches
 
@@ -125,10 +133,6 @@ def _scan_library(
 
     result = ScanResult()
     existing = {v.relative_path: v for v in session.scalars(select(Video)).all()}
-    catalog_titles = {
-        title.relative_root_path: title
-        for title in session.scalars(select(CatalogTitle)).all()
-    }
     seen: set[str] = set()
     for path in iter_videos(root):
         result.found += 1
@@ -165,17 +169,6 @@ def _scan_library(
                     )
                     for track in metadata["subtitles"]
                 ]
-            identity = determine_parent_series(key)
-            catalog_title = catalog_titles.get(identity.relative_path)
-            if catalog_title is None:
-                catalog_title = CatalogTitle(
-                    local_title=identity.name,
-                    normalized_local_title=normalize_title(identity.name),
-                    relative_root_path=identity.relative_path,
-                )
-                session.add(catalog_title)
-                catalog_titles[identity.relative_path] = catalog_title
-            video.catalog_title = catalog_title
             _sync_external_subtitles(session, video, _external_subtitles(path, root))
         except (OSError, ProbeError, ValueError) as exc:
             result.errors += 1
@@ -206,6 +199,99 @@ def _scan_library(
     for _, video in missing:
         session.delete(video)
         result.removed += 1
+    session.flush()
+    current_videos = [
+        video for video in session.scalars(select(Video)).all()
+        if video.relative_path in seen
+    ]
+    hierarchy = derive_library_hierarchy([video.relative_path for video in current_videos])
+    collections = {
+        value.relative_root_path: value
+        for value in session.scalars(select(CatalogCollection)).all()
+    }
+    titles = {
+        value.relative_root_path: value
+        for value in session.scalars(select(CatalogTitle)).all()
+    }
+    videos_by_collection_path: dict[str, list[Video]] = {}
+    for video in current_videos:
+        identity = hierarchy[video.relative_path]
+        videos_by_collection_path.setdefault(
+            identity.collection.relative_root_path, []
+        ).append(video)
+    for video in current_videos:
+        identity = hierarchy[video.relative_path]
+        collection_data, title_data = identity.collection, identity.title
+        collection = collections.get(collection_data.relative_root_path)
+        if collection is None:
+            collection = CatalogCollection(
+                local_title=collection_data.local_title,
+                normalized_local_title=normalize_title(collection_data.local_title),
+                relative_root_path=collection_data.relative_root_path,
+            )
+            session.add(collection)
+            session.flush()
+            collections[collection.relative_root_path] = collection
+        video.catalog_collection = collection
+        split_titles = manual_split_titles(collection)
+        if split_titles:
+            continue
+        catalog_title = titles.get(title_data.relative_root_path)
+        if catalog_title is None:
+            catalog_title = CatalogTitle(
+                local_title=title_data.local_title,
+                normalized_local_title=normalize_title(title_data.local_title),
+                relative_root_path=title_data.relative_root_path,
+            )
+            session.add(catalog_title)
+            titles[catalog_title.relative_root_path] = catalog_title
+        catalog_title.collection = collection
+        if not catalog_title.hierarchy_manual_override:
+            catalog_title.part_type = title_data.part_type
+            catalog_title.season_number = title_data.season_number
+            catalog_title.season_label = title_data.season_label
+            catalog_title.original_folder_name = title_data.original_folder_name
+            catalog_title.sort_order = title_data.sort_order
+            catalog_title.part_number = (
+                title_data.season_number
+                if title_data.part_type in {"part", "cour"} else None
+            )
+        video.catalog_title = catalog_title
+    for path, collection_videos in videos_by_collection_path.items():
+        collection = collections[path]
+        collection.local_period_hint = extract_local_period_hint(collection.local_title)
+        split_titles = sorted(
+            manual_split_titles(collection), key=lambda title: title.effective_sort_order
+        )
+        if split_titles:
+            preview = preview_assignments(
+                collection_videos, [definition_from_title(title) for title in split_titles]
+            )
+            for video in collection_videos:
+                target = preview.assignments.get(video.id)
+                video.catalog_title = split_titles[target] if target is not None else None
+            if preview.conflicts:
+                collection.hierarchy_status = "conflict"
+                collection.hierarchy_note = "Video odpovídá více ručním částem."
+                collection.hierarchy_verified_at = None
+            elif preview.unmatched_video_ids:
+                collection.hierarchy_status = "review_required"
+                collection.hierarchy_note = "Nové nezařazené video."
+                collection.hierarchy_verified_at = None
+            continue
+        reason = collection_requires_review(collection, collection_videos)
+        if collection.hierarchy_status != "verified":
+            collection.hierarchy_status = "review_required" if reason else "automatic"
+            collection.hierarchy_note = reason
+    session.flush()
+    videos_by_title: dict[int, list[Video]] = {}
+    for video in current_videos:
+        videos_by_title.setdefault(video.catalog_title_id, []).append(video)
+    session.expire_all()
+    for collection in session.scalars(select(CatalogCollection).options(
+        selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record)
+    )).all():
+        recalculate_collection_numbering(collection, videos_by_title)
     session.commit()
     logger.info("Sken dokončen: found=%d created=%d updated=%d unchanged=%d removed=%d errors=%d",
                 result.found, result.created, result.updated, result.unchanged, result.removed, result.errors)

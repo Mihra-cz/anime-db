@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Kontrola hierarchie · AnimeDB{% endblock %}
+{% block content %}<p><a href="/">← Zpět na katalog</a></p>
+<h1>Kontrola hierarchie</h1>
+<p>Automatické návrhy zde čekají na ruční kontrolu. Žádná akce nemění složky ani videosoubory.</p>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>Kolekce</th><th>Cesta</th><th>Interní poznámka</th><th>Videa</th><th>Části</th><th>Stav</th><th>Důvod</th></tr></thead><tbody>
+{% for collection in collections %}<tr><td><a href="/hierarchy-review/{{ collection.id }}">{{ collection.local_title }}</a></td><td>{{ collection.relative_root_path }}</td><td>{{ collection.local_period_hint or '—' }}</td><td>{{ collection.videos|length }}</td><td>{{ collection.titles|length }}</td><td>{{ collection.hierarchy_status }}</td><td>{{ collection.hierarchy_note or '—' }}</td></tr>
+{% else %}<tr><td colspan="7">Žádná kolekce nyní nevyžaduje kontrolu.</td></tr>{% endfor %}
+</tbody></table></div></section>{% endblock %}

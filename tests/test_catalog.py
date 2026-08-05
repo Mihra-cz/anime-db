@@ -17,7 +17,7 @@ from app.catalog import (
     title_videos,
     translation_status,
 )
-from app.models import ExternalSubtitle, InternalSubtitle, Video
+from app.models import CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, Video
 
 
 def test_normalizes_czech_variants():
@@ -341,3 +341,32 @@ def test_clearing_manual_hardsub_falls_back_to_automatic_subtitles():
     assert status.has_cs is True
     assert status.has_sk is False
     assert video.manual_hardsub_verified_at is None
+
+
+def test_catalog_aggregates_multiple_metadata_titles_as_one_collection():
+    collection = CatalogCollection(
+        id=10, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    first = CatalogTitle(
+        id=11, local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", season_number=1,
+        season_label="S1", metadata_status="linked_manual", collection=collection,
+    )
+    second = CatalogTitle(
+        id=12, local_title="Season 2", normalized_local_title="season 2",
+        relative_root_path="Anime/Show/Season 2", season_number=2,
+        season_label="S2", metadata_status="unlinked", collection=collection,
+    )
+    videos = [
+        _video("Anime/Show/Season 1/E01.mkv"),
+        _video("Anime/Show/Season 2/E01.mkv"),
+    ]
+    videos[0].catalog_title, videos[0].catalog_title_id = first, first.id
+    videos[1].catalog_title, videos[1].catalog_title_id = second, second.id
+    results = build_catalog_results(videos, "all")
+    assert len(results.groups) == 1
+    assert results.groups[0].catalog_collection_id == collection.id
+    assert results.groups[0].parts == 2
+    assert results.groups[0].linked_parts == 1
+    assert results.groups[0].total == 2

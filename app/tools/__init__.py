@@ -1,0 +1,1 @@
+"""Bezpečné servisní příkazy AnimeDB."""

@@ -2,8 +2,8 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 5. srpna 2026  
-> **Aktuální checkpoint:** konec V4, příprava V5  
+> **Aktualizováno:** 6. srpna 2026
+> **Aktuální checkpoint:** výrazně pokročilá V5 – stabilní hierarchie, ruční metadata a kontrola částí
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -119,10 +119,16 @@ Základní struktura obsahuje zejména:
 app/
 ├── config.py
 ├── database.py
+├── hierarchy.py
+├── hierarchy_rebuild.py
+├── hierarchy_review.py
 ├── main.py
+├── metadata/
 ├── models.py
+├── numbering.py
 ├── probe.py
 ├── subtitles.py
+├── tools/
 ├── scanner/
 ├── templates/
 └── static/
@@ -213,6 +219,7 @@ Dokončeno:
 - relativní cesta každého videa zůstává dostupná.
 
 Všechny hlavní přehledy nejprve ukazují tituly, nikoli dlouhý seznam jednotlivých epizod.
+V5 toto původní seskupení zpřesnila na nadřazené kolekce a konkrétní části.
 
 ---
 
@@ -349,19 +356,8 @@ Chování relevance:
 - stav se zachová při otevření detailu i po změně hardsubu,
 - návrat vede ke stejnému videu.
 
-### Poslední ověřený stav testů
-
-```text
-56 passed
-```
-
-Dále prošlo:
-
-```text
-python -m compileall app tests
-git diff --check
-docker compose config
-```
+Původní V4 funkce zůstávají zachované i po databázových změnách V5. Aktuální
+automatické ověření je uvedeno v části V5.
 
 ---
 
@@ -382,15 +378,30 @@ Poslední ověřené hodnoty před dalšími ručními úpravami:
 
 Poznámka: čísla CZ/SK se mohou postupně měnit ručním označováním hardsubů.
 
+## Produkční ověření migrace V5
+
+- migrace produkční SQLite databáze proběhla úspěšně,
+- zůstalo zachováno všech **3 098 videí**,
+- prošla produkční kontrola katalogu, hierarchie, metadat, titulků a ručních hardsubů,
+- `rebuild_hierarchy --dry-run` nenavrhl žádné další bezpečné automatické změny,
+- nejasné historické kolekce se nerozdělují odhadem a řeší se ručně přes `/hierarchy-review`,
+- nebyly měněny, přesouvány ani přejmenovány žádné videosoubory nebo adresáře.
+
 ---
 
-# 6. V5 – Metadata, obaly a externí databáze ⏳
+# 6. V5 – Stabilní hierarchie, metadata a číslování 🚧
 
 ## Cíl checkpointu V5
 
-Převést technicky seskupený katalog na skutečnou anime knihovnu s ověřenou identitou titulů a externími metadaty.
+Převést technicky seskupený katalog na skutečnou anime knihovnu s ověřenou
+identitou kolekcí, konkrétních částí a externích metadat.
 
-V5 nesmí měnit ani přesouvat videosoubory. Pracuje pouze s databází, identitou titulu, metadaty, obrázky a ručním potvrzením.
+V5 nesmí měnit ani přesouvat videosoubory. Pracuje pouze s databází, identitou
+titulu, metadaty, vzdálenými náhledy obrázků a ručním potvrzením.
+
+V5 je výrazně pokročilá a produkčně nasazená, ale ještě není úplně uzavřená.
+Není implementováno hromadné ani automatické párování, lokální cache obrázků,
+další metadata providery ani úplná kontrola chybějících epizod.
 
 ## Hlavní princip
 
@@ -416,13 +427,13 @@ Použití:
 - romaji, anglický a původní název,
 - alternativní názvy,
 - popis,
-- obaly a bannery,
+- obalový náhled,
 - rok a sezóna vysílání,
 - formát,
 - stav,
 - počet epizod a délka,
 - žánry a tagy,
-- vztahy mezi anime.
+- budoucí vztahy mezi anime.
 
 AniList má veřejné GraphQL API. Dotazy se posílají pomocí HTTP POST a klient si vybírá požadovaná pole.
 
@@ -497,35 +508,96 @@ Architektura musí umožnit přidat další adaptéry bez změny hlavního katal
 
 ---
 
-## 6.1 Datový model V5
+## 6.1 Implementovaná stabilní hierarchie
 
-Doporučené nové entity:
+Aktuální interní model je:
+
+```text
+CatalogCollection
+└── CatalogTitle
+    └── Video
+```
+
+### `CatalogCollection`
+
+Nadřazené lokální seskupení zobrazované na hlavní stránce. Představuje například
+celé anime uložené v jedné kořenové složce. Nenese externí metadata konkrétní
+sezóny.
+
+Implementovaná pole kontroly hierarchie:
+
+```text
+hierarchy_status
+hierarchy_verified_at
+hierarchy_note
+local_period_hint
+```
+
+Povolené stavy:
+
+```text
+automatic
+review_required
+verified
+conflict
+not_applicable
+```
+
+Interní poznámky jako `J19`, `Z18-L20` nebo `L15-L22` se mohou uložit do
+`local_period_hint`. Neurčují automaticky počet sezón, částí ani epizod a původní
+`local_title` a cesta zůstávají beze změny.
 
 ### `CatalogTitle`
 
-Stabilní interní titul AnimeDB.
+Konkrétní metadata jednotka uvnitř kolekce: jedna sezóna, část, film, OVA,
+Specials nebo samostatné anime bez rozpoznané podstruktury. Každý `CatalogTitle`
+může mít vlastní `ExternalTitleLink` a `TitleMetadata`.
 
-Možná pole:
+Vedle stabilní lokální identity a metadata polí jsou implementována zejména:
 
 ```text
-id
-local_title
-normalized_local_title
-relative_root_path
-manual_display_title
-preferred_metadata_provider
-preferred_external_id
-metadata_status
-metadata_locked
-created_at
-updated_at
+season_number_manual
+season_label_manual
+part_type_manual
+sort_order_manual
+hierarchy_verified_at
+part_number
+episode_start
+episode_end
+episode_start_offset
+episode_filename_pattern
+numbering_mode
 ```
 
-`CatalogTitle` nesmí být závislý na jednom externím providerovi.
+Ruční sezóna, typ, pořadí a pravidla přiřazení mají přednost před automatickou
+detekcí. Sken ani opravný nástroj ručně ověřenou hierarchii nepřepisují.
+
+### `Video`
+
+Video je primárně přiřazené ke konkrétnímu `CatalogTitle` a současně si uchovává
+přímou vazbu na kolekci:
+
+```text
+catalog_collection_id
+catalog_title_id
+local_episode_number
+season_episode_number
+absolute_episode_number
+external_episode_number
+episode_number_source
+episode_number_confidence
+episode_number_manual_override
+episode_number_verified_at
+```
+
+`catalog_title_id` může být `NULL`, pokud video nelze bezpečně přiřadit. Takové
+video zůstává evidované v `CatalogCollection` a je viditelné ve filtru
+**Nezařazená videa**. Ruční override číslování má vždy přednost a sken jej
+nepřepisuje.
 
 ### `ExternalTitleLink`
 
-Vazba interního titulu na externí databázi.
+Implementovaná vazba konkrétního `CatalogTitle` na externí databázi.
 
 ```text
 id
@@ -588,11 +660,17 @@ country_of_origin
 is_adult
 metadata_provider
 metadata_external_id
+cover_image_url
 metadata_fetched_at
 metadata_updated_at
 ```
 
-### `MetadataCandidate`
+### Dosud neimplementované doplňkové entity
+
+Následující entity zůstávají návrhem pro pozdější iterace V5; současná
+implementace kandidáty zobrazuje přímo z normalizované odpovědi provideru:
+
+#### `MetadataCandidate`
 
 Kandidáti před ručním potvrzením.
 
@@ -613,7 +691,7 @@ rejected_at
 confirmed_at
 ```
 
-### `Artwork`
+#### `Artwork`
 
 ```text
 id
@@ -640,7 +718,7 @@ logo
 thumbnail
 ```
 
-### `MetadataSyncLog`
+#### `MetadataSyncLog`
 
 ```text
 id
@@ -658,13 +736,14 @@ request_count
 
 ## 6.2 Provider architektura
 
-Vytvořit společné rozhraní, například:
+Je implementované společné provider rozhraní v `app/metadata/providers/base.py`
+a první adaptér v `app/metadata/providers/anilist.py`:
 
 ```python
 class MetadataProvider(Protocol):
     name: str
 
-    def search_titles(self, query: str) -> list[MetadataCandidate]:
+    def search_titles(self, query: str) -> list[ProviderTitleMetadata]:
         ...
 
     def fetch_title(self, external_id: str) -> ProviderTitleMetadata:
@@ -677,17 +756,19 @@ class MetadataProvider(Protocol):
         ...
 ```
 
-Konkrétní adaptéry:
+Stav adaptérů:
 
 ```text
-app/metadata/providers/base.py
-app/metadata/providers/anilist.py
-app/metadata/providers/myanimelist.py
-app/metadata/providers/shoko.py
-app/metadata/providers/crunchyroll.py
+base.py             implementováno
+anilist.py          implementováno: search_titles a fetch_title
+myanimelist.py      neimplementováno
+shoko.py            neimplementováno
+crunchyroll.py      neimplementováno
 ```
 
-Crunchyroll adaptér může být zpočátku pouze ruční nebo vypnutý, dokud nebude ověřené podporované rozhraní.
+`fetch_relations` a `fetch_artwork` jsou součástí rozhraní, ale v AniList adaptéru
+zatím nejsou dokončené. Crunchyroll adaptér může být zpočátku pouze ruční nebo
+vypnutý, dokud nebude ověřené podporované rozhraní.
 
 Provider nesmí zapisovat přímo do tabulek videí. Výsledek se nejprve převede do interního normalizovaného datového modelu.
 
@@ -695,17 +776,18 @@ Provider nesmí zapisovat přímo do tabulek videí. Výsledek se nejprve převe
 
 ## 6.3 Párování titulů
 
-### Automatická příprava kandidátů
+### Implementované ruční vyhledání a potvrzení
 
-Pro každý nepřiřazený titul:
+Pro konkrétní `CatalogTitle` lze:
 
-1. vezmi lokální název,
-2. odstraň interní technické suffixy pouze pro hledání,
-3. zachovej původní název beze změny,
-4. vyhledej kandidáty u aktivních providerů,
-5. spočítej skóre,
-6. zobraz kandidáty uživateli,
-7. nic automaticky nepotvrzuj pod stanoveným prahem.
+1. předvyplnit bezpečně očištěný vyhledávací dotaz,
+2. dotaz před odesláním ručně upravit,
+3. zobrazit nejvýše deset kandidátů z AniListu,
+4. kandidáta ručně potvrdit,
+5. uložit nebo aktualizovat `ExternalTitleLink` a `TitleMetadata`,
+6. primární vazbu změnit nebo odpojit,
+7. metadata ručně aktualizovat nebo zamknout,
+8. nastavit ruční zobrazovaný název bez změny lokálního názvu.
 
 Příklady interních suffixů, které lze při hledání normalizovat:
 
@@ -721,9 +803,10 @@ BD
 WEB
 ```
 
-Odstraňování suffixů musí být opatrné, testované a nesmí měnit uložený lokální titul.
+Odstraňování suffixů je opatrné, testované a používá se pouze pro výchozí
+vyhledávací dotaz. Nemění uložený lokální titul, cestu ani názvy souborů.
 
-### Skóre kandidáta
+### Budoucí automatické skóre kandidáta
 
 Možné body:
 
@@ -735,7 +818,8 @@ Možné body:
 - shoda sezóny vysílání,
 - shoda více providerů.
 
-Skóre musí uchovávat vysvětlení, například:
+Hromadné vytváření kandidátů a automatické skórování zatím není implementované.
+Budoucí skóre má uchovávat vysvětlení, například:
 
 ```json
 {
@@ -747,16 +831,10 @@ Skóre musí uchovávat vysvětlení, například:
 }
 ```
 
-### Ruční potvrzení
-
-Uživatel musí mít možnosti:
-
-- potvrdit kandidáta,
-- vyhledat jiný titul,
-- zadat externí ID ručně,
-- označit titul jako lokální / bez externího záznamu,
-- vazbu později změnit,
-- zamknout metadata proti automatickému přepsání.
+Potvrzení kandidáta vždy znovu načte data ze serveru a zapisuje je v databázové
+transakci. Stejné AniList ID primárně použité jiným lokálním titulem vyžaduje
+explicitní potvrzení. Síťová, HTTP nebo GraphQL chyba provede rollback a lokální
+katalog zůstává funkční.
 
 ---
 
@@ -764,32 +842,27 @@ Uživatel musí mít možnosti:
 
 ### Domovská stránka
 
-Postupně přidat:
+Hlavní katalog nejprve zobrazuje `CatalogCollection` a agreguje statistiky všech
+jejích částí. Detail kolekce zobrazuje seznam `CatalogTitle`; teprve detail
+konkrétní části zobrazuje videa a její externí metadata. Navigace používá stabilní
+ID:
 
-- obal titulu,
-- preferovaný zobrazovaný název,
-- rok,
-- formát,
-- počet evidovaných videí,
-- oficiální počet epizod,
-- stav spárování metadat.
+```text
+/collections/{collection_id}
+/titles/{catalog_title_id}
+```
 
 ### Nové filtry
 
 ```text
-Bez metadat
-Čeká na potvrzení
-Spárováno automaticky
-Spárováno ručně
-Konflikt providerů
-Chybí obal
-Chybí oficiální počet epizod
-Metadata zastaralá
+Nezařazená videa
+Konflikt hierarchie
+Hierarchie ke kontrole
 ```
 
 ### Detail titulu
 
-Přidat:
+Detail konkrétního `CatalogTitle` zobrazuje:
 
 - obal,
 - romaji / anglický / původní název,
@@ -807,26 +880,85 @@ Přidat:
 - zdroj každého hlavního údaje,
 - datum poslední aktualizace,
 - tlačítko „Vyhledat metadata“,
-- seznam kandidátů,
+- seznam kandidátů z AniListu,
 - ruční potvrzení,
-- zámek metadat.
+- změnu a odpojení vazby,
+- historii externích vazeb,
+- zámek metadat,
+- lokální, sezónní, absolutní a externí číslo epizody, pokud se liší.
+
+Externí popis je převáděn na bezpečný prostý text. Vzdálený obal lze konfigurací
+vypnout; lokální cache obrázků zatím není implementovaná.
+
+### Ruční kontrola hierarchie
+
+Stránka `/hierarchy-review` zobrazuje kolekce ve stavech `review_required` a
+`conflict`. Umožňuje vytvářet virtuální části uvnitř jedné fyzické složky bez
+změny videosouborů nebo adresářů.
+
+Videa lze přiřadit podle:
+
+- rozsahu lokálních čísel epizod,
+- bezpečně omezeného `episode_filename_pattern`,
+- seznamu jednotlivých `video_ids`.
+
+Před zápisem se zobrazí náhled cílových částí, nezařazených videí a překryvů.
+Překrývající se pravidla nelze aplikovat bez explicitního potvrzení; konfliktní
+videa zůstávají bezpečně nezařazená. Po úplném potvrzení má kolekce stav
+`verified` a datum ručního ověření.
+
+Další sken zachová virtuální části i jejich pravidla. Pokud najde nové video mimo
+ověřené rozsahy nebo pravidla, nepřiřadí je odhadem a vrátí kolekci do
+`review_required` s důvodem **Nové nezařazené video**. AniList kandidáti na této
+stránce slouží pouze jako pomůcka a sami kolekci nerozdělují.
+
+### Číslování částí a epizod
+
+Číslování rozlišuje hodnotu z názvu souboru, číslo v konkrétní části, absolutní
+číslo v kolekci a číslo externího provideru.
+
+Příklad pro `Part 2` uloženou jako lokální epizody 14–26 s offsetem 13:
+
+```text
+local_episode_number     14–26
+season_episode_number     1–13
+absolute_episode_number  14–26
+external_episode_number   1–13
+```
+
+Externí číslo se pro samostatnou část odvozuje od sezónního, nikoli slepě od
+absolutního čísla. Pokud offset nebo počet předchozích epizod není známý, absolutní
+číslo se nehádá. Ruční režim, offset a override jednotlivého videa mají vždy
+přednost a přežijí další sken.
+
+### Opravný nástroj hierarchie
+
+```bash
+python -m app.tools.rebuild_hierarchy --dry-run
+python -m app.tools.rebuild_hierarchy --apply
+```
+
+- `--dry-run` pouze vypíše navrhované změny a nic nezapisuje,
+- `--apply` opravuje jen bezpečně jednoznačně rozpoznané existující části,
+- nástroj nevytváří nové části,
+- nepřesouvá externí vazby ani metadata,
+- nepřepisuje ručně ověřenou hierarchii.
 
 ### Hromadná operace
 
-- „Najít kandidáty pro všechny tituly bez metadat“
-- pouze připraví kandidáty,
-- nic automaticky nepřepíše,
-- respektuje limity API,
-- zobrazuje průběh a chyby,
-- lze bezpečně zopakovat.
+Hromadné hledání a automatické potvrzení kandidátů zatím není implementované.
+Zůstává podmínkou, že budoucí hromadná operace smí pouze připravit návrhy a nesmí
+přepsat ruční rozhodnutí.
 
 ---
 
 ## 6.5 Obrázky a cache
 
-Externí obrázky nepoužívat jen jako vzdálené hotlinky.
+V aktuální iteraci se ukládá normalizované URL obalu a web může zobrazit vzdálený
+náhled. Zobrazení lze vypnout přes `METADATA_ALLOW_REMOTE_IMAGES=false`. Obrázek
+se zatím nestahuje do lokální cache.
 
-Doporučení:
+Cílové doporučení pro dokončení V5:
 
 - metadata URL uložit,
 - obrázek stáhnout do lokální cache,
@@ -857,19 +989,24 @@ METADATA_CACHE_TTL_HOURS=168
 METADATA_AUTO_CONFIRM=false
 METADATA_AUTO_CONFIRM_THRESHOLD=0.95
 METADATA_DOWNLOAD_ARTWORK=true
+METADATA_ALLOW_REMOTE_IMAGES=true
 
 ANILIST_ENABLED=true
-MYANIMELIST_ENABLED=false
-SHOKO_ENABLED=false
-SHOKO_BASE_URL=http://127.0.0.1:8111
-CRUNCHYROLL_LINKS_ENABLED=false
 ```
+
+Nastavení dalších providerů se přidají až společně s jejich implementací.
+`METADATA_CACHE_TTL_HOURS` a `METADATA_DOWNLOAD_ARTWORK` jsou připravené pro
+budoucí cache; současná iterace cache ani stahování ještě nespouští.
 
 Tajné klíče a tokeny nikdy neukládat do Gitu.
 
 ---
 
 ## 6.7 Bezpečnost a provozní pravidla V5
+
+Implementované jsou timeouty, ošetření rate limitu a síťových/HTTP/GraphQL chyb,
+transakční rollback a ochrana ručních či zamknutých dat. Následující pravidla
+platí i pro zbývající iterace V5; retry a lokální cache jsou stále budoucí práce:
 
 - síťová chyba nesmí poškodit katalog,
 - selhání provideru nesmí blokovat běžné prohlížení knihovny,
@@ -889,59 +1026,54 @@ Tajné klíče a tokeny nikdy neukládat do Gitu.
 
 ## 6.8 Testy V5
 
-Minimální sada:
+Aktuálně automaticky ověřeno mimo jiné:
 
-- vytvoření stabilního interního titulu,
+- migrace stabilních kolekcí a částí,
+- zachování všech videí při testovací migraci; produkčních 3 098 videí je
+  potvrzeno samostatnou produkční kontrolou,
 - více externích vazeb na jeden titul,
 - jeden externí záznam nesmí být omylem primární pro dva různé lokální tituly bez upozornění,
 - AniList provider používá parametrizovaný GraphQL dotaz,
-- timeout a chyba API nepoškodí katalog,
-- cache zabrání zbytečnému opakování dotazu,
-- kandidáti se seřadí podle skóre,
-- přesná shoda názvu má přednost,
-- alternativní název lze použít,
-- rok a počet epizod ovlivní skóre,
-- ruční potvrzení přepíše automatický návrh,
+- timeout, HTTP a GraphQL chyba nepoškodí katalog,
+- ruční potvrzení, změna, aktualizace a odpojení vazby,
 - zamknutá metadata se neaktualizují,
-- změna provideru nesmaže starou vazbu,
-- hromadné hledání nevytváří duplicity kandidátů,
-- obrázek se validuje a uloží do cache,
-- neplatný obrázek se odmítne,
-- migrace zachová stávajících 3 098 videí,
-- stávající ruční hardsuby zůstanou zachované,
+- rozdělení kolekce na více virtuálních částí,
+- přiřazení podle rozsahu, vzoru i jednotlivého výběru,
+- odmítnutí překrývajících se pravidel bez potvrzení,
+- zachování ruční hierarchie a číslování při dalším skenu,
+- označení nového nezařazeného videa,
+- idempotence migrací a opravného nástroje,
+- zachování titulků, metadat a ručních hardsubů,
 - všechny stávající filtry, hledání a řazení dál fungují.
 
-Po každém větším kroku spustit:
+Poslední automatické ověření:
 
 ```bash
-pytest -v
-python -m compileall app tests
-git diff --check
-docker compose config
+pytest -v                         # 144 passed
+python -m compileall app tests   # prošlo
+git diff --check                 # prošlo
+docker compose config            # prošlo
 ```
 
 ---
 
-## 6.9 Akceptační kritéria V5
+## 6.9 Stav uzavření V5
 
-V5 je dokončená, až když:
+Hotová je stabilní hierarchie `CatalogCollection → CatalogTitle → Video`, ruční
+kontrola a dělení kolekcí, oddělené číslování, ruční párování AniList metadat,
+zobrazení a správa uložených metadat i ochrana ručních rozhodnutí.
 
-1. každý lokální titul má stabilní interní ID,
-2. lze vyhledat kandidáty alespoň přes AniList,
-3. uživatel může kandidáta ručně potvrdit nebo odmítnout,
-4. vazba na externí titul je uložená odděleně,
-5. detail zobrazuje obal a základní metadata,
-6. je vidět zdroj a čas aktualizace,
-7. automatická synchronizace nepřepisuje ruční nebo zamknutá data,
-8. selhání internetu neovlivní stávající katalog,
-9. migrace zachová všechna videa, titulky a hardsuby,
-10. všechny dosavadní testy dál procházejí.
+V5 ještě není úplně uzavřená. Zbývá zejména rozhodnout a implementovat bezpečnou
+cache obrázků, případné trvalé ukládání kandidátů a synchronizačního logu,
+provider relace a případné další providery. Hromadné ani automatické párování
+celé knihovny není povoleno bez samostatné bezpečné iterace.
 
 ---
 
 # 7. V6 – Úplnost knihovny ⏳
 
-Po V5:
+V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou
+úplnost knihovny:
 
 - porovnání lokálních epizod s oficiálním počtem,
 - chybějící čísla epizod,
@@ -953,7 +1085,10 @@ Po V5:
 - procenta CZ/SK překladu,
 - konflikty mezi lokální strukturou a externí databází.
 
-V6 musí stavět nad potvrzenou identitou titulů z V5.
+V6 musí porovnávat konkrétní `CatalogTitle` proti jeho externímu počtu epizod a
+používat `season_episode_number` nebo `external_episode_number`, nikdy slepě
+`absolute_episode_number`. Současný filtr **Bez CZ/SK** znamená chybějící překlad,
+nikoli skutečně chybějící epizodu.
 
 ---
 
@@ -992,6 +1127,9 @@ zdrojový chaos
 ```
 
 V7 nesmí nic mazat nebo přesouvat bez předchozího plánu a explicitního potvrzení.
+Fyzické uklízení a import musí vycházet z již ručně nebo bezpečně automaticky
+ověřené databázové hierarchie V5; nesmí si při přesunu znovu nezávisle hádat
+identitu kolekcí, částí nebo epizod.
 
 ---
 
@@ -1045,25 +1183,16 @@ Aktuálně nezačínat import V7 ani přehrávání.
 
 Bezprostřední další krok:
 
-1. vytvořit migraci pro `CatalogTitle`,
-2. převést současné seskupování na stabilní interní titul,
-3. vytvořit provider rozhraní,
-4. implementovat první AniList adaptér,
-5. vytvořit stránku kandidátů,
-6. ručně spárovat několik zkušebních titulů,
-7. teprve potom spustit kandidáty pro větší část knihovny.
+1. přes `/hierarchy-review` projít historické kolekce ve stavech `review_required`
+   a `conflict`,
+2. ručně potvrdit nebo rozdělit pouze kolekce, jejichž strukturu lze ověřit,
+3. pokračovat v ručním párování jednotlivých `CatalogTitle` na AniList,
+4. dokončit zbývající provozní části V5 bez hromadného automatického párování,
+5. potom zahájit malou iteraci V6 pro kontrolu skutečně chybějících epizod,
+6. V7 spustit až nad ověřenou databázovou hierarchií.
 
-První implementační iterace V5 má být malá:
-
-```text
-CatalogTitle
-+ ExternalTitleLink
-+ AniList search
-+ ruční potvrzení kandidáta
-+ základní obal a metadata v detailu
-```
-
-Nezačínat hromadným automatickým párováním celé knihovny.
+Nejasný interní suffix ani externí návrh není oprávněním k automatickému rozdělení
+kolekce. Nezačínat hromadným automatickým párováním celé knihovny.
 
 ---
 
@@ -1076,6 +1205,9 @@ Nezačínat hromadným automatickým párováním celé knihovny.
 - Zachovat read-only přístup ke zdrojové anime knihovně.
 - Síťové metadata nesmí být podmínkou funkce lokálního katalogu.
 - Automatické návrhy nesmí přepisovat ruční rozhodnutí.
+- Ručně ověřenou hierarchii nesmí přepsat sken, migrace ani opravný nástroj.
+- Nezařazené video musí zůstat evidované v kolekci; nesmí se přiřadit odhadem.
+- Interní časové suffixy jsou pouze lokální poznámka, nikoli údaj o sezóně.
 - Každá migrace musí zachovat současná data.
 - Po změnách vždy spustit úplnou sadu testů a kontrol.
 - Před velkou změnou vytvořit Git commit.
