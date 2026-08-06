@@ -214,7 +214,7 @@ def test_verified_manual_split_survives_scan_and_new_video_reopens_review(
     folder.mkdir(parents=True)
     for number in range(1, 27):
         (folder / f"Episode {number:02}.mkv").write_bytes(b"video")
-    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: PROBE_RESULT)
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine)

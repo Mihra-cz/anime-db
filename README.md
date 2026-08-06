@@ -23,6 +23,22 @@ Soubor `.env` se načítá automaticky pomocí `python-dotenv`. Proměnné nasta
 
 Pro NAS je doporučeno nastavit `REQUIRE_MOUNT=true`. Sken pak začne pouze tehdy, pokud `ANIME_PATH` leží na samostatně připojeném filesystemu. I bez této volby skener odmítne prázdný výsledek proti neprázdné databázi a odstranění více než 20 % indexu vyžaduje explicitní potvrzení ve webu.
 
+### CIFS a výpadky NASu
+
+CIFS mount nastavte podle vlastností konkrétního NASu a provozních požadavků hostitele; aplikace automaticky nevynucuje žádné agresivní nebo potenciálně nebezpečné mount volby. Filesystemová operace může při výpadku serveru čekat uvnitř kernelového CIFS klienta, proto AnimeDB navíc používá vlastní průběžný healthcheck v odděleném procesu. Výchozí kontrola proběhne každých 25 videí s timeoutem 10 sekund. Při selhání se celý aktuální sken vrátí zpět a databázové záznamy se nemažou.
+
+Související konfigurace:
+
+```ini
+FFPROBE_TIMEOUT_SECONDS=60
+MEDIAINFO_TIMEOUT_SECONDS=60
+LIBRARY_ACCESS_TIMEOUT_SECONDS=10
+LIBRARY_HEALTHCHECK_INTERVAL_FILES=25
+METADATA_REQUEST_TIMEOUT_SECONDS=15
+```
+
+HTTP metadata používají rozdělený timeout pro connect/read/write/pool. `ffprobe` a případné budoucí použití MediaInfo mají vlastní timeout na každý proces.
+
 ## Docker Compose
 
 Compose připojuje hostitelský `/mnt/nas-anime` pouze pro čtení jako `/media/anime` a databázi ukládá do `./data`:
@@ -47,6 +63,8 @@ pytest
 - Češtinu a slovenštinu odhaduje lokální, transparentní heuristikou typických slov a znaků; neurčité texty označí `unknown`.
 - Relativní cesta je jedinečná. Nezměněné video znovu nevolá `ffprobe`; velikost nebo čas změny vyvolá aktualizaci. Externí titulky se obnovují při každém skenu.
 - Selhání jednoho souboru se zaloguje a sken pokračuje. Smazané či přesunuté soubory se odstraní pouze z databázového indexu.
+- Překročení timeoutu `ffprobe` označí pouze daný soubor jako chybu; jeho předchozí databázový záznam zůstane zachovaný.
+- Dostupnost knihovny se kontroluje před skenem, průběžně a znovu před mazací fází. Výpadek vyvolá rollback celého skenu.
 
 ## Aktualizace databáze
 

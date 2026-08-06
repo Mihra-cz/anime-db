@@ -12,17 +12,33 @@ class ProbeError(RuntimeError):
     pass
 
 
-def probe_video(path: Path) -> dict:
+class MediaInfoError(RuntimeError):
+    pass
+
+
+def _run_command(command: list[str], *, timeout_seconds: float, tool_name: str):
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True,
+            timeout=max(0.1, float(timeout_seconds)), check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ProbeError(f"{tool_name} překročil timeout {timeout_seconds:g} s") from exc
+    except OSError as exc:
+        raise ProbeError(f"{tool_name} nelze spustit: {exc}") from exc
+    if result.returncode:
+        raise ProbeError(
+            result.stderr.strip() or f"{tool_name} skončil s kódem {result.returncode}"
+        )
+    return result
+
+
+def probe_video(path: Path, timeout_seconds: float = 60) -> dict:
     command = [
         "ffprobe", "-v", "error", "-show_format", "-show_streams",
         "-of", "json", "--", str(path),
     ]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ProbeError(str(exc)) from exc
-    if result.returncode:
-        raise ProbeError(result.stderr.strip() or f"ffprobe skončil s kódem {result.returncode}")
+    result = _run_command(command, timeout_seconds=timeout_seconds, tool_name="ffprobe")
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -48,3 +64,18 @@ def probe_video(path: Path) -> dict:
             for s in streams if s.get("codec_type") == "subtitle"
         ],
     }
+
+
+def probe_mediainfo(path: Path, timeout_seconds: float = 60) -> dict:
+    """Optional safe wrapper; MediaInfo is not currently part of the scanner pipeline."""
+    try:
+        result = _run_command(
+            ["mediainfo", "--Output=JSON", "--", str(path)],
+            timeout_seconds=timeout_seconds, tool_name="MediaInfo",
+        )
+    except ProbeError as exc:
+        raise MediaInfoError(str(exc)) from exc
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise MediaInfoError("MediaInfo vrátil neplatný JSON") from exc

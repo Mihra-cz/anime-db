@@ -52,10 +52,22 @@ def test_provider_catches_http_and_graphql_errors(response):
         AniListProvider(client=StubClient(response)).search_titles("Show")
 
 
-def test_provider_catches_timeout():
+@pytest.mark.parametrize("error_type", [httpx.ConnectTimeout, httpx.ReadTimeout])
+def test_provider_catches_timeout(error_type):
     request = httpx.Request("POST", "https://graphql.anilist.co")
     with pytest.raises(MetadataProviderError):
-        AniListProvider(client=StubClient(error=httpx.ReadTimeout("timeout", request=request))).search_titles("Show")
+        AniListProvider(client=StubClient(error=error_type("timeout", request=request))).search_titles("Show")
+
+
+def test_anilist_uses_explicit_split_timeout():
+    client = StubClient(_response({"data": {"Page": {"media": []}}}))
+    AniListProvider(timeout_seconds=15, client=client).search_titles("Show")
+    timeout = client.calls[0][1]["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 5
+    assert timeout.read == 15
+    assert timeout.write == 10
+    assert timeout.pool == 5
 
 
 @pytest.mark.parametrize("external_id", ["", "abc", "0", "-1", "1.5"])

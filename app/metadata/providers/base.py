@@ -3,6 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
+import httpx
+
+
+def metadata_http_timeout(read_seconds: float = 15) -> httpx.Timeout:
+    read = max(0.1, float(read_seconds))
+    return httpx.Timeout(
+        connect=min(5.0, read), read=read, write=min(10.0, read), pool=min(5.0, read)
+    )
+
 
 class MetadataProviderError(RuntimeError):
     """Bezpečně zobrazitelná chyba externího provideru."""

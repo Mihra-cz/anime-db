@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import json
 import logging
 from pathlib import Path
+import time
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -37,6 +38,11 @@ from .hierarchy_review import (
 )
 from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
+from .metadata.artwork import ArtworkCacheError, cache_cover
+from .metadata.candidates import (
+    LOW_SCORE_THRESHOLD, batch_search_candidates, decode_match_reasons, search_and_store_candidates,
+    set_candidate_rejected,
+)
 from .metadata.service import (
     MetadataConflictError, MetadataLockedError, confirm_anilist_candidate,
     default_metadata_search_query, normalize_metadata_search_query, refresh_title_metadata,
@@ -75,10 +81,12 @@ def _load_catalog_title(session, catalog_title_id: int | None):
         selectinload(CatalogTitle.external_links),
         selectinload(CatalogTitle.metadata_record),
         selectinload(CatalogTitle.collection),
+        selectinload(CatalogTitle.metadata_candidates),
+        selectinload(CatalogTitle.artwork),
     ).where(CatalogTitle.id == catalog_title_id))
 
 
-def _metadata_template_values(title: CatalogTitle | None, allow_remote_images: bool) -> dict:
+def _metadata_template_values(title: CatalogTitle | None, allow_remote_images: bool, show_rejected: bool = False) -> dict:
     metadata = title.metadata_record if title else None
     def decoded(value: str | None) -> list:
         try:
@@ -86,6 +94,11 @@ def _metadata_template_values(title: CatalogTitle | None, allow_remote_images: b
             return result if isinstance(result, list) else []
         except (TypeError, ValueError):
             return []
+    artwork = next((item for item in (title.artwork if title else []) if item.is_primary and item.artwork_type == "cover"), None)
+    candidates = sorted(
+        [item for item in (title.metadata_candidates if title else []) if show_rejected or item.rejected_at is None],
+        key=lambda item: (item.rejected_at is not None, -(item.match_score or 0), item.candidate_title.casefold()),
+    )
     return {
         "title_metadata": metadata,
         "external_links": sorted(
@@ -95,9 +108,13 @@ def _metadata_template_values(title: CatalogTitle | None, allow_remote_images: b
         "metadata_genres": decoded(metadata.genres_json if metadata else None),
         "metadata_tags": decoded(metadata.tags_json if metadata else None),
         "metadata_synonyms": decoded(metadata.synonyms_json if metadata else None),
-        "show_remote_cover": bool(
-            allow_remote_images and metadata and metadata.cover_image_url
-        ),
+        "metadata_candidates": candidates,
+        "candidate_reasons": {item.id: decode_match_reasons(item) for item in candidates},
+        "low_score_threshold": LOW_SCORE_THRESHOLD,
+        "show_rejected": show_rejected,
+        "has_rejected_candidates": bool(title and any(item.rejected_at for item in title.metadata_candidates)),
+        "local_cover_url": f"/artwork/{artwork.thumbnail_path}" if artwork and artwork.thumbnail_path else None,
+        "show_remote_cover": bool(not artwork and allow_remote_images and metadata and metadata.cover_image_url),
     }
 
 
@@ -201,6 +218,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.sessions = sessions
     app.state.metadata_provider = AniListProvider(settings.metadata_request_timeout_seconds)
     app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
+    settings.metadata_artwork_directory.mkdir(parents=True, exist_ok=True)
+    app.mount("/artwork", StaticFiles(directory=settings.metadata_artwork_directory, check_dir=False), name="artwork")
+
+    def cache_title_artwork(catalog_title_id: int, *, force: bool = False) -> str | None:
+        if not settings.metadata_download_artwork:
+            return None
+        with sessions() as session:
+            metadata = session.get(TitleMetadata, catalog_title_id)
+            if not metadata or metadata.metadata_provider != "anilist" or not metadata.metadata_external_id or not metadata.cover_image_url:
+                return "Metadata neobsahují URL obalu."
+            try:
+                cache_cover(
+                    session, catalog_title_id=catalog_title_id,
+                    provider=metadata.metadata_provider, external_id=metadata.metadata_external_id,
+                    remote_url=metadata.cover_image_url, root=settings.metadata_artwork_directory,
+                    max_bytes=settings.metadata_artwork_max_bytes,
+                    thumbnail_width=settings.metadata_artwork_thumbnail_width,
+                    timeout_seconds=settings.metadata_request_timeout_seconds, force=force,
+                )
+                session.commit()
+            except ArtworkCacheError as exc:
+                session.rollback()
+                return str(exc)
+        return None
 
     @app.get("/health")
     def health():
@@ -278,6 +319,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sort: str | None = None, direction: str | None = None,
         video_sort: str | None = None, video_direction: str | None = None,
         message: str | None = None, metadata_error: str | None = None,
+        metadata_warning: str | None = None, show_rejected: bool = False,
         pending_external_id: str | None = None,
         require_conflict_confirmation: bool = False,
         require_locked_confirmation: bool = False,
@@ -359,6 +401,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "metadata_status_labels": METADATA_STATUS_LABELS,
             "metadata_candidates": [], "metadata_error": metadata_error,
             "metadata_message": message,
+            "metadata_warning": metadata_warning,
             "pending_external_id": pending_external_id,
             "require_conflict_confirmation": require_conflict_confirmation,
             "require_locked_confirmation": require_locked_confirmation,
@@ -384,7 +427,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         }
         context.update(_metadata_template_values(
-            catalog_title, settings.metadata_allow_remote_images
+            catalog_title, settings.metadata_allow_remote_images, show_rejected
         ))
         return templates.TemplateResponse(request, "series.html", context)
 
@@ -394,13 +437,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sort: str | None = None, direction: str | None = None,
         video_sort: str | None = None, video_direction: str | None = None,
         message: str | None = None, metadata_error: str | None = None,
+        metadata_warning: str | None = None, show_rejected: bool = False,
         pending_external_id: str | None = None,
         require_conflict_confirmation: bool = False,
         require_locked_confirmation: bool = False,
     ):
         return series_detail(
             request, filter_name, catalog_title_id, None, q, sort, direction,
-            video_sort, video_direction, message, metadata_error, pending_external_id,
+            video_sort, video_direction, message, metadata_error, metadata_warning, show_rejected, pending_external_id,
             require_conflict_confirmation, require_locked_confirmation,
         )
 
@@ -530,6 +574,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/hierarchy-review/{collection_id}", response_class=HTMLResponse)
     def hierarchy_review_detail(request: Request, collection_id: int):
         return hierarchy_review_context(request, collection_id)
+
+    def metadata_review_context(request: Request, status: str = "without", batch_result=None):
+        allowed = {"without", "pending", "manual", "conflict", "missing-artwork", "low-score"}
+        if status not in allowed:
+            raise HTTPException(status_code=404, detail="Neznámý přehled metadat")
+        with sessions() as session:
+            titles = list(session.scalars(select(CatalogTitle).options(
+                selectinload(CatalogTitle.collection), selectinload(CatalogTitle.metadata_record),
+                selectinload(CatalogTitle.metadata_candidates), selectinload(CatalogTitle.artwork),
+            ).order_by(CatalogTitle.local_title)).all())
+        rows = []
+        for title in titles:
+            active = [candidate for candidate in title.metadata_candidates if candidate.rejected_at is None]
+            best = max((candidate.match_score or 0 for candidate in active), default=None)
+            include = {
+                "without": title.metadata_status in {"unlinked", "unavailable", "error"},
+                "pending": title.metadata_status == "candidates_available",
+                "manual": title.metadata_status == "linked_manual",
+                "conflict": title.metadata_status == "conflict",
+                "missing-artwork": title.metadata_status == "linked_manual" and not any(item.is_primary for item in title.artwork),
+                "low-score": any((candidate.match_score or 0) < LOW_SCORE_THRESHOLD for candidate in active),
+            }[status]
+            if include:
+                rows.append({"title": title, "candidate_count": len(active), "best_score": best,
+                             "last_search": max((candidate.updated_at for candidate in title.metadata_candidates), default=None)})
+        return templates.TemplateResponse(request, "metadata_review.html", {
+            "rows": rows, "status": status, "batch_result": batch_result,
+            "default_batch_limit": settings.metadata_batch_search_limit,
+        })
+
+    @app.get("/metadata-review", response_class=HTMLResponse)
+    def metadata_review(request: Request, status: str = "without"):
+        return metadata_review_context(request, status)
+
+    @app.post("/metadata/batch-search", response_class=HTMLResponse)
+    def batch_metadata_search(request: Request, limit: int = Form(10)):
+        safe_limit = max(1, min(limit, settings.metadata_batch_search_limit))
+        result = batch_search_candidates(
+            sessions, app.state.metadata_provider, limit=safe_limit,
+            candidate_limit=settings.metadata_candidate_limit,
+            throttle=lambda: time.sleep(0.25),
+        )
+        return metadata_review_context(request, "pending", result)
 
     @app.post("/hierarchy-review/{collection_id}/preview", response_class=HTMLResponse)
     def hierarchy_review_preview(
@@ -665,18 +752,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
+        candidates, metadata_error = [], None
         with sessions() as session:
             catalog_title = _load_catalog_title(session, catalog_title_id)
-        if catalog_title is None:
-            raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
-        candidates, metadata_error = [], None
-        if not settings.metadata_enabled or not settings.anilist_enabled:
-            metadata_error = "Vyhledávání metadat je vypnuté v konfiguraci."
-        else:
-            try:
-                candidates = app.state.metadata_provider.search_titles(metadata_query)
-            except (ValueError, MetadataProviderError) as exc:
-                metadata_error = str(exc)
+            if catalog_title is None:
+                raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+            if not settings.metadata_enabled or not settings.anilist_enabled:
+                metadata_error = "Vyhledávání metadat je vypnuté v konfiguraci."
+            else:
+                try:
+                    candidates = search_and_store_candidates(
+                        session, catalog_title, metadata_query, app.state.metadata_provider,
+                        limit=settings.metadata_candidate_limit,
+                    )
+                    session.commit()
+                    catalog_title = _load_catalog_title(session, catalog_title_id)
+                except (ValueError, MetadataProviderError) as exc:
+                    session.rollback()
+                    metadata_error = str(exc)
+                    catalog_title = _load_catalog_title(session, catalog_title_id)
         all_videos = _load_videos(sessions)
         results = build_catalog_results(all_videos, filter_name, q, sort, direction)
         title_videos_for_detail = [
@@ -711,9 +805,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 else catalog_state_url(filter_name, results.query, results.sort, results.direction)
             ),
             "metadata_status_labels": METADATA_STATUS_LABELS,
-            "metadata_candidates": candidates, "metadata_error": metadata_error,
+            "metadata_error": metadata_error,
             "metadata_query": metadata_query[:200],
             "metadata_message": None, "pending_external_id": None,
+            "metadata_warning": None,
             "require_conflict_confirmation": False,
             "require_locked_confirmation": False,
             "metadata_allow_remote_images": settings.metadata_allow_remote_images,
@@ -737,6 +832,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/confirm")
     def confirm_metadata(
         filter_name: str, catalog_title_id: int, external_id: str = Form(...),
+        candidate_id: int | None = Form(None),
         confirm_conflict: bool = Form(False), confirm_locked: bool = Form(False),
         q: str = Form(""), sort: str = Form(""), direction: str = Form(""),
         detail_sort: str = Form(""), detail_direction: str = Form(""),
@@ -757,6 +853,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 confirm_anilist_candidate(
                     session, title, external_id, app.state.metadata_provider,
                     confirm_conflict=confirm_conflict, confirm_locked=confirm_locked,
+                    candidate_id=candidate_id,
                 )
                 session.commit()
             except MetadataConflictError as exc:
@@ -783,9 +880,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     filter_name, catalog_title_id, q, sort, direction,
                     detail_sort, detail_direction, metadata_error=str(exc),
                 )
+        artwork_warning = cache_title_artwork(catalog_title_id)
         return action_redirect(
             filter_name, catalog_title_id, q, sort, direction,
             detail_sort, detail_direction, message="Metadata byla ručně potvrzena.",
+            metadata_warning=artwork_warning or "",
         )
 
     @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/update")
@@ -815,9 +914,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     filter_name, catalog_title_id, q, sort, direction,
                     detail_sort, detail_direction, metadata_error=str(exc),
                 )
+        artwork_warning = cache_title_artwork(catalog_title_id)
         return action_redirect(
             filter_name, catalog_title_id, q, sort, direction,
             detail_sort, detail_direction, message="Metadata byla aktualizována.",
+            metadata_warning=artwork_warning or "",
+        )
+
+    @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/artwork/refresh")
+    def refresh_artwork(
+        filter_name: str, catalog_title_id: int, q: str = Form(""),
+        sort: str = Form(""), direction: str = Form(""),
+        detail_sort: str = Form(""), detail_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=404, detail="Neznámý filtr")
+        with sessions() as session:
+            if session.get(CatalogTitle, catalog_title_id) is None:
+                raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+        warning = cache_title_artwork(catalog_title_id, force=True)
+        return action_redirect(
+            filter_name, catalog_title_id, q, sort, direction, detail_sort, detail_direction,
+            message="Obal byl obnoven." if not warning else "",
+            metadata_warning=warning or "",
+        )
+
+    @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/candidates/{candidate_id}/reject")
+    def reject_candidate(
+        filter_name: str, catalog_title_id: int, candidate_id: int,
+        rejected: bool = Form(True), q: str = Form(""), sort: str = Form(""),
+        direction: str = Form(""), detail_sort: str = Form(""), detail_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=404, detail="Neznámý filtr")
+        with sessions() as session:
+            if session.get(CatalogTitle, catalog_title_id) is None:
+                raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+            try:
+                set_candidate_rejected(session, catalog_title_id, candidate_id, rejected)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return action_redirect(
+            filter_name, catalog_title_id, q, sort, direction, detail_sort, detail_direction,
+            message="Kandidát byl odmítnut." if rejected else "Odmítnutí kandidáta bylo zrušeno.",
+            show_rejected="true" if not rejected else "",
         )
 
     @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/unlink")
@@ -999,6 +1141,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     settings.anime_path,
                     require_mount=settings.require_mount,
                     confirm_deletions=confirm_deletions,
+                    ffprobe_timeout_seconds=settings.ffprobe_timeout_seconds,
+                    library_access_timeout_seconds=settings.library_access_timeout_seconds,
+                    library_healthcheck_interval_files=settings.library_healthcheck_interval_files,
                 )
             message = (f"Sken dokončen: {result.found} videí, {result.created} nových, "
                        f"{result.updated} změněných, {result.errors} chyb.")

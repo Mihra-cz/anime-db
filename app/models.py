@@ -124,6 +124,8 @@ class CatalogTitle(Base):
     collection: Mapped[CatalogCollection | None] = relationship(back_populates="titles")
     external_links: Mapped[list[ExternalTitleLink]] = relationship(cascade="all, delete-orphan")
     metadata_record: Mapped[TitleMetadata | None] = relationship(cascade="all, delete-orphan")
+    metadata_candidates: Mapped[list[MetadataCandidate]] = relationship(cascade="all, delete-orphan")
+    artwork: Mapped[list[Artwork]] = relationship(cascade="all, delete-orphan")
     __table_args__ = (CheckConstraint(
         "metadata_status IN ('unlinked','candidates_available','linked_auto','linked_manual','conflict','migration_review_required','unavailable','error')",
         name="ck_catalog_title_metadata_status",
@@ -197,6 +199,51 @@ class TitleMetadata(Base):
     cover_image_url: Mapped[str | None] = mapped_column(String, nullable=True)
     metadata_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     metadata_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MetadataCandidate(Base):
+    __tablename__ = "metadata_candidates"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    catalog_title_id: Mapped[int] = mapped_column(ForeignKey("catalog_titles.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    external_id: Mapped[str] = mapped_column(String, nullable=False)
+    candidate_title: Mapped[str] = mapped_column(String, nullable=False)
+    title_romaji: Mapped[str | None] = mapped_column(String, nullable=True)
+    title_english: Mapped[str | None] = mapped_column(String, nullable=True)
+    title_native: Mapped[str | None] = mapped_column(String, nullable=True)
+    candidate_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    candidate_format: Mapped[str | None] = mapped_column(String, nullable=True)
+    candidate_episode_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cover_image_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    site_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    match_reasons_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (UniqueConstraint("catalog_title_id", "provider", "external_id"),)
+
+
+class Artwork(Base):
+    __tablename__ = "artwork"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    catalog_title_id: Mapped[int] = mapped_column(ForeignKey("catalog_titles.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    external_id: Mapped[str] = mapped_column(String, nullable=False)
+    artwork_type: Mapped[str] = mapped_column(String, nullable=False, default="cover", server_default="cover")
+    remote_url: Mapped[str] = mapped_column(String, nullable=False)
+    local_path: Mapped[str] = mapped_column(String, nullable=False)
+    thumbnail_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    mime_type: Mapped[str] = mapped_column(String, nullable=False)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    __table_args__ = (UniqueConstraint("catalog_title_id", "provider", "external_id", "artwork_type"),)
 
 
 class AudioTrack(Base):

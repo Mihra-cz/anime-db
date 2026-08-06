@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from .base import MetadataProviderError, MetadataRateLimitError, ProviderTitleMetadata
+from .base import MetadataProviderError, MetadataRateLimitError, ProviderTitleMetadata, metadata_http_timeout
 
 ANILIST_ENDPOINT = "https://graphql.anilist.co"
 MEDIA_FIELDS = """
@@ -48,6 +48,7 @@ class AniListProvider:
 
     def __init__(self, timeout_seconds: float = 15, client: httpx.Client | None = None):
         self.timeout_seconds = timeout_seconds
+        self.timeout = metadata_http_timeout(timeout_seconds)
         self.client = client
 
     def _request(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
@@ -55,14 +56,14 @@ class AniListProvider:
             if self.client is not None:
                 response = self.client.post(
                     ANILIST_ENDPOINT, json={"query": query, "variables": variables},
-                    timeout=self.timeout_seconds,
+                    timeout=self.timeout,
                 )
             else:
                 response = httpx.post(
                     ANILIST_ENDPOINT, json={"query": query, "variables": variables},
-                    timeout=self.timeout_seconds,
+                    timeout=self.timeout,
                 )
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TimeoutException, httpx.NetworkError) as exc:
             raise MetadataProviderError("AniList není momentálně dostupný.") from exc
         if response.status_code == 429:
             raise MetadataRateLimitError("AniList dočasně omezil počet požadavků.")

@@ -1,3 +1,6 @@
-from .service import LibrarySafetyError, ScanResult, is_on_mounted_source, iter_videos, scan_library
+from .service import (
+    LibrarySafetyError, LibraryUnavailableError, ScanResult, check_library_access,
+    is_on_mounted_source, iter_videos, scan_library,
+)
 
-__all__ = ["LibrarySafetyError", "ScanResult", "is_on_mounted_source", "iter_videos", "scan_library"]
+__all__ = ["LibrarySafetyError", "LibraryUnavailableError", "ScanResult", "check_library_access", "is_on_mounted_source", "iter_videos", "scan_library"]

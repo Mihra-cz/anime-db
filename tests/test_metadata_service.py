@@ -192,3 +192,12 @@ def test_two_seasons_keep_independent_external_metadata(session):
     assert session.get(TitleMetadata, second.id).display_title == "Second"
     assert first.preferred_external_id == "1"
     assert second.preferred_external_id == "2"
+
+
+def test_artwork_failure_after_confirmation_does_not_remove_metadata(session):
+    title, _ = add_title(session)
+    confirm_anilist_candidate(session, title, "1", Provider({"1": data()}))
+    session.commit()
+    # Stahování obalu probíhá až po této úspěšné transakci a má vlastní rollback.
+    assert session.get(TitleMetadata, title.id).metadata_external_id == "1"
+    assert session.scalar(select(ExternalTitleLink).where(ExternalTitleLink.catalog_title_id == title.id)).is_primary

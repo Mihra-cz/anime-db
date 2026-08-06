@@ -87,3 +87,10 @@ def test_all_metadata_mutations_are_post_only():
     matching = [route for route in app.routes if any(route.path.endswith(s) for s in mutation_suffixes)]
     assert len(matching) == len(mutation_suffixes)
     assert all(route.methods == {"POST"} for route in matching)
+
+
+def test_candidate_and_artwork_mutations_are_post_only():
+    paths = {route.path: route.methods for route in app.routes if hasattr(route, "methods")}
+    assert paths["/catalog/{filter_name}/titles/{catalog_title_id}/metadata/candidates/{candidate_id}/reject"] == {"POST"}
+    assert paths["/catalog/{filter_name}/titles/{catalog_title_id}/metadata/artwork/refresh"] == {"POST"}
+    assert paths["/metadata/batch-search"] == {"POST"}

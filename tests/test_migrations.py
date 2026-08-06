@@ -188,3 +188,41 @@ def test_ambiguous_legacy_metadata_is_preserved_for_review(tmp_path):
             ExternalTitleLink.catalog_title_id == legacy_id
         )).external_id == "123"
         assert session.scalar(select(func.count()).select_from(Video)) == 2
+
+
+def test_migration_preserves_3098_videos_hardsubs_subtitles_and_manual_hierarchy(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'production-shape.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show", relative_root_path="Anime/Show",
+            hierarchy_status="verified",
+        )
+        title = CatalogTitle(
+            local_title="Show", normalized_local_title="show", relative_root_path="Anime/Show",
+            collection=collection, hierarchy_manual_override=True,
+            season_number_manual=1, season_label_manual="S1",
+        )
+        session.add(title)
+        session.flush()
+        videos = [Video(
+            relative_path=f"Anime/Show/E{number:04d}.mkv", root_folder="Anime",
+            filename=f"E{number:04d}.mkv", size=number, mtime_ns=number,
+            catalog_title_id=title.id, catalog_collection_id=collection.id,
+            manual_hardsub_cs=number == 1,
+        ) for number in range(1, 3099)]
+        session.add_all(videos)
+        session.flush()
+        session.add(InternalSubtitle(video_id=videos[0].id, stream_index=1, language="cze", normalized_language="cs"))
+        session.commit()
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(Video)) == 3098
+        assert session.scalar(select(Video.manual_hardsub_cs).where(Video.id == 1)) is True
+        assert session.scalar(select(func.count()).select_from(InternalSubtitle)) == 1
+        title = session.scalar(select(CatalogTitle).where(CatalogTitle.relative_root_path == "Anime/Show"))
+        assert title.season_number_manual == 1
+        assert title.season_label_manual == "S1"
+        assert title.hierarchy_manual_override is True

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import multiprocessing
 import os
 from pathlib import Path
 
@@ -31,6 +32,13 @@ class LibrarySafetyError(RuntimeError):
     def __init__(self, message: str, *, confirmation_allowed: bool = False):
         super().__init__(message)
         self.confirmation_allowed = confirmation_allowed
+
+
+class LibraryUnavailableError(LibrarySafetyError):
+    def __init__(self, message: str, *, last_successful_file: str | None = None, result=None):
+        super().__init__(message)
+        self.last_successful_file = last_successful_file
+        self.result = result
 
 
 @dataclass
@@ -68,6 +76,56 @@ def is_on_mounted_source(root: Path) -> bool:
             return True
         current = current.parent
     return False
+
+
+def _library_healthcheck_worker(root: str, require_mount: bool, sender) -> None:
+    try:
+        path = Path(root)
+        if not path.is_dir():
+            raise OSError("kořen knihovny není dostupný adresář")
+        if require_mount and not is_on_mounted_source(path):
+            raise OSError("kořen knihovny už neleží na připojeném zdroji")
+        with os.scandir(path) as entries:
+            next(entries, None)
+        sender.send((True, None))
+    except BaseException as exc:
+        try:
+            sender.send((False, str(exc)))
+        except (BrokenPipeError, OSError):
+            pass
+    finally:
+        sender.close()
+
+
+def check_library_access(root: Path, *, timeout_seconds: float = 10, require_mount: bool = False) -> None:
+    receiver, sender = multiprocessing.Pipe(duplex=False)
+    process = multiprocessing.Process(
+        target=_library_healthcheck_worker,
+        args=(str(root), require_mount, sender),
+        daemon=True,
+    )
+    process.start()
+    sender.close()
+    process.join(max(0.1, float(timeout_seconds)))
+    if process.is_alive():
+        process.terminate()
+        process.join(1)
+        if process.is_alive():
+            process.kill()
+            process.join(1)
+        receiver.close()
+        raise LibraryUnavailableError(
+            f"Kontrola přístupu ke knihovně překročila timeout {timeout_seconds:g} s."
+        )
+    try:
+        try:
+            ok, detail = receiver.recv() if receiver.poll() else (False, "kontrola přístupu selhala")
+        except EOFError:
+            ok, detail = False, "proces kontroly přístupu skončil bez výsledku"
+    finally:
+        receiver.close()
+    if not ok:
+        raise LibraryUnavailableError(f"Knihovna není dostupná: {detail}.")
 
 
 def _root_folder(relative: Path) -> str:
@@ -120,21 +178,38 @@ def _scan_library(
     *,
     require_mount: bool = False,
     confirm_deletions: bool = False,
+    ffprobe_timeout_seconds: float = 60,
+    library_access_timeout_seconds: float = 10,
+    library_healthcheck_interval_files: int = 25,
 ) -> ScanResult:
-    root = root.resolve()
-    if not root.is_dir():
-        raise LibrarySafetyError(
-            f"ANIME_PATH není dostupný adresář: {root}. Knihovna může být odpojená."
-        )
-    if require_mount and not is_on_mounted_source(root):
-        raise LibrarySafetyError(
-            f"ANIME_PATH {root} neleží na připojeném zdroji. Knihovna může být odpojená."
-        )
-
+    root = root.absolute()
     result = ScanResult()
+    last_successful_file: str | None = None
+    try:
+        check_library_access(
+            root, timeout_seconds=library_access_timeout_seconds, require_mount=require_mount
+        )
+    except LibraryUnavailableError as exc:
+        exc.result = result
+        raise
     existing = {v.relative_path: v for v in session.scalars(select(Video)).all()}
     seen: set[str] = set()
     for path in iter_videos(root):
+        if result.found and result.found % max(1, library_healthcheck_interval_files) == 0:
+            try:
+                check_library_access(
+                    root, timeout_seconds=library_access_timeout_seconds,
+                    require_mount=require_mount,
+                )
+            except LibraryUnavailableError as exc:
+                logger.error(
+                    "Knihovna přestala být dostupná během skenu; poslední úspěšný soubor=%s",
+                    last_successful_file or "žádný",
+                )
+                raise LibraryUnavailableError(
+                    f"Knihovna přestala být dostupná během skenu: {exc}",
+                    last_successful_file=last_successful_file, result=result,
+                ) from exc
         result.found += 1
         relative = path.relative_to(root)
         key = relative.as_posix()
@@ -142,20 +217,18 @@ def _scan_library(
         video = existing.get(key)
         try:
             stat = path.stat()
-            changed = video is None or video.size != stat.st_size or video.mtime_ns != stat.st_mtime_ns
-            if video is None:
+            is_new = video is None
+            changed = is_new or video.size != stat.st_size or video.mtime_ns != stat.st_mtime_ns
+            if is_new:
                 video = Video(relative_path=key, root_folder=_root_folder(relative), filename=path.name,
                               size=stat.st_size, mtime_ns=stat.st_mtime_ns,
                               file_type=classify_video(key))
                 session.add(video)
-                result.created += 1
-            elif changed:
-                result.updated += 1
-            else:
+            if not changed:
                 result.unchanged += 1
 
             if changed:
-                metadata = probe_video(path)
+                metadata = probe_video(path, timeout_seconds=ffprobe_timeout_seconds)
                 video.filename, video.root_folder = path.name, _root_folder(relative)
                 video.file_type = classify_video(key)
                 video.size, video.mtime_ns = stat.st_size, stat.st_mtime_ns
@@ -169,12 +242,31 @@ def _scan_library(
                     )
                     for track in metadata["subtitles"]
                 ]
+                if is_new:
+                    result.created += 1
+                else:
+                    result.updated += 1
             _sync_external_subtitles(session, video, _external_subtitles(path, root))
+            last_successful_file = key
         except (OSError, ProbeError, ValueError) as exc:
             result.errors += 1
             logger.warning("Nelze zpracovat %s: %s", key, exc)
             if key not in existing and video is not None:
                 session.expunge(video)
+
+    try:
+        check_library_access(
+            root, timeout_seconds=library_access_timeout_seconds, require_mount=require_mount
+        )
+    except LibraryUnavailableError as exc:
+        logger.error(
+            "Knihovna přestala být dostupná po průchodu; poslední úspěšný soubor=%s",
+            last_successful_file or "žádný",
+        )
+        raise LibraryUnavailableError(
+            f"Knihovna přestala být dostupná během skenu před dokončením: {exc}",
+            last_successful_file=last_successful_file, result=result,
+        ) from exc
 
     missing = [(key, video) for key, video in existing.items() if key not in seen]
     existing_count = len(existing)
@@ -304,6 +396,9 @@ def scan_library(
     *,
     require_mount: bool = False,
     confirm_deletions: bool = False,
+    ffprobe_timeout_seconds: float = 60,
+    library_access_timeout_seconds: float = 10,
+    library_healthcheck_interval_files: int = 25,
 ) -> ScanResult:
     try:
         return _scan_library(
@@ -311,6 +406,9 @@ def scan_library(
             root,
             require_mount=require_mount,
             confirm_deletions=confirm_deletions,
+            ffprobe_timeout_seconds=ffprobe_timeout_seconds,
+            library_access_timeout_seconds=library_access_timeout_seconds,
+            library_healthcheck_interval_files=library_healthcheck_interval_files,
         )
     except Exception:
         session.rollback()

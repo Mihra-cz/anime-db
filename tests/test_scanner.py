@@ -30,7 +30,7 @@ def test_repeated_scan_has_no_duplicates(tmp_path: Path, monkeypatch):
     video_path.parent.mkdir()
     video_path.write_bytes(b"video")
     (video_path.parent / "episode.cs.srt").write_text("Jsem tady, protože něco vím.", encoding="utf-8")
-    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: {
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: {
         "duration": 60.0, "video_codec": "h264", "width": 1920, "height": 1080,
         "audio": [], "subtitles": [],
     })
@@ -50,7 +50,7 @@ def test_scan_preserves_manual_episode_override(tmp_path: Path, monkeypatch):
     video_path = tmp_path / "Show" / "Part 2" / "Episode 14.mkv"
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"video")
-    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: PROBE_RESULT)
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine)
@@ -69,7 +69,7 @@ def test_scan_preserves_manual_hierarchy_values(tmp_path: Path, monkeypatch):
     video_path = tmp_path / "OVERLORD" / "Overlord (L15)" / "Episode 01.mkv"
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"video")
-    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: PROBE_RESULT)
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine)
@@ -97,7 +97,7 @@ def test_updates_language_of_existing_external_subtitle(tmp_path: Path, monkeypa
     video_path.write_bytes(b"video")
     subtitle_path = video_path.parent / "episode.srt"
     subtitle_path.write_text("subtitle", encoding="utf-8")
-    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: {
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: {
         "duration": 60.0, "video_codec": "h264", "width": 1920, "height": 1080,
         "audio": [], "subtitles": [],
     })
@@ -127,7 +127,7 @@ def test_preserves_two_external_subtitles_with_same_language(tmp_path: Path, mon
     video_path.write_bytes(b"video")
     (video_path.parent / "episode.cs.srt").write_text("one", encoding="utf-8")
     (video_path.parent / "episode.alternative.srt").write_text("two", encoding="utf-8")
-    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: {
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: {
         "duration": 60.0, "video_codec": "h264", "width": 1920, "height": 1080,
         "audio": [], "subtitles": [],
     })
@@ -148,7 +148,7 @@ def test_empty_existing_root_does_not_delete_database_records(tmp_path: Path, mo
     video_path = tmp_path / "Show" / "episode.mkv"
     video_path.parent.mkdir()
     video_path.write_bytes(b"video")
-    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: PROBE_RESULT)
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine)
@@ -183,7 +183,7 @@ def test_removing_more_than_twenty_percent_requires_confirmation(tmp_path: Path,
         path = show / f"episode-{number:02}.mkv"
         path.write_bytes(b"video")
         video_paths.append(path)
-    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: PROBE_RESULT)
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine)
@@ -208,7 +208,7 @@ def test_scan_preserves_manual_hardsub_and_verification_date(tmp_path: Path, mon
     video_path = tmp_path / "Show" / "episode.mkv"
     video_path.parent.mkdir()
     video_path.write_bytes(b"video")
-    monkeypatch.setattr("app.scanner.service.probe_video", lambda _: PROBE_RESULT)
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine)

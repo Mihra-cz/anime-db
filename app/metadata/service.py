@@ -9,7 +9,7 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import CatalogTitle, ExternalTitleLink, TitleMetadata
+from app.models import CatalogTitle, ExternalTitleLink, MetadataCandidate, TitleMetadata
 from app.numbering import recalculate_title_numbering
 from app.hierarchy import parse_explicit_part
 
@@ -150,8 +150,18 @@ def confirm_anilist_candidate(
     *,
     confirm_conflict: bool = False,
     confirm_locked: bool = False,
+    candidate_id: int | None = None,
     now: datetime | None = None,
 ) -> ExternalTitleLink:
+    candidate = None
+    if candidate_id is not None:
+        candidate = session.scalar(select(MetadataCandidate).where(
+            MetadataCandidate.id == candidate_id,
+            MetadataCandidate.catalog_title_id == title.id,
+            MetadataCandidate.provider == "anilist",
+        ))
+        if candidate is None or candidate.external_id != str(external_id).strip():
+            raise ValueError("Kandidát pro tento titul nebyl nalezen.")
     data = provider.fetch_title(external_id)
     if data.provider != "anilist" or data.external_id != str(int(external_id)):
         raise ValueError("AniList vrátil neočekávanou identitu titulu.")
@@ -193,6 +203,7 @@ def confirm_anilist_candidate(
         )
         session.add(link)
     link.external_url = data.site_url
+    link.match_score = candidate.match_score if candidate else None
     link.match_method = "manual_search"
     link.is_primary = True
     link.is_manual = True
@@ -201,6 +212,14 @@ def confirm_anilist_candidate(
     title.preferred_external_id = data.external_id
     title.metadata_status = "linked_manual"
     _write_metadata(session, title, data, timestamp)
+    if candidate is None:
+        candidate = session.scalar(select(MetadataCandidate).where(
+            MetadataCandidate.catalog_title_id == title.id,
+            MetadataCandidate.provider == "anilist",
+            MetadataCandidate.external_id == data.external_id,
+        ))
+    if candidate is not None:
+        candidate.confirmed_at = timestamp
     session.flush()
     recalculate_title_numbering(title, list(title.videos), external_linked=True)
     return link

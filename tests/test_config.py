@@ -23,3 +23,23 @@ def test_loads_dotenv_but_system_environment_has_priority(tmp_path: Path, monkey
 def test_remote_images_can_be_disabled(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("METADATA_ALLOW_REMOTE_IMAGES", "false")
     assert get_settings(tmp_path / "missing.env").metadata_allow_remote_images is False
+
+
+def test_v5_candidate_and_artwork_defaults(tmp_path: Path, monkeypatch):
+    for name in ("METADATA_CANDIDATE_LIMIT", "METADATA_BATCH_SEARCH_LIMIT", "METADATA_ARTWORK_MAX_BYTES", "METADATA_ARTWORK_THUMBNAIL_WIDTH"):
+        monkeypatch.delenv(name, raising=False)
+    settings = get_settings(tmp_path / "missing.env")
+    assert settings.metadata_candidate_limit == 10
+    assert settings.metadata_batch_search_limit == 10
+    assert settings.metadata_artwork_max_bytes == 10_485_760
+    assert settings.metadata_artwork_thumbnail_width == 400
+
+
+def test_probe_and_library_timeout_defaults(tmp_path: Path, monkeypatch):
+    for name in ("FFPROBE_TIMEOUT_SECONDS", "MEDIAINFO_TIMEOUT_SECONDS", "LIBRARY_ACCESS_TIMEOUT_SECONDS", "LIBRARY_HEALTHCHECK_INTERVAL_FILES"):
+        monkeypatch.delenv(name, raising=False)
+    settings = get_settings(tmp_path / "missing.env")
+    assert settings.ffprobe_timeout_seconds == 60
+    assert settings.mediainfo_timeout_seconds == 60
+    assert settings.library_access_timeout_seconds == 10
+    assert settings.library_healthcheck_interval_files == 25

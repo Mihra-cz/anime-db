@@ -19,6 +19,15 @@ class Settings:
     metadata_download_artwork: bool = True
     anilist_enabled: bool = True
     metadata_allow_remote_images: bool = True
+    metadata_candidate_limit: int = 10
+    metadata_batch_search_limit: int = 10
+    metadata_artwork_max_bytes: int = 10_485_760
+    metadata_artwork_thumbnail_width: int = 400
+    metadata_artwork_directory: Path = Path("data/artwork")
+    ffprobe_timeout_seconds: float = 60
+    mediainfo_timeout_seconds: float = 60
+    library_access_timeout_seconds: float = 10
+    library_healthcheck_interval_files: int = 25
 
 
 def _get_bool(name: str, default: bool = False) -> bool:
@@ -44,4 +53,13 @@ def get_settings(dotenv_path: str | Path | None = None) -> Settings:
         metadata_download_artwork=_get_bool("METADATA_DOWNLOAD_ARTWORK", True),
         anilist_enabled=_get_bool("ANILIST_ENABLED", True),
         metadata_allow_remote_images=_get_bool("METADATA_ALLOW_REMOTE_IMAGES", True),
+        metadata_candidate_limit=max(1, min(10, int(os.getenv("METADATA_CANDIDATE_LIMIT", "10")))),
+        metadata_batch_search_limit=max(1, int(os.getenv("METADATA_BATCH_SEARCH_LIMIT", "10"))),
+        metadata_artwork_max_bytes=max(1, int(os.getenv("METADATA_ARTWORK_MAX_BYTES", "10485760"))),
+        metadata_artwork_thumbnail_width=max(1, int(os.getenv("METADATA_ARTWORK_THUMBNAIL_WIDTH", "400"))),
+        metadata_artwork_directory=Path(os.getenv("METADATA_ARTWORK_DIRECTORY", "data/artwork")),
+        ffprobe_timeout_seconds=max(0.1, float(os.getenv("FFPROBE_TIMEOUT_SECONDS", "60"))),
+        mediainfo_timeout_seconds=max(0.1, float(os.getenv("MEDIAINFO_TIMEOUT_SECONDS", "60"))),
+        library_access_timeout_seconds=max(0.1, float(os.getenv("LIBRARY_ACCESS_TIMEOUT_SECONDS", "10"))),
+        library_healthcheck_interval_files=max(1, int(os.getenv("LIBRARY_HEALTHCHECK_INTERVAL_FILES", "25"))),
     )

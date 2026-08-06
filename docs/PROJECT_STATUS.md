@@ -3,7 +3,7 @@
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
 > **Aktualizováno:** 6. srpna 2026
-> **Aktuální checkpoint:** výrazně pokročilá V5 – stabilní hierarchie, ruční metadata a kontrola částí
+> **Aktuální checkpoint:** výrazně pokročilá V5 – stabilní hierarchie, perzistentní kandidáti a lokální obaly
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -400,8 +400,9 @@ V5 nesmí měnit ani přesouvat videosoubory. Pracuje pouze s databází, identi
 titulu, metadaty, vzdálenými náhledy obrázků a ručním potvrzením.
 
 V5 je výrazně pokročilá a produkčně nasazená, ale ještě není úplně uzavřená.
-Není implementováno hromadné ani automatické párování, lokální cache obrázků,
-další metadata providery ani úplná kontrola chybějících epizod.
+Není implementováno automatické párování, další metadata providery ani úplná
+kontrola chybějících epizod. Bezpečné dávkové hledání pouze ukládá kandidáty a
+nikdy je samo nepotvrzuje.
 
 ## Hlavní princip
 
@@ -665,10 +666,9 @@ metadata_fetched_at
 metadata_updated_at
 ```
 
-### Dosud neimplementované doplňkové entity
+### Implementované doplňkové entity
 
-Následující entity zůstávají návrhem pro pozdější iterace V5; současná
-implementace kandidáty zobrazuje přímo z normalizované odpovědi provideru:
+Kandidáti a lokální obaly jsou od 6. srpna 2026 perzistentní:
 
 #### `MetadataCandidate`
 
@@ -818,8 +818,8 @@ Možné body:
 - shoda sezóny vysílání,
 - shoda více providerů.
 
-Hromadné vytváření kandidátů a automatické skórování zatím není implementované.
-Budoucí skóre má uchovávat vysvětlení, například:
+Ruční i dávkové hledání ukládá transparentní pomocné skóre a jeho vysvětlení,
+například:
 
 ```json
 {
@@ -946,17 +946,19 @@ python -m app.tools.rebuild_hierarchy --apply
 
 ### Hromadná operace
 
-Hromadné hledání a automatické potvrzení kandidátů zatím není implementované.
-Zůstává podmínkou, že budoucí hromadná operace smí pouze připravit návrhy a nesmí
-přepsat ruční rozhodnutí.
+Hromadné hledání kandidátů pro nezamknuté tituly bez metadat je implementované
+se synchronním konfigurovatelným limitem a omezením mezi dotazy. Přeskakuje
+konfliktní hierarchii, u hierarchie ke kontrole varuje a nic automaticky
+nepotvrzuje ani nepřepisuje.
 
 ---
 
 ## 6.5 Obrázky a cache
 
-V aktuální iteraci se ukládá normalizované URL obalu a web může zobrazit vzdálený
-náhled. Zobrazení lze vypnout přes `METADATA_ALLOW_REMOTE_IMAGES=false`. Obrázek
-se zatím nestahuje do lokální cache.
+Po ručním potvrzení se obal volitelně ukládá do lokální cache
+`data/artwork/<provider>/<external_id>/`. Ověřuje se schéma URL, MIME typ a
+velikost, zápis je atomický a vytváří se WebP náhled. Chyba obalu neruší uložení
+metadat a předchozí úspěšný obrázek zůstává zachovaný.
 
 Cílové doporučení pro dokončení V5:
 
@@ -990,6 +992,14 @@ METADATA_AUTO_CONFIRM=false
 METADATA_AUTO_CONFIRM_THRESHOLD=0.95
 METADATA_DOWNLOAD_ARTWORK=true
 METADATA_ALLOW_REMOTE_IMAGES=true
+METADATA_CANDIDATE_LIMIT=10
+METADATA_BATCH_SEARCH_LIMIT=10
+METADATA_ARTWORK_MAX_BYTES=10485760
+METADATA_ARTWORK_THUMBNAIL_WIDTH=400
+FFPROBE_TIMEOUT_SECONDS=60
+MEDIAINFO_TIMEOUT_SECONDS=60
+LIBRARY_ACCESS_TIMEOUT_SECONDS=10
+LIBRARY_HEALTHCHECK_INTERVAL_FILES=25
 
 ANILIST_ENABLED=true
 ```
@@ -1046,10 +1056,10 @@ Aktuálně automaticky ověřeno mimo jiné:
 - zachování titulků, metadat a ručních hardsubů,
 - všechny stávající filtry, hledání a řazení dál fungují.
 
-Poslední automatické ověření:
+Automatické ověření po iteraci perzistentních kandidátů a obalů:
 
 ```bash
-pytest -v                         # 144 passed
+pytest -v                         # 172 passed
 python -m compileall app tests   # prošlo
 git diff --check                 # prošlo
 docker compose config            # prošlo
@@ -1063,10 +1073,11 @@ Hotová je stabilní hierarchie `CatalogCollection → CatalogTitle → Video`, 
 kontrola a dělení kolekcí, oddělené číslování, ruční párování AniList metadat,
 zobrazení a správa uložených metadat i ochrana ručních rozhodnutí.
 
-V5 ještě není úplně uzavřená. Zbývá zejména rozhodnout a implementovat bezpečnou
-cache obrázků, případné trvalé ukládání kandidátů a synchronizačního logu,
-provider relace a případné další providery. Hromadné ani automatické párování
-celé knihovny není povoleno bez samostatné bezpečné iterace.
+V5 ještě není úplně uzavřená. Perzistentní kandidáti, jejich ruční odmítání,
+pomocné skóre, bezpečná cache obalů a omezené dávkové vyhledání jsou hotové.
+Zbývá synchronizační log, provider relace a případné další providery.
+Automatické potvrzování celé knihovny není povoleno bez samostatné bezpečné
+iterace.
 
 ---
 
