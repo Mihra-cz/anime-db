@@ -2,8 +2,8 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 6. srpna 2026
-> **Aktuální checkpoint:** výrazně pokročilá V5 – stabilní hierarchie, perzistentní kandidáti a lokální obaly
+> **Aktualizováno:** 7. srpna 2026
+> **Aktuální checkpoint:** V5 dokončena – následuje stabilizace hierarchie a ladění UI nad reálnou knihovnou
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -387,9 +387,37 @@ Poznámka: čísla CZ/SK se mohou postupně měnit ručním označováním hards
 - nejasné historické kolekce se nerozdělují odhadem a řeší se ručně přes `/hierarchy-review`,
 - nebyly měněny, přesouvány ani přejmenovány žádné videosoubory nebo adresáře.
 
+## Závěrečné produkční ověření V5
+
+Ručně ověřený stav k 7. srpnu 2026:
+
+| Kategorie | Počet |
+|---|---:|
+| Videa | 3 098 |
+| Kolekce | 194 |
+| Tituly | 229 |
+| Metadata kandidáti | 40 |
+| Záznamy artworku | 2 |
+| Videa bez kolekce | 0 |
+| Videa bez titulu | 0 |
+
+Ručně bylo dále ověřeno:
+
+- aplikace se spustí i s odpojeným NASem,
+- pokus o sken s odpojeným NASem skončí řízenou bezpečnostní chybou a databáze
+  zůstane nedotčená,
+- výpadek NASu během probíhajícího skenu je zachycen a způsobí rollback celé
+  transakce,
+- po opětovném připojení NASu proběhl normální sken s výsledkem
+  `found=3098`, `created=0`, `updated=0`, `unchanged=3098`, `removed=0`,
+  `errors=0`,
+- offline aktualizace metadat skončila řízenou chybou bez poškození existujících
+  dat,
+- lokálně cachovaný artwork zůstal dostupný i bez internetu.
+
 ---
 
-# 6. V5 – Stabilní hierarchie, metadata a číslování 🚧
+# 6. V5 – Stabilní hierarchie, metadata a číslování ✅
 
 ## Cíl checkpointu V5
 
@@ -399,10 +427,10 @@ identitou kolekcí, konkrétních částí a externích metadat.
 V5 nesmí měnit ani přesouvat videosoubory. Pracuje pouze s databází, identitou
 titulu, metadaty, vzdálenými náhledy obrázků a ručním potvrzením.
 
-V5 je výrazně pokročilá a produkčně nasazená, ale ještě není úplně uzavřená.
-Není implementováno automatické párování, další metadata providery ani úplná
-kontrola chybějících epizod. Bezpečné dávkové hledání pouze ukládá kandidáty a
-nikdy je samo nepotvrzuje.
+V5 je produkčně nasazená, závěrečně ověřená a uzavřená. Automatické párování,
+další metadata providery, provider relace a úplná kontrola chybějících epizod
+nepatří do uzavřeného rozsahu V5. Bezpečné dávkové hledání pouze ukládá kandidáty
+a nikdy je samo nepotvrzuje.
 
 ## Hlavní princip
 
@@ -701,24 +729,23 @@ external_id
 artwork_type
 remote_url
 local_path
+thumbnail_path
+mime_type
 width
 height
-language
+file_size
 is_primary
 fetched_at
+updated_at
 ```
 
-Typy:
+Současná implementace používá `artwork_type=cover`; thumbnail je samostatný
+soubor evidovaný v `thumbnail_path`, nikoli samostatný databázový typ artworku.
 
-```text
-cover
-banner
-background
-logo
-thumbnail
-```
+### Plánovaná, ale neimplementovaná entita `MetadataSyncLog`
 
-#### `MetadataSyncLog`
+Synchronizační log nebyl součástí uzavíracího kritéria V5. Pro případné budoucí
+rozšíření byl navržen tento tvar:
 
 ```text
 id
@@ -888,7 +915,7 @@ Detail konkrétního `CatalogTitle` zobrazuje:
 - lokální, sezónní, absolutní a externí číslo epizody, pokud se liší.
 
 Externí popis je převáděn na bezpečný prostý text. Vzdálený obal lze konfigurací
-vypnout; lokální cache obrázků zatím není implementovaná.
+vypnout; při dostupném lokálním artworku se používá jeho cachovaný thumbnail.
 
 ### Ruční kontrola hierarchie
 
@@ -955,23 +982,17 @@ nepotvrzuje ani nepřepisuje.
 
 ## 6.5 Obrázky a cache
 
-Po ručním potvrzení se obal volitelně ukládá do lokální cache
-`data/artwork/<provider>/<external_id>/`. Ověřuje se schéma URL, MIME typ a
-velikost, zápis je atomický a vytváří se WebP náhled. Chyba obalu neruší uložení
-metadat a předchozí úspěšný obrázek zůstává zachovaný.
+Po ručním potvrzení nebo aktualizaci metadat se obal volitelně ukládá do lokální
+cache. Ověřuje se HTTP/HTTPS URL bez přihlašovacích údajů, podporovaný MIME typ,
+platnost obrázku a maximální velikost. Soubory se publikují atomicky a vedle
+originálu vzniká WebP thumbnail. Ruční akce **Obnovit obal** vynutí nové stažení.
 
-Cílové doporučení pro dokončení V5:
+Chyba stažení obalu neruší již potvrzená metadata. Neúspěšný download ani
+neplatný nový obrázek nepřepíše předchozí úspěšný artwork, takže cachovaný obal
+zůstává použitelný také při nedostupném internetu. Binární cache je vyloučená z
+Gitu.
 
-- metadata URL uložit,
-- obrázek stáhnout do lokální cache,
-- ověřit MIME typ,
-- nastavit maximální velikost,
-- vytvořit menší náhled,
-- ukládat pod stabilním názvem podle provideru a externího ID,
-- při chybě ponechat předchozí obrázek,
-- nedávat binární cache do Gitu.
-
-Možná cesta:
+Použitá cesta:
 
 ```text
 data/artwork/<provider>/<external_id>/
@@ -1005,8 +1026,9 @@ ANILIST_ENABLED=true
 ```
 
 Nastavení dalších providerů se přidají až společně s jejich implementací.
-`METADATA_CACHE_TTL_HOURS` a `METADATA_DOWNLOAD_ARTWORK` jsou připravené pro
-budoucí cache; současná iterace cache ani stahování ještě nespouští.
+`METADATA_DOWNLOAD_ARTWORK` řídí aktuálně implementované stahování obalů.
+`METADATA_CACHE_TTL_HOURS` je připravené pro případnou budoucí cache metadata
+odpovědí a nynější artwork cache jej nepoužívá.
 
 Tajné klíče a tokeny nikdy neukládat do Gitu.
 
@@ -1014,16 +1036,17 @@ Tajné klíče a tokeny nikdy neukládat do Gitu.
 
 ## 6.7 Bezpečnost a provozní pravidla V5
 
-Implementované jsou timeouty, ošetření rate limitu a síťových/HTTP/GraphQL chyb,
-transakční rollback a ochrana ručních či zamknutých dat. Následující pravidla
-platí i pro zbývající iterace V5; retry a lokální cache jsou stále budoucí práce:
+Implementované jsou explicitní dělené HTTP timeouty, ošetření rate limitu a
+síťových/HTTP/GraphQL chyb, transakční rollback, lokální cache artworku a ochrana
+ručních či zamknutých dat. Síťová nedostupnost je řízená chyba a neblokuje běžné
+prohlížení lokálního katalogu. Pro budoucí síťové integrace nadále platí:
 
 - síťová chyba nesmí poškodit katalog,
 - selhání provideru nesmí blokovat běžné prohlížení knihovny,
 - používat timeout,
-- používat retry s omezením,
+- případný retry vždy omezit,
 - respektovat rate limit,
-- cacheovat odpovědi,
+- podle potřeby cacheovat odpovědi,
 - neukládat tajné tokeny do logu,
 - nepřepisovat ruční údaje,
 - nepřepisovat zamknutá metadata,
@@ -1056,28 +1079,78 @@ Aktuálně automaticky ověřeno mimo jiné:
 - zachování titulků, metadat a ručních hardsubů,
 - všechny stávající filtry, hledání a řazení dál fungují.
 
-Automatické ověření po iteraci perzistentních kandidátů a obalů:
+Závěrečné automatické ověření 7. srpna 2026:
 
 ```bash
-pytest -v                         # 172 passed
+pytest -q                         # 172 passed
 python -m compileall app tests   # prošlo
 git diff --check                 # prošlo
-docker compose config            # prošlo
 ```
+
+V kontrolním shellu nebyly aliasy `pytest` a `python` přímo na `PATH`, proto byly
+první dva příkazy spuštěny ekvivalentně přes projektové virtuální prostředí jako
+`.venv/bin/pytest -q` a `.venv/bin/python -m compileall app tests`.
 
 ---
 
 ## 6.9 Stav uzavření V5
 
-Hotová je stabilní hierarchie `CatalogCollection → CatalogTitle → Video`, ruční
-kontrola a dělení kolekcí, oddělené číslování, ruční párování AniList metadat,
-zobrazení a správa uložených metadat i ochrana ručních rozhodnutí.
+V5 je dokončena a formálně uzavřena. Ověřený rozsah tvoří:
 
-V5 ještě není úplně uzavřená. Perzistentní kandidáti, jejich ruční odmítání,
-pomocné skóre, bezpečná cache obalů a omezené dávkové vyhledání jsou hotové.
-Zbývá synchronizační log, provider relace a případné další providery.
-Automatické potvrzování celé knihovny není povoleno bez samostatné bezpečné
-iterace.
+- stabilní hierarchie `CatalogCollection → CatalogTitle → Video`, ruční kontrola
+  a dělení kolekcí a oddělené číslování,
+- ruční hledání titulů na AniListu a ruční propojení `CatalogTitle` s AniList
+  metadaty,
+- perzistentní metadata kandidáti, jejich pomocné skóre, potvrzení, odmítnutí a
+  zrušení odmítnutí,
+- přehled **Metadata Review** a omezené dávkové hledání, které kandidáty nikdy
+  samo nepotvrzuje,
+- bezpečná normalizace lokálního názvu výhradně pro výchozí metadata search
+  query,
+- explicitní potvrzení konfliktu stejného primárního AniList ID,
+- zamykání ručně potvrzených metadat a ochrana ručních rozhodnutí,
+- lokální cache artworku, WebP thumbnail, ruční refresh a zachování starého
+  artworku při neúspěšném stažení,
+- explicitní HTTP timeouty a bezpečné offline chování bez poškození existujících
+  dat.
+
+`MetadataSyncLog` zůstává pouze plánovaným rozšířením; synchronizační historie
+není součástí uzavíracího kritéria této etapy. AniList relace, další providery,
+retry politika a automatické potvrzování celé knihovny jsou možné budoucí
+rozšíření, nikoli nedokončené položky V5.
+
+## 6.10 Související provozní hardening doplněný během V5
+
+Následující změny byly dokončeny a ověřeny během stejné etapy, ale jsou
+provozním hardeningem skeneru, nikoli funkčním rozsahem metadata V5:
+
+- `FFPROBE_TIMEOUT_SECONDS=60`,
+- `MEDIAINFO_TIMEOUT_SECONDS=60`,
+- `LIBRARY_ACCESS_TIMEOUT_SECONDS=10`,
+- `LIBRARY_HEALTHCHECK_INTERVAL_FILES=25`,
+- kontrola dostupnosti NASu před skenem,
+- průběžná kontrola NASu během skenu,
+- poslední kontrola dostupnosti před mazací fází,
+- rollback celé databázové transakce při výpadku knihovny během skenu,
+- zachování původního databázového záznamu změněného videa při timeoutu
+  `ffprobe`.
+
+Procesní healthcheck omezuje dobu čekání aplikace i v situaci, kdy filesystemová
+operace uvázne v CIFS klientovi. Ruční produkční test potvrdil bezpečné chování
+při odpojeném NASu před skenem i při jeho výpadku během skenu.
+
+## 6.11 Následující pracovní fáze – Stabilizace hierarchie a ladění UI nad reálnou knihovnou
+
+Tato fáze proběhne **před implementací kontroly úplnosti knihovny (V6)**.
+
+Cíl fáze:
+
+- ručně projít existující kolekce a tituly,
+- opravit skutečnou hierarchii sezón, částí, filmů, OVA a dalších titulů,
+- ověřovat hierarchii pomocí statusu `verified`,
+- při praktické práci identifikovat problémy nebo zbytečně složité kroky v UI,
+- průběžně opravovat problémy nalezené při ruční tvorbě hierarchie,
+- zachovat ručně ověřenou hierarchii proti automatickému přepsání.
 
 ---
 
@@ -1100,6 +1173,18 @@ V6 musí porovnávat konkrétní `CatalogTitle` proti jeho externímu počtu epi
 používat `season_episode_number` nebo `external_episode_number`, nikdy slepě
 `absolute_episode_number`. Současný filtr **Bez CZ/SK** znamená chybějící překlad,
 nikoli skutečně chybějící epizodu.
+
+### Zásadní pravidlo kontroly úplnosti
+
+- chybějící běžná epizoda potvrzené série nebo sezóny je `ERROR`,
+- duplicitní běžná epizoda je `ERROR`,
+- chybějící OVA, ONA, Special, Bonus, OP, ED, NCOP nebo NCED není chyba úplnosti
+  hlavní série,
+- absence tohoto doplňkového obsahu je maximálně `INFO` o jeho existenci,
+- nejisté nebo nejednoznačné číslování je `WARNING` a vyžaduje ruční kontrolu,
+- doplňkový obsah nesmí způsobit označení hlavní série jako nekompletní.
+
+Toto pravidlo je zatím pouze dokumentované; implementace V6 nebyla zahájena.
 
 ---
 
@@ -1192,14 +1277,15 @@ AnimeDB zůstává vlastní katalog a správce knihovny.
 
 Aktuálně nezačínat import V7 ani přehrávání.
 
-Bezprostřední další krok:
+Bezprostřední další krok je fáze **Stabilizace hierarchie a ladění UI nad reálnou
+knihovnou** popsaná v části 6.11:
 
-1. přes `/hierarchy-review` projít historické kolekce ve stavech `review_required`
-   a `conflict`,
+1. přes `/hierarchy-review` a detaily kolekcí projít existující kolekce a tituly,
 2. ručně potvrdit nebo rozdělit pouze kolekce, jejichž strukturu lze ověřit,
-3. pokračovat v ručním párování jednotlivých `CatalogTitle` na AniList,
-4. dokončit zbývající provozní části V5 bez hromadného automatického párování,
-5. potom zahájit malou iteraci V6 pro kontrolu skutečně chybějících epizod,
+3. ukládat ověřenou hierarchii se statusem `verified`,
+4. při této práci průběžně opravovat konkrétní problémy a zbytečně složité kroky
+   v UI,
+5. teprve po této stabilizaci zahájit V6 podle pravidel kontroly úplnosti,
 6. V7 spustit až nad ověřenou databázovou hierarchií.
 
 Nejasný interní suffix ani externí návrh není oprávněním k automatickému rozdělení
