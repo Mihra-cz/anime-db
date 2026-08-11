@@ -1248,6 +1248,42 @@ Automatické ověření 11. srpna 2026:
 git diff --check                       # prošlo
 ```
 
+## 6.13 Jednosériové kolekce a jednodušší ruční rozdělení
+
+Ve fázi **Stabilizace hierarchie a ladění UI nad reálnou knihovnou** byl na
+reálném případu `Akame ga Kill! (L14)` doplněn bezpečný návrh pro jednoznačné
+jednosériové kolekce. Pokud kolekce obsahuje právě jeden obecný `CatalogTitle`
+s alespoň jedním videem, bez určené sezóny, konfliktu nebo dřívějšího ručního
+zařazení, zobrazí Hierarchy Review návrh **Nastavit jako Season 1**. Formát
+`TV` nebo `TV_SHORT` z uložených metadat může návrh pouze vizuálně podpořit;
+metadata nikdy změnu sama neprovedou.
+
+Akce vyžaduje explicitní potvrzení a nastaví pouze ruční číslo sezóny `1`,
+označení `S1`, typ `season` a příznak manuálního override. Nemění přiřazení
+videí, episode numbering, metadata vazbu, `hierarchy_status` kolekce ani datum
+ověření kolekce či titulu. Uživatel proto stále samostatně potvrzuje
+**Zařazení ověřeno** na úrovni `CatalogTitle` a **Hierarchie ověřena** na úrovni
+celé kolekce.
+
+Výchozí ruční rozdělení v Hierarchy Review nyní používá lidský formulář pro
+název a typ části, sezónu, Part, pořadí, rozsah epizod, offset, pravidlo názvu
+souboru a explicitní `video_ids`. Formulář se převádí do existujícího
+`ManualTitleDefinition`, takže používá původní validace, read-only preview a
+stejnou potvrzovací akci. Technický JSON zůstává dostupný v rozbalovací sekci
+pro pokročilé případy. Virtuální rozdělení nadále nemění ani nepřesouvá fyzické
+soubory na NASu a nedochází k žádnému automatickému přepisování hierarchie.
+
+V6 nebyla zahájena a produkční databáze nebyla touto změnou automaticky
+upravena.
+
+Automatické ověření 11. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                       # 205 passed
+.venv/bin/python -m compileall app tests  # prošlo
+git diff --check                          # prošlo
+```
+
 ---
 
 # 7. V6 – Úplnost knihovny ⏳

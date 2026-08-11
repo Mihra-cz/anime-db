@@ -7,11 +7,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.database import Base
 from app.catalog import video_matches_filter
 from app.hierarchy_review import (
-    ManualTitleDefinition, apply_manual_split, collection_requires_review,
-    extract_local_period_hint, parse_manual_definitions, preview_assignments,
+    ManualTitleDefinition, apply_manual_split, apply_single_season_suggestion,
+    collection_requires_review, extract_local_period_hint, parse_manual_definitions,
+    parse_simple_definitions, preview_assignments, simple_definition_rows,
+    single_season_suggestion,
 )
 from app.models import (
-    CatalogCollection, CatalogTitle, ExternalTitleLink, InternalSubtitle, Video,
+    CatalogCollection, CatalogTitle, ExternalTitleLink, InternalSubtitle,
+    TitleMetadata, Video, utc_now,
 )
 from app.migrations import migrate_schema
 from app.scanner import scan_library
@@ -63,6 +66,28 @@ def definitions(first_title_id: int):
     ]""")
 
 
+def simple_collection(*, part_type="title", status="review_required", with_video=True):
+    collection = CatalogCollection(
+        id=1, local_title="Akame ga Kill! (L14)",
+        normalized_local_title="akame ga kill l14",
+        relative_root_path="Anime/Akame ga Kill! (L14)", hierarchy_status=status,
+    )
+    title = CatalogTitle(
+        id=1, collection=collection, local_title=collection.local_title,
+        normalized_local_title=collection.normalized_local_title,
+        relative_root_path=collection.relative_root_path, part_type=part_type,
+    )
+    if with_video:
+        Video(
+            id=1, relative_path=f"{collection.relative_root_path}/Episode 01.mkv",
+            root_folder="Anime", filename="Episode 01.mkv", size=1, mtime_ns=1,
+            local_episode_number=1, season_episode_number=1,
+            absolute_episode_number=1, catalog_title=title,
+            catalog_collection=collection,
+        )
+    return collection, title
+
+
 def test_flat_collection_with_episodes_1_to_26_requires_review():
     engine, collection_id, _ = seeded_collection()
     with Session(engine) as session:
@@ -80,6 +105,163 @@ def test_internal_period_hint_does_not_infer_season_count_or_change_identity():
         assert title.season_number is None
         assert collection.local_title == "Anime title (Z18-L20)"
         assert collection.relative_root_path == "Anime/Anime title (Z18-L20)"
+
+
+def test_single_generic_title_gets_manual_season_one_suggestion():
+    collection, title = simple_collection()
+    title.metadata_record = TitleMetadata(
+        catalog_title_id=title.id, display_title="Akame ga Kill!",
+        format="TV", episode_count=24,
+    )
+
+    suggestion = single_season_suggestion(collection)
+
+    assert suggestion is not None
+    assert suggestion.title is title
+    assert suggestion.metadata_supports_tv is True
+
+
+def test_confirmed_season_one_suggestion_changes_only_manual_title_hierarchy():
+    collection, title = simple_collection()
+    collection_status = collection.hierarchy_status
+    video = title.videos[0]
+    original_title = video.catalog_title
+    episode_values = (
+        video.local_episode_number, video.season_episode_number,
+        video.absolute_episode_number, video.external_episode_number,
+    )
+    metadata = TitleMetadata(
+        catalog_title_id=title.id, display_title="Akame ga Kill!",
+        metadata_provider="anilist", metadata_external_id="20613", format="TV",
+    )
+    link = ExternalTitleLink(
+        catalog_title_id=title.id, provider="anilist", external_id="20613",
+        match_method="manual_search", is_primary=True, is_manual=True,
+    )
+    title.metadata_record = metadata
+    title.external_links.append(link)
+
+    changed = apply_single_season_suggestion(collection)
+
+    assert changed is title
+    assert title.season_number_manual == 1
+    assert title.season_label_manual == "S1"
+    assert title.part_type_manual == "season"
+    assert title.hierarchy_manual_override is True
+    assert title.hierarchy_verified_at is None
+    assert collection.hierarchy_status == collection_status
+    assert collection.hierarchy_verified_at is None
+    assert video.catalog_title is original_title
+    assert (
+        video.local_episode_number, video.season_episode_number,
+        video.absolute_episode_number, video.external_episode_number,
+    ) == episode_values
+    assert title.metadata_record is metadata
+    assert title.external_links == [link]
+
+
+@pytest.mark.parametrize("part_type", ["film", "ova"])
+def test_non_series_manual_type_does_not_get_season_one_suggestion(part_type):
+    collection, title = simple_collection()
+    title.part_type_manual = part_type
+    title.hierarchy_manual_override = True
+
+    assert single_season_suggestion(collection) is None
+
+
+def test_collection_with_two_titles_does_not_get_season_one_suggestion():
+    collection, _ = simple_collection()
+    CatalogTitle(
+        id=2, collection=collection, local_title="Second title",
+        normalized_local_title="second title",
+        relative_root_path=f"{collection.relative_root_path}/Second title",
+        part_type="title",
+    )
+
+    assert single_season_suggestion(collection) is None
+
+
+def test_manual_season_two_does_not_get_season_one_suggestion():
+    collection, title = simple_collection()
+    title.season_number_manual = 2
+    title.season_label_manual = "S2"
+    title.part_type_manual = "season"
+    title.hierarchy_manual_override = True
+
+    assert single_season_suggestion(collection) is None
+
+
+def test_conflicting_hierarchy_does_not_get_season_one_suggestion():
+    collection, _ = simple_collection(status="conflict")
+
+    assert single_season_suggestion(collection) is None
+
+
+def test_title_without_videos_does_not_get_season_one_suggestion():
+    collection, _ = simple_collection(with_video=False)
+
+    assert single_season_suggestion(collection) is None
+
+
+def test_existing_automatic_season_one_does_not_get_duplicate_suggestion():
+    collection, title = simple_collection()
+    title.season_number = 1
+    title.season_label = "S1"
+    title.part_type = "season"
+
+    assert single_season_suggestion(collection) is None
+
+
+def test_previously_verified_title_structure_does_not_get_suggestion():
+    collection, title = simple_collection()
+    title.hierarchy_verified_at = utc_now()
+
+    assert single_season_suggestion(collection) is None
+
+
+def test_suggestion_and_simple_preview_data_are_read_only():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection, _ = simple_collection()
+        session.add(collection)
+        session.commit()
+
+        assert single_season_suggestion(collection) is not None
+        rows = simple_definition_rows(collection)
+        definitions = parse_simple_definitions(rows)
+        preview_assignments(list(collection.videos), definitions)
+
+        assert not session.dirty
+        assert not session.new
+        assert not session.deleted
+
+
+def test_simple_definition_form_uses_existing_backend_semantics():
+    rows = [
+        {
+            "title_id": "1", "local_title": "Part 1",
+            "season_number_manual": "1", "season_label_manual": "S1",
+            "part_number": "1", "part_type_manual": "part",
+            "episode_start": "1", "episode_end": "12",
+            "episode_start_offset": "0", "numbering_mode": "absolute",
+            "sort_order": "1", "filename_pattern": "", "video_ids": "1, 2 3",
+        },
+        {
+            "title_id": "", "local_title": "", "numbering_mode": "unknown",
+        },
+    ]
+
+    parsed = parse_simple_definitions(rows)
+
+    assert len(parsed) == 1
+    assert parsed[0] == ManualTitleDefinition(
+        title_id=1, local_title="Part 1", manual_display_title=None,
+        season_number_manual=1, season_label_manual="S1", part_number=1,
+        part_type_manual="part", episode_start=1, episode_end=12,
+        episode_start_offset=0, numbering_mode="absolute", sort_order=1,
+        filename_pattern=None, video_ids=(1, 2, 3),
+    )
 
 
 def test_manual_split_creates_two_titles_and_assigns_ranges():

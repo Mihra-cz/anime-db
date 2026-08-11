@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 import re
@@ -17,6 +18,12 @@ PERIOD_HINT = re.compile(
 )
 ALLOWED_PART_TYPES = {"title", "season", "part", "cour", "film", "ova", "special"}
 ALLOWED_NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
+SIMPLE_DEFINITION_FIELDS = (
+    "title_id", "local_title", "manual_display_title", "season_number_manual",
+    "season_label_manual", "part_number", "part_type_manual", "episode_start",
+    "episode_end", "episode_start_offset", "numbering_mode", "sort_order",
+    "filename_pattern", "video_ids",
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +51,12 @@ class AssignmentPreview:
     conflicts: dict[int, tuple[int, ...]]
 
 
+@dataclass(frozen=True)
+class SingleSeasonSuggestion:
+    title: CatalogTitle
+    metadata_supports_tv: bool
+
+
 def extract_local_period_hint(local_title: str) -> str | None:
     matches = PERIOD_HINT.findall(local_title or "")
     return matches[-1].upper() if matches else None
@@ -59,6 +72,51 @@ def collection_requires_review(collection: CatalogCollection, videos: list[Video
     if len(collection.titles) <= 1 and len(numbers) >= 14 and numbers == list(range(numbers[0], numbers[-1] + 1)):
         return "Souvislá řada epizod bez sezónních podsložek může obsahovat více částí."
     return None
+
+
+def single_season_suggestion(
+    collection: CatalogCollection,
+) -> SingleSeasonSuggestion | None:
+    if (
+        len(collection.titles) != 1
+        or collection.hierarchy_status in {"verified", "conflict", "not_applicable"}
+        or collection.hierarchy_verified_at is not None
+    ):
+        return None
+    title = collection.titles[0]
+    if (
+        not title.videos
+        or title.effective_season_number is not None
+        or title.effective_season_label is not None
+        or (title.part_type or "title") not in {"title", "season"}
+        or title.part_type_manual is not None
+        or title.season_number_manual is not None
+        or title.season_label_manual is not None
+        or title.sort_order_manual is not None
+        or title.hierarchy_manual_override
+        or title.hierarchy_verified_at is not None
+    ):
+        return None
+    metadata_format = (
+        title.metadata_record.format.strip().upper()
+        if title.metadata_record and title.metadata_record.format else ""
+    )
+    return SingleSeasonSuggestion(
+        title=title,
+        metadata_supports_tv=metadata_format in {"TV", "TV_SHORT"},
+    )
+
+
+def apply_single_season_suggestion(collection: CatalogCollection) -> CatalogTitle:
+    suggestion = single_season_suggestion(collection)
+    if suggestion is None:
+        raise ValueError("Kolekce už nesplňuje podmínky bezpečného návrhu Season 1.")
+    title = suggestion.title
+    title.season_number_manual = 1
+    title.season_label_manual = "S1"
+    title.part_type_manual = "season"
+    title.hierarchy_manual_override = True
+    return title
 
 
 def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
@@ -116,6 +174,55 @@ def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
             video_ids=video_ids,
         ))
     return definitions
+
+
+def parse_simple_definitions(
+    rows: list[Mapping[str, str]],
+) -> list[ManualTitleDefinition]:
+    values = []
+    for row in rows:
+        value = {field: str(row.get(field) or "").strip() for field in SIMPLE_DEFINITION_FIELDS}
+        is_blank_new_row = (
+            not value["title_id"]
+            and not value["local_title"]
+            and not any(
+                value[field] for field in SIMPLE_DEFINITION_FIELDS
+                if field not in {"title_id", "local_title", "numbering_mode"}
+            )
+            and value["numbering_mode"] in {"", "unknown"}
+        )
+        if is_blank_new_row:
+            continue
+        value["numbering_mode"] = value["numbering_mode"] or "unknown"
+        value["video_ids"] = [
+            token for token in re.split(r"[\s,]+", value["video_ids"])
+            if token
+        ]
+        values.append(value)
+    return parse_manual_definitions(json.dumps(values, ensure_ascii=False))
+
+
+def simple_definition_rows(collection: CatalogCollection) -> list[dict[str, str | int | None]]:
+    rows = []
+    for title in sorted(collection.titles, key=lambda item: item.effective_sort_order):
+        rows.append({
+            "title_id": title.id,
+            "local_title": title.local_title,
+            "manual_display_title": title.manual_display_title,
+            "season_number_manual": title.season_number_manual,
+            "season_label_manual": title.season_label_manual,
+            "part_number": title.part_number,
+            "part_type_manual": title.part_type_manual,
+            "episode_start": title.episode_start,
+            "episode_end": title.episode_end,
+            "episode_start_offset": title.episode_start_offset,
+            "numbering_mode": title.numbering_mode,
+            "sort_order": title.effective_sort_order,
+            "filename_pattern": title.episode_filename_pattern,
+            "video_ids": "",
+        })
+    rows.append({field: "" for field in SIMPLE_DEFINITION_FIELDS})
+    return rows
 
 
 def _optional_text(value, limit: int) -> str | None:
@@ -269,3 +376,14 @@ def definitions_as_json(collection: CatalogCollection) -> str:
             "video_ids": [],
         })
     return json.dumps(values, ensure_ascii=False, indent=2)
+
+
+def definitions_to_json(definitions: list[ManualTitleDefinition]) -> str:
+    return json.dumps(
+        [
+            {**definition.__dict__, "video_ids": list(definition.video_ids)}
+            for definition in definitions
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )

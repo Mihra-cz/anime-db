@@ -33,8 +33,10 @@ from .config import Settings, get_settings
 from .database import Base, make_engine, make_session_factory
 from .migrations import migrate_schema
 from .hierarchy_review import (
-    apply_manual_split, definitions_as_json, parse_manual_definitions,
-    preview_assignments,
+    SIMPLE_DEFINITION_FIELDS, apply_manual_split, apply_single_season_suggestion,
+    definitions_as_json, definitions_to_json, parse_manual_definitions,
+    parse_simple_definitions,
+    preview_assignments, simple_definition_rows, single_season_suggestion,
 )
 from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
@@ -532,11 +534,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def hierarchy_review_context(
         request: Request, collection_id: int, definitions_json: str | None = None,
         preview=None, error: str | None = None, external_search_candidates=None,
+        simple_rows=None, message: str | None = None,
     ):
         with sessions() as session:
             collection = session.scalar(select(CatalogCollection).options(
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
                 selectinload(CatalogCollection.videos),
             ).where(CatalogCollection.id == collection_id))
             if collection is None:
@@ -586,6 +590,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             numbering_unknown = sum(
                 item["summary"].unknown for item in title_numbering
             )
+            season_one = single_season_suggestion(collection)
             return templates.TemplateResponse(request, "hierarchy_review_detail.html", {
                 "collection": collection, "videos": videos,
                 "episode_min": min(episode_numbers) if episode_numbers else None,
@@ -597,6 +602,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "metadata_status_labels": METADATA_STATUS_LABELS,
                 "title_numbering": title_numbering,
                 "numbering_unknown": numbering_unknown,
+                "season_one_suggestion": season_one,
+                "simple_rows": simple_rows or simple_definition_rows(collection),
+                "message": message,
             })
 
     @app.get("/hierarchy-review", response_class=HTMLResponse)
@@ -626,8 +634,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         })
 
     @app.get("/hierarchy-review/{collection_id}", response_class=HTMLResponse)
-    def hierarchy_review_detail(request: Request, collection_id: int):
-        return hierarchy_review_context(request, collection_id)
+    def hierarchy_review_detail(
+        request: Request, collection_id: int, message: str | None = None,
+    ):
+        return hierarchy_review_context(request, collection_id, message=message)
 
     def metadata_review_context(request: Request, status: str = "without", batch_result=None):
         allowed = {"without", "pending", "manual", "conflict", "missing-artwork", "low-score"}
@@ -693,6 +703,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 request, collection_id, definitions_json, error=str(exc)
             )
 
+    @app.post("/hierarchy-review/{collection_id}/simple-preview", response_class=HTMLResponse)
+    async def hierarchy_review_simple_preview(request: Request, collection_id: int):
+        form = await request.form()
+        columns = {
+            field: [str(value) for value in form.getlist(field)]
+            for field in SIMPLE_DEFINITION_FIELDS
+        }
+        row_count = len(columns["title_id"])
+        simple_rows = [
+            {field: columns[field][index] for field in SIMPLE_DEFINITION_FIELDS}
+            for index in range(row_count)
+        ] if row_count and all(len(values) == row_count for values in columns.values()) else []
+        try:
+            if not simple_rows:
+                raise ValueError("Jednoduchý formulář částí není úplný.")
+            definitions = parse_simple_definitions(simple_rows)
+            definitions_json = definitions_to_json(definitions)
+            with sessions() as session:
+                collection = session.scalar(select(CatalogCollection).options(
+                    selectinload(CatalogCollection.videos)
+                ).where(CatalogCollection.id == collection_id))
+                if collection is None:
+                    raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
+                preview = preview_assignments(collection.videos, definitions)
+            return hierarchy_review_context(
+                request, collection_id, definitions_json, preview,
+                simple_rows=simple_rows,
+            )
+        except ValueError as exc:
+            return hierarchy_review_context(
+                request, collection_id, error=str(exc), simple_rows=simple_rows or None,
+            )
+
     @app.post("/hierarchy-review/{collection_id}/metadata-search", response_class=HTMLResponse)
     def hierarchy_review_metadata_search(
         request: Request, collection_id: int, metadata_query: str = Form(...),
@@ -750,6 +793,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             session.commit()
         return RedirectResponse(f"/hierarchy-review/{collection_id}", status_code=303)
+
+    @app.post("/hierarchy-review/{collection_id}/season-one")
+    def hierarchy_review_set_season_one(
+        collection_id: int, confirm_single_season: bool = Form(False),
+    ):
+        if not confirm_single_season:
+            raise HTTPException(
+                status_code=400,
+                detail="Nastavení Season 1 je nutné explicitně potvrdit.",
+            )
+        with sessions() as session:
+            collection = session.scalar(select(CatalogCollection).options(
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
+            ).where(CatalogCollection.id == collection_id))
+            if collection is None:
+                raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
+            try:
+                apply_single_season_suggestion(collection)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': 'Season 1 byla předvyplněna; zařazení ani hierarchie zatím nejsou ověřené.'})}",
+            status_code=303,
+        )
 
     @app.post("/collections/{collection_id}/titles/{catalog_title_id}/hierarchy")
     def update_title_hierarchy(

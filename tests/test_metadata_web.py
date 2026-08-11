@@ -1,6 +1,8 @@
 from app.main import app, templates
+from app.hierarchy_review import simple_definition_rows, single_season_suggestion
 from app.metadata.providers.base import ProviderTitleMetadata
-from app.models import CatalogTitle, Video
+from app.models import CatalogCollection, CatalogTitle, Video, utc_now
+from app.numbering import summarize_title_numbering
 
 
 def test_detail_template_displays_anilist_candidates():
@@ -95,6 +97,68 @@ def test_candidate_and_artwork_mutations_are_post_only():
     assert paths["/catalog/{filter_name}/titles/{catalog_title_id}/metadata/artwork/refresh"] == {"POST"}
     assert paths["/metadata/batch-search"] == {"POST"}
     assert paths["/titles/{catalog_title_id}/numbering/sequence"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/season-one"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/simple-preview"] == {"POST"}
+
+
+def _render_hierarchy_review(*, verified=False):
+    collection = CatalogCollection(
+        id=1, local_title="Akame ga Kill! (L14)",
+        normalized_local_title="akame ga kill l14",
+        relative_root_path="Anime/Akame ga Kill! (L14)",
+        hierarchy_status="verified" if verified else "review_required",
+        hierarchy_verified_at=utc_now() if verified else None,
+    )
+    title = CatalogTitle(
+        id=1, collection=collection, local_title=collection.local_title,
+        normalized_local_title=collection.normalized_local_title,
+        relative_root_path=collection.relative_root_path, part_type="title",
+        hierarchy_verified_at=utc_now() if verified else None,
+    )
+    video = Video(
+        id=1, relative_path=f"{collection.relative_root_path}/Episode 01.mkv",
+        root_folder="Anime", filename="Episode 01.mkv", size=1, mtime_ns=1,
+        season_episode_number=1, catalog_title=title,
+        catalog_collection=collection,
+    )
+    summary = summarize_title_numbering([video])
+    return templates.env.get_template("hierarchy_review_detail.html").render(
+        request=type("Request", (), {
+            "url_for": lambda self, *args, **kwargs: "/static/style.css",
+        })(),
+        collection=collection, videos=[video], numbering_unknown=0,
+        message=None, error=None, season_one_suggestion=single_season_suggestion(collection),
+        title_numbering=[{"title": title, "summary": summary}],
+        metadata_status_labels={"unlinked": "Bez metadat"},
+        simple_rows=simple_definition_rows(collection), definitions_json="[]",
+        external_search_candidates=[], external_candidates=[],
+        preview=None, preview_rows=[],
+    )
+
+
+def test_hierarchy_review_shows_season_one_suggestion_and_human_friendly_form():
+    rendered = _render_hierarchy_review()
+
+    assert "Pravděpodobně jednoduchá jednosériová kolekce" in rendered
+    assert "Nastavit jako Season 1" in rendered
+    assert "Jednoduchá definice ručního rozdělení" in rendered
+    assert "Název části" in rendered
+    assert "Číslo sezóny" in rendered
+    assert "Rozsah epizod od" in rendered
+    assert "Virtuální rozdělení nemění ani nepřesouvá fyzické soubory na NASu." in rendered
+    assert "<summary>Pokročilé / zobrazit JSON</summary>" in rendered
+    assert 'name="definitions_json"' in rendered
+    assert rendered.index("Jednoduchá definice ručního rozdělení") < rendered.index(
+        "Pokročilé / zobrazit JSON"
+    )
+
+
+def test_collection_and_title_verification_texts_are_distinct():
+    rendered = _render_hierarchy_review(verified=True)
+
+    assert "Hierarchie ověřena" in rendered
+    assert "Zařazení ověřeno" in rendered
+    assert "Nastavit jako Season 1" not in rendered
 
 
 def test_episode_column_distinguishes_season_episode_absolute_and_external_numbers():

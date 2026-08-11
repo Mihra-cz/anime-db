@@ -1,14 +1,86 @@
 {% extends "base.html" %}
 {% block title %}Kontrola {{ collection.local_title }} · AnimeDB{% endblock %}
-{% block content %}<p><a href="/hierarchy-review">← Přehled kontrol</a> · <a href="/collections/{{ collection.id }}">Otevřít kolekci</a></p>
+{% block content %}
+<p><a href="/hierarchy-review">← Přehled kontrol</a> · <a href="/collections/{{ collection.id }}">Otevřít kolekci</a></p>
 <h1>{{ collection.local_title }}</h1>
-<p>{{ collection.relative_root_path }} · stav <strong>{{ collection.hierarchy_status }}</strong>{% if collection.hierarchy_verified_at %} · Hierarchie ručně ověřena{% endif %}</p>
+<p>{{ collection.relative_root_path }} · stav <strong>{{ collection.hierarchy_status }}</strong>{% if collection.hierarchy_verified_at %} · Hierarchie ověřena{% endif %}</p>
 <p>Interní suffix: {{ collection.local_period_hint or '—' }} · videí: {{ videos|length }}</p>
-{% if (collection.hierarchy_verified_at or collection.hierarchy_status == 'verified') and numbering_unknown %}<p class="warning">Hierarchie byla ručně ověřena, ale {{ numbering_unknown }} {{ 'video stále nemá' if numbering_unknown == 1 else 'videa stále nemají' if numbering_unknown in [2, 3, 4] else 'videí stále nemá' }} určené číslo epizody.</p>{% endif %}
-{% if collection.hierarchy_note %}<p class="warning">Důvod kontroly: {{ collection.hierarchy_note }}</p>{% endif %}{% if error %}<p class="error">{{ error }}</p>{% endif %}
-<form class="inline-form" method="post" action="/hierarchy-review/{{ collection.id }}/status"><select name="hierarchy_status">{% for value, label in [('automatic','Automatická'),('review_required','Vyžaduje kontrolu'),('verified','Ověřená'),('conflict','Konflikt'),('not_applicable','Nevztahuje se')] %}<option value="{{ value }}" {% if collection.hierarchy_status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select><input type="text" maxlength="1000" name="hierarchy_note" value="{{ collection.hierarchy_note or '' }}" placeholder="Poznámka ke kontrole"><button type="submit">Uložit stav kontroly</button></form>
-<section class="panel"><h2>Současné části a číslování</h2><ul>{% for item in title_numbering %}{% set title = item.title %}{% set summary = item.summary %}<li><a href="/titles/{{ title.id }}">{{ title.local_title }}</a> · {{ title.effective_season_label or title.effective_part_type }} · {{ metadata_status_labels.get(title.metadata_status, title.metadata_status) }} · videí: {{ summary.total }} · očíslováno: {{ summary.numbered }}/{{ summary.total }}{% if summary.episode_min is not none %} · rozsah: E{{ summary.episode_min }}–E{{ summary.episode_max }}{% endif %} · mezery: {{ summary.gaps|join(', ') if summary.gaps else 'žádné' }}{% if summary.duplicate_numbers %} · <span class="warning">duplicity: {{ summary.duplicate_numbers|join(', ') }}</span>{% endif %}{% if summary.requires_review %} · <span class="warning">stav číslování: vyžaduje kontrolu</span>{% else %} · <span class="verified">číslování vyřešeno</span>{% endif %}{% if title.episode_start is not none %} · pravidlo přiřazení {{ title.episode_start }}–{{ title.episode_end }}{% endif %}</li>{% else %}<li>Žádné části.</li>{% endfor %}</ul></section>
+{% if message %}<div class="notice success">{{ message }}</div>{% endif %}
+{% if (collection.hierarchy_verified_at or collection.hierarchy_status == 'verified') and numbering_unknown %}<p class="warning">Hierarchie byla ověřena, ale {{ numbering_unknown }} {{ 'video stále nemá' if numbering_unknown == 1 else 'videa stále nemají' if numbering_unknown in [2, 3, 4] else 'videí stále nemá' }} určené číslo epizody.</p>{% endif %}
+{% if collection.hierarchy_note %}<p class="warning">Důvod kontroly: {{ collection.hierarchy_note }}</p>{% endif %}
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+
+<form class="inline-form" method="post" action="/hierarchy-review/{{ collection.id }}/status">
+  <label>Stav celkové hierarchie
+    <select name="hierarchy_status">{% for value, label in [('automatic','Automatická'),('review_required','Vyžaduje kontrolu'),('verified','Hierarchie ověřena'),('conflict','Konflikt'),('not_applicable','Nevztahuje se')] %}<option value="{{ value }}" {% if collection.hierarchy_status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+  </label>
+  <input type="text" maxlength="1000" name="hierarchy_note" value="{{ collection.hierarchy_note or '' }}" placeholder="Poznámka ke kontrole">
+  <button type="submit">Uložit stav hierarchie</button>
+</form>
+
+{% if season_one_suggestion %}
+<section class="panel">
+  <h2>Pravděpodobně jednoduchá jednosériová kolekce</h2>
+  <p>Tato kolekce obsahuje jeden titul a není u něj určena sezóna. Nastavit jako Season 1?{% if season_one_suggestion.metadata_supports_tv %} <span class="verified">Metadata uvádějí TV / TV_SHORT</span>{% endif %}</p>
+  <p>Použijte pouze pokud jde skutečně o první a jedinou sezónu této kolekce. Akce nemění soubory, číslování epizod ani metadata a sama nepotvrdí zařazení nebo celou hierarchii.</p>
+  <form method="post" action="/hierarchy-review/{{ collection.id }}/season-one">
+    <label><input type="checkbox" name="confirm_single_season" value="true" required> Potvrzuji, že jde o Season 1.</label>
+    <button type="submit">Nastavit jako Season 1</button>
+  </form>
+</section>
+{% endif %}
+
+<section class="panel"><h2>Současné části a číslování</h2><ul>{% for item in title_numbering %}{% set title = item.title %}{% set summary = item.summary %}<li><a href="/titles/{{ title.id }}">{{ title.local_title }}</a> · {{ title.effective_season_label or title.effective_part_type }}{% if title.hierarchy_verified_at %} · <span class="verified">Zařazení ověřeno</span>{% endif %} · {{ metadata_status_labels.get(title.metadata_status, title.metadata_status) }} · videí: {{ summary.total }} · očíslováno: {{ summary.numbered }}/{{ summary.total }}{% if summary.episode_min is not none %} · rozsah: E{{ summary.episode_min }}–E{{ summary.episode_max }}{% endif %} · mezery: {{ summary.gaps|join(', ') if summary.gaps else 'žádné' }}{% if summary.duplicate_numbers %} · <span class="warning">duplicity: {{ summary.duplicate_numbers|join(', ') }}</span>{% endif %}{% if summary.requires_review %} · <span class="warning">stav číslování: vyžaduje kontrolu</span>{% else %} · <span class="verified">číslování vyřešeno</span>{% endif %}{% if title.episode_start is not none %} · pravidlo přiřazení {{ title.episode_start }}–{{ title.episode_end }}{% endif %}</li>{% else %}<li>Žádné části.</li>{% endfor %}</ul></section>
+
+<section class="panel">
+  <h2>Jednoduchá definice ručního rozdělení</h2>
+  <p><strong>Virtuální rozdělení nemění ani nepřesouvá fyzické soubory na NASu.</strong></p>
+  <p>Rozsah epizod: Použijte například pokud jedna fyzická složka obsahuje díly 1–24 a chcete ji virtuálně rozdělit na části 1–12 a 13–24.</p>
+  <p>Pravidlo podle názvu souboru: Použijte pokud lze část bezpečně určit podle názvu souborů.</p>
+  <p>Výběr konkrétních videí: Použijte pro nestandardní případy, které nelze bezpečně rozdělit rozsahem nebo názvem.</p>
+  <form class="hierarchy-form" method="post" action="/hierarchy-review/{{ collection.id }}/simple-preview">
+    <div class="table-wrap"><table><thead><tr><th>Část</th><th>Typ a sezóna</th><th>Pořadí a číslování</th><th>Pravidla přiřazení</th></tr></thead><tbody>
+    {% for row in simple_rows %}
+      <tr>
+        <td>
+          <input type="hidden" name="title_id" value="{{ row.title_id }}">
+          <input type="hidden" name="manual_display_title" value="{{ row.manual_display_title or '' }}">
+          <label>Název části <input type="text" maxlength="200" name="local_title" value="{{ row.local_title }}" {% if row.title_id %}required{% endif %} placeholder="{{ 'Nová virtuální část (volitelné)' if not row.title_id else '' }}"></label>
+        </td>
+        <td>
+          <label>Typ části <select name="part_type_manual"><option value="">automaticky</option>{% for value, label in [('season','Sezóna'),('part','Part'),('cour','Cour'),('film','Film'),('ova','OVA'),('special','Special'),('title','Titul')] %}<option value="{{ value }}" {% if row.part_type_manual == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+          <label>Číslo sezóny <input type="number" min="1" name="season_number_manual" value="{{ row.season_number_manual if row.season_number_manual is not none else '' }}"></label>
+          <label>Označení sezóny <input type="text" maxlength="50" name="season_label_manual" value="{{ row.season_label_manual or '' }}" placeholder="S1"></label>
+          <label>Číslo Part <input type="number" min="1" name="part_number" value="{{ row.part_number if row.part_number is not none else '' }}"></label>
+        </td>
+        <td>
+          <label>Pořadí <input type="number" min="0" name="sort_order" value="{{ row.sort_order if row.sort_order is not none else '' }}"></label>
+          <label>Offset číslování <input type="number" min="0" name="episode_start_offset" value="{{ row.episode_start_offset if row.episode_start_offset is not none else '' }}"></label>
+          <label>Režim číslování <select name="numbering_mode">{% for value, label in [('unknown','automaticky'),('season_local','v rámci sezóny'),('absolute','absolutní'),('mixed','smíšené')] %}<option value="{{ value }}" {% if (row.numbering_mode or 'unknown') == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+        </td>
+        <td>
+          <label>Rozsah epizod od <input type="number" min="1" name="episode_start" value="{{ row.episode_start if row.episode_start is not none else '' }}"></label>
+          <label>do <input type="number" min="1" name="episode_end" value="{{ row.episode_end if row.episode_end is not none else '' }}"></label>
+          <label>Pravidlo podle názvu souboru <input type="text" maxlength="100" name="filename_pattern" value="{{ row.filename_pattern or '' }}" placeholder="např. Episode 0[1-9]"></label>
+          <label>Výběr konkrétních video_ids <input type="text" name="video_ids" value="{{ row.video_ids or '' }}" placeholder="např. 12, 15, 18"></label>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody></table></div>
+    <button type="submit">Zobrazit náhled rozdělení</button>
+  </form>
+
+  <details>
+    <summary>Pokročilé / zobrazit JSON</summary>
+    <p>Technický JSON používá stejný bezpečný náhled a potvrzení jako jednoduchý formulář.</p>
+    <form method="post" action="/hierarchy-review/{{ collection.id }}/preview">
+      <textarea name="definitions_json" rows="24" cols="100" required>{{ definitions_json }}</textarea><br>
+      <button type="submit">Zobrazit náhled JSON</button>
+    </form>
+  </details>
+</section>
+
 <section class="panel"><h2>Externí návrhy a vazby</h2><p>Externí údaje jsou pouze pomůcka a samy kolekci nerozdělují.</p><form method="post" action="/hierarchy-review/{{ collection.id }}/metadata-search"><input type="search" maxlength="200" required name="metadata_query" value="{{ collection.local_title }}"><button type="submit">Vyhledat návrhy na AniListu</button></form><ul>{% for candidate in external_search_candidates %}<li>{{ candidate.title_english or candidate.title_romaji or candidate.title_native }} · {{ candidate.format or '—' }} · {{ candidate.episode_count or '—' }} epizod · AniList {{ candidate.external_id }}</li>{% endfor %}{% for candidate in external_candidates %}<li>{{ candidate.metadata.display_title if candidate.metadata else candidate.title.local_title }}{% if candidate.metadata and candidate.metadata.episode_count %} · {{ candidate.metadata.episode_count }} epizod{% endif %}{% for link in candidate.links %} · {{ link.provider }} {{ link.external_id }}{% endfor %}</li>{% else %}{% if not external_search_candidates %}<li>Nejsou uložené žádné externí návrhy ani vazby.</li>{% endif %}{% endfor %}</ul></section>
-<section class="panel"><h2>Definice ručního rozdělení</h2><p>Každá položka může použít rozsah <code>episode_start</code>–<code>episode_end</code>, bezpečné pravidlo <code>filename_pattern</code> nebo seznam <code>video_ids</code>. Virtuální části nemění fyzické cesty.</p><form method="post" action="/hierarchy-review/{{ collection.id }}/preview"><textarea name="definitions_json" rows="24" cols="100" required>{{ definitions_json }}</textarea><br><button type="submit">Zobrazit náhled</button></form></section>
+
 {% if preview %}<section class="panel" id="result"><h2>Náhled přiřazení</h2><p>Nezařazeno: {{ preview.unmatched_video_ids|length }} · konflikty: {{ preview.conflicts|length }}</p><div class="table-wrap"><table><thead><tr><th>ID</th><th>Video</th><th>Lokální číslo</th><th>Cílová část</th><th>Výsledek</th></tr></thead><tbody>{% for row in preview_rows %}<tr><td>{{ row.video.id }}</td><td>{{ row.video.filename }}</td><td>{{ row.video.local_episode_number or '—' }}</td><td>{{ row.targets|join(', ') or '—' }}</td><td>{{ 'Konflikt' if row.conflict else 'Přiřazeno' if row.targets else 'Nezařazeno' }}</td></tr>{% endfor %}</tbody></table></div><form method="post" action="/hierarchy-review/{{ collection.id }}/apply"><input type="hidden" name="definitions_json" value="{{ definitions_json }}">{% if preview.conflicts %}<label><input type="checkbox" name="confirm_conflicts" value="true" required> Výslovně potvrzuji konfliktní pravidla; konfliktní videa zůstanou nezařazená.</label>{% endif %}<button type="submit">Potvrdit ruční rozdělení</button></form></section>{% endif %}
 {% endblock %}
