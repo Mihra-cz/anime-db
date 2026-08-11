@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 import re
 import unicodedata
 
-from .models import CatalogTitle, Video
+from .models import CatalogCollection, CatalogTitle, Video
 
 LANGUAGE_ALIASES = {
     "cs": "cs", "cze": "cs", "ces": "cs", "czech": "cs", "čeština": "cs",
@@ -105,6 +105,11 @@ def catalog_title_display_title(title: CatalogTitle) -> str:
     )
 
 
+def catalog_collection_display_title(collection: CatalogCollection) -> str:
+    """Vrátí uživatelský název kolekce bez změny její logické identity."""
+    return collection.manual_display_title or collection.local_title
+
+
 def catalog_title_series_label(title: CatalogTitle) -> str:
     """Vrátí popisek části výhradně z hierarchie CatalogTitle."""
     if title.effective_season_label:
@@ -154,17 +159,21 @@ def is_root_video(video: Video) -> bool:
     return len(PurePosixPath(video.relative_path).parts) == 1
 
 
+def meaningful_root_collection(video: Video) -> CatalogCollection | None:
+    if not is_root_video(video):
+        return None
+    candidates = (
+        video.catalog_title.collection if video.catalog_title else None,
+        video.catalog_collection,
+    )
+    return next(
+        (collection for collection in candidates if collection and collection.relative_root_path != ROOT_FOLDER),
+        None,
+    )
+
+
 def has_meaningful_root_assignment(video: Video) -> bool:
-    collection = (
-        video.catalog_title.collection
-        if video.catalog_title and video.catalog_title.collection
-        else video.catalog_collection
-    )
-    return bool(
-        is_root_video(video)
-        and collection
-        and collection.relative_root_path != ROOT_FOLDER
-    )
+    return meaningful_root_collection(video) is not None
 
 
 def manual_hardsub_state(video: Video) -> str:
@@ -421,15 +430,20 @@ def build_catalog_results(
     for video in list(videos):
         catalog_title = video.catalog_title
         collection = catalog_title.collection if catalog_title else video.catalog_collection
+        root_collection = meaningful_root_collection(video)
+        if root_collection is not None:
+            collection = root_collection
+            if catalog_title and catalog_title.collection is not root_collection:
+                catalog_title = None
         identity = determine_parent_series(video.relative_path)
-        is_unassigned_root = is_root_video(video) and not has_meaningful_root_assignment(video)
+        is_unassigned_root = is_root_video(video) and root_collection is None
         group_path = (
             ROOT_FOLDER if is_unassigned_root
             else collection.relative_root_path if collection else identity.relative_path
         )
         group_name = (
             ROOT_VIDEO_GROUP_LABEL if is_unassigned_root
-            else collection.local_title if collection else identity.name
+            else catalog_collection_display_title(collection) if collection else identity.name
         )
         all_by_title.setdefault(group_path, []).append(video)
         summary = groups.setdefault(
@@ -463,13 +477,15 @@ def build_catalog_results(
         first_collection = (
             first_title.collection if first_title else title_videos_list[0].catalog_collection
         )
+        root_collection = meaningful_root_collection(title_videos_list[0])
+        if root_collection is not None:
+            first_collection = root_collection
         identity = determine_parent_series(title_videos_list[0].relative_path)
-        is_unassigned_root = is_root_video(title_videos_list[0]) and not has_meaningful_root_assignment(
-            title_videos_list[0]
-        )
+        is_unassigned_root = is_root_video(title_videos_list[0]) and root_collection is None
         display_name = (
             ROOT_VIDEO_GROUP_LABEL if is_unassigned_root
-            else first_collection.local_title if first_collection else identity.name
+            else catalog_collection_display_title(first_collection)
+            if first_collection else identity.name
         )
         display_path = (
             ROOT_FOLDER if is_unassigned_root

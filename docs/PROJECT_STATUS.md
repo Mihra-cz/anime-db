@@ -1326,6 +1326,35 @@ akcí nemění ani nepřesouvá fyzický soubor. Staré technické přiřazení 
 pseudo-kolekci `.` se pouze zobrazí jako stav ke kontrole; tato změna sama
 produkční databázi automaticky neupravuje.
 
+Ruční akce **Vytvořit samostatný titul** ukládá pro každé video vlastní
+virtuální `CatalogCollection` s cestou `@root/<video_id>`, její `CatalogTitle` s
+cestou `@root/<video_id>/title` a oba cizí klíče na `Video`. Přehled root videí
+potom vybírá jen soubory bez smysluplného logického přiřazení, nikoli všechny
+soubory s fyzickým `root_folder="."`. Startupová idempotentní migrace ani
+následný sken virtuální vazbu nepřepisují. Legacy vazba na `.` zůstává při
+startu beze změny a UI ji nadále prezentuje jako technický stav ke kontrole.
+
+### Logický katalog na titulní stránce
+
+Hlavní katalog na titulní stránce je založen na uložené logické hierarchii
+`CatalogCollection -> CatalogTitle -> Video`. `CatalogCollection` je jeho primární
+uživatelská jednotka; fyzická struktura NASu (`root_folder`, složky a cesty)
+zůstává dostupná v samostatném sekundárním technickém pohledu. Virtuální
+collection s cestou `@root/...` se proto zobrazuje stejně jako běžná collection
+ve fyzické složce. Legacy pseudo-přiřazení `.` není prezentováno jako anime
+collection a zůstává v workflow nezařazených root videí.
+
+Navigace z homepage vynechává zbytečný mezikrok: pokud collection obsahuje
+právě jeden `CatalogTitle` a všechna její zobrazená videa jsou k tomuto titulu
+jednoznačně přiřazena, odkaz vede přímo na `/titles/{id}`. Collection s více
+částmi nebo neúplným přiřazením vede na `/collections/{id}`. Toto pravidlo je
+pouze prezentační a nemění databázovou hierarchii. Vytváření dalších
+Season/Part/Cour, Film/OVA/Special částí, jejich rozdělování, pořadí a přesuny
+videí nadále patří do **Hierarchy Review**.
+
+Změna nevyžadovala databázovou migraci, neupravuje produkční data a nemění
+fyzické cesty souborů. V6 nebyla zahájena.
+
 ---
 
 # 7. V6 – Úplnost knihovny ⏳

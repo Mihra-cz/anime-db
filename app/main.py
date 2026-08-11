@@ -84,6 +84,38 @@ METADATA_STATUS_LABELS = {
     "conflict": "Konflikt", "migration_review_required": "Vyžaduje kontrolu migrace",
     "unavailable": "Bez externího záznamu", "error": "Chyba",
 }
+
+
+def _homepage_collection_rows(
+    videos: list[Video], collection_title_ids: dict[int, tuple[int, ...]],
+) -> list[dict]:
+    """Sestaví navigační homepage nad uloženou logickou hierarchií."""
+    results = build_catalog_results(videos, "all", sort="title", direction="asc")
+    rows = []
+    for group in results.groups:
+        if group.is_root_group or group.catalog_collection_id is None:
+            continue
+        title_ids = collection_title_ids.get(group.catalog_collection_id, ())
+        group_videos = results.videos_by_title[group.relative_path]
+        sole_title_id = title_ids[0] if len(title_ids) == 1 else None
+        has_unambiguous_title = bool(
+            sole_title_id
+            and group_videos
+            and all(video.catalog_title_id == sole_title_id for video in group_videos)
+        )
+        rows.append({
+            "group": group,
+            "href": (
+                f"/titles/{sole_title_id}"
+                if has_unambiguous_title
+                else f"/collections/{group.catalog_collection_id}"
+            ),
+            "title_count": len(title_ids),
+            "opens_title": has_unambiguous_title,
+        })
+    return rows
+
+
 def _load_videos(sessions) -> list[Video]:
     with sessions() as session:
         return list(session.scalars(select(Video).options(
@@ -278,14 +310,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         with sessions() as session:
             videos = session.scalars(select(Video).options(
-                selectinload(Video.internal_subtitles), selectinload(Video.external_subtitles)
+                selectinload(Video.internal_subtitles), selectinload(Video.external_subtitles),
+                selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
+                selectinload(Video.catalog_collection),
             )).all()
+            collection_title_ids = {
+                collection.id: tuple(title.id for title in collection.titles)
+                for collection in session.scalars(select(CatalogCollection).options(
+                    selectinload(CatalogCollection.titles)
+                )).all()
+            }
         folders: dict[str, dict[str, int]] = {}
         totals = _empty_stats()
         for video in videos:
-            _add_video(folders.setdefault(video.root_folder, _empty_stats()), video)
+            if not (is_root_video(video) and has_meaningful_root_assignment(video)):
+                _add_video(folders.setdefault(video.root_folder, _empty_stats()), video)
             _add_video(totals, video)
         return templates.TemplateResponse(request, "index.html", {
+            "collections": _homepage_collection_rows(videos, collection_title_ids),
             "folders": sorted(folders.items()), "totals": totals, "message": message,
             "error": error, "confirm_deletions": confirm_deletions,
             "q": normalize_search_query(q),
@@ -313,7 +355,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/root-videos", response_class=HTMLResponse)
     def root_videos(request: Request):
         videos = sorted(
-            [video for video in _load_videos(sessions) if is_root_video(video)],
+            [
+                video for video in _load_videos(sessions)
+                if is_root_video(video) and not has_meaningful_root_assignment(video)
+            ],
             key=lambda video: video.filename.casefold(),
         )
         with sessions() as session:

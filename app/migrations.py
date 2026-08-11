@@ -5,7 +5,10 @@ import logging
 from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session, selectinload
 
-from .catalog import classify_video, normalize_language, normalize_title
+from .catalog import (
+    ROOT_FOLDER, classify_video, is_root_video, meaningful_root_collection,
+    normalize_language, normalize_title,
+)
 from .database import Base
 from .hierarchy import derive_library_hierarchy
 from .hierarchy_review import (
@@ -125,8 +128,15 @@ def migrate_schema(engine) -> None:
             identity.title.relative_root_path: identity
             for identity in hierarchy.values()
         }
-        used_titles: set[CatalogTitle] = set()
+        used_titles: set[CatalogTitle] = {
+            video.catalog_title
+            for video in videos
+            if is_root_video(video)
+            and video.catalog_title is not None
+        }
         for identity in identities_by_title_path.values():
+            if identity.title.relative_root_path == ROOT_FOLDER:
+                continue
             collection_identity = identity.collection
             collection = collections.get(collection_identity.relative_root_path)
             if collection is None:
@@ -165,6 +175,11 @@ def migrate_schema(engine) -> None:
 
         videos_by_collection: dict[int, list[Video]] = {}
         for video in videos:
+            if is_root_video(video):
+                assigned_collection = meaningful_root_collection(video) or video.catalog_collection
+                if assigned_collection is not None:
+                    videos_by_collection.setdefault(assigned_collection.id, []).append(video)
+                continue
             identity = hierarchy[video.relative_path]
             title = titles[identity.title.relative_root_path]
             collection = collections[identity.collection.relative_root_path]

@@ -1,13 +1,19 @@
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
+from app.catalog import ROOT_VIDEO_GROUP_LABEL, build_catalog_results
 from app.config import Settings
 from app.database import Base
 from app.main import app, create_app, templates
 from app.hierarchy_review import simple_definition_rows, single_season_suggestion
 from app.metadata.providers.base import ProviderTitleMetadata
+from app.migrations import migrate_schema
 from app.models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, TitleMetadata, Video,
     utc_now,
 )
 from app.numbering import summarize_title_numbering
+from app.scanner import scan_library
 from starlette.requests import Request
 
 
@@ -359,7 +365,7 @@ def test_root_folder_link_has_readable_label_and_no_dead_dot_url():
     })()
 
     rendered = templates.env.get_template("index.html").render(
-        request=request, folders=[(".", stats)], totals={
+        request=request, collections=[], folders=[(".", stats)], totals={
             "episodes": 0, "bonus": 2, "only_cs": 0, "only_sk": 0,
             "both_cs_sk": 0, "missing": 2, "unknown": 0,
         }, message=None, error=None, confirm_deletions=False, q="",
@@ -385,6 +391,164 @@ def test_root_folder_link_has_readable_label_and_no_dead_dot_url():
     )
     assert 'href="/root-videos"' in catalog_rendered
     assert "/collections/None" not in catalog_rendered
+
+
+def test_homepage_uses_logical_collections_and_simplifies_unambiguous_navigation(
+    tmp_path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'homepage.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+
+        def add_collection(
+            name, relative_root_path, parts, *, root_video=False,
+        ):
+            collection = CatalogCollection(
+                local_title=name, normalized_local_title=name.casefold(),
+                relative_root_path=relative_root_path,
+            )
+            titles = []
+            videos = []
+            for index, (part_name, part_type) in enumerate(parts, 1):
+                title = CatalogTitle(
+                    collection=collection, local_title=part_name,
+                    normalized_local_title=part_name.casefold(),
+                    relative_root_path=f"{relative_root_path}/title-{index}",
+                    part_type=part_type,
+                    season_number=index if part_type == "season" else None,
+                    season_label=f"S{index}" if part_type == "season" else None,
+                    sort_order=index,
+                )
+                filename = f"{name} {part_name}.mkv"
+                video = Video(
+                    relative_path=(filename if root_video else f"Anime/{name}/{filename}"),
+                    root_folder="." if root_video else "Anime",
+                    filename=filename, size=1, mtime_ns=index,
+                    file_type="other" if part_type in {"film", "ova", "special"} else "episode",
+                    catalog_collection=collection, catalog_title=title,
+                )
+                titles.append(title)
+                videos.append(video)
+            session.add_all(videos)
+            return collection, titles, videos
+
+        single, single_titles, _ = add_collection(
+            "Single Season", "Anime/Single Season", [("Season 1", "season")]
+        )
+        film, film_titles, _ = add_collection(
+            "Standalone Film", "Anime/Standalone Film", [("Film", "film")]
+        )
+        multi, multi_titles, _ = add_collection(
+            "Two Seasons", "Anime/Two Seasons",
+            [("Season 1", "season"), ("Season 2", "season")],
+        )
+        mixed, mixed_titles, _ = add_collection(
+            "Series Plus OVA", "Anime/Series Plus OVA",
+            [("Season 1", "season"), ("OVA", "ova")],
+        )
+        root_film, root_film_titles, root_film_videos = add_collection(
+            "Virtual Root Film", "@root/101", [("Film", "film")], root_video=True,
+        )
+        second_root, second_root_titles, second_root_videos = add_collection(
+            "Second Root Film", "@root/102", [("Film", "film")], root_video=True,
+        )
+        legacy_collection = CatalogCollection(
+            local_title="Legacy tečka", normalized_local_title="legacy tečka",
+            relative_root_path=".",
+        )
+        legacy_title = CatalogTitle(
+            collection=legacy_collection, local_title="Legacy tečka",
+            normalized_local_title="legacy tečka", relative_root_path=".",
+        )
+        legacy_video = Video(
+            relative_path="Legacy.mkv", root_folder=".", filename="Legacy.mkv",
+            size=1, mtime_ns=1, file_type="other",
+            catalog_collection=legacy_collection, catalog_title=legacy_title,
+        )
+        session.add(legacy_video)
+        session.commit()
+        expected_links = {
+            "Single Season": f"/titles/{single_titles[0].id}",
+            "Standalone Film": f"/titles/{film_titles[0].id}",
+            "Two Seasons": f"/collections/{multi.id}",
+            "Series Plus OVA": f"/collections/{mixed.id}",
+            "Virtual Root Film": f"/titles/{root_film_titles[0].id}",
+            "Second Root Film": f"/titles/{second_root_titles[0].id}",
+        }
+        hierarchy_before = {
+            collection.id: tuple(
+                (title.id, title.part_type, title.season_number, title.sort_order)
+                for title in collection.titles
+            )
+            for collection in (single, film, multi, mixed, root_film, second_root)
+        }
+        physical_before = {
+            video.id: (video.relative_path, video.root_folder)
+            for video in (*root_film_videos, *second_root_videos)
+        }
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")
+    }
+    request = Request({
+        "type": "http", "app": web_app, "method": "GET", "path": "/",
+        "root_path": "", "scheme": "http", "query_string": b"", "headers": [],
+        "server": ("testserver", 80), "client": ("testclient", 50000),
+    })
+    rendered = endpoints["/"](request).body.decode()
+    logical_section = rendered.split('class="panel logical-catalog"', 1)[1].split(
+        'class="panel physical-folders"', 1
+    )[0]
+
+    for name, href in expected_links.items():
+        assert f'href="{href}">{name}</a>' in logical_section
+    assert logical_section.count("Root Film</a>") == 2
+    assert "Legacy tečka" not in logical_section
+    assert ROOT_VIDEO_GROUP_LABEL in rendered
+    assert 'href="/hierarchy-review"' in logical_section
+
+    with web_app.state.sessions() as session:
+        loaded_videos = list(session.scalars(select(Video).options(
+            selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
+            selectinload(Video.catalog_collection),
+            selectinload(Video.internal_subtitles),
+            selectinload(Video.external_subtitles),
+        )).all())
+        search_groups = build_catalog_results(loaded_videos, "all")
+        logical_search_names = {
+            group.name for group in search_groups.groups if not group.is_root_group
+        }
+        assert logical_search_names == set(expected_links)
+
+        collections = session.scalars(select(CatalogCollection).options(
+            selectinload(CatalogCollection.titles)
+        ).where(CatalogCollection.id.in_(hierarchy_before))).all()
+        assert {
+            collection.id: tuple(
+                (title.id, title.part_type, title.season_number, title.sort_order)
+                for title in collection.titles
+            )
+            for collection in collections
+        } == hierarchy_before
+        root_videos = [
+            session.get(Video, video_id) for video_id in physical_before
+        ]
+        assert {
+            video.id: (video.relative_path, video.root_folder) for video in root_videos
+        } == physical_before
+        assert session.get(CatalogCollection, root_film.id).relative_root_path == "@root/101"
+        assert session.get(CatalogCollection, second_root.id).relative_root_path == "@root/102"
+
+    route_methods = {
+        route.path: route.methods for route in web_app.routes if hasattr(route, "methods")
+    }
+    assert route_methods["/hierarchy-review/{collection_id}/simple-preview"] == {"POST"}
+    assert route_methods["/hierarchy-review/{collection_id}/apply"] == {"POST"}
 
 
 def test_root_video_page_lists_files_and_manual_assignment_keeps_physical_paths(tmp_path):
@@ -452,3 +616,145 @@ def test_root_video_page_lists_files_and_manual_assignment_keeps_physical_paths(
         assert stored_first.catalog_title_id == target_title_id
         assert stored_second.catalog_title.local_title == "Second Movie"
         assert stored_first.catalog_collection_id != stored_second.catalog_collection_id
+
+
+def test_created_root_titles_survive_refresh_restart_and_scan(tmp_path):
+    paths = [
+        tmp_path / "Hotarubi no Mori e.mkv",
+        tmp_path / "Koe no Katachi - A Silent Voice.mkv",
+        tmp_path / "Legacy Root Movie.mkv",
+    ]
+    for path in paths:
+        path.write_bytes(b"x")
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'root-persistence.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    engine = web_app.state.sessions.kw["bind"]
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        legacy_collection = CatalogCollection(
+            local_title="Knihovna", normalized_local_title="knihovna",
+            relative_root_path=".",
+        )
+        legacy_title = CatalogTitle(
+            collection=legacy_collection, local_title="Knihovna",
+            normalized_local_title="knihovna", relative_root_path=".",
+        )
+        videos = []
+        for path in paths:
+            stat = path.stat()
+            videos.append(Video(
+                relative_path=path.name, root_folder=".", filename=path.name,
+                size=stat.st_size, mtime_ns=stat.st_mtime_ns, file_type="other",
+            ))
+        videos[-1].catalog_collection = legacy_collection
+        videos[-1].catalog_title = legacy_title
+        session.add_all(videos)
+        session.commit()
+        first_id, second_id, legacy_id = (video.id for video in videos)
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")
+    }
+
+    def render_root_videos() -> str:
+        request = Request({
+            "type": "http", "app": web_app, "method": "GET", "path": "/root-videos",
+            "root_path": "", "scheme": "http", "query_string": b"", "headers": [],
+            "server": ("testserver", 80), "client": ("testclient", 50000),
+        })
+        return endpoints["/root-videos"](request).body.decode()
+
+    initial_page = render_root_videos()
+    assert all(path.name in initial_page for path in paths)
+    assert "Technická původní root skupina „.“" in initial_page
+
+    first_response = endpoints["/root-videos/{video_id}/new-title"](
+        first_id, display_title="Hotarubi no Mori e", part_type="film"
+    )
+    assert first_response.status_code == 303
+    refreshed_page = render_root_videos()
+    assert paths[0].name not in refreshed_page
+    assert paths[1].name in refreshed_page
+
+    second_response = endpoints["/root-videos/{video_id}/new-title"](
+        second_id, display_title="Koe no Katachi - A Silent Voice", part_type="film"
+    )
+    assert second_response.status_code == 303
+
+    with web_app.state.sessions() as session:
+        stored = [session.get(Video, video_id) for video_id in (first_id, second_id)]
+        committed_ids = [
+            (video.catalog_collection_id, video.catalog_title_id) for video in stored
+        ]
+        assert all(collection_id and title_id for collection_id, title_id in committed_ids)
+        assert committed_ids[0][0] != committed_ids[1][0]
+        assert stored[0].catalog_collection.relative_root_path == f"@root/{first_id}"
+        assert stored[0].catalog_title.relative_root_path == f"@root/{first_id}/title"
+        assert stored[1].catalog_collection.relative_root_path == f"@root/{second_id}"
+        assert stored[1].catalog_title.relative_root_path == f"@root/{second_id}/title"
+        assert [(video.relative_path, video.root_folder) for video in stored] == [
+            (paths[0].name, "."), (paths[1].name, "."),
+        ]
+
+    homepage_request = Request({
+        "type": "http", "app": web_app, "method": "GET", "path": "/",
+        "root_path": "", "scheme": "http", "query_string": b"", "headers": [],
+        "server": ("testserver", 80), "client": ("testclient", 50000),
+    })
+    homepage = endpoints["/"](homepage_request).body.decode()
+    logical_homepage = homepage.split('class="panel logical-catalog"', 1)[1].split(
+        'class="panel physical-folders"', 1
+    )[0]
+    assert f'href="/titles/{committed_ids[0][1]}">Hotarubi no Mori e</a>' in logical_homepage
+    assert (
+        f'href="/titles/{committed_ids[1][1]}">Koe no Katachi - A Silent Voice</a>'
+        in logical_homepage
+    )
+    assert ROOT_VIDEO_GROUP_LABEL not in logical_homepage
+
+    after_commit_page = render_root_videos()
+    assert paths[0].name not in after_commit_page
+    assert paths[1].name not in after_commit_page
+    assert paths[2].name in after_commit_page
+
+    with web_app.state.sessions() as session:
+        loaded_videos = list(session.scalars(select(Video).options(
+            selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
+            selectinload(Video.catalog_collection),
+            selectinload(Video.internal_subtitles),
+            selectinload(Video.external_subtitles),
+        ).order_by(Video.id)).all())
+        results = build_catalog_results(loaded_videos, "all")
+        assert {group.name for group in results.groups} == {
+            "Hotarubi no Mori e", "Koe no Katachi - A Silent Voice",
+            ROOT_VIDEO_GROUP_LABEL,
+        }
+        assert sum(group.is_root_group for group in results.groups) == 1
+
+    migrate_schema(engine)
+    with web_app.state.sessions() as session:
+        restarted = [session.get(Video, video_id) for video_id in (first_id, second_id)]
+        assert [
+            (video.catalog_collection_id, video.catalog_title_id) for video in restarted
+        ] == committed_ids
+        legacy_after_restart = session.get(Video, legacy_id)
+        assert legacy_after_restart.catalog_collection.relative_root_path == "."
+        assert legacy_after_restart.catalog_title.relative_root_path == "."
+
+    with web_app.state.sessions() as session:
+        scan_library(session, tmp_path)
+    with web_app.state.sessions() as session:
+        scanned = [session.get(Video, video_id) for video_id in (first_id, second_id)]
+        assert [
+            (video.catalog_collection_id, video.catalog_title_id) for video in scanned
+        ] == committed_ids
+        assert [(video.relative_path, video.root_folder) for video in scanned] == [
+            (paths[0].name, "."), (paths[1].name, "."),
+        ]
+        legacy = session.get(Video, legacy_id)
+        assert legacy.catalog_collection_id is None
+        assert legacy.catalog_title_id is None

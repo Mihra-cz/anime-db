@@ -10,8 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.catalog import (
-    classify_video, has_meaningful_root_assignment, is_root_video, normalize_language,
-    normalize_title,
+    classify_video, is_root_video, meaningful_root_collection, normalize_language, normalize_title,
 )
 from app.hierarchy import derive_library_hierarchy
 from app.hierarchy_review import (
@@ -318,11 +317,17 @@ def _scan_library(
         ).append(video)
     for video in current_videos:
         if is_root_video(video):
-            if not has_meaningful_root_assignment(video):
+            meaningful_collection = meaningful_root_collection(video)
+            if meaningful_collection is None:
                 video.catalog_title = None
                 video.catalog_collection = None
-            elif video.catalog_title and video.catalog_title.collection:
-                video.catalog_collection = video.catalog_title.collection
+            else:
+                if (
+                    video.catalog_title
+                    and video.catalog_title.collection is not meaningful_collection
+                ):
+                    video.catalog_title = None
+                video.catalog_collection = meaningful_collection
             continue
         identity = hierarchy[video.relative_path]
         collection_data, title_data = identity.collection, identity.title
