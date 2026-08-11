@@ -174,6 +174,26 @@ def test_hierarchy_filters_include_unassigned_review_and_conflict():
     assert video_matches_filter(video, "hierarchy-conflict") is True
 
 
+def test_verified_hierarchy_with_unknown_episode_stays_in_review_filter():
+    collection = CatalogCollection(
+        local_title="Show", normalized_local_title="show", relative_root_path="Show",
+        hierarchy_status="verified",
+    )
+    title = CatalogTitle(
+        local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Show/Season 1", collection=collection, season_number=1,
+    )
+    video = Video(
+        relative_path="Show/Season 1/unknown.mkv", root_folder="Show",
+        filename="unknown.mkv", size=1, mtime_ns=1,
+        catalog_collection=collection, catalog_title=title,
+    )
+
+    assert video_matches_filter(video, "hierarchy-review") is True
+    video.season_episode_number = 1
+    assert video_matches_filter(video, "hierarchy-review") is False
+
+
 def test_manual_split_preserves_metadata_subtitles_and_hardsub():
     engine, collection_id, title_id = seeded_collection()
     with Session(engine) as session:

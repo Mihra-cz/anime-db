@@ -1152,6 +1152,102 @@ Cíl fáze:
 - průběžně opravovat problémy nalezené při ruční tvorbě hierarchie,
 - zachovat ručně ověřenou hierarchii proti automatickému přepsání.
 
+## 6.12 Stabilizace episode numbering nad reálnou knihovnou
+
+Probíhá fáze **Stabilizace hierarchie a ladění UI nad reálnou knihovnou**. V6
+nebyla zahájena.
+
+První konkrétní problém byl nalezen u kolekce
+`100-man no Inochi no Ue ni Ore wa Tatteiru (P20-L21)`. Soubory ve tvaru
+`100-man no Inochi no Ue ni Ore wa Tatteiru - 01.mkv` zůstávaly bez čísla,
+protože původní parser našel současně `100` uvnitř názvu a `01` na konci a
+nejednoznačný výsledek správně odmítl. Parser nyní před obecným odmítnutím
+rozpozná bezpečný koncový tvar `Title - NN`; obecné samostatné číslo na libovolném
+místě názvu už nepovažuje za epizodu. Explicitní tvary `E01`, `EP02`,
+`Episode 03` a čistě číselné názvy souborů zůstávají podporované. Rok,
+rozlišení, číslo uvnitř názvu, technické hodnoty a suffixy jako `(P20-L21)`
+zůstávají bez bezpečné shody `unknown`.
+
+### Skutečná semantika uložených polí
+
+- `Video.local_episode_number` je výhradně bezpečně rozpoznaná hodnota z názvu
+  souboru. Ruční vstup ji nenahrazuje.
+- `Video.episode_number_manual_override` je ručně zadaný vstup s předností před
+  lokální hodnotou. Jeho uložení nastaví `episode_number_verified_at`; smazání
+  override datum odstraní.
+- `Video.season_episode_number` je výsledné číslo v rámci konkrétního
+  `CatalogTitle`, nově zobrazované jako `E`.
+- `Video.absolute_episode_number` je výsledné absolutní číslo v rámci kolekce,
+  zobrazované jako `A`. Bez známého bezpečného offsetu se u pozdější části
+  neodhaduje.
+- `Video.external_episode_number` je v současném modelu číslo očekávané externě
+  propojeným titulem. Pokud má titul `TitleMetadata`, přebírá vypočtené
+  `season_episode_number`; nejde o samostatně načtené číslo konkrétní epizody od
+  provideru. UI je proto označuje samostatně jako `X`, nikoli jako `E`.
+- `Video.episode_number_source` nabývá hodnot `unknown`, `filename`, `manual`
+  nebo `derived_from_part_offset`. `episode_number_confidence` je současně
+  `NULL`, `0.95`, `1.0`, respektive `0.9` podle použité cesty.
+- `CatalogTitle.numbering_mode=unknown` odpovídá volbě **automaticky**. S
+  offsetem rozliší lokální a absolutní vstup podle čísel; bez offsetu bezpečně
+  stanoví sezónní číslo a absolutní číslo pouze pro první část.
+- `numbering_mode=season_local` interpretuje rozpoznaný nebo ruční vstup jako
+  `season_episode_number` (`E`).
+- `numbering_mode=absolute` interpretuje vstup jako
+  `absolute_episode_number` (`A`).
+- Hodnota `mixed` zůstává podporovanou interní kompatibilní hodnotou, ale web ji
+  nenabízí jako samostatný ruční režim; výpočet používá stejnou bezpečnou
+  detekční větev jako automatický režim.
+- `CatalogTitle.episode_start_offset` je počet epizod před aktuálním titulem,
+  nikoli počáteční číslo epizody. Pro sezónní vstup platí `A = E + offset`, pro
+  absolutní vstup `E = A - offset`. Pro první sezónu je offset `0`, pro druhou
+  sezónu po 12 epizodách `12`. Prázdný offset dovolí použít jen bezpečně známý
+  součet oficiálních počtů předchozích titulů. Pokud počet kteréhokoli
+  předchozího titulu chybí, další absolutní offset se už neodvozuje.
+- `CatalogTitle.numbering_manual` a `numbering_verified_at` zaznamenávají ruční
+  uložení režimu nebo offsetu. Nemění `season_number`, přiřazení videa ani
+  metadata vazbu.
+
+Původní výpis `S1 A4 E1` ve sloupci čísla epizody znamenal
+`season_episode_number=1`, `absolute_episode_number=4` a
+`external_episode_number=1`. Písmeno `S` zde neznamenalo
+`CatalogTitle.season_number`; skutečná sezóna se vždy zobrazovala v sousedním
+sloupci z `CatalogTitle.effective_season_label`. UI nyní používá jednoznačné
+značky `E` pro epizodu v sezóně, `A` pro absolutní číslo, `L` pro lokální
+detekci a `X` pro externí číslo.
+
+### Ruční a sekvenční číslování
+
+Ruční zadání jednotlivého čísla mění pouze episode numbering pole videa a
+následný výpočet jejich odvozených reprezentací. Nemění `CatalogTitle`,
+`season_number`, hierarchii ani metadata.
+
+Detail `CatalogTitle` nabízí akci **Očíslovat videa podle aktuálního pořadí**.
+Náhled používá deterministické přirozené pořadí názvů souborů, při shodě cestu a
+ID, a nic nezapisuje. Zápis vyžaduje samostatné explicitní potvrzení. Pokud by
+návrh změnil existující ruční override, označí konflikt a backend odmítne zápis
+bez dalšího výslovného potvrzení. Potvrzení ukládá čísla jako ruční override a
+nemění příslušnost videí ani sezónu titulu.
+
+### Hierarchy Review
+
+Ručně ověřená kolekce zůstává v `/hierarchy-review`, dokud některý její titul
+obsahuje neznámé číslování, mezery nebo duplicity. Detail u každého
+`CatalogTitle` uvádí počet videí, poměr očíslovaných videí, rozsah `E`, mezery,
+duplicity a srozumitelný stav. Ověřená hierarchie s neznámými čísly zobrazuje
+samostatné varování; vyřešení číslování nemění její stav hierarchie.
+
+Tato změna neobsahuje databázovou migraci ani automatický hromadný přepočet
+produkční databáze. Existující produkční hodnoty nebyly změněny. Oprava se
+provádí následně a explicitně přes UI pro jednotlivé tituly.
+
+Automatické ověření 11. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                    # 191 passed
+.venv/bin/python -m compileall app tests  # prošlo
+git diff --check                       # prošlo
+```
+
 ---
 
 # 7. V6 – Úplnost knihovny ⏳

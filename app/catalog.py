@@ -246,7 +246,10 @@ def video_matches_filter(video: Video, filter_name: str) -> bool:
         ),
         "hierarchy-review": bool(
             video.catalog_collection
-            and video.catalog_collection.hierarchy_status == "review_required"
+            and (
+                video.catalog_collection.hierarchy_status == "review_required"
+                or video.season_episode_number is None
+            )
         ),
     }
     if filter_name.startswith("type-"):
@@ -439,16 +442,19 @@ EXPLICIT_EPISODE = re.compile(
     r"(?:^|[^a-z0-9])(?:episode|ep|e)\s*[-_. ]*0*(\d{1,3})(?:v\d+)?(?:[^a-z0-9]|$)",
     re.IGNORECASE,
 )
-BARE_EPISODE = re.compile(r"(?:^|[^a-z0-9])0*(\d{1,3})(?:v\d+)?(?:[^a-z0-9]|$)", re.IGNORECASE)
+TRAILING_EPISODE = re.compile(r"\s+-\s+0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
+BARE_EPISODE = re.compile(r"0*(\d{1,3})(?:v\d+)?", re.IGNORECASE)
 
 
 def derive_episode_number(filename: str) -> int | None:
     stem = PurePosixPath(filename).stem
     if match := EXPLICIT_EPISODE.search(stem):
         return int(match.group(1))
-    candidates = {int(value) for value in BARE_EPISODE.findall(stem)}
-    candidates = {value for value in candidates if value not in {720} and value < 190}
-    return candidates.pop() if len(candidates) == 1 else None
+    if match := TRAILING_EPISODE.search(stem):
+        return int(match.group(1))
+    if match := BARE_EPISODE.fullmatch(stem):
+        return int(match.group(1))
+    return None
 
 
 TYPE_ORDER = {"episode": 0, "special": 1, "ova": 2, "ncop": 3, "nced": 4, "pv": 5, "cm": 6, "menu": 7, "other": 8}

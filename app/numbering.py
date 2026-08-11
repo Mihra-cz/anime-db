@@ -1,11 +1,40 @@
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .catalog import derive_episode_number
+from .catalog import derive_episode_number, natural_sort_key
 from .models import CatalogCollection, CatalogTitle, Video
 
 NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
+
+
+@dataclass(frozen=True)
+class SequentialNumberingRow:
+    video_id: int
+    filename: str
+    current_episode: int | None
+    proposed_episode: int
+    manual_conflict: bool
+
+
+@dataclass(frozen=True)
+class TitleNumberingSummary:
+    total: int
+    numbered: int
+    episode_min: int | None
+    episode_max: int | None
+    gaps: tuple[int, ...]
+    duplicate_numbers: tuple[int, ...]
+
+    @property
+    def unknown(self) -> int:
+        return self.total - self.numbered
+
+    @property
+    def requires_review(self) -> bool:
+        return bool(self.unknown or self.gaps or self.duplicate_numbers)
 
 
 def recalculate_title_numbering(
@@ -90,7 +119,7 @@ def recalculate_collection_numbering(
         official_count = title.metadata_record.episode_count if title.metadata_record else None
         if official_count is not None:
             preceding += official_count
-        elif title.part_number == 1:
+        else:
             preceding_known = False
 
 
@@ -114,3 +143,86 @@ def set_video_episode_override(video: Video, value: int | None) -> None:
         raise ValueError("Číslo epizody musí být kladné.")
     video.episode_number_manual_override = value
     video.episode_number_verified_at = datetime.now(timezone.utc) if value else None
+
+
+def deterministic_video_order(videos: list[Video]) -> list[Video]:
+    """Return stable filename-first ordering for explicit sequential numbering."""
+    return sorted(
+        videos,
+        key=lambda video: (
+            natural_sort_key(video.filename),
+            natural_sort_key(video.relative_path),
+            video.id or 0,
+        ),
+    )
+
+
+def preview_sequential_numbering(
+    videos: list[Video], start_episode: int
+) -> list[SequentialNumberingRow]:
+    if start_episode <= 0:
+        raise ValueError("Počáteční číslo epizody musí být kladné.")
+    rows = []
+    for index, video in enumerate(deterministic_video_order(videos)):
+        proposed = start_episode + index
+        current = video.season_episode_number
+        rows.append(SequentialNumberingRow(
+            video_id=video.id,
+            filename=video.filename,
+            current_episode=current,
+            proposed_episode=proposed,
+            manual_conflict=(
+                video.episode_number_manual_override is not None
+                and video.episode_number_manual_override != proposed
+            ),
+        ))
+    return rows
+
+
+def apply_sequential_numbering(
+    videos: list[Video], start_episode: int, *, confirm_manual_conflicts: bool = False
+) -> list[SequentialNumberingRow]:
+    rows = preview_sequential_numbering(videos, start_episode)
+    if any(row.manual_conflict for row in rows) and not confirm_manual_conflicts:
+        raise ValueError(
+            "Náhled je v konfliktu s ručně zadanými čísly; jejich přepsání je nutné "
+            "explicitně potvrdit."
+        )
+    videos_by_id = {video.id: video for video in videos}
+    for row in rows:
+        video = videos_by_id[row.video_id]
+        if video.episode_number_manual_override != row.proposed_episode:
+            set_video_episode_override(video, row.proposed_episode)
+    return rows
+
+
+def summarize_title_numbering(videos: list[Video]) -> TitleNumberingSummary:
+    values = [
+        video.season_episode_number
+        for video in videos
+        if video.season_episode_number is not None
+    ]
+    unique_values = set(values)
+    episode_min = min(unique_values) if unique_values else None
+    episode_max = max(unique_values) if unique_values else None
+    gaps = tuple(
+        sorted(set(range(episode_min, episode_max + 1)) - unique_values)
+    ) if episode_min is not None and episode_max is not None else ()
+    duplicates = tuple(sorted(
+        value for value, count in Counter(values).items() if count > 1
+    ))
+    return TitleNumberingSummary(
+        total=len(videos),
+        numbered=len(values),
+        episode_min=episode_min,
+        episode_max=episode_max,
+        gaps=gaps,
+        duplicate_numbers=duplicates,
+    )
+
+
+def collection_requires_numbering_review(collection: CatalogCollection) -> bool:
+    return any(
+        summarize_title_numbering(list(title.videos)).requires_review
+        for title in collection.titles
+    )

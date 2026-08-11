@@ -184,6 +184,27 @@ def test_derives_safe_episode_numbers():
     assert derive_episode_number("Show 2024 1080p.mkv") is None
 
 
+@pytest.mark.parametrize(("filename", "expected"), [
+    ("Title - 01.mkv", 1),
+    ("Title - 02.mkv", 2),
+    ("Title - 12.mkv", 12),
+    ("100-man no Inochi no Ue ni Ore wa Tatteiru - 01.mkv", 1),
+])
+def test_derives_trailing_hyphen_episode_number(filename, expected):
+    assert derive_episode_number(filename) == expected
+
+
+@pytest.mark.parametrize("filename", [
+    "100-man no Inochi no Ue ni Ore wa Tatteiru.mkv",
+    "Anime title (P20-L21).mkv",
+    "Anime title 2024.mkv",
+    "Anime title 1080p x265 10bit.mkv",
+    "Anime title [Release Group 12].mkv",
+])
+def test_does_not_derive_numbers_inside_title_or_technical_suffixes(filename):
+    assert derive_episode_number(filename) is None
+
+
 def test_title_detail_sorting_orders_seasons_episodes_and_bonus():
     videos = [
         _video("Anime/Show/Serie 2/02.mkv"),

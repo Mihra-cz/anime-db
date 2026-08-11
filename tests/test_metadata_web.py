@@ -1,6 +1,6 @@
 from app.main import app, templates
 from app.metadata.providers.base import ProviderTitleMetadata
-from app.models import CatalogTitle
+from app.models import CatalogTitle, Video
 
 
 def test_detail_template_displays_anilist_candidates():
@@ -94,3 +94,47 @@ def test_candidate_and_artwork_mutations_are_post_only():
     assert paths["/catalog/{filter_name}/titles/{catalog_title_id}/metadata/candidates/{candidate_id}/reject"] == {"POST"}
     assert paths["/catalog/{filter_name}/titles/{catalog_title_id}/metadata/artwork/refresh"] == {"POST"}
     assert paths["/metadata/batch-search"] == {"POST"}
+    assert paths["/titles/{catalog_title_id}/numbering/sequence"] == {"POST"}
+
+
+def test_episode_column_distinguishes_season_episode_absolute_and_external_numbers():
+    title = CatalogTitle(
+        id=1, local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", metadata_status="unlinked",
+        season_number=1, season_label="S1", numbering_mode="season_local",
+        episode_start_offset=3,
+    )
+    video = Video(
+        id=1, relative_path="Anime/Show/Season 1/Title - 01.mkv",
+        root_folder="Anime", filename="Title - 01.mkv", size=1, mtime_ns=1,
+        local_episode_number=1, season_episode_number=1,
+        absolute_episode_number=4, external_episode_number=1,
+        episode_number_source="manual", episode_number_manual_override=1,
+    )
+    status = type("Status", (), {
+        "automatic_has_cs": False, "automatic_has_sk": False, "has_unknown": False,
+    })()
+    season = type("Season", (), {"original": "Season 1"})()
+
+    rendered = templates.env.get_template("series.html").render(
+        request=type("Request", (), {"url_for": lambda self, *args, **kwargs: "/static/style.css"})(),
+        series=type("Series", (), {"name": "Show", "relative_path": "Anime/Show"})(),
+        catalog_title=title, metadata_status_labels={"unlinked": "Bez metadat"},
+        metadata_candidates=[], metadata_error=None, metadata_message=None,
+        metadata_warning=None, numbering_error=None, numbering_message=None,
+        numbering_preview=None,
+        sequence_start=None, metadata_allow_remote_images=False,
+        metadata_default_query="Show", filter_name="all",
+        filter_label="Všechna videa", back_url="/catalog/all", videos=[video], q="",
+        sort="title", direction="asc", video_sort="default", video_direction="asc",
+        video_sort_url=lambda _: "#", translation_status=lambda _: status,
+        video_matches_filter=lambda *_: False, derive_season_info=lambda _: season,
+        derive_episode_number=lambda _: 1,
+    )
+
+    assert ">S1<" in rendered
+    assert "<strong>E1</strong>" in rendered
+    assert "A4" in rendered
+    assert "lokální L1" in rendered
+    assert "externí X1" in rendered
+    assert "S1 A4 E1" not in rendered

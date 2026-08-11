@@ -50,7 +50,10 @@ from .metadata.service import (
 )
 from .models import CatalogCollection, CatalogTitle, ExternalTitleLink, TitleMetadata, Video, utc_now
 from .numbering import (
+    apply_sequential_numbering, collection_requires_numbering_review,
+    preview_sequential_numbering,
     recalculate_title_numbering, set_title_numbering, set_video_episode_override,
+    summarize_title_numbering,
 )
 from .scanner import LibrarySafetyError, scan_library
 
@@ -323,6 +326,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pending_external_id: str | None = None,
         require_conflict_confirmation: bool = False,
         require_locked_confirmation: bool = False,
+        sequence_start: int | None = None, numbering_error: str | None = None,
+        numbering_message: str | None = None,
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
@@ -393,6 +398,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 results.query, results.sort, results.direction,
                 column, toggled_direction(column, normalized_video_sort, normalized_video_direction),
             )
+        numbering_preview = None
+        if catalog_title and sequence_start is not None:
+            try:
+                numbering_preview = preview_sequential_numbering(
+                    title_candidates, sequence_start
+                )
+            except ValueError as exc:
+                numbering_error = str(exc)
         context = {
             "filter_name": filter_name,
             "filter_label": FILTER_LABELS[filter_name],
@@ -402,6 +415,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "metadata_candidates": [], "metadata_error": metadata_error,
             "metadata_message": message,
             "metadata_warning": metadata_warning,
+            "numbering_error": numbering_error,
+            "numbering_message": numbering_message,
+            "numbering_preview": numbering_preview,
+            "sequence_start": sequence_start,
             "pending_external_id": pending_external_id,
             "require_conflict_confirmation": require_conflict_confirmation,
             "require_locked_confirmation": require_locked_confirmation,
@@ -441,11 +458,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pending_external_id: str | None = None,
         require_conflict_confirmation: bool = False,
         require_locked_confirmation: bool = False,
+        sequence_start: int | None = None, numbering_error: str | None = None,
+        numbering_message: str | None = None,
     ):
         return series_detail(
             request, filter_name, catalog_title_id, None, q, sort, direction,
             video_sort, video_direction, message, metadata_error, metadata_warning, show_rejected, pending_external_id,
             require_conflict_confirmation, require_locked_confirmation,
+            sequence_start, numbering_error, numbering_message,
         )
 
     @app.get("/collections/{collection_id}", response_class=HTMLResponse)
@@ -548,6 +568,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for title in collection.titles
                 if title.metadata_record or title.external_links
             ]
+            title_numbering = [
+                {
+                    "title": title,
+                    "summary": summarize_title_numbering(
+                        [video for video in videos if video.catalog_title_id == title.id]
+                    ),
+                }
+                for title in sorted(
+                    collection.titles,
+                    key=lambda value: (
+                        value.effective_sort_order,
+                        value.local_title.casefold(),
+                    ),
+                )
+            ]
+            numbering_unknown = sum(
+                item["summary"].unknown for item in title_numbering
+            )
             return templates.TemplateResponse(request, "hierarchy_review_detail.html", {
                 "collection": collection, "videos": videos,
                 "episode_min": min(episode_numbers) if episode_numbers else None,
@@ -557,18 +595,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "external_candidates": external_candidates,
                 "external_search_candidates": external_search_candidates or [],
                 "metadata_status_labels": METADATA_STATUS_LABELS,
+                "title_numbering": title_numbering,
+                "numbering_unknown": numbering_unknown,
             })
 
     @app.get("/hierarchy-review", response_class=HTMLResponse)
     def hierarchy_review_list(request: Request):
         with sessions() as session:
             collections = list(session.scalars(select(CatalogCollection).options(
-                selectinload(CatalogCollection.titles), selectinload(CatalogCollection.videos),
-            ).where(CatalogCollection.hierarchy_status.in_(("review_required", "conflict"))).order_by(
-                CatalogCollection.local_title
-            )).all())
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+                selectinload(CatalogCollection.videos),
+            ).order_by(CatalogCollection.local_title)).all())
+            rows = []
+            for collection in collections:
+                summaries = [
+                    summarize_title_numbering(list(title.videos))
+                    for title in collection.titles
+                ]
+                numbering_unknown = sum(summary.unknown for summary in summaries)
+                if (
+                    collection.hierarchy_status in {"review_required", "conflict"}
+                    or collection_requires_numbering_review(collection)
+                ):
+                    rows.append({
+                        "collection": collection,
+                        "numbering_unknown": numbering_unknown,
+                    })
         return templates.TemplateResponse(request, "hierarchy_review.html", {
-            "collections": collections,
+            "rows": rows,
         })
 
     @app.get("/hierarchy-review/{collection_id}", response_class=HTMLResponse)
@@ -1095,13 +1149,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session.commit()
             except ValueError as exc:
                 session.rollback()
-                return action_redirect(
+                return RedirectResponse(metadata_return_url(
                     filter_name, catalog_title_id, q, sort, direction,
-                    detail_sort, detail_direction, metadata_error=str(exc),
-                )
+                    detail_sort, detail_direction, numbering_error=str(exc),
+                ).replace("#metadata", "#numbering"), status_code=303)
         return RedirectResponse(metadata_return_url(
             filter_name, catalog_title_id, q, sort, direction,
-            detail_sort, detail_direction, message="Číslování bylo uloženo.",
+            detail_sort, detail_direction, numbering_message="Číslování bylo uloženo.",
         ).replace("#metadata", "#numbering"), status_code=303)
 
     @app.post("/videos/{video_id}/episode-number")
@@ -1131,6 +1185,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ).replace("#metadata", f"#video-{video_id}"),
             status_code=303,
         )
+
+    @app.post("/titles/{catalog_title_id}/numbering/sequence")
+    def apply_title_numbering_sequence(
+        catalog_title_id: int, sequence_start: int = Form(...),
+        confirm_apply: bool = Form(False),
+        confirm_manual_conflicts: bool = Form(False),
+        filter_name: str = Form("all"), q: str = Form(""),
+        sort: str = Form(""), direction: str = Form(""),
+        detail_sort: str = Form(""), detail_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=400, detail="Neplatný filtr")
+        with sessions() as session:
+            title = session.scalar(select(CatalogTitle).options(
+                selectinload(CatalogTitle.videos),
+            ).where(CatalogTitle.id == catalog_title_id))
+            if title is None:
+                raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+            try:
+                if not confirm_apply:
+                    raise ValueError("Sekvenční číslování je nutné explicitně potvrdit.")
+                apply_sequential_numbering(
+                    list(title.videos), sequence_start,
+                    confirm_manual_conflicts=confirm_manual_conflicts,
+                )
+                recalculate_title_numbering(title, list(title.videos))
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                return RedirectResponse(metadata_return_url(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction,
+                    numbering_error=str(exc), sequence_start=str(sequence_start),
+                ).replace("#metadata", "#numbering"), status_code=303)
+        return RedirectResponse(metadata_return_url(
+            filter_name, catalog_title_id, q, sort, direction,
+            detail_sort, detail_direction,
+            numbering_message="Sekvenční číslování bylo uloženo.",
+        ).replace("#metadata", "#numbering"), status_code=303)
 
     @app.post("/scan")
     def scan(confirm_deletions: bool = Form(False)):

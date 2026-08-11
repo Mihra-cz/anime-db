@@ -1,6 +1,11 @@
-from app.models import CatalogTitle, TitleMetadata, Video
+import pytest
+
+from app.models import CatalogCollection, CatalogTitle, TitleMetadata, Video
 from app.numbering import (
-    recalculate_title_numbering, set_title_numbering, set_video_episode_override,
+    apply_sequential_numbering, collection_requires_numbering_review,
+    preview_sequential_numbering, recalculate_collection_numbering,
+    recalculate_title_numbering,
+    set_title_numbering, set_video_episode_override, summarize_title_numbering,
 )
 
 
@@ -74,3 +79,156 @@ def test_manual_numbering_settings_are_marked_verified():
     set_title_numbering(title, "absolute", 13)
     assert title.numbering_manual is True
     assert title.numbering_verified_at is not None
+
+
+def test_manual_episode_number_does_not_change_title_or_season():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    title = CatalogTitle(
+        id=10, collection=collection, local_title="Season 1",
+        normalized_local_title="season 1", relative_root_path="Anime/Show/Season 1",
+        season_number=1, season_label="S1", numbering_mode="season_local",
+        episode_start_offset=0,
+    )
+    video = Video(
+        id=1, relative_path="Anime/Show/Season 1/Title - 02.mkv",
+        root_folder="Anime", filename="Title - 02.mkv", size=1, mtime_ns=1,
+        catalog_title=title, catalog_collection=collection,
+    )
+
+    set_video_episode_override(video, 2)
+    recalculate_title_numbering(title, [video])
+
+    assert video.catalog_title is title
+    assert title.season_number == 1
+    assert title.effective_season_number == 1
+    assert video.season_episode_number == 2
+
+
+def test_sequential_preview_is_pure_and_uses_deterministic_filename_order():
+    items = list(reversed([
+        Video(
+            id=number,
+            relative_path=f"Anime/Show/Season 1/Title - {number:02}.mkv",
+            root_folder="Anime", filename=f"Title - {number:02}.mkv",
+            size=1, mtime_ns=1,
+        )
+        for number in range(1, 13)
+    ]))
+
+    rows = preview_sequential_numbering(items, 1)
+
+    assert [(row.filename, row.proposed_episode) for row in rows] == [
+        (f"Title - {number:02}.mkv", number) for number in range(1, 13)
+    ]
+    assert all(item.episode_number_manual_override is None for item in items)
+    assert all(item.season_episode_number is None for item in items)
+
+
+def test_confirmed_sequential_numbering_creates_e1_to_e12_without_changing_season():
+    title = part(1, offset=0, mode="season_local")
+    title.season_number = 1
+    items = list(reversed(videos(1, 12)))
+    for item in items:
+        item.catalog_title = title
+
+    apply_sequential_numbering(items, 1)
+    recalculate_title_numbering(title, items)
+
+    ordered = sorted(items, key=lambda item: item.season_episode_number)
+    assert [item.season_episode_number for item in ordered] == list(range(1, 13))
+    assert [item.episode_number_manual_override for item in ordered] == list(range(1, 13))
+    assert title.season_number == 1
+    assert all(item.catalog_title is title for item in items)
+
+
+def test_sequential_numbering_does_not_silently_overwrite_manual_value():
+    items = videos(1, 2)
+    set_video_episode_override(items[0], 9)
+
+    with pytest.raises(ValueError, match="explicitně potvrdit"):
+        apply_sequential_numbering(items, 1)
+
+    assert items[0].episode_number_manual_override == 9
+    assert items[1].episode_number_manual_override is None
+
+    apply_sequential_numbering(items, 1, confirm_manual_conflicts=True)
+    assert [item.episode_number_manual_override for item in items] == [1, 2]
+
+
+def test_offset_is_count_of_preceding_episodes_for_season_local_mode():
+    title = part(2, offset=12, mode="season_local")
+    items = videos(1, 12)
+
+    recalculate_title_numbering(title, items)
+
+    assert items[0].season_episode_number == 1
+    assert items[0].absolute_episode_number == 13
+    assert items[-1].season_episode_number == 12
+    assert items[-1].absolute_episode_number == 24
+
+
+def test_unknown_preceding_title_count_prevents_later_inferred_absolute_offset():
+    collection = CatalogCollection(
+        local_title="Show", normalized_local_title="show", relative_root_path="Anime/Show",
+    )
+    titles = [
+        CatalogTitle(
+            id=number, collection=collection, local_title=f"Season {number}",
+            normalized_local_title=f"season {number}",
+            relative_root_path=f"Anime/Show/Season {number}",
+            season_number=number, sort_order=number,
+        )
+        for number in range(1, 4)
+    ]
+    titles[1].metadata_record = TitleMetadata(
+        catalog_title_id=titles[1].id, display_title="Season 2", episode_count=12,
+    )
+    items = {
+        title.id: [Video(
+            id=title.id, relative_path=f"{title.relative_root_path}/Episode 01.mkv",
+            root_folder="Anime", filename="Episode 01.mkv", size=1, mtime_ns=1,
+        )]
+        for title in titles
+    }
+
+    recalculate_collection_numbering(collection, items)
+
+    assert items[titles[2].id][0].season_episode_number == 1
+    assert items[titles[2].id][0].absolute_episode_number is None
+
+
+def test_verified_collection_with_unknown_numbering_requires_review():
+    collection = CatalogCollection(
+        local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show", hierarchy_status="verified",
+    )
+    title = CatalogTitle(
+        local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", collection=collection,
+    )
+    title.videos = videos(1, 2)
+
+    assert collection_requires_numbering_review(collection) is True
+    assert summarize_title_numbering(title.videos).unknown == 2
+
+
+def test_verified_collection_with_fully_numbered_title_has_no_numbering_warning():
+    collection = CatalogCollection(
+        local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show", hierarchy_status="verified",
+    )
+    title = CatalogTitle(
+        local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", collection=collection,
+    )
+    title.videos = videos(1, 2)
+    for number, item in enumerate(title.videos, 1):
+        item.season_episode_number = number
+
+    summary = summarize_title_numbering(title.videos)
+    assert collection_requires_numbering_review(collection) is False
+    assert summary.requires_review is False
+    assert summary.gaps == ()
