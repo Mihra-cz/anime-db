@@ -15,9 +15,9 @@
   <a class="stat-link" href="/catalog/missing{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.missing }}</strong><span>bez CZ/SK</span></article></a>
   <a class="stat-link" href="/catalog/unknown{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.unknown }}</strong><span>s neznámými titulky</span></article></a>
 </section>
-<section class="panel"><h2>Kořenové složky</h2>
+<section class="panel"><h2>Kořenové složky a nezařazený obsah</h2>
 <div class="table-wrap"><table><thead><tr><th>Složka</th><th>Epizody</th><th>Bonusy</th><th>CZ</th><th>SK</th><th>CZ/SK</th><th>Bez CZ/SK</th><th>Neznámé</th></tr></thead><tbody>
-{% for name, data in folders %}<tr><td><a href="{{ url_for('folder_detail', folder=name) }}">{{ name }}</a></td><td>{{ data.episodes }}</td><td>{{ data.bonus }}</td><td>{{ data.cs }}</td><td>{{ data.sk }}</td><td>{{ data.translated }}</td><td>{{ data.missing }}</td><td>{{ data.unknown }}</td></tr>
+{% for name, data in folders %}<tr><td>{% if name == '.' %}<a href="{{ url_for('root_videos') }}">Nezařazená videa z kořene knihovny</a><small>Fyzické soubory přímo v kořeni; nejde o jednu anime kolekci.</small>{% else %}<a href="{{ url_for('folder_detail', folder=name) }}">{{ name }}</a>{% endif %}</td><td>{{ data.episodes }}</td><td>{{ data.bonus }}</td><td>{{ data.cs }}</td><td>{{ data.sk }}</td><td>{{ data.translated }}</td><td>{{ data.missing }}</td><td>{{ data.unknown }}</td></tr>
 {% else %}<tr><td colspan="8">Databáze je prázdná. Spusťte první sken.</td></tr>{% endfor %}
 </tbody></table></div></section>
 {% endblock %}

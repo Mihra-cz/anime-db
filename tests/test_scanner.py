@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.catalog import set_manual_hardsub
-from app.models import CatalogTitle, ExternalSubtitle, Video
+from app.models import CatalogCollection, CatalogTitle, ExternalSubtitle, Video
 from app.scanner import LibrarySafetyError, iter_videos, scan_library
 
 
@@ -15,6 +15,89 @@ PROBE_RESULT = {
     "duration": 60.0, "video_codec": "h264", "width": 1920, "height": 1080,
     "audio": [], "subtitles": [],
 }
+
+
+def test_root_videos_remain_visible_unassigned_and_are_not_merged(tmp_path: Path, monkeypatch):
+    paths = [tmp_path / "Movie One.mkv", tmp_path / "Movie Two.ova.mp4"]
+    for path in paths:
+        path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        result = scan_library(session, tmp_path)
+        videos = session.scalars(select(Video).order_by(Video.filename)).all()
+
+        assert result.created == 2
+        assert [video.relative_path for video in videos] == [
+            "Movie One.mkv", "Movie Two.ova.mp4",
+        ]
+        assert {video.root_folder for video in videos} == {"."}
+        assert [video.file_type for video in videos] == ["other", "ova"]
+        assert all(video.catalog_collection_id is None for video in videos)
+        assert all(video.catalog_title_id is None for video in videos)
+        assert session.scalar(select(func.count()).select_from(CatalogCollection)) == 0
+        assert all(path.exists() for path in paths)
+
+
+def test_scan_preserves_meaningful_root_assignment_and_regular_folder_hierarchy(
+    tmp_path: Path, monkeypatch
+):
+    root_path = tmp_path / "Standalone Movie.mkv"
+    collection_only_path = tmp_path / "Unassigned Special.mkv"
+    regular_path = tmp_path / "Regular Show" / "E01.mkv"
+    regular_path.parent.mkdir()
+    root_path.write_bytes(b"root")
+    collection_only_path.write_bytes(b"root without title")
+    regular_path.write_bytes(b"regular")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        root_video = session.scalar(select(Video).where(Video.relative_path == root_path.name))
+        collection_only_video = session.scalar(select(Video).where(
+            Video.relative_path == collection_only_path.name
+        ))
+        collection = CatalogCollection(
+            local_title="Standalone Movie", normalized_local_title="standalone movie",
+            relative_root_path="@root/manual-movie", hierarchy_status="review_required",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Standalone Movie",
+            normalized_local_title="standalone movie",
+            relative_root_path="@root/manual-movie/title", part_type="film",
+            hierarchy_manual_override=True,
+        )
+        root_video.catalog_collection = collection
+        root_video.catalog_title = title
+        holding_collection = CatalogCollection(
+            local_title="Existing holding collection",
+            normalized_local_title="existing holding collection",
+            relative_root_path="Anime/Existing holding collection",
+            hierarchy_status="review_required",
+        )
+        collection_only_video.catalog_collection = holding_collection
+        session.commit()
+
+        scan_library(session, tmp_path)
+        stored_root = session.scalar(select(Video).where(Video.relative_path == root_path.name))
+        stored_collection_only = session.scalar(select(Video).where(
+            Video.relative_path == collection_only_path.name
+        ))
+        regular = session.scalar(select(Video).where(Video.relative_path == "Regular Show/E01.mkv"))
+
+        assert stored_root.catalog_collection_id == collection.id
+        assert stored_root.catalog_title_id == title.id
+        assert stored_collection_only.catalog_collection_id == holding_collection.id
+        assert stored_collection_only.catalog_title_id is None
+        assert regular.catalog_collection.local_title == "Regular Show"
+        assert regular.catalog_title.local_title == "Regular Show"
+        assert root_path.exists() and collection_only_path.exists() and regular_path.exists()
 
 
 def test_ignores_recycle(tmp_path: Path):
@@ -228,5 +311,16 @@ def test_scan_preserves_manual_hardsub_and_verification_date(tmp_path: Path, mon
         assert video.manual_hardsub_verified_at == stored_timestamp
 
         set_manual_hardsub(video, "none")
+        session.commit()
+        absence_timestamp = video.manual_hardsub_verified_at
+        assert absence_timestamp is not None
+
+        scan_library(session, tmp_path)
+        video = session.scalar(select(Video))
+        assert video.manual_hardsub_cs is False
+        assert video.manual_hardsub_sk is False
+        assert video.manual_hardsub_verified_at == absence_timestamp
+
+        set_manual_hardsub(video, "unknown")
         session.commit()
         assert video.manual_hardsub_verified_at is None

@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 import re
 import unicodedata
 
-from .models import Video
+from .models import CatalogTitle, Video
 
 LANGUAGE_ALIASES = {
     "cs": "cs", "cze": "cs", "ces": "cs", "czech": "cs", "čeština": "cs",
@@ -77,6 +77,100 @@ class TranslationStatus:
     has_unknown: bool
     automatic_has_cs: bool
     automatic_has_sk: bool
+
+
+@dataclass(frozen=True)
+class SubtitleTrackDisplay:
+    label: str
+    details: str
+
+
+SUBTITLE_LANGUAGE_LABELS = {
+    "cs": "CZ", "sk": "SK", "eng": "EN", "deu": "DE", "fra": "FR",
+    "spa": "ES", "ita": "IT", "jpn": "JA", "kor": "KO", "zho": "ZH",
+    "pol": "PL", "rus": "RU", "ukr": "UK", "por": "PT", "hun": "HU",
+    "unknown": "?",
+}
+
+ROOT_FOLDER = "."
+ROOT_VIDEO_GROUP_LABEL = "Nezařazená videa z kořene knihovny"
+
+
+def catalog_title_display_title(title: CatalogTitle) -> str:
+    """Vrátí nejlepší uložený uživatelský název bez změny lokální identity."""
+    return (
+        title.manual_display_title
+        or (title.metadata_record.display_title if title.metadata_record else None)
+        or title.local_title
+    )
+
+
+def catalog_title_series_label(title: CatalogTitle) -> str:
+    """Vrátí popisek části výhradně z hierarchie CatalogTitle."""
+    if title.effective_season_label:
+        return title.effective_season_label
+    if title.effective_part_type == "season" and title.effective_season_number is not None:
+        return f"S{title.effective_season_number}"
+    if title.effective_part_type in {"part", "cour"} and title.part_number is not None:
+        prefix = "Part" if title.effective_part_type == "part" else "Cour"
+        return f"{prefix} {title.part_number}"
+    return {
+        "film": "Film", "ova": "OVA", "special": "Special",
+        "migration_review": "Kontrola migrace",
+    }.get(title.effective_part_type, "—")
+
+
+def subtitle_track_display(video: Video) -> list[SubtitleTrackDisplay]:
+    """Sloučí interní a externí subtitle tracky do unikátních čitelných položek."""
+    grouped: dict[tuple[str, str], list[str]] = {}
+    tracks = [
+        ("interní", track) for track in video.internal_subtitles
+    ] + [
+        ("externí", track) for track in video.external_subtitles
+    ]
+    for source, track in tracks:
+        language = SUBTITLE_LANGUAGE_LABELS.get(
+            track.normalized_language, track.normalized_language.upper()
+        )
+        codec = (track.codec or "").strip().upper()
+        key = (language, codec)
+        raw_language = (track.language or "unknown").strip() or "unknown"
+        detail = f"{source}: raw={raw_language}, codec={track.codec or '?'}"
+        if source == "interní" and getattr(track, "title", None):
+            detail += f", název={track.title}"
+        if source == "externí":
+            detail += f", cesta={track.relative_path}"
+        grouped.setdefault(key, []).append(detail)
+    return [
+        SubtitleTrackDisplay(
+            label=f"{language} ({codec})" if codec else language,
+            details="; ".join(details),
+        )
+        for (language, codec), details in grouped.items()
+    ]
+
+
+def is_root_video(video: Video) -> bool:
+    return len(PurePosixPath(video.relative_path).parts) == 1
+
+
+def has_meaningful_root_assignment(video: Video) -> bool:
+    collection = (
+        video.catalog_title.collection
+        if video.catalog_title and video.catalog_title.collection
+        else video.catalog_collection
+    )
+    return bool(
+        is_root_video(video)
+        and collection
+        and collection.relative_root_path != ROOT_FOLDER
+    )
+
+
+def manual_hardsub_state(video: Video) -> str:
+    if video.manual_hardsub_verified_at is None:
+        return "unknown"
+    return "yes" if video.manual_hardsub_cs or video.manual_hardsub_sk else "no"
 
 
 def translation_status(video: Video) -> TranslationStatus:
@@ -167,6 +261,7 @@ class SeriesSummary:
     catalog_title_id: int | None = None
     catalog_collection_id: int | None = None
     metadata_status: str = "unlinked"
+    is_root_group: bool = False
     part_ids: set[int] = field(default_factory=set)
     linked_part_ids: set[int] = field(default_factory=set)
     total: int = 0
@@ -327,16 +422,25 @@ def build_catalog_results(
         catalog_title = video.catalog_title
         collection = catalog_title.collection if catalog_title else video.catalog_collection
         identity = determine_parent_series(video.relative_path)
-        group_path = collection.relative_root_path if collection else identity.relative_path
-        group_name = collection.local_title if collection else identity.name
+        is_unassigned_root = is_root_video(video) and not has_meaningful_root_assignment(video)
+        group_path = (
+            ROOT_FOLDER if is_unassigned_root
+            else collection.relative_root_path if collection else identity.relative_path
+        )
+        group_name = (
+            ROOT_VIDEO_GROUP_LABEL if is_unassigned_root
+            else collection.local_title if collection else identity.name
+        )
         all_by_title.setdefault(group_path, []).append(video)
         summary = groups.setdefault(
             group_path,
             SeriesSummary(
                 name=group_name, relative_path=group_path,
                 catalog_title_id=video.catalog_title_id,
-                catalog_collection_id=collection.id if collection else None,
+                catalog_collection_id=(collection.id if collection else None)
+                if not is_unassigned_root else None,
                 metadata_status=catalog_title.metadata_status if catalog_title else "unlinked",
+                is_root_group=is_unassigned_root,
             ),
         )
         if catalog_title:
@@ -360,8 +464,17 @@ def build_catalog_results(
             first_title.collection if first_title else title_videos_list[0].catalog_collection
         )
         identity = determine_parent_series(title_videos_list[0].relative_path)
-        display_name = first_collection.local_title if first_collection else identity.name
-        display_path = first_collection.relative_root_path if first_collection else identity.relative_path
+        is_unassigned_root = is_root_video(title_videos_list[0]) and not has_meaningful_root_assignment(
+            title_videos_list[0]
+        )
+        display_name = (
+            ROOT_VIDEO_GROUP_LABEL if is_unassigned_root
+            else first_collection.local_title if first_collection else identity.name
+        )
+        display_path = (
+            ROOT_FOLDER if is_unassigned_root
+            else first_collection.relative_root_path if first_collection else identity.relative_path
+        )
         filtered = [video for video in title_videos_list if video_matches_filter(video, filter_name)]
         title_matches = bool(folded_query) and (
             _contains_query(display_name, folded_query)
@@ -530,6 +643,7 @@ def set_manual_hardsub(
     video: Video, mode: str, *, verified_at: datetime | None = None
 ) -> None:
     values = {
+        "unknown": (False, False),
         "none": (False, False),
         "cs": (True, False),
         "sk": (False, True),
@@ -539,5 +653,5 @@ def set_manual_hardsub(
         raise ValueError("Neplatná hodnota ručního hardsubu")
     video.manual_hardsub_cs, video.manual_hardsub_sk = values[mode]
     video.manual_hardsub_verified_at = (
-        (verified_at or datetime.now(timezone.utc)) if mode != "none" else None
+        None if mode == "unknown" else (verified_at or datetime.now(timezone.utc))
     )

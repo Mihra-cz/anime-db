@@ -9,7 +9,10 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.catalog import classify_video, normalize_language, normalize_title
+from app.catalog import (
+    classify_video, has_meaningful_root_assignment, is_root_video, normalize_language,
+    normalize_title,
+)
 from app.hierarchy import derive_library_hierarchy
 from app.hierarchy_review import (
     collection_requires_review, definition_from_title, extract_local_period_hint,
@@ -307,11 +310,20 @@ def _scan_library(
     }
     videos_by_collection_path: dict[str, list[Video]] = {}
     for video in current_videos:
+        if is_root_video(video):
+            continue
         identity = hierarchy[video.relative_path]
         videos_by_collection_path.setdefault(
             identity.collection.relative_root_path, []
         ).append(video)
     for video in current_videos:
+        if is_root_video(video):
+            if not has_meaningful_root_assignment(video):
+                video.catalog_title = None
+                video.catalog_collection = None
+            elif video.catalog_title and video.catalog_title.collection:
+                video.catalog_collection = video.catalog_title.collection
+            continue
         identity = hierarchy[video.relative_path]
         collection_data, title_data = identity.collection, identity.title
         collection = collections.get(collection_data.relative_root_path)

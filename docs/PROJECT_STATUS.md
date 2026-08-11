@@ -249,6 +249,7 @@ Dokončeno:
   - `manual_hardsub_sk`,
   - `manual_hardsub_verified_at`,
 - ruční volby:
+  - neověřeno,
   - bez hardsubu,
   - hardsub CZ,
   - hardsub SK,
@@ -256,7 +257,9 @@ Dokončeno:
 - štítek **Ověřeno přehráním**,
 - datum ručního ověření,
 - ruční údaje skener nepřepisuje,
-- zrušení ručního označení odstraní datum ověření,
+- potvrzení absence hardsubu ukládá datum ověření stejně jako potvrzení
+  jeho přítomnosti,
+- teprve volba **neověřeno** odstraní ruční hodnotu i datum ověření,
 - ruční hardsub se započítává do výsledného CZ/SK stavu,
 - neovlivňuje samostatnou evidenci neznámých titulků.
 
@@ -1283,6 +1286,45 @@ Automatické ověření 11. srpna 2026:
 .venv/bin/python -m compileall app tests  # prošlo
 git diff --check                          # prošlo
 ```
+
+## 6.14 Čitelnější seznam epizod na detailu titulu
+
+V rámci fáze **Stabilizace hierarchie a ladění UI nad reálnou knihovnou**
+byla tabulka videí na detailu `CatalogTitle` upravena tak, aby jako hlavní
+informace zobrazovala uživatelský název, sérii, epizodu, délku, společný
+seznam titulků, hardsub a stav ověření. Filename a další technické údaje
+zůstávají dostupné se sníženou vizuální prioritou. Změna nemění
+hierarchii, číslování ani databázový model.
+
+Pozdější samostatný UX refaktor má rozdělit detail titulu na:
+
+- běžné **Zobrazení** s metadaty, artworkem, seznamem epizod a čitelnými
+  informacemi,
+- **Úpravy** s hierarchií, propojením metadat, číslováním, override a
+  technickými údaji.
+
+Tento View/Edit refaktor nyní implementován nebyl. V6 nebyla zahájena.
+
+Hardsub se v seznamu zobrazuje trojstavově: **Ano** znamená ručně potvrzenou
+přítomnost, **Ne** ručně potvrzenou absenci a **Neznámé** chybějící
+ruční ověření. Hodnotu nesou existující boolean příznaky a stav ověření
+rozlišuje `manual_hardsub_verified_at`; nebyla potřeba databázová migrace.
+
+### Videa přímo v kořeni knihovny
+
+Při ruční kontrole byly nalezeny samostatné filmy uložené přímo v kořeni
+knihovny. Scanner je správně eviduje s `root_folder="."`; původní přehled ale
+tečku zobrazoval jako kořenovou složku a odkaz `/folders/.` mohl být při
+zpracování URL normalizován na prázdnou cestu. Výsledkem byl prázdný katalog.
+
+UI nyní používá samostatný přehled **Nezařazená videa z kořene knihovny**.
+Root soubory se automaticky neslučují do anime kolekce pouze podle společného
+fyzického umístění. Lze je explicitně přiřadit k existujícímu
+`CatalogTitle` nebo pro jednotlivý soubor ručně vytvořit samostatný titul.
+Existující smysluplné ruční přiřazení scanner zachová. Žádná z těchto
+akcí nemění ani nepřesouvá fyzický soubor. Staré technické přiřazení k
+pseudo-kolekci `.` se pouze zobrazí jako stav ke kontrole; tato změna sama
+produkční databázi automaticky neupravuje.
 
 ---
 

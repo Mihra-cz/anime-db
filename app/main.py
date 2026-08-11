@@ -16,14 +16,23 @@ from sqlalchemy.orm import selectinload
 
 from .catalog import (
     FILTER_LABELS,
+    ROOT_FOLDER,
+    ROOT_VIDEO_GROUP_LABEL,
     build_catalog_results,
+    catalog_title_display_title,
+    catalog_title_series_label,
     derive_episode_number,
     derive_season_info,
     determine_parent_series,
     group_videos_by_series,
+    has_meaningful_root_assignment,
+    is_root_video,
+    manual_hardsub_state,
     normalize_search_query,
+    normalize_title,
     set_manual_hardsub,
     sort_title_videos,
+    subtitle_track_display,
     title_videos,
     translation_status,
     video_matches_filter,
@@ -63,6 +72,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
+templates.env.globals.update(
+    catalog_title_display_title=catalog_title_display_title,
+    catalog_title_series_label=catalog_title_series_label,
+    subtitle_track_display=subtitle_track_display,
+    manual_hardsub_state=manual_hardsub_state,
+)
 METADATA_STATUS_LABELS = {
     "unlinked": "Bez metadat", "candidates_available": "Čeká na potvrzení",
     "linked_auto": "Spárováno automaticky", "linked_manual": "Spárováno ručně",
@@ -75,6 +90,7 @@ def _load_videos(sessions) -> list[Video]:
             selectinload(Video.audio_tracks), selectinload(Video.internal_subtitles),
             selectinload(Video.external_subtitles),
             selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
+            selectinload(Video.catalog_title).selectinload(CatalogTitle.metadata_record),
             selectinload(Video.catalog_collection),
         ).order_by(Video.relative_path)).all())
 
@@ -277,6 +293,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/folders/{folder:path}", response_class=HTMLResponse)
     def folder_detail(request: Request, folder: str):
+        if folder in {"", ROOT_FOLDER}:
+            return RedirectResponse("/root-videos", status_code=307)
         videos = [video for video in _load_videos(sessions) if video.root_folder == folder]
         results = build_catalog_results(videos, "all")
         def sort_url(column: str) -> str:
@@ -291,6 +309,130 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "direction": results.direction, "sort_url": sort_url,
             "catalog_state_url": catalog_state_url,
         })
+
+    @app.get("/root-videos", response_class=HTMLResponse)
+    def root_videos(request: Request):
+        videos = sorted(
+            [video for video in _load_videos(sessions) if is_root_video(video)],
+            key=lambda video: video.filename.casefold(),
+        )
+        with sessions() as session:
+            target_titles = list(session.scalars(select(CatalogTitle).options(
+                selectinload(CatalogTitle.collection),
+                selectinload(CatalogTitle.metadata_record),
+            ).join(CatalogTitle.collection).where(
+                CatalogCollection.relative_root_path != ROOT_FOLDER
+            ).order_by(CatalogCollection.local_title, CatalogTitle.local_title)).all())
+        rows = []
+        for video in videos:
+            meaningful_assignment = has_meaningful_root_assignment(video)
+            rows.append({
+                "video": video,
+                "display_title": (
+                    catalog_title_display_title(video.catalog_title)
+                    if meaningful_assignment and video.catalog_title
+                    else Path(video.filename).stem
+                ),
+                "meaningful_assignment": meaningful_assignment,
+                "metadata": (
+                    video.catalog_title.metadata_record
+                    if video.catalog_title else None
+                ),
+            })
+        return templates.TemplateResponse(request, "root_videos.html", {
+            "rows": rows,
+            "target_titles": target_titles,
+            "root_group_label": ROOT_VIDEO_GROUP_LABEL,
+            "metadata_status_labels": METADATA_STATUS_LABELS,
+            "subtitle_track_display": subtitle_track_display,
+            "manual_hardsub_state": manual_hardsub_state,
+        })
+
+    @app.post("/root-videos/{video_id}/assignment")
+    def assign_root_video(video_id: int, target_title_id: str = Form("")):
+        with sessions() as session:
+            video = session.get(Video, video_id)
+            if video is None or not is_root_video(video):
+                raise HTTPException(status_code=404, detail="Root video nebylo nalezeno")
+            old_title = video.catalog_title
+            target_title = None
+            if target_title_id.strip():
+                try:
+                    parsed_title_id = int(target_title_id)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail="Neplatný cílový titul") from exc
+                target_title = session.get(CatalogTitle, parsed_title_id)
+                if (
+                    target_title is None or target_title.collection is None
+                    or target_title.collection.relative_root_path == ROOT_FOLDER
+                ):
+                    raise HTTPException(status_code=400, detail="Cílový titul nelze použít")
+                video.catalog_title = target_title
+                video.catalog_collection = target_title.collection
+            else:
+                video.catalog_title = None
+                video.catalog_collection = None
+            session.flush()
+            for title in {old_title, target_title} - {None}:
+                recalculate_title_numbering(title, list(title.videos))
+            session.commit()
+        return RedirectResponse(f"/root-videos#video-{video_id}", status_code=303)
+
+    @app.post("/root-videos/{video_id}/new-title")
+    def create_root_video_title(
+        video_id: int, display_title: str = Form(...), part_type: str = Form("film")
+    ):
+        name = display_title.strip()
+        if not name or len(name) > 200:
+            raise HTTPException(status_code=400, detail="Název musí mít 1 až 200 znaků")
+        labels = {"title": None, "film": "Film", "ova": "OVA", "special": "Special"}
+        if part_type not in labels:
+            raise HTTPException(status_code=400, detail="Neplatný typ titulu")
+        with sessions() as session:
+            video = session.get(Video, video_id)
+            if video is None or not is_root_video(video):
+                raise HTTPException(status_code=404, detail="Root video nebylo nalezeno")
+            old_title = video.catalog_title
+            virtual_root = f"@root/{video.id}"
+            collection = session.scalar(select(CatalogCollection).where(
+                CatalogCollection.relative_root_path == virtual_root
+            ))
+            if collection is None:
+                collection = CatalogCollection(
+                    local_title=name, normalized_local_title=normalize_title(name),
+                    relative_root_path=virtual_root, manual_display_title=name,
+                    hierarchy_status="review_required",
+                    hierarchy_note="Samostatný titul ručně vytvořený pro video v kořeni knihovny.",
+                )
+                session.add(collection)
+                session.flush()
+            title_path = f"{virtual_root}/title"
+            title = session.scalar(select(CatalogTitle).where(
+                CatalogTitle.relative_root_path == title_path
+            ))
+            if title is None:
+                title = CatalogTitle(
+                    collection=collection, local_title=name,
+                    normalized_local_title=normalize_title(name),
+                    relative_root_path=title_path,
+                )
+                session.add(title)
+            collection.local_title = name
+            collection.normalized_local_title = normalize_title(name)
+            collection.manual_display_title = name
+            title.local_title = name
+            title.normalized_local_title = normalize_title(name)
+            title.manual_display_title = name
+            title.part_type_manual = part_type
+            title.season_label_manual = labels[part_type]
+            title.hierarchy_manual_override = True
+            video.catalog_collection = collection
+            video.catalog_title = title
+            session.flush()
+            for affected_title in {old_title, title} - {None}:
+                recalculate_title_numbering(affected_title, list(affected_title.videos))
+            session.commit()
+        return RedirectResponse(f"/root-videos#video-{video_id}", status_code=303)
 
     @app.get("/catalog/{filter_name}", response_class=HTMLResponse)
     def catalog(
@@ -429,6 +571,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 catalog_title
             ) if catalog_title else "",
             "videos": videos,
+            "catalog_title_display_title": catalog_title_display_title,
+            "catalog_title_series_label": catalog_title_series_label,
+            "subtitle_track_display": subtitle_track_display,
+            "manual_hardsub_state": manual_hardsub_state,
             "translation_status": translation_status,
             "video_matches_filter": video_matches_filter,
             "derive_season_info": derive_season_info,
@@ -917,6 +1063,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "filter_name": filter_name, "filter_label": FILTER_LABELS[filter_name],
             "series": determine_parent_series(videos[0].relative_path),
             "catalog_title": catalog_title, "videos": videos,
+            "catalog_title_display_title": catalog_title_display_title,
+            "catalog_title_series_label": catalog_title_series_label,
+            "subtitle_track_display": subtitle_track_display,
             "translation_status": translation_status, "video_matches_filter": video_matches_filter,
             "derive_season_info": derive_season_info, "derive_episode_number": derive_episode_number,
             "q": results.query, "sort": results.sort, "direction": results.direction,

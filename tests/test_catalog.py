@@ -4,20 +4,27 @@ import pytest
 
 from app.catalog import (
     FILTER_LABELS,
+    ROOT_VIDEO_GROUP_LABEL,
     SeriesSummary,
     build_catalog_results,
+    catalog_title_display_title,
+    catalog_title_series_label,
     classify_video,
     derive_episode_number,
     derive_season_info,
     determine_parent_series,
     group_videos_by_series,
+    manual_hardsub_state,
     normalize_language,
     set_manual_hardsub,
     sort_title_videos,
+    subtitle_track_display,
     title_videos,
     translation_status,
 )
-from app.models import CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, Video
+from app.models import (
+    CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, TitleMetadata, Video,
+)
 
 
 def test_normalizes_czech_variants():
@@ -31,6 +38,120 @@ def test_normalizes_slovak_variants():
 def test_uses_english_title_when_language_is_unknown():
     assert normalize_language("unknown", "English (UK)") == "eng"
     assert normalize_language("unknown", "[Isekai]") == "unknown"
+
+
+def test_catalog_title_display_title_prefers_manual_then_metadata_then_local():
+    title = CatalogTitle(
+        local_title="Local title", normalized_local_title="local title",
+        relative_root_path="Anime/Local title", manual_display_title="Manual title",
+        metadata_record=TitleMetadata(display_title="Metadata title"),
+    )
+
+    assert catalog_title_display_title(title) == "Manual title"
+    title.manual_display_title = None
+    assert catalog_title_display_title(title) == "Metadata title"
+    title.metadata_record = None
+    assert catalog_title_display_title(title) == "Local title"
+
+
+def test_catalog_title_series_label_uses_effective_hierarchy_values():
+    title = CatalogTitle(
+        local_title="Season", normalized_local_title="season",
+        relative_root_path="Anime/Show/Season", part_type="season", season_number=1,
+        season_label="S1", season_number_manual=2, season_label_manual="S2",
+    )
+    assert catalog_title_series_label(title) == "S2"
+
+    title.season_label_manual = None
+    title.season_label = None
+    assert catalog_title_series_label(title) == "S2"
+
+
+def test_root_videos_use_workflow_group_instead_of_fake_dot_collection():
+    pseudo_collection = CatalogCollection(
+        id=1, local_title="Knihovna", normalized_local_title="knihovna",
+        relative_root_path=".",
+    )
+    pseudo_title = CatalogTitle(
+        id=1, collection=pseudo_collection, local_title="Knihovna",
+        normalized_local_title="knihovna", relative_root_path=".",
+    )
+    videos = [
+        Video(
+            id=index, relative_path=filename, root_folder=".", filename=filename,
+            size=1, mtime_ns=1, file_type="other", catalog_collection=pseudo_collection,
+            catalog_title=pseudo_title,
+        )
+        for index, filename in enumerate(("Film A.mkv", "Film B.mkv"), 1)
+    ]
+
+    results = build_catalog_results(videos, "all")
+
+    assert len(results.groups) == 1
+    assert results.groups[0].name == ROOT_VIDEO_GROUP_LABEL
+    assert results.groups[0].is_root_group is True
+    assert results.groups[0].catalog_collection_id is None
+    assert results.groups[0].bonus == 2
+    assert results.videos_by_title["."] == videos
+
+
+def test_root_videos_with_distinct_manual_assignments_stay_in_distinct_collections():
+    videos = []
+    for index, name in enumerate(("Film A", "Film B"), 1):
+        collection = CatalogCollection(
+            id=index, local_title=name, normalized_local_title=name.casefold(),
+            relative_root_path=f"@root/{index}",
+        )
+        title = CatalogTitle(
+            id=index, collection=collection, local_title=name,
+            normalized_local_title=name.casefold(), relative_root_path=f"@root/{index}/title",
+        )
+        videos.append(Video(
+            id=index, relative_path=f"{name}.mkv", root_folder=".", filename=f"{name}.mkv",
+            size=1, mtime_ns=1, file_type="other", catalog_collection=collection,
+            catalog_title=title,
+        ))
+
+    results = build_catalog_results(videos, "all")
+
+    assert [group.name for group in results.groups] == ["Film A", "Film B"]
+    assert all(not group.is_root_group for group in results.groups)
+    assert [group.catalog_collection_id for group in results.groups] == [1, 2]
+
+
+def test_root_video_without_catalog_title_keeps_meaningful_collection_assignment():
+    collection = CatalogCollection(
+        id=3, local_title="Existing collection", normalized_local_title="existing collection",
+        relative_root_path="Anime/Existing collection",
+    )
+    video = Video(
+        id=3, relative_path="Unassigned Special.mkv", root_folder=".",
+        filename="Unassigned Special.mkv", size=1, mtime_ns=1, file_type="special",
+        catalog_collection=collection, catalog_title=None,
+    )
+
+    results = build_catalog_results([video], "all")
+
+    assert results.groups[0].name == "Existing collection"
+    assert results.groups[0].catalog_collection_id == 3
+    assert results.groups[0].is_root_group is False
+
+def test_subtitle_track_display_merges_languages_and_preserves_known_formats():
+    video = _video("Anime/Show/01.mkv")
+    video.internal_subtitles = [InternalSubtitle(
+        stream_index=2, codec="ass", language="cze", normalized_language="cs",
+    )]
+    video.external_subtitles = [ExternalSubtitle(
+        relative_path="Anime/Show/01.en.srt", codec="srt", language="eng",
+        normalized_language="eng",
+    )]
+
+    tracks = subtitle_track_display(video)
+
+    assert [track.label for track in tracks] == ["CZ (ASS)", "EN (SRT)"]
+    assert "interní" in tracks[0].details
+    assert "externí" in tracks[1].details
+    assert subtitle_track_display(_video("Anime/Show/02.mkv")) == []
 
 
 def test_internal_czech_marks_video_as_translated():
@@ -354,10 +475,27 @@ def test_manual_hardsub_sets_independent_language_flags_and_timestamp():
     assert translation_status(video).has_sk is True
 
 
-def test_clearing_manual_hardsub_falls_back_to_automatic_subtitles():
+def test_manual_hardsub_state_distinguishes_unknown_absent_and_present():
+    video = _video("Anime/Show/01.mkv")
+    verified_at = datetime(2026, 8, 5, 10, 30, tzinfo=timezone.utc)
+
+    assert manual_hardsub_state(video) == "unknown"
+
+    set_manual_hardsub(video, "none", verified_at=verified_at)
+    assert manual_hardsub_state(video) == "no"
+    assert video.manual_hardsub_verified_at == verified_at
+
+    set_manual_hardsub(video, "cs", verified_at=verified_at)
+    assert manual_hardsub_state(video) == "yes"
+
+    set_manual_hardsub(video, "unknown")
+    assert manual_hardsub_state(video) == "unknown"
+    assert video.manual_hardsub_verified_at is None
+
+def test_clearing_hardsub_verification_falls_back_to_automatic_subtitles():
     video = _video("Anime/Show/01.mkv", language="cs")
     set_manual_hardsub(video, "both")
-    set_manual_hardsub(video, "none")
+    set_manual_hardsub(video, "unknown")
     status = translation_status(video)
     assert status.has_cs is True
     assert status.has_sk is False
