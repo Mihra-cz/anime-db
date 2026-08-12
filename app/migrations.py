@@ -48,6 +48,8 @@ def migrate_schema(engine) -> None:
             ("episode_number_manual_override", "INTEGER NULL"),
             ("episode_number_verified_at", "DATETIME NULL"),
             ("content_type_manual", "VARCHAR NULL"),
+            ("duplicate_of_video_id", "INTEGER NULL REFERENCES videos(id) ON DELETE SET NULL"),
+            ("duplicate_primary_missing", "BOOLEAN NOT NULL DEFAULT 0"),
         ],
         "internal_subtitles": [("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'")],
         "external_subtitles": [("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'")],
@@ -101,6 +103,10 @@ def migrate_schema(engine) -> None:
         connection.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_videos_catalog_collection_id "
             "ON videos(catalog_collection_id)"
+        ))
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_videos_duplicate_of_video_id "
+            "ON videos(duplicate_of_video_id)"
         ))
         connection.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_catalog_collections_hierarchy_status "

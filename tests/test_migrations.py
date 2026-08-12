@@ -55,6 +55,12 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
     assert [
         column["name"] for column in inspect(engine).get_columns("videos")
     ].count("content_type_manual") == 1
+    assert [
+        column["name"] for column in inspect(engine).get_columns("videos")
+    ].count("duplicate_of_video_id") == 1
+    assert [
+        column["name"] for column in inspect(engine).get_columns("videos")
+    ].count("duplicate_primary_missing") == 1
 
     with Session(engine) as session:
         assert session.scalar(select(Video.file_type)) == "ncop"
@@ -68,6 +74,8 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
             987, 654, 123.5, "h265", 1280, 720,
         )
         assert video.content_type_manual is None
+        assert video.duplicate_of_video_id is None
+        assert video.duplicate_primary_missing is False
         assert video.manual_hardsub_cs is False
         assert video.manual_hardsub_sk is False
         assert video.manual_hardsub_verified_at is None
@@ -91,6 +99,57 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         ) == (
             "Show/NCOP.mkv", "NCOP.mkv", 987, 654,
             123.5, "h265", 1280, 720,
+        )
+
+
+def test_duplicate_relation_migration_is_idempotent_and_preserves_old_video_data(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'pre-duplicates.db'}")
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE videos (
+                id INTEGER PRIMARY KEY, relative_path VARCHAR UNIQUE NOT NULL,
+                root_folder VARCHAR NOT NULL, filename VARCHAR NOT NULL,
+                size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
+                duration FLOAT, video_codec VARCHAR, width INTEGER, height INTEGER
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO videos
+                (id, relative_path, root_folder, filename, size, mtime_ns,
+                 duration, video_codec, width, height)
+            VALUES
+                (1, 'Show/Show - 01.mkv', 'Show', 'Show - 01.mkv', 100, 11,
+                 1200, 'h264', 1920, 1080),
+                (2, 'Show/Show 01.mp4', 'Show', 'Show 01.mp4', 200, 22,
+                 1201, 'h265', 1280, 720)
+        """))
+
+    migrate_schema(engine)
+    columns = [column["name"] for column in inspect(engine).get_columns("videos")]
+    assert columns.count("duplicate_of_video_id") == 1
+    assert columns.count("duplicate_primary_missing") == 1
+    with Session(engine) as session:
+        videos = list(session.scalars(select(Video).order_by(Video.id)))
+        assert [(video.relative_path, video.size, video.video_codec) for video in videos] == [
+            ("Show/Show - 01.mkv", 100, "h264"),
+            ("Show/Show 01.mp4", 200, "h265"),
+        ]
+        assert all(video.duplicate_of_video_id is None for video in videos)
+        assert all(video.duplicate_primary_missing is False for video in videos)
+        videos[1].duplicate_of = videos[0]
+        session.commit()
+
+    migrate_schema(engine)
+    migrate_schema(engine)
+
+    columns = [column["name"] for column in inspect(engine).get_columns("videos")]
+    assert columns.count("duplicate_of_video_id") == 1
+    with Session(engine) as session:
+        primary, duplicate = session.scalars(select(Video).order_by(Video.id)).all()
+        assert duplicate.duplicate_of_video_id == primary.id
+        assert duplicate.duplicate_of is primary
+        assert (primary.filename, duplicate.filename) == (
+            "Show - 01.mkv", "Show 01.mp4",
         )
 
 

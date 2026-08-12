@@ -7,6 +7,9 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.catalog import set_manual_hardsub
+from app.hierarchy_review import (
+    MISSING_DUPLICATE_PRIMARY_REVIEW_REASON, confirm_duplicate_videos,
+)
 from app.models import CatalogCollection, CatalogTitle, ExternalSubtitle, Video
 from app.scanner import LibrarySafetyError, iter_videos, scan_library
 
@@ -324,3 +327,51 @@ def test_scan_preserves_manual_hardsub_and_verification_date(tmp_path: Path, mon
         set_manual_hardsub(video, "unknown")
         session.commit()
         assert video.manual_hardsub_verified_at is None
+
+
+def test_scan_preserves_duplicate_relationship_and_marks_missing_primary(
+    tmp_path: Path, monkeypatch,
+):
+    folder = tmp_path / "Show"
+    folder.mkdir()
+    primary_path = folder / "Show - 01.mkv"
+    duplicate_path = folder / "Show 01.mp4"
+    primary_path.write_bytes(b"primary")
+    duplicate_path.write_bytes(b"duplicate")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        videos = list(session.scalars(select(Video).order_by(Video.filename)))
+        collection = videos[0].catalog_collection
+        primary = next(video for video in videos if video.filename == primary_path.name)
+        duplicate = next(video for video in videos if video.filename == duplicate_path.name)
+        confirm_duplicate_videos(
+            session, collection.id, [primary.id, duplicate.id], primary.id,
+        )
+        session.commit()
+        primary_id, duplicate_id, collection_id = primary.id, duplicate.id, collection.id
+
+        scan_library(session, tmp_path)
+        duplicate = session.get(Video, duplicate_id)
+        assert duplicate.duplicate_of_video_id == primary_id
+
+        monkeypatch.setattr(
+            "app.scanner.service.iter_videos", lambda _: iter([duplicate_path]),
+        )
+        scan_library(session, tmp_path, confirm_deletions=True)
+
+    with sessions() as session:
+        assert session.get(Video, primary_id) is None
+        duplicate = session.get(Video, duplicate_id)
+        collection = session.get(CatalogCollection, collection_id)
+        assert duplicate is not None
+        assert duplicate.duplicate_of_video_id is None
+        assert duplicate.duplicate_primary_missing is True
+        assert collection.hierarchy_status == "review_required"
+        assert collection.hierarchy_note == MISSING_DUPLICATE_PRIMARY_REVIEW_REASON
+        assert primary_path.read_bytes() == b"primary"
+        assert duplicate_path.read_bytes() == b"duplicate"

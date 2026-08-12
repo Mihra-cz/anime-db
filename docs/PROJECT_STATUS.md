@@ -1254,19 +1254,23 @@ git diff --check                       # prošlo
 ## 6.13 Jednosériové kolekce a jednodušší ruční rozdělení
 
 Ve fázi **Stabilizace hierarchie a ladění UI nad reálnou knihovnou** byl na
-reálném případu `Akame ga Kill! (L14)` doplněn bezpečný návrh pro jednoznačné
-jednosériové kolekce. Pokud kolekce obsahuje právě jeden obecný `CatalogTitle`
-s alespoň jedním videem, bez určené sezóny, konfliktu nebo dřívějšího ručního
-zařazení, zobrazí Hierarchy Review návrh **Nastavit jako Season 1**. Formát
-`TV` nebo `TV_SHORT` z uložených metadat může návrh pouze vizuálně podpořit;
-metadata nikdy změnu sama neprovedou.
+reálném případu `Akame ga Kill! (L14)` doplněn bezpečný návrh pro kolekce s
+jediným `CatalogTitle`. Současný formulář **Ručně potvrdit typ jediné části**
+nepředpokládá, že jediná část je definitivně Season 1. Uživatel vybírá typ,
+volitelné číslo sezóny a volitelné označení; číslo 1 je pouze editovatelný návrh.
+Automatický folder hint může podobně předvyplnit například 2 / S2, ale dokud
+uživatel formulář nepotvrdí, ruční pole zůstávají prázdná. Formát `TV` nebo
+`TV_SHORT` z uložených metadat může návrh pouze vizuálně podpořit; metadata
+nikdy změnu sama neprovedou.
 
-Akce vyžaduje explicitní potvrzení a nastaví pouze ruční číslo sezóny `1`,
-označení `S1`, typ `season` a příznak manuálního override. Nemění přiřazení
-videí, episode numbering, metadata vazbu, `hierarchy_status` kolekce ani datum
-ověření kolekce či titulu. Uživatel proto stále samostatně potvrzuje
-**Zařazení ověřeno** na úrovni `CatalogTitle` a **Hierarchie ověřena** na úrovni
-celé kolekce.
+Akce vyžaduje explicitní potvrzení a teprve potom nastaví `part_type_manual`,
+volitelné `season_number_manual`, `season_label_manual`, příznak manuálního
+override a ověření této části. Pokud uživatel potvrdí číslo sezóny a label
+ponechá prázdný, vznikne label podle skutečně potvrzeného čísla, například S2;
+bez potvrzeného čísla se automaticky nevytvoří S1. Pokud nejsou přítomné jiné
+aktuální problémy, kolekce se nastaví na `verified` a původní automatický review
+reason se odstraní. Akce nemění přiřazení videí, episode numbering, display
+title ani metadata vazbu.
 
 Výchozí ruční rozdělení v Hierarchy Review nyní používá lidský formulář pro
 název a typ části, sezónu, Part, pořadí, rozsah epizod, offset, pravidlo názvu
@@ -1575,9 +1579,106 @@ načtení všech Jinja2 šablon               # 11 šablon, prošlo
 git diff --check                          # prošlo
 ```
 
+## 6.18 Potvrzené fyzické duplicity
+
+Hierarchy Review nyní rozlišuje dvě různé situace. **Podezření na duplicitu**
+znamená, že více videí má stejné standardní číslo epizody, ale stejný obsah
+zatím nebyl potvrzen. **Potvrzená duplicita** znamená pouze to, že uživatel
+ověřil společnou logickou identitu souborů a ručně vybral jedno primary video.
+Neznamená to, že obě fyzické kopie jsou žádoucí nebo že problém knihovny skončil.
+
+Persistentní vztah používá nullable self-reference
+`Video.duplicate_of_video_id`. `NULL` znamená, že video není potvrzenou kopií;
+ID ukazuje na uživatelem zvolené primary video. Více kopií může ukazovat na
+stejné primary. Workflow kontroluje stejný `CatalogTitle`, kolekci a známé
+episode number, nedovolí self-reference ani cyklus a primary nikdy nevybírá
+automaticky podle filename nebo technických parametrů. Pokud primary při
+pozdějším scanu zmizí, zbývající kopie dostane
+`duplicate_primary_missing=true`, vztah se považuje za neplatný a kolekce se
+vrátí do review; AnimeDB sama nevybere nové primary.
+
+UI **Vyřešit duplicity** zobrazuje pro všechny kolizní epizody filename,
+`relative_path`, délku, rozlišení, codec, velikost, audio, interní a externí
+titulky a ruční stav hardsubu. Primary volí uživatel u každé skupiny, ale všechna
+rozhodnutí může potvrdit jedním hromadným formulářem. Označení lze zrušit a
+primary lze změnit. Po zrušení se skupina znovu zobrazí jako nevyřešená kolize
+čísel.
+
+Potvrzená duplicate copy se nepočítá jako další logická standardní epizoda.
+Například `Bungo to Alchemist - Shinpan no Haguruma` s E1–E13 ve dvou kopiích
+proto po potvrzení ukazuje 26 fyzických videí, 13 logických standardních epizod,
+13/13, rozsah E1–E13, nula nevyřešených číselných kolizí a 13 potvrzených
+duplicitních souborů. Číslování je vyřešené, ale kolekce zůstává
+`review_required` s důvodem **Potvrzené duplicitní soubory vyžadují vyřešení.**
+Potvrzená duplicita se záměrně nezobrazuje zeleně jako legitimní konečný stav.
+
+Dlouhodobým cílem je na NASu vztah **jedna logická epizoda = jedna uživatelem
+preferovaná fyzická verze**. Budoucí samostatná akce **Vyřešit duplicitu** má
+porovnat obě verze a nabídnout ponechat A, ponechat B, zatím ponechat obě nebo
+zrušit označení duplicity. Pomocné údaje mohou zahrnovat cestu, velikost, délku,
+rozlišení, video codec, audio a titulkové stopy a hardsub. Současný model tyto
+údaje převážně má; neukládá ale bitrate ani content hash. Vyšší rozlišení nebo
+větší velikost sama nikdy neznamená automaticky lepší verzi. Jiný střih, audio,
+titulky nebo edice mohou znamenat nezaměnitelný obsah. Destruktivní volbu musí
+později potvrdit uživatel.
+
+Fyzický cleanup nyní implementován nebyl: AnimeDB duplicitní soubor nemaže,
+nepřejmenovává, nepřesouvá, nenahrazuje, nevytváří hardlink ani symlink. Změna
+je pouze databázová a prezentační. Pro vztah a explicitní stav chybějícího
+primary byla přidána minimální idempotentní migrace sloupců
+`videos.duplicate_of_video_id` a `videos.duplicate_primary_missing`; staré
+záznamy dostanou `NULL` a `false` a jejich ostatní data zůstávají zachována.
+Produkční databáze nebyla otevřena ani migrována.
+
+### Hash audit a budoucí V7 duplicate preflight
+
+`Video` v současnosti neobsahuje file hash ani content hash a scanner žádný
+hash nepočítá, ať už z celého souboru nebo ze vzorků. Persistované hashové
+pokrytí je proto z hlediska současného schématu 0 videí; bez nového řízeného
+hashing workflow nelze stávající data použít jako důkaz exact duplicate. V této
+iteraci nebyl spuštěn hromadný výpočet hashů ani otevřena produkční databáze.
+
+Budoucí V7 Import musí před jakýmkoliv kopírováním na NAS provést duplicate
+preflight nad **celým importním batchem**, nikoli až soubor po souboru během
+kopírování:
+
+```text
+vybraný importní adresář
+→ úplná analýza plánovaného importu
+→ porovnání se stávající AnimeDB
+→ exact / pravděpodobné duplicity / možné náhrady / nejednoznačné položky
+→ kompletní import preview
+→ rozhodnutí uživatele
+→ teprve potom fyzické kopírování
+```
+
+Spolehlivý hash celého incoming souboru shodný s hashem existujícího souboru má
+být silným důkazem exact duplicate a bezpečný default je **nekopírovat**.
+Filename je pouze hint. Samotná shoda collection, season a episode number nikdy
+nestačí k automatickému odmítnutí: jiný encode, release, střih, audio nebo
+titulky mohou být legitimně jinou verzí. Bez shodného hashe má V7 kombinovat
+logickou identitu, délku, velikost, mediální parametry a audio/titulkovou
+strukturu a výsledek zobrazit jako pravděpodobnou duplicitu nebo možnou
+kvalitnější náhradu.
+
+Pokud uživatel jednou zvolí replacement, bezpečný budoucí tok je ověřit incoming
+soubor, zkopírovat jej do staging/cíle, ověřit kopii a integritu, aktualizovat DB
+a teprve potom samostatně nabídnout odstranění staré verze. Funkční existující
+kopie se nikdy nesmí smazat před ověřením nové. V7 ani toto cleanup workflow
+nyní zahájeny ani implementovány nebyly.
+
+Automatické ověření 12. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                       # 278 passed
+.venv/bin/python -m compileall app tests  # prošlo
+načtení všech Jinja2 šablon               # 12 šablon, prošlo
+git diff --check                          # prošlo
+```
+
 ---
 
-## 6.18 Klasifikace videí, vratné zařazení a rychlé číslování
+## 6.19 Klasifikace videí, vratné zařazení a rychlé číslování
 
 Kontrola reálné kolekce `Arifureta Shokugyou de Sekai Saikyou (L19-Z22)`
 ukázala, že typ doplňkového obsahu a jeho logické umístění jsou dvě různá
@@ -1630,6 +1731,71 @@ Všechny operace této iterace jsou databázové a prezentační. Nemění filen
 `ParentCatalogTitle`, `SeasonGroup` ani jiný strom. Stále jde o fázi
 **Stabilizace hierarchie a ladění UI nad reálnou knihovnou** a V6 nebyla
 zahájena.
+
+## 6.20 Uzavření suffixové ambiguity potvrzením Season 1
+
+Při kontrole `Asobi Asobase (L18)` se ukázalo, že potvrzení návrhu **Nastavit
+jako Season 1** sice persistovalo `season_number_manual=1`,
+`season_label_manual="S1"`, `part_type_manual="season"` a
+`hierarchy_manual_override`, ale neaktualizovalo stav ani původní
+`CatalogCollection.hierarchy_note`. Detail proto mohl vedle ručně určené Season
+1 stále ukazovat historický důvod „Interní časový rozsah neurčuje bezpečně
+hranice sezón nebo částí.“ Formulář celkového stavu navíc tento předvyplněný
+reason znovu odesílal.
+
+Confirmation workflow nyní považuje ručně uložené strukturální údaje a jejich
+ověření za odpověď na původní otázku. U čisté kolekce nastaví `CatalogTitle` i
+`CatalogCollection` jako ověřené, odstraní vyřešený suffixový reason a select
+po novém načtení odpovídá uloženému stavu `verified`. `local_period_hint="L18"`
+zůstává zachovaný a v UI se nadále zobrazuje jako informační interní suffix;
+samotný suffix stále není zdrojem automatického odhadu sezóny.
+
+Nejde o obecné pravidlo, že `verified` potlačuje každé varování. Vyřešení se
+odvozuje z existujících ručních strukturálních polí titulu, nikoli pouze ze
+statusu kolekce. Nové nezařazené video, unknown, nevyřešené `00` nebo fractional
+číslování, mezera či duplicita mohou kolekci znovu přepnout do
+`review_required` s novým aktuálním důvodem. Po ručním vyřešení těchto nových
+problémů lze kolekci znovu konzistentně ověřit.
+
+Oprava nepřidává databázové pole ani migraci, nepřepočítává existující epizodní
+hodnoty při samotném potvrzení, nemění produkční databázi ani fyzické soubory a
+adresáře na NASu. V6 zůstává nezahájena.
+
+## 6.21 Editovatelné potvrzení typu a čísla sezóny
+
+Ruční kontrola ukázala, že kolekce s jediným `CatalogTitle` nemusí představovat
+Season 1: samostatná fyzická složka nebo samostatně pojmenované anime může být
+Season 2, Season 3 nebo jiná část. Původní confirmation helper přesto natvrdo
+ukládal `season_number_manual=1`, `season_label_manual="S1"` a
+`part_type_manual="season"`.
+
+Hierarchy Review nyní před potvrzením zobrazuje editovatelný typ části, číslo
+sezóny a označení sezóny. Podporované scénáře zahrnují Season 1, Season 2,
+Season 3 i `part_type_manual="season"` s neurčeným
+`season_number_manual=NULL`. Automatické číslo z adresáře, interní suffix,
+pořadí nebo skutečnost, že jde o jediný titul, se mohou použít pouze jako návrh
+formuláře a samy nic nezapisují do ručních polí. Po explicitním ručním potvrzení
+typu části jsou manuální číslo a label autoritativní i jako `NULL`; prázdná
+hodnota proto znovu neaktivuje dřívější automatický folder hint.
+
+Po potvrzení například Season 2 se uloží `season_number_manual=2` a label S2,
+nastaví se existující `hierarchy_manual_override` a ruční rozhodnutí přežije
+následný scan. Tím se suffixová nejednoznačnost uzavírá stejně jako u Season 1,
+pokud neexistuje jiný aktuální problém. Display title, lokální název,
+`ExternalTitleLink`, filename a `relative_path` jsou na čísle sezóny nezávislé
+a confirmation je nemění.
+
+Nebyla přidána databázová tabulka, sloupec ani migrace. Produkční databáze a
+fyzická struktura NASu se nemění a V6 zůstává nezahájena.
+
+Automatické ověření 12. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                       # 271 passed
+.venv/bin/python -m compileall app tests  # prošlo
+načtení všech Jinja2 šablon               # 12 šablon, prošlo
+git diff --check                          # prošlo
+```
 
 ---
 

@@ -3,9 +3,11 @@ import pytest
 from app.models import CatalogCollection, CatalogTitle, TitleMetadata, Video
 from app.numbering import (
     apply_sequential_numbering, collection_requires_numbering_review,
+    confirmed_duplicate_groups,
     preview_sequential_numbering, recalculate_collection_numbering,
     recalculate_title_numbering,
-    set_title_numbering, set_video_episode_override, summarize_title_numbering,
+    set_duplicate_group_primary, set_title_numbering, set_video_episode_override,
+    summarize_title_numbering, unresolved_duplicate_groups,
 )
 
 
@@ -332,3 +334,93 @@ def test_numbered_ova_shows_range_but_does_not_use_season_completeness():
     assert (summary.episode_min, summary.episode_max) == (1, 2)
     assert summary.supplemental is True
     assert summary.requires_review is False
+
+
+def _bungo_duplicate_videos():
+    collection = CatalogCollection(
+        id=1, local_title="Bungo to Alchemist - Shinpan no Haguruma",
+        normalized_local_title="bungo to alchemist shinpan no haguruma",
+        relative_root_path="Anime/Bungo",
+    )
+    title = CatalogTitle(
+        id=10, collection=collection, local_title="Season 1",
+        normalized_local_title="season 1", relative_root_path="Anime/Bungo/Season 1",
+        part_type="season", season_number=1,
+    )
+    items = []
+    for number in range(1, 14):
+        for copy, extension in (("A", "mkv"), ("B", "mp4")):
+            items.append(Video(
+                id=number * 10 + (copy == "B"),
+                relative_path=f"Anime/Bungo/Season 1/Bungo {number:02} {copy}.{extension}",
+                root_folder="Anime", filename=f"Bungo {number:02}.{extension}",
+                size=number, mtime_ns=1, season_episode_number=number,
+                catalog_title_id=title.id, catalog_collection_id=collection.id,
+                catalog_title=title, catalog_collection=collection,
+            ))
+    return collection, title, items
+
+
+def test_bungo_duplicate_groups_change_from_unresolved_to_confirmed_physical_warning():
+    _, title, items = _bungo_duplicate_videos()
+
+    before = summarize_title_numbering(items, title)
+    assert before.total == 26
+    assert before.standard_total == 26
+    assert before.duplicate_numbers == tuple(range(1, 14))
+    assert len(unresolved_duplicate_groups(items)) == 13
+    assert before.requires_review is True
+
+    for group in unresolved_duplicate_groups(items):
+        set_duplicate_group_primary(list(group.videos), group.videos[0])
+
+    after = summarize_title_numbering(items, title)
+    assert after.total == 26
+    assert after.standard_total == 13
+    assert after.numbered == 13
+    assert (after.episode_min, after.episode_max) == (1, 13)
+    assert after.gaps == ()
+    assert after.duplicate_numbers == ()
+    assert after.confirmed_duplicates == 13
+    assert len(unresolved_duplicate_groups(items)) == 0
+    assert len(confirmed_duplicate_groups(items)) == 13
+    assert after.requires_review is False
+
+
+def test_duplicate_primary_is_explicit_changeable_and_cannot_be_self_reference():
+    _, _, items = _bungo_duplicate_videos()
+    first_group = list(unresolved_duplicate_groups(items)[0].videos)
+    first, second = first_group
+    paths = [(video.filename, video.relative_path) for video in first_group]
+
+    set_duplicate_group_primary(first_group, first)
+    assert second.duplicate_of is first
+    assert first.duplicate_of is None
+
+    set_duplicate_group_primary(first_group, second)
+    assert first.duplicate_of is second
+    assert second.duplicate_of is None
+    assert second not in first.duplicate_copies
+    assert [(video.filename, video.relative_path) for video in first_group] == paths
+
+    with pytest.raises(ValueError, match="stejné video"):
+        set_duplicate_group_primary([first, first], first)
+
+
+def test_multiple_duplicate_copies_can_share_one_primary_without_cycle():
+    collection, title, items = _bungo_duplicate_videos()
+    primary, second = list(unresolved_duplicate_groups(items)[0].videos)
+    third = Video(
+        id=999, relative_path="Anime/Bungo/Season 1/Bungo 01 third.avi",
+        root_folder="Anime", filename="Bungo 01.avi", size=1, mtime_ns=1,
+        season_episode_number=1, catalog_title_id=title.id,
+        catalog_collection_id=collection.id, catalog_title=title,
+        catalog_collection=collection,
+    )
+
+    set_duplicate_group_primary([primary, second, third], primary)
+
+    assert second.duplicate_of is primary
+    assert third.duplicate_of is primary
+    assert primary.duplicate_of is None
+    assert set(primary.duplicate_copies) == {second, third}

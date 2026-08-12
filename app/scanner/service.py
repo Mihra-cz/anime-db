@@ -14,6 +14,7 @@ from app.catalog import (
 )
 from app.hierarchy import derive_library_hierarchy
 from app.hierarchy_review import (
+    CONFIRMED_DUPLICATES_REVIEW_REASON, MISSING_DUPLICATE_PRIMARY_REVIEW_REASON,
     collection_requires_review, definition_from_title, extract_local_period_hint,
     manual_split_titles, preview_assignments,
 )
@@ -292,6 +293,10 @@ def _scan_library(
 
     # Mazání je záměrně až poslední operace po dokončení průchodu a bezpečnostních kontrolách.
     for _, video in missing:
+        for duplicate_copy in list(video.duplicate_copies):
+            if duplicate_copy.relative_path in seen:
+                duplicate_copy.duplicate_of = None
+                duplicate_copy.duplicate_primary_missing = True
         session.delete(video)
         result.removed += 1
     session.flush()
@@ -399,9 +404,18 @@ def _scan_library(
                 collection.hierarchy_note = "Nové nezařazené video."
                 collection.hierarchy_verified_at = None
             else:
-                collection.hierarchy_status = "verified"
-                collection.hierarchy_note = None
-                collection.hierarchy_verified_at = collection.hierarchy_verified_at or utc_now()
+                reason = (
+                    MISSING_DUPLICATE_PRIMARY_REVIEW_REASON
+                    if any(video.duplicate_primary_missing for video in collection_videos)
+                    else CONFIRMED_DUPLICATES_REVIEW_REASON
+                    if any(video.duplicate_of_video_id is not None for video in collection_videos)
+                    else None
+                )
+                collection.hierarchy_status = "review_required" if reason else "verified"
+                collection.hierarchy_note = reason
+                collection.hierarchy_verified_at = (
+                    None if reason else collection.hierarchy_verified_at or utc_now()
+                )
             continue
         reason = collection_requires_review(collection, collection_videos)
         if collection.hierarchy_status != "verified":

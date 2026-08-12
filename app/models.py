@@ -38,6 +38,12 @@ class Video(Base):
     episode_number_manual_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
     episode_number_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     content_type_manual: Mapped[str | None] = mapped_column(String, nullable=True)
+    duplicate_of_video_id: Mapped[int | None] = mapped_column(
+        ForeignKey("videos.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    duplicate_primary_missing: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
     catalog_title_id: Mapped[int | None] = mapped_column(
         ForeignKey("catalog_titles.id"), nullable=True, index=True
     )
@@ -48,6 +54,13 @@ class Video(Base):
     audio_tracks: Mapped[list[AudioTrack]] = relationship(cascade="all, delete-orphan")
     internal_subtitles: Mapped[list[InternalSubtitle]] = relationship(cascade="all, delete-orphan")
     external_subtitles: Mapped[list[ExternalSubtitle]] = relationship(cascade="all, delete-orphan")
+    duplicate_of: Mapped[Video | None] = relationship(
+        "Video", remote_side=[id], foreign_keys=[duplicate_of_video_id],
+        back_populates="duplicate_copies", post_update=True,
+    )
+    duplicate_copies: Mapped[list[Video]] = relationship(
+        "Video", foreign_keys=[duplicate_of_video_id], back_populates="duplicate_of",
+    )
     catalog_title: Mapped[CatalogTitle | None] = relationship(back_populates="videos")
     catalog_collection: Mapped[CatalogCollection | None] = relationship(back_populates="videos")
 
@@ -134,10 +147,14 @@ class CatalogTitle(Base):
 
     @property
     def effective_season_number(self) -> int | None:
+        if self.hierarchy_manual_override and self.part_type_manual is not None:
+            return self.season_number_manual
         return self.season_number_manual if self.season_number_manual is not None else self.season_number
 
     @property
     def effective_season_label(self) -> str | None:
+        if self.hierarchy_manual_override and self.part_type_manual is not None:
+            return self.season_label_manual
         return self.season_label_manual or self.season_label
 
     @property

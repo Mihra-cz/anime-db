@@ -31,6 +31,8 @@ class TitleNumberingSummary:
     episode_max: int | None
     gaps: tuple[int, ...]
     duplicate_numbers: tuple[int, ...]
+    confirmed_duplicates: int
+    invalid_duplicate_references: int
 
     supplemental: bool = False
 
@@ -46,6 +48,100 @@ class TitleNumberingSummary:
             self.unnumbered_standard or self.unknown or self.nonstandard
             or self.gaps or self.duplicate_numbers
         )
+
+
+@dataclass(frozen=True)
+class EpisodeDuplicateGroup:
+    episode_number: int
+    videos: tuple[Video, ...]
+    primary: Video | None = None
+
+    @property
+    def duplicate_copies(self) -> tuple[Video, ...]:
+        return tuple(video for video in self.videos if video is not self.primary)
+
+
+def is_confirmed_duplicate(video: Video) -> bool:
+    return video.duplicate_of_video_id is not None or video.duplicate_of is not None
+
+
+def is_nonprimary_duplicate_video(video: Video) -> bool:
+    return is_confirmed_duplicate(video) or video.duplicate_primary_missing
+
+
+def unresolved_duplicate_groups(videos: list[Video]) -> tuple[EpisodeDuplicateGroup, ...]:
+    by_number: dict[int, list[Video]] = {}
+    for video in videos:
+        if (
+            video.season_episode_number is not None
+            and not video.content_type_manual
+            and not is_confirmed_duplicate(video)
+        ):
+            by_number.setdefault(video.season_episode_number, []).append(video)
+    return tuple(
+        EpisodeDuplicateGroup(number, tuple(sorted(items, key=deterministic_video_order_key)))
+        for number, items in sorted(by_number.items()) if len(items) > 1
+    )
+
+
+def confirmed_duplicate_groups(videos: list[Video]) -> tuple[EpisodeDuplicateGroup, ...]:
+    videos_by_id = {video.id: video for video in videos if video.id is not None}
+    copies_by_primary: dict[Video, list[Video]] = {}
+    for video in videos:
+        primary = video.duplicate_of
+        if primary is None and video.duplicate_of_video_id is not None:
+            primary = videos_by_id.get(video.duplicate_of_video_id)
+        if primary is not None:
+            copies_by_primary.setdefault(primary, []).append(video)
+    groups = []
+    for primary, copies in copies_by_primary.items():
+        members = tuple(sorted([primary, *copies], key=deterministic_video_order_key))
+        groups.append(EpisodeDuplicateGroup(
+            primary.season_episode_number or 0, members, primary=primary,
+        ))
+    return tuple(sorted(groups, key=lambda group: (group.episode_number, group.primary.id or 0)))
+
+
+def set_duplicate_group_primary(videos: list[Video], primary: Video) -> None:
+    if len(videos) != len(set(videos)):
+        raise ValueError("Skupina duplicity nesmí obsahovat stejné video vícekrát.")
+    members = _complete_duplicate_group(videos)
+    if len(members) < 2 or primary not in members:
+        raise ValueError("Skupina duplicity musí obsahovat primární video a alespoň jednu kopii.")
+    title_ids = {video.catalog_title_id for video in members}
+    collection_ids = {video.catalog_collection_id for video in members}
+    episode_numbers = {video.season_episode_number for video in members}
+    if len(title_ids) != 1 or None in title_ids or len(collection_ids) != 1:
+        raise ValueError("Duplicitní videa musí patřit do stejné části a kolekce.")
+    if len(episode_numbers) != 1 or None in episode_numbers:
+        raise ValueError("Duplicitní videa musí mít stejné známé číslo epizody.")
+    for video in members:
+        video.duplicate_of = None
+        video.duplicate_primary_missing = False
+    for video in members:
+        if video is not primary:
+            video.duplicate_of = primary
+
+
+def clear_duplicate_group(videos: list[Video]) -> None:
+    for video in _complete_duplicate_group(videos):
+        video.duplicate_of = None
+        video.duplicate_primary_missing = False
+
+
+def _complete_duplicate_group(videos: list[Video]) -> set[Video]:
+    members = set(videos)
+    pending = list(videos)
+    while pending:
+        video = pending.pop()
+        related = [*video.duplicate_copies]
+        if video.duplicate_of is not None:
+            related.append(video.duplicate_of)
+        for candidate in related:
+            if candidate not in members:
+                members.add(candidate)
+                pending.append(candidate)
+    return members
 
 
 def recalculate_title_numbering(
@@ -166,11 +262,15 @@ def deterministic_video_order(videos: list[Video]) -> list[Video]:
     """Return stable filename-first ordering for explicit sequential numbering."""
     return sorted(
         videos,
-        key=lambda video: (
-            natural_sort_key(video.filename),
-            natural_sort_key(video.relative_path),
-            video.id or 0,
-        ),
+        key=deterministic_video_order_key,
+    )
+
+
+def deterministic_video_order_key(video: Video):
+    return (
+        natural_sort_key(video.filename),
+        natural_sort_key(video.relative_path),
+        video.id or 0,
     )
 
 
@@ -232,24 +332,30 @@ def summarize_title_numbering(
     resolved = [
         bool(video.content_type_manual) and not supplemental for video in videos
     ]
+    confirmed_duplicate = [is_nonprimary_duplicate_video(video) for video in videos]
     standard_total = sum(
-        not is_resolved and (detection is None or detection.is_standard)
-        for detection, is_resolved in zip(detections, resolved)
+        not is_resolved and not is_duplicate and (detection is None or detection.is_standard)
+        for detection, is_resolved, is_duplicate
+        in zip(detections, resolved, confirmed_duplicate)
     )
     nonstandard = sum(
-        not is_resolved and detection is not None and detection.is_nonstandard
-        for detection, is_resolved in zip(detections, resolved)
+        not is_resolved and not is_duplicate
+        and detection is not None and detection.is_nonstandard
+        for detection, is_resolved, is_duplicate
+        in zip(detections, resolved, confirmed_duplicate)
     )
     unknown = sum(
-        not is_resolved and video.season_episode_number is None
+        not is_resolved and not is_duplicate and video.season_episode_number is None
         and (detection is None or not detection.is_nonstandard)
-        for video, detection, is_resolved in zip(videos, detections, resolved)
+        for video, detection, is_resolved, is_duplicate
+        in zip(videos, detections, resolved, confirmed_duplicate)
     )
     values = [
         video.season_episode_number
         for video in videos
         if video.season_episode_number is not None
         and (supplemental or not video.content_type_manual)
+        and not is_nonprimary_duplicate_video(video)
     ]
     unique_values = set(values)
     episode_min = min(unique_values) if unique_values else None
@@ -271,6 +377,10 @@ def summarize_title_numbering(
         episode_max=episode_max,
         gaps=gaps,
         duplicate_numbers=duplicates,
+        confirmed_duplicates=sum(is_confirmed_duplicate(video) for video in videos),
+        invalid_duplicate_references=sum(
+            bool(video.duplicate_primary_missing) for video in videos
+        ),
         supplemental=supplemental,
     )
 

@@ -10,11 +10,24 @@ from sqlalchemy.orm import Session, selectinload
 
 from .catalog import detect_episode_number, derive_episode_number, normalize_title
 from .models import CatalogCollection, CatalogTitle, Video, utc_now
-from .numbering import collection_requires_numbering_review, recalculate_collection_numbering
+from .numbering import (
+    clear_duplicate_group, collection_requires_numbering_review,
+    is_confirmed_duplicate, recalculate_collection_numbering,
+    set_duplicate_group_primary,
+)
 
 
 PERIOD_HINT = re.compile(
     r"(?:\(|\s)([A-Z]\d{2}(?:-[A-Z]\d{2})?)(?:\)|\s*$)", re.IGNORECASE
+)
+PERIOD_HINT_REVIEW_REASON = (
+    "Interní časový rozsah neurčuje bezpečně hranice sezón nebo částí."
+)
+CONFIRMED_DUPLICATES_REVIEW_REASON = (
+    "Potvrzené duplicitní soubory vyžadují vyřešení."
+)
+MISSING_DUPLICATE_PRIMARY_REVIEW_REASON = (
+    "Primární video potvrzené duplicity chybí; vztah vyžaduje novou ruční kontrolu."
 )
 ALLOWED_PART_TYPES = {
     "title", "season", "part", "cour", "film", "ova", "special",
@@ -57,9 +70,12 @@ class AssignmentPreview:
 
 
 @dataclass(frozen=True)
-class SingleSeasonSuggestion:
+class SingleTitleConfirmationSuggestion:
     title: CatalogTitle
     metadata_supports_tv: bool
+    proposed_part_type: str
+    proposed_season_number: int | None
+    proposed_season_label: str | None
 
 
 def extract_local_period_hint(local_title: str) -> str | None:
@@ -67,9 +83,26 @@ def extract_local_period_hint(local_title: str) -> str | None:
     return matches[-1].upper() if matches else None
 
 
+def manual_hierarchy_resolves_ambiguity(collection: CatalogCollection) -> bool:
+    """Rozliší potvrzenou strukturu od pouhého obecného statusu verified."""
+    return bool(collection.titles) and all(
+        title.hierarchy_manual_override
+        and (
+            title.season_number_manual is not None
+            or title.season_label_manual is not None
+            or title.part_type_manual is not None
+            or title.episode_start is not None
+            or title.episode_end is not None
+            or bool(title.episode_filename_pattern)
+        )
+        for title in collection.titles
+    )
+
+
 def collection_requires_review(collection: CatalogCollection, videos: list[Video]) -> str | None:
-    if extract_local_period_hint(collection.local_title):
-        return "Interní časový rozsah neurčuje bezpečně hranice sezón nebo částí."
+    hierarchy_resolved = manual_hierarchy_resolves_ambiguity(collection)
+    if extract_local_period_hint(collection.local_title) and not hierarchy_resolved:
+        return PERIOD_HINT_REVIEW_REASON
     nonstandard = [
         detection.display_value
         for video in videos
@@ -82,18 +115,27 @@ def collection_requires_review(collection: CatalogCollection, videos: list[Video
     ]
     if nonstandard:
         return "Nestandardní číslování vyžaduje ruční zařazení."
+    if any(video.duplicate_primary_missing for video in videos):
+        return MISSING_DUPLICATE_PRIMARY_REVIEW_REASON
+    if any(is_confirmed_duplicate(video) for video in videos):
+        return CONFIRMED_DUPLICATES_REVIEW_REASON
     numbers = sorted({
         number for video in videos
         if (number := video.local_episode_number or derive_episode_number(video.filename)) is not None
     })
-    if len(collection.titles) <= 1 and len(numbers) >= 14 and numbers == list(range(numbers[0], numbers[-1] + 1)):
+    if (
+        not hierarchy_resolved
+        and len(collection.titles) <= 1
+        and len(numbers) >= 14
+        and numbers == list(range(numbers[0], numbers[-1] + 1))
+    ):
         return "Souvislá řada epizod bez sezónních podsložek může obsahovat více částí."
     return None
 
 
-def single_season_suggestion(
+def single_title_confirmation_suggestion(
     collection: CatalogCollection,
-) -> SingleSeasonSuggestion | None:
+) -> SingleTitleConfirmationSuggestion | None:
     if (
         len(collection.titles) != 1
         or collection.hierarchy_status in {"verified", "conflict", "not_applicable"}
@@ -103,8 +145,6 @@ def single_season_suggestion(
     title = collection.titles[0]
     if (
         not title.videos
-        or title.effective_season_number is not None
-        or title.effective_season_label is not None
         or (title.part_type or "title") not in {"title", "season"}
         or title.part_type_manual is not None
         or title.season_number_manual is not None
@@ -118,21 +158,44 @@ def single_season_suggestion(
         title.metadata_record.format.strip().upper()
         if title.metadata_record and title.metadata_record.format else ""
     )
-    return SingleSeasonSuggestion(
+    automatic_season_number = title.season_number
+    return SingleTitleConfirmationSuggestion(
         title=title,
         metadata_supports_tv=metadata_format in {"TV", "TV_SHORT"},
+        proposed_part_type="season",
+        proposed_season_number=automatic_season_number or 1,
+        proposed_season_label=(
+            title.season_label if automatic_season_number is not None else None
+        ),
     )
 
 
-def apply_single_season_suggestion(collection: CatalogCollection) -> CatalogTitle:
-    suggestion = single_season_suggestion(collection)
+def apply_single_title_confirmation(
+    collection: CatalogCollection, *, part_type: str,
+    season_number: int | None, season_label: str | None,
+) -> CatalogTitle:
+    suggestion = single_title_confirmation_suggestion(collection)
     if suggestion is None:
-        raise ValueError("Kolekce už nesplňuje podmínky bezpečného návrhu Season 1.")
+        raise ValueError("Kolekce už nesplňuje podmínky ručního potvrzení jediné části.")
+    normalized_type = part_type.strip().casefold()
+    if normalized_type not in ALLOWED_PART_TYPES:
+        raise ValueError("Neplatný typ části.")
+    if season_number is not None and season_number <= 0:
+        raise ValueError("Číslo sezóny musí být kladné.")
+    label = (season_label or "").strip()[:50] or None
+    if normalized_type == "season":
+        if season_number is not None and label is None:
+            label = f"S{season_number}"
+    else:
+        season_number = None
+        label = None
     title = suggestion.title
-    title.season_number_manual = 1
-    title.season_label_manual = "S1"
-    title.part_type_manual = "season"
+    title.season_number_manual = season_number
+    title.season_label_manual = label
+    title.part_type_manual = normalized_type
     title.hierarchy_manual_override = True
+    title.hierarchy_verified_at = utc_now()
+    refresh_collection_state(collection, recalculate=False)
     return title
 
 
@@ -328,27 +391,35 @@ def _selected_videos(collection: CatalogCollection, video_ids: list[int]) -> lis
     return selected
 
 
-def refresh_collection_state(collection: CatalogCollection) -> None:
-    recalculate_collection_numbering(
-        collection,
-        {
-            title.id: [
-                video for video in collection.videos
-                if video.catalog_title is title or video.catalog_title_id == title.id
-            ]
-            for title in collection.titles
-        },
+def refresh_collection_state(
+    collection: CatalogCollection, *, recalculate: bool = True,
+) -> None:
+    if recalculate:
+        recalculate_collection_numbering(
+            collection,
+            {
+                title.id: [
+                    video for video in collection.videos
+                    if video.catalog_title is title or video.catalog_title_id == title.id
+                ]
+                for title in collection.titles
+            },
+        )
+    has_unassigned = any(
+        video.catalog_title is None and video.catalog_title_id is None
+        for video in collection.videos
     )
-    needs_review = (
-        any(video.catalog_title is None and video.catalog_title_id is None for video in collection.videos)
-        or collection_requires_numbering_review(collection)
-    )
-    collection.hierarchy_status = "review_required" if needs_review else "verified"
-    collection.hierarchy_verified_at = None if needs_review else utc_now()
-    collection.hierarchy_note = (
-        "Číslování nebo nezařazený obsah stále vyžaduje kontrolu."
-        if needs_review else None
-    )
+    has_numbering_problem = collection_requires_numbering_review(collection)
+    hierarchy_reason = collection_requires_review(collection, list(collection.videos))
+    if has_unassigned:
+        note = "Nové nebo nezařazené video vyžaduje kontrolu."
+    elif has_numbering_problem:
+        note = "Číslování nebo nezařazený obsah stále vyžaduje kontrolu."
+    else:
+        note = hierarchy_reason
+    collection.hierarchy_status = "review_required" if note else "verified"
+    collection.hierarchy_verified_at = None if note else utc_now()
+    collection.hierarchy_note = note
 
 
 def classify_videos_in_place(
@@ -364,6 +435,62 @@ def classify_videos_in_place(
         if video.catalog_title is not None:
             video.catalog_title.hierarchy_manual_override = True
             video.catalog_title.hierarchy_verified_at = utc_now()
+    session.flush()
+    refresh_collection_state(collection)
+    return selected
+
+
+def confirm_duplicate_videos(
+    session: Session, collection_id: int, video_ids: list[int], primary_video_id: int,
+) -> list[Video]:
+    collection = _load_collection_for_assignment(session, collection_id)
+    selected = _selected_videos(collection, video_ids)
+    primary = next((video for video in selected if video.id == primary_video_id), None)
+    if primary is None:
+        raise ValueError("Primární kopie musí být součástí potvrzované skupiny.")
+    clear_duplicate_group(selected)
+    session.flush()
+    set_duplicate_group_primary(selected, primary)
+    session.flush()
+    refresh_collection_state(collection)
+    return selected
+
+
+def confirm_duplicate_groups(
+    session: Session, collection_id: int,
+    assignments: list[tuple[list[int], int]],
+) -> list[Video]:
+    if not assignments:
+        raise ValueError("Není vybraná žádná skupina duplicit.")
+    collection = _load_collection_for_assignment(session, collection_id)
+    changed: list[Video] = []
+    used_ids: set[int] = set()
+    for video_ids, primary_video_id in assignments:
+        selected = _selected_videos(collection, video_ids)
+        selected_ids = {video.id for video in selected}
+        if used_ids & selected_ids:
+            raise ValueError("Jedno video nemůže být v několika skupinách duplicit.")
+        primary = next((video for video in selected if video.id == primary_video_id), None)
+        if primary is None:
+            raise ValueError("Primární kopie musí být součástí potvrzované skupiny.")
+        clear_duplicate_group(selected)
+        session.flush()
+        set_duplicate_group_primary(selected, primary)
+        used_ids.update(selected_ids)
+        changed.extend(selected)
+    session.flush()
+    refresh_collection_state(collection)
+    return changed
+
+
+def clear_confirmed_duplicate_videos(
+    session: Session, collection_id: int, video_ids: list[int],
+) -> list[Video]:
+    collection = _load_collection_for_assignment(session, collection_id)
+    selected = _selected_videos(collection, video_ids)
+    if len(selected) < 2 and not any(video.duplicate_primary_missing for video in selected):
+        raise ValueError("Pro zrušení duplicity je nutné vybrat celou skupinu.")
+    clear_duplicate_group(selected)
     session.flush()
     refresh_collection_state(collection)
     return selected

@@ -5,15 +5,19 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.catalog import video_matches_filter
+from app.catalog import catalog_title_display_title, video_matches_filter
 from app.hierarchy_review import (
-    ManualTitleDefinition, apply_manual_split, apply_single_season_suggestion,
-    classify_videos_in_place, collection_requires_review, create_title_from_videos,
+    CONFIRMED_DUPLICATES_REVIEW_REASON, PERIOD_HINT_REVIEW_REASON,
+    ManualTitleDefinition, apply_manual_split,
+    apply_single_title_confirmation,
+    classify_videos_in_place, clear_confirmed_duplicate_videos,
+    collection_requires_review, confirm_duplicate_groups, confirm_duplicate_videos,
+    create_title_from_videos,
     delete_empty_local_title, extract_local_period_hint, merge_title_into,
     move_videos_to_title, parse_manual_definitions, parse_simple_definitions,
-    preview_assignments, separate_nonstandard_videos,
+    preview_assignments, refresh_collection_state, separate_nonstandard_videos,
     simple_definition_rows,
-    single_season_suggestion,
+    single_title_confirmation_suggestion,
 )
 from app.models import (
     CatalogCollection, CatalogTitle, ExternalTitleLink, InternalSubtitle,
@@ -23,6 +27,7 @@ from app.migrations import migrate_schema
 from app.numbering import (
     apply_sequential_numbering,
     collection_requires_numbering_review as numbering_requires_review,
+    set_video_episode_override,
     summarize_title_numbering,
 )
 from app.scanner import scan_library
@@ -101,7 +106,7 @@ def test_flat_collection_with_episodes_1_to_26_requires_review():
     with Session(engine) as session:
         collection = session.get(CatalogCollection, collection_id)
         reason = collection_requires_review(collection, list(collection.videos))
-        assert reason is not None
+        assert reason == PERIOD_HINT_REVIEW_REASON
 
 
 def test_internal_period_hint_does_not_infer_season_count_or_change_identity():
@@ -115,23 +120,31 @@ def test_internal_period_hint_does_not_infer_season_count_or_change_identity():
         assert collection.relative_root_path == "Anime/Anime title (Z18-L20)"
 
 
-def test_single_generic_title_gets_manual_season_one_suggestion():
+def test_single_generic_title_gets_editable_part_confirmation_suggestion():
     collection, title = simple_collection()
     title.metadata_record = TitleMetadata(
         catalog_title_id=title.id, display_title="Akame ga Kill!",
         format="TV", episode_count=24,
     )
 
-    suggestion = single_season_suggestion(collection)
+    suggestion = single_title_confirmation_suggestion(collection)
 
     assert suggestion is not None
     assert suggestion.title is title
     assert suggestion.metadata_supports_tv is True
+    assert suggestion.proposed_part_type == "season"
+    assert suggestion.proposed_season_number == 1
+    assert suggestion.proposed_season_label is None
+    assert title.season_number_manual is None
+    assert title.season_label_manual is None
+    assert title.part_type_manual is None
+    assert not title.hierarchy_manual_override
 
 
-def test_confirmed_season_one_suggestion_changes_only_manual_title_hierarchy():
+@pytest.mark.parametrize("season_number", [1, 2, 3])
+def test_confirmed_season_number_resolves_period_hint_review(season_number):
     collection, title = simple_collection()
-    collection_status = collection.hierarchy_status
+    collection.hierarchy_note = PERIOD_HINT_REVIEW_REASON
     video = title.videos[0]
     original_title = video.catalog_title
     episode_values = (
@@ -148,17 +161,23 @@ def test_confirmed_season_one_suggestion_changes_only_manual_title_hierarchy():
     )
     title.metadata_record = metadata
     title.external_links.append(link)
+    display_title = catalog_title_display_title(title)
+    filename = video.filename
+    relative_path = video.relative_path
 
-    changed = apply_single_season_suggestion(collection)
+    changed = apply_single_title_confirmation(
+        collection, part_type="season", season_number=season_number, season_label=None,
+    )
 
     assert changed is title
-    assert title.season_number_manual == 1
-    assert title.season_label_manual == "S1"
+    assert title.season_number_manual == season_number
+    assert title.season_label_manual == f"S{season_number}"
     assert title.part_type_manual == "season"
     assert title.hierarchy_manual_override is True
-    assert title.hierarchy_verified_at is None
-    assert collection.hierarchy_status == collection_status
-    assert collection.hierarchy_verified_at is None
+    assert title.hierarchy_verified_at is not None
+    assert collection.hierarchy_status == "verified"
+    assert collection.hierarchy_verified_at is not None
+    assert collection.hierarchy_note is None
     assert video.catalog_title is original_title
     assert (
         video.local_episode_number, video.season_episode_number,
@@ -166,18 +185,196 @@ def test_confirmed_season_one_suggestion_changes_only_manual_title_hierarchy():
     ) == episode_values
     assert title.metadata_record is metadata
     assert title.external_links == [link]
+    assert catalog_title_display_title(title) == display_title
+    assert video.filename == filename
+    assert video.relative_path == relative_path
+
+
+def test_confirmed_season_can_keep_number_and_label_unspecified():
+    collection, title = simple_collection()
+    title.part_type = "season"
+    title.season_number = 2
+    title.season_label = "S2"
+
+    apply_single_title_confirmation(
+        collection, part_type="season", season_number=None, season_label=None,
+    )
+
+    assert title.part_type_manual == "season"
+    assert title.season_number_manual is None
+    assert title.season_label_manual is None
+    assert title.effective_season_number is None
+    assert title.effective_season_label is None
+    assert collection.hierarchy_status == "verified"
+
+
+def test_new_unknown_reopens_confirmed_season_and_manual_numbering_resolves_it():
+    collection, title = simple_collection()
+    apply_single_title_confirmation(
+        collection, part_type="season", season_number=1, season_label=None,
+    )
+    unknown = Video(
+        id=2, relative_path=f"{collection.relative_root_path}/new-unknown.mkv",
+        root_folder="Anime", filename="new-unknown.mkv", size=1, mtime_ns=1,
+        catalog_title=title, catalog_collection=collection,
+    )
+
+    refresh_collection_state(collection)
+
+    assert collection.hierarchy_status == "review_required"
+    assert collection.hierarchy_note != PERIOD_HINT_REVIEW_REASON
+    assert collection.hierarchy_verified_at is None
+
+    set_video_episode_override(unknown, 2)
+    refresh_collection_state(collection)
+
+    assert collection.hierarchy_status == "verified"
+    assert collection.hierarchy_note is None
+    assert collection.hierarchy_verified_at is not None
+
+
+def test_confirmed_period_hint_collection_reopens_for_new_scan_problem(
+    tmp_path: Path, monkeypatch,
+):
+    folder = tmp_path / "Asobi Asobase (L18)"
+    folder.mkdir()
+    episode_paths = [
+        folder / f"Asobi Asobase - {number:02}.mkv" for number in range(1, 13)
+    ]
+    for path in episode_paths:
+        path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        collection = session.scalar(select(CatalogCollection))
+        assert collection.hierarchy_status == "review_required"
+        assert collection.hierarchy_note == PERIOD_HINT_REVIEW_REASON
+
+        title = apply_single_title_confirmation(
+            collection, part_type="season", season_number=2, season_label=None,
+        )
+        session.commit()
+        collection_id, title_id = collection.id, title.id
+        assert collection.hierarchy_status == "verified"
+        assert collection.hierarchy_note is None
+        assert title.season_number_manual == 2
+        assert title.season_label_manual == "S2"
+
+        unknown_path = folder / "Asobi Asobase new extra.mkv"
+        unknown_path.write_bytes(b"video")
+        scan_library(session, tmp_path)
+        unknown = session.scalar(select(Video).where(Video.filename == unknown_path.name))
+        assert collection.hierarchy_status == "review_required"
+        assert collection.hierarchy_note == "Nové nezařazené video."
+        assert unknown.catalog_title_id is None
+
+        move_videos_to_title(session, collection_id, [unknown.id], title_id)
+        set_video_episode_override(unknown, 13)
+        refresh_collection_state(collection)
+        session.commit()
+        unknown_id = unknown.id
+
+    with sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        unknown = session.get(Video, unknown_id)
+        assert collection.hierarchy_status == "verified"
+        assert collection.hierarchy_note is None
+        assert collection.local_period_hint == "L18"
+        title = session.get(CatalogTitle, title_id)
+        assert title.season_number_manual == 2
+        assert title.season_label_manual == "S2"
+        assert title.part_type_manual == "season"
+        assert unknown.catalog_title_id == title_id
+        assert unknown.season_episode_number == 13
+        assert [path.read_bytes() for path in episode_paths] == [b"video"] * 12
+        assert unknown_path.read_bytes() == b"video"
+
+
+def test_confirmed_duplicate_persists_can_change_primary_and_can_be_cleared():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    with sessions() as session:
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show", hierarchy_status="verified",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1", relative_root_path="Anime/Show/Season 1",
+            part_type_manual="season", hierarchy_manual_override=True,
+        )
+        first = Video(
+            relative_path="Anime/Show/Season 1/Show - 01.mkv", root_folder="Anime",
+            filename="Show - 01.mkv", size=100, mtime_ns=1,
+            catalog_title=title, catalog_collection=collection,
+        )
+        second = Video(
+            relative_path="Anime/Show/Season 1/Show 01.mp4", root_folder="Anime",
+            filename="Show 01.mp4", size=200, mtime_ns=1,
+            catalog_title=title, catalog_collection=collection,
+        )
+        session.add(collection)
+        session.flush()
+        refresh_collection_state(collection)
+        assert summarize_title_numbering(list(title.videos), title).duplicate_numbers == (1,)
+        paths = [(video.filename, video.relative_path) for video in title.videos]
+
+        confirm_duplicate_groups(session, collection.id, [([first.id, second.id], first.id)])
+        session.commit()
+        collection_id, first_id, second_id = collection.id, first.id, second.id
+        assert collection.hierarchy_status == "review_required"
+        assert collection.hierarchy_note == CONFIRMED_DUPLICATES_REVIEW_REASON
+
+    with sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        first, second = session.get(Video, first_id), session.get(Video, second_id)
+        assert second.duplicate_of_video_id == first.id
+        summary = summarize_title_numbering(list(first.catalog_title.videos), first.catalog_title)
+        assert (summary.total, summary.standard_total, summary.numbered) == (2, 1, 1)
+        assert summary.duplicate_numbers == ()
+        assert summary.confirmed_duplicates == 1
+        assert [(video.filename, video.relative_path) for video in first.catalog_title.videos] == paths
+
+        confirm_duplicate_videos(
+            session, collection.id, [first.id, second.id], second.id,
+        )
+        session.commit()
+
+    with sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        first, second = session.get(Video, first_id), session.get(Video, second_id)
+        assert first.duplicate_of_video_id == second.id
+        assert second.duplicate_of_video_id is None
+
+        clear_confirmed_duplicate_videos(
+            session, collection.id, [first.id, second.id],
+        )
+        session.commit()
+        summary = summarize_title_numbering(list(first.catalog_title.videos), first.catalog_title)
+        assert summary.confirmed_duplicates == 0
+        assert summary.duplicate_numbers == (1,)
+        assert collection.hierarchy_status == "review_required"
+        assert collection.hierarchy_note == (
+            "Číslování nebo nezařazený obsah stále vyžaduje kontrolu."
+        )
+        assert [(video.filename, video.relative_path) for video in first.catalog_title.videos] == paths
 
 
 @pytest.mark.parametrize("part_type", ["film", "ova"])
-def test_non_series_manual_type_does_not_get_season_one_suggestion(part_type):
+def test_non_series_manual_type_does_not_get_part_confirmation_suggestion(part_type):
     collection, title = simple_collection()
     title.part_type_manual = part_type
     title.hierarchy_manual_override = True
 
-    assert single_season_suggestion(collection) is None
+    assert single_title_confirmation_suggestion(collection) is None
 
 
-def test_collection_with_two_titles_does_not_get_season_one_suggestion():
+def test_collection_with_two_titles_does_not_get_part_confirmation_suggestion():
     collection, _ = simple_collection()
     CatalogTitle(
         id=2, collection=collection, local_title="Second title",
@@ -186,45 +383,52 @@ def test_collection_with_two_titles_does_not_get_season_one_suggestion():
         part_type="title",
     )
 
-    assert single_season_suggestion(collection) is None
+    assert single_title_confirmation_suggestion(collection) is None
 
 
-def test_manual_season_two_does_not_get_season_one_suggestion():
+def test_manual_season_two_does_not_get_duplicate_part_confirmation_suggestion():
     collection, title = simple_collection()
     title.season_number_manual = 2
     title.season_label_manual = "S2"
     title.part_type_manual = "season"
     title.hierarchy_manual_override = True
 
-    assert single_season_suggestion(collection) is None
+    assert single_title_confirmation_suggestion(collection) is None
 
 
-def test_conflicting_hierarchy_does_not_get_season_one_suggestion():
+def test_conflicting_hierarchy_does_not_get_part_confirmation_suggestion():
     collection, _ = simple_collection(status="conflict")
 
-    assert single_season_suggestion(collection) is None
+    assert single_title_confirmation_suggestion(collection) is None
 
 
-def test_title_without_videos_does_not_get_season_one_suggestion():
+def test_title_without_videos_does_not_get_part_confirmation_suggestion():
     collection, _ = simple_collection(with_video=False)
 
-    assert single_season_suggestion(collection) is None
+    assert single_title_confirmation_suggestion(collection) is None
 
 
-def test_existing_automatic_season_one_does_not_get_duplicate_suggestion():
+def test_automatic_folder_season_is_only_editable_confirmation_proposal():
     collection, title = simple_collection()
-    title.season_number = 1
-    title.season_label = "S1"
+    title.season_number = 2
+    title.season_label = "S2"
     title.part_type = "season"
 
-    assert single_season_suggestion(collection) is None
+    suggestion = single_title_confirmation_suggestion(collection)
+
+    assert suggestion is not None
+    assert suggestion.proposed_season_number == 2
+    assert suggestion.proposed_season_label == "S2"
+    assert title.season_number_manual is None
+    assert title.season_label_manual is None
+    assert title.part_type_manual is None
 
 
 def test_previously_verified_title_structure_does_not_get_suggestion():
     collection, title = simple_collection()
     title.hierarchy_verified_at = utc_now()
 
-    assert single_season_suggestion(collection) is None
+    assert single_title_confirmation_suggestion(collection) is None
 
 
 def test_suggestion_and_simple_preview_data_are_read_only():
@@ -235,7 +439,7 @@ def test_suggestion_and_simple_preview_data_are_read_only():
         session.add(collection)
         session.commit()
 
-        assert single_season_suggestion(collection) is not None
+        assert single_title_confirmation_suggestion(collection) is not None
         rows = simple_definition_rows(collection)
         definitions = parse_simple_definitions(rows)
         preview_assignments(list(collection.videos), definitions)

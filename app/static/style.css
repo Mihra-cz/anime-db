@@ -17,3 +17,6 @@
 .supplemental-videos { border-left: .25rem solid #587b63; padding-left: .8rem; }
 .part-management, .bulk-numbering { margin-top: 1rem; }
 .danger-zone { border: 1px solid #9b4b4b; padding: .75rem; }
+.duplicate-group { display: grid; gap: .55rem; margin-top: .75rem; padding: .8rem; border: 1px solid #8b6b2f; border-radius: 8px; background: #1d1a13; }
+.duplicate-group label { display: block; }
+.confirmed-duplicates,.unresolved-duplicates { border-left: .25rem solid #f59e0b; padding-left: .8rem; }

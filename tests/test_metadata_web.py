@@ -1,4 +1,5 @@
-from urllib.parse import parse_qs, urlparse
+import asyncio
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -11,7 +12,9 @@ from app.main import (
     get_preferred_title_language, templates,
 )
 from app.hierarchy_review import (
-    separate_nonstandard_videos, simple_definition_rows, single_season_suggestion,
+    CONFIRMED_DUPLICATES_REVIEW_REASON, PERIOD_HINT_REVIEW_REASON,
+    separate_nonstandard_videos,
+    simple_definition_rows, single_title_confirmation_suggestion,
 )
 from app.metadata.providers.base import ProviderTitleMetadata
 from app.migrations import migrate_schema
@@ -19,7 +22,7 @@ from app.models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
     InternalSubtitle, TitleMetadata, Video, utc_now,
 )
-from app.numbering import summarize_title_numbering
+from app.numbering import summarize_title_numbering, unresolved_duplicate_groups
 from app.scanner import scan_library
 from starlette.requests import Request
 
@@ -156,10 +159,13 @@ def test_candidate_and_artwork_mutations_are_post_only():
     assert paths["/catalog/{filter_name}/titles/{catalog_title_id}/metadata/artwork/refresh"] == {"POST"}
     assert paths["/metadata/batch-search"] == {"POST"}
     assert paths["/titles/{catalog_title_id}/numbering/sequence"] == {"POST"}
-    assert paths["/hierarchy-review/{collection_id}/season-one"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/confirm-part"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/simple-preview"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/separate-nonstandard"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/manage-videos"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/duplicates/confirm"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/duplicates/confirm-bulk"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/duplicates/clear"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/merge-title"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/delete-empty-title"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/numbering-preview"] == {"POST"}
@@ -547,7 +553,7 @@ def test_ansatsu_hierarchy_review_summary_before_and_after_zero_separation(tmp_p
     assert ">Ansatsu Kyoushitsu</a>" in before
     assert "Lokální část: <strong>Serie 1</strong>" in before
     assert "<dt>Fyzických videí</dt><dd>23</dd>" in before
-    assert "<dt>Standardních epizod</dt><dd>22</dd>" in before
+    assert "<dt>Logických standardních epizod</dt><dd>22</dd>" in before
     assert "<dt>Očíslováno</dt><dd>22/22</dd>" in before
     assert "<dt>Rozsah</dt><dd>E1–E22</dd>" in before
     assert "<dt>Nestandardní</dt><dd>1</dd>" in before
@@ -570,6 +576,114 @@ def test_ansatsu_hierarchy_review_summary_before_and_after_zero_separation(tmp_p
     assert "<dt>Fyzických videí</dt><dd>1</dd>" in preview_block
     assert "Doplňkový obsah – standardní completeness se nepoužije" in preview_block
     assert "Bez externích metadat" in preview_block
+
+
+def test_bungo_bulk_duplicate_resolution_keeps_physical_cleanup_warning(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'bungo-duplicates.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Bungo to Alchemist - Shinpan no Haguruma",
+            normalized_local_title="bungo to alchemist shinpan no haguruma",
+            relative_root_path="Anime/Bungo", hierarchy_status="review_required",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1", relative_root_path="Anime/Bungo/Season 1",
+            part_type_manual="season", season_number_manual=1,
+            season_label_manual="S1", hierarchy_manual_override=True,
+        )
+        for number in range(1, 14):
+            for filename, size in (
+                (f"Bungo - {number:02}.mkv", 1_000_000_000 + number),
+                (f"Bungo {number:02}.mp4", 2_000_000_000 + number),
+            ):
+                Video(
+                    relative_path=f"Anime/Bungo/Season 1/{filename}",
+                    root_folder="Anime", filename=filename, size=size, mtime_ns=1,
+                    duration=1440, video_codec="h264", width=1920, height=1080,
+                    local_episode_number=number, season_episode_number=number,
+                    catalog_title=title, catalog_collection=collection,
+                )
+        session.add(collection)
+        session.commit()
+        collection_id, title_id = collection.id, title.id
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    before = endpoints["/hierarchy-review/{collection_id}"](
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+    assert "Vyřešit duplicity · podezření (13 skupin)" in before
+    assert before.count('name="group_key"') == 13
+    assert before.count('action="/hierarchy-review/1/duplicates/confirm-bulk"') == 1
+    assert "Délka 24:00 · 1920×1080 · h264" in before
+
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        groups = unresolved_duplicate_groups(list(collection.titles[0].videos))
+        form_items = [("confirm_duplicate", "true")]
+        for group in groups:
+            key = f"{title_id}-{group.episode_number}"
+            form_items.append(("group_key", key))
+            form_items.extend(
+                (f"video_ids_{key}", str(video.id)) for video in group.videos
+            )
+            form_items.append((f"primary_{key}", str(group.videos[0].id)))
+    body = urlencode(form_items).encode()
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if sent:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request = Request({
+        "type": "http", "app": web_app, "method": "POST",
+        "path": f"/hierarchy-review/{collection_id}/duplicates/confirm-bulk",
+        "root_path": "", "scheme": "http", "query_string": b"",
+        "headers": [(b"content-type", b"application/x-www-form-urlencoded")],
+        "server": ("testserver", 80), "client": ("testclient", 50000),
+    }, receive)
+    response = asyncio.run(
+        endpoints["/hierarchy-review/{collection_id}/duplicates/confirm-bulk"](
+            request, collection_id,
+        )
+    )
+    assert response.status_code == 303
+
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        assert collection.hierarchy_status == "review_required"
+        assert collection.hierarchy_note == CONFIRMED_DUPLICATES_REVIEW_REASON
+
+    after = endpoints["/hierarchy-review/{collection_id}"](
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+    assert "<dt>Fyzických videí</dt><dd>26</dd>" in after
+    assert "<dt>Logických standardních epizod</dt><dd>13</dd>" in after
+    assert "<dt>Očíslováno</dt><dd>13/13</dd>" in after
+    assert "<dt>Rozsah</dt><dd>E1–E13</dd>" in after
+    assert "<dt>Potvrzených duplicit</dt><dd>13</dd>" in after
+    assert "Číslování vyřešeno" in after
+    assert "Fyzické duplicity vyžadují vyřešení: 13" in after
+    assert "Potvrzené duplicity (13)" in after
+    assert "Vyřešit duplicity · podezření" not in after
+
+    title_detail = endpoints["/titles/{catalog_title_id}"](
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+    ).body.decode()
+    assert title_detail.count("+ 1 potvrzená duplicitní kopie") == 13
+    assert "Fyzický cleanup dosud nebyl proveden." in title_detail
 
 
 def _render_hierarchy_review(*, verified=False, filename="Episode 01.mkv"):
@@ -614,7 +728,8 @@ def _render_hierarchy_review(*, verified=False, filename="Episode 01.mkv"):
         collection=collection, videos=[video], numbering_unknown=0,
         nonstandard_videos=(groups["nonstandard"]),
         unassigned_videos={"standard": [], "nonstandard": [], "unknown": []},
-        message=None, error=None, season_one_suggestion=single_season_suggestion(collection),
+        message=None, error=None,
+        part_confirmation_suggestion=single_title_confirmation_suggestion(collection),
         title_numbering=[{
             "title": title, "summary": summary, "videos": groups,
             "metadata_linked": False, "can_delete": False,
@@ -626,11 +741,13 @@ def _render_hierarchy_review(*, verified=False, filename="Episode 01.mkv"):
     )
 
 
-def test_hierarchy_review_shows_season_one_suggestion_and_human_friendly_form():
+def test_hierarchy_review_shows_editable_part_confirmation_and_human_friendly_form():
     rendered = _render_hierarchy_review()
 
-    assert "Pravděpodobně jednoduchá jednosériová kolekce" in rendered
-    assert "Nastavit jako Season 1" in rendered
+    assert "Ručně potvrdit typ jediné části" in rendered
+    assert 'name="season_number_manual" value="1"' in rendered
+    assert 'name="season_label_manual" value=""' in rendered
+    assert "Jediný CatalogTitle nemusí být Season 1" in rendered
     assert "Jednoduchá definice ručního rozdělení" in rendered
     assert "Název části" in rendered
     assert "Číslo sezóny" in rendered
@@ -648,7 +765,97 @@ def test_collection_and_title_verification_texts_are_distinct():
 
     assert "Hierarchie ověřena" in rendered
     assert "Zařazení ověřeno" in rendered
-    assert "Nastavit jako Season 1" not in rendered
+    assert "Ručně potvrdit typ jediné části" not in rendered
+
+
+def test_season_two_confirmation_clears_period_hint_reason_and_renders_verified(
+    tmp_path,
+):
+    settings = Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'season-confirmation.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    )
+    web_app = create_app(settings)
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Asobi Asobase (L18)",
+            normalized_local_title="asobi asobase l18",
+            relative_root_path="Anime/Asobi Asobase (L18)",
+            local_period_hint="L18", hierarchy_status="review_required",
+            hierarchy_note=PERIOD_HINT_REVIEW_REASON,
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Asobi Asobase (L18)",
+            normalized_local_title="asobi asobase l18",
+            relative_root_path="Anime/Asobi Asobase (L18)",
+            metadata_status="linked_manual",
+            metadata_record=TitleMetadata(
+                display_title="Asobi Asobase", title_romaji="Asobi Asobase",
+                metadata_provider="anilist", metadata_external_id="37171",
+            ),
+        )
+        title.external_links.append(ExternalTitleLink(
+            provider="anilist", external_id="37171", match_method="manual_search",
+            is_primary=True, is_manual=True,
+        ))
+        for number in range(1, 13):
+            Video(
+                relative_path=(
+                    f"Anime/Asobi Asobase (L18)/Asobi Asobase - {number:02}.mkv"
+                ),
+                root_folder="Anime", filename=f"Asobi Asobase - {number:02}.mkv",
+                size=1, mtime_ns=1, local_episode_number=number,
+                season_episode_number=number, absolute_episode_number=number,
+                catalog_title=title, catalog_collection=collection,
+            )
+        session.add(collection)
+        session.commit()
+        collection_id, title_id = collection.id, title.id
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    response = endpoints["/hierarchy-review/{collection_id}/confirm-part"](
+        collection_id, part_type_manual="season", season_number_manual="2",
+        season_label_manual="", confirm_part=True,
+    )
+
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        title = session.get(CatalogTitle, title_id)
+        assert collection.hierarchy_status == "verified"
+        assert collection.hierarchy_note is None
+        assert collection.hierarchy_verified_at is not None
+        assert title.season_number_manual == 2
+        assert title.season_label_manual == "S2"
+        assert title.part_type_manual == "season"
+        assert title.hierarchy_verified_at is not None
+
+    rendered = endpoints["/hierarchy-review/{collection_id}"](
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    assert "stav <strong>verified</strong> · Hierarchie ověřena" in rendered
+    assert "Interní suffix: L18 · videí: 12" in rendered
+    assert PERIOD_HINT_REVIEW_REASON not in rendered
+    assert '<option value="verified" selected>Hierarchie ověřena</option>' in rendered
+    assert "Lokální část: <strong>Asobi Asobase (L18)</strong>" in rendered
+    assert "označení: <strong>S2</strong>" in rendered
+    assert "typ: <strong>season</strong>" in rendered
+    assert "<dt>Fyzických videí</dt><dd>12</dd>" in rendered
+    assert "<dt>Logických standardních epizod</dt><dd>12</dd>" in rendered
+    assert "<dt>Očíslováno</dt><dd>12/12</dd>" in rendered
+    assert "<dt>Rozsah</dt><dd>E1–E12</dd>" in rendered
+    assert "<dt>Unknown</dt><dd>0</dd>" in rendered
+    assert "<dt>Nestandardní</dt><dd>0</dd>" in rendered
+    assert "<dt>Ručně zařazený doplněk</dt><dd>0</dd>" in rendered
+    assert "Metadata propojena" in rendered
+    assert "Číslování vyřešeno" in rendered
 
 
 def test_hierarchy_review_marks_zero_and_offers_logical_separation():
