@@ -47,6 +47,7 @@ def migrate_schema(engine) -> None:
             ("episode_number_confidence", "FLOAT NULL"),
             ("episode_number_manual_override", "INTEGER NULL"),
             ("episode_number_verified_at", "DATETIME NULL"),
+            ("content_type_manual", "VARCHAR NULL"),
         ],
         "internal_subtitles": [("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'")],
         "external_subtitles": [("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'")],
@@ -134,6 +135,9 @@ def migrate_schema(engine) -> None:
             if is_root_video(video)
             and video.catalog_title is not None
         }
+        used_titles.update(
+            title for title in original_titles if title.hierarchy_manual_override
+        )
         for identity in identities_by_title_path.values():
             if identity.title.relative_root_path == ROOT_FOLDER:
                 continue

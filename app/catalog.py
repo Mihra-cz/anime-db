@@ -121,7 +121,10 @@ def filename_display_title(filename: str) -> str | None:
     if detection.kind == "unknown":
         return None
     stem = PurePosixPath(filename).stem.strip()
-    match = DISPLAY_TITLE_EPISODE_SUFFIX.fullmatch(stem)
+    match = (
+        DISPLAY_TITLE_OVA_PART_SUFFIX.fullmatch(stem)
+        or DISPLAY_TITLE_EPISODE_SUFFIX.fullmatch(stem)
+    )
     if match is None:
         return None
     candidate = match.group("title").strip().rstrip("-_. ").strip()
@@ -645,6 +648,9 @@ EXPLICIT_EPISODE = re.compile(
 )
 TRAILING_EPISODE = re.compile(r"\s+-\s+0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
 TRAILING_PLAIN_EPISODE = re.compile(r"\s+0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
+TRAILING_OVA_PART_EPISODE = re.compile(
+    r"(?:^|\s)OVA\s+P0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE
+)
 BARE_EPISODE = re.compile(r"0\d{1,2}(?:v\d+)?", re.IGNORECASE)
 EXPLICIT_FRACTIONAL_EPISODE = re.compile(
     r"(?:^|[^a-z0-9])(?:episode|ep|e)\s*[-_. ]*0*(\d{1,3})\.(\d+)"
@@ -658,6 +664,10 @@ DISPLAY_TITLE_EPISODE_SUFFIX = re.compile(
     r"(?P<title>.+?)(?:\s+-\s+|\s+)"
     r"(?:(?:episode|ep|e)\s*[-_. ]*)?"
     r"(?:0*\d{1,3}(?:\.\d+)?)(?:v\d+)?$",
+    re.IGNORECASE,
+)
+DISPLAY_TITLE_OVA_PART_SUFFIX = re.compile(
+    r"(?P<title>.+?)(?:\s+-\s+|\s+)OVA\s+P0*\d{1,3}(?:v\d+)?$",
     re.IGNORECASE,
 )
 
@@ -690,6 +700,9 @@ class EpisodeNumberDetection:
 def detect_episode_number(filename: str) -> EpisodeNumberDetection:
     """Bezpečně rozliší standardní, nulové, desetinné a neznámé číslování."""
     stem = PurePosixPath(filename).stem
+    if match := TRAILING_OVA_PART_EPISODE.search(stem):
+        number = int(match.group(1))
+        return EpisodeNumberDetection("zero" if number == 0 else "standard", number)
     for pattern in (EXPLICIT_FRACTIONAL_EPISODE, TRAILING_FRACTIONAL_EPISODE):
         if match := pattern.search(stem):
             return EpisodeNumberDetection(

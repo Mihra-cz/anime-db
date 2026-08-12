@@ -46,8 +46,10 @@ from .database import Base, make_engine, make_session_factory
 from .migrations import migrate_schema
 from .hierarchy_review import (
     SIMPLE_DEFINITION_FIELDS, apply_manual_split, apply_single_season_suggestion,
+    classify_videos_in_place, create_title_from_videos, delete_empty_local_title,
     definitions_as_json, definitions_to_json, parse_manual_definitions,
-    parse_simple_definitions,
+    merge_title_into, move_videos_to_title, parse_simple_definitions,
+    refresh_collection_state,
     preview_assignments, separate_nonstandard_videos, simple_definition_rows,
     single_season_suggestion,
 )
@@ -104,6 +106,7 @@ templates.env.globals.update(
     catalog_title_series_label=catalog_title_series_label,
     subtitle_track_display=subtitle_track_display,
     manual_hardsub_state=manual_hardsub_state,
+    detect_episode_number=detect_episode_number,
 )
 METADATA_STATUS_LABELS = {
     "unlinked": "Bez metadat", "candidates_available": "Čeká na potvrzení",
@@ -168,7 +171,7 @@ def _load_catalog_title(session, catalog_title_id: int | None):
 
 
 def _hierarchy_video_groups(videos: list[Video]) -> dict[str, list]:
-    standard, nonstandard, unknown = [], [], []
+    standard, supplemental, nonstandard, unknown = [], [], [], []
     for video in sorted(
         videos,
         key=lambda item: (
@@ -178,13 +181,18 @@ def _hierarchy_video_groups(videos: list[Video]) -> dict[str, list]:
         ),
     ):
         detection = detect_episode_number(video.filename)
-        if detection.is_nonstandard:
+        if video.content_type_manual:
+            supplemental.append({"video": video, "detection": detection})
+        elif detection.is_nonstandard:
             nonstandard.append({"video": video, "detection": detection})
         elif video.season_episode_number is not None:
             standard.append({"video": video, "detection": detection})
         else:
             unknown.append({"video": video, "detection": detection})
-    return {"standard": standard, "nonstandard": nonstandard, "unknown": unknown}
+    return {
+        "standard": standard, "supplemental": supplemental,
+        "nonstandard": nonstandard, "unknown": unknown,
+    }
 
 
 def _metadata_template_values(
@@ -851,6 +859,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_candidates),
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.artwork),
                 selectinload(CatalogCollection.videos),
             ).where(CatalogCollection.id == collection_id))
             if collection is None:
@@ -895,6 +905,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         title.metadata_record
                         and any(link.is_primary for link in title.external_links)
                     ),
+                    "can_delete": bool(
+                        not title.videos
+                        and title.hierarchy_manual_override
+                        and "/.catalog-part-" in title.relative_root_path
+                        and title.metadata_record is None
+                        and not title.external_links
+                        and not title.metadata_candidates
+                        and not title.artwork
+                    ),
                 }
                 for title in sorted(
                     collection.titles,
@@ -911,6 +930,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {"video": video, "detection": detection}
                 for video in videos
                 if (detection := detect_episode_number(video.filename)).is_nonstandard
+                and not video.content_type_manual
                 and (
                     video.catalog_title is None
                     or video.catalog_title.effective_part_type
@@ -1150,6 +1170,142 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         message = "Nestandardní obsah byl logicky oddělen; fyzické cesty zůstaly beze změny."
         return RedirectResponse(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#title-{title_id}",
+            status_code=303,
+        )
+
+    @app.post("/hierarchy-review/{collection_id}/manage-videos")
+    async def hierarchy_review_manage_videos(request: Request, collection_id: int):
+        form = await request.form()
+        try:
+            video_ids = [int(value) for value in form.getlist("video_ids")]
+            operation = str(form.get("operation") or "").strip()
+            with sessions() as session:
+                if operation == "classify":
+                    classify_videos_in_place(
+                        session, collection_id, video_ids,
+                        str(form.get("content_type") or ""),
+                    )
+                    message = "Obsah byl ručně zařazen v současné části."
+                elif operation == "move":
+                    move_videos_to_title(
+                        session, collection_id, video_ids,
+                        int(str(form.get("target_title_id") or "")),
+                    )
+                    message = "Videa byla logicky přesunuta do existující části."
+                elif operation == "create":
+                    create_title_from_videos(
+                        session, collection_id, video_ids,
+                        local_title=str(form.get("local_title") or ""),
+                        part_type=str(form.get("part_type") or ""),
+                    )
+                    message = "Byla vytvořena nová logická část a vybraná videa do ní přesunuta."
+                else:
+                    raise ValueError("Vyberte platnou operaci správy zařazení.")
+                session.commit()
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#assignment",
+            status_code=303,
+        )
+
+    @app.post("/hierarchy-review/{collection_id}/merge-title")
+    def hierarchy_review_merge_title(
+        collection_id: int, source_title_id: int = Form(...),
+        target_title_id: int = Form(...), confirm_merge: bool = Form(False),
+    ):
+        if not confirm_merge:
+            raise HTTPException(status_code=400, detail="Sloučení je nutné explicitně potvrdit.")
+        with sessions() as session:
+            try:
+                merge_title_into(session, collection_id, source_title_id, target_title_id)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = "Všechna videa byla logicky přesunuta; zdrojová část zůstala prázdná."
+        return RedirectResponse(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#title-{source_title_id}",
+            status_code=303,
+        )
+
+    @app.post("/hierarchy-review/{collection_id}/delete-empty-title")
+    def hierarchy_review_delete_empty_title(
+        collection_id: int, title_id: int = Form(...),
+        confirm_delete: bool = Form(False),
+    ):
+        if not confirm_delete:
+            raise HTTPException(status_code=400, detail="Odstranění je nutné explicitně potvrdit.")
+        with sessions() as session:
+            try:
+                delete_empty_local_title(session, collection_id, title_id)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = "Prázdná lokální část byla odstraněna."
+        return RedirectResponse(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}",
+            status_code=303,
+        )
+
+    @app.post("/hierarchy-review/{collection_id}/numbering-preview", response_class=HTMLResponse)
+    async def hierarchy_review_numbering_preview(request: Request, collection_id: int):
+        form = await request.form()
+        try:
+            video_ids = [int(value) for value in form.getlist("video_ids")]
+            start_episode = int(str(form.get("start_episode") or ""))
+            with sessions() as session:
+                collection = session.scalar(select(CatalogCollection).options(
+                    selectinload(CatalogCollection.videos),
+                ).where(CatalogCollection.id == collection_id))
+                if collection is None:
+                    raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
+                selected_ids = set(video_ids)
+                selected = [video for video in collection.videos if video.id in selected_ids]
+                if not selected_ids or len(selected) != len(selected_ids):
+                    raise ValueError("Výběr videí není platný.")
+                rows = preview_sequential_numbering(selected, start_episode)
+                collection_name = collection.local_title
+            return templates.TemplateResponse(request, "bulk_numbering_preview.html", {
+                "collection_id": collection_id, "collection_name": collection_name,
+                "rows": rows, "start_episode": start_episode,
+            })
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/hierarchy-review/{collection_id}/numbering-apply")
+    async def hierarchy_review_numbering_apply(request: Request, collection_id: int):
+        form = await request.form()
+        if str(form.get("confirm_apply") or "").casefold() not in {"true", "on", "1"}:
+            raise HTTPException(status_code=400, detail="Číslování je nutné explicitně potvrdit.")
+        try:
+            video_ids = [int(value) for value in form.getlist("video_ids")]
+            start_episode = int(str(form.get("start_episode") or ""))
+            confirm_conflicts = str(form.get("confirm_manual_conflicts") or "").casefold() in {
+                "true", "on", "1",
+            }
+            with sessions() as session:
+                collection = session.scalar(select(CatalogCollection).options(
+                    selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+                    selectinload(CatalogCollection.videos),
+                ).where(CatalogCollection.id == collection_id))
+                if collection is None:
+                    raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
+                selected_ids = set(video_ids)
+                selected = [video for video in collection.videos if video.id in selected_ids]
+                if not selected_ids or len(selected) != len(selected_ids):
+                    raise ValueError("Výběr videí není platný.")
+                apply_sequential_numbering(
+                    selected, start_episode, confirm_manual_conflicts=confirm_conflicts,
+                )
+                refresh_collection_state(collection)
+                session.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = "Vybraná videa byla očíslována v potvrzeném pořadí."
+        return RedirectResponse(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#assignment",
             status_code=303,
         )
 

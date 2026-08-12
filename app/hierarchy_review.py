@@ -21,6 +21,7 @@ ALLOWED_PART_TYPES = {
     "preview", "recap", "bonus", "other",
 }
 SUPPLEMENTAL_PART_TYPES = {"film", "ova", "special", "preview", "recap", "bonus", "other"}
+VIDEO_CONTENT_TYPES = {"preview", "special", "recap", "ova", "bonus", "other"}
 ALLOWED_NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
 SIMPLE_DEFINITION_FIELDS = (
     "title_id", "local_title", "manual_display_title", "season_number_manual",
@@ -73,6 +74,7 @@ def collection_requires_review(collection: CatalogCollection, videos: list[Video
         detection.display_value
         for video in videos
         if (detection := detect_episode_number(video.filename)).is_nonstandard
+        and not video.content_type_manual
         and (
             video.catalog_title is None
             or video.catalog_title.effective_part_type not in SUPPLEMENTAL_PART_TYPES
@@ -294,44 +296,114 @@ def definition_from_title(title: CatalogTitle) -> ManualTitleDefinition:
         episode_end=title.episode_end, episode_start_offset=title.episode_start_offset,
         numbering_mode=title.numbering_mode, sort_order=title.effective_sort_order,
         filename_pattern=title.episode_filename_pattern,
+        video_ids=tuple(video.id for video in title.videos),
     )
 
 
 def manual_split_titles(collection: CatalogCollection) -> list[CatalogTitle]:
-    return [
-        title for title in collection.titles
-        if title.hierarchy_manual_override and (
-            title.episode_start is not None or title.episode_filename_pattern
-            or title.effective_part_type in SUPPLEMENTAL_PART_TYPES
-        )
-    ]
+    return [title for title in collection.titles if title.hierarchy_manual_override]
 
 
-def separate_nonstandard_videos(
-    session: Session, collection_id: int, video_ids: list[int], *,
-    local_title: str, part_type: str,
-) -> CatalogTitle:
-    """Logicky oddělí vybraná nestandardní videa bez změny jejich cesty."""
-    name = local_title.strip()[:200]
-    normalized_type = part_type.strip().casefold()
-    selected_ids = {int(video_id) for video_id in video_ids}
-    if not name:
-        raise ValueError("Nová část musí mít název.")
-    if normalized_type not in SUPPLEMENTAL_PART_TYPES - {"film"}:
-        raise ValueError("Neplatný typ nestandardního obsahu.")
-    if not selected_ids:
-        raise ValueError("Vyberte alespoň jedno nestandardní video.")
+def _load_collection_for_assignment(session: Session, collection_id: int) -> CatalogCollection:
     collection = session.scalar(select(CatalogCollection).options(
         selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+        selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
+        selectinload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
+        selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_candidates),
+        selectinload(CatalogCollection.titles).selectinload(CatalogTitle.artwork),
         selectinload(CatalogCollection.videos),
     ).where(CatalogCollection.id == collection_id))
     if collection is None:
         raise ValueError("Kolekce nebyla nalezena.")
+    return collection
+
+
+def _selected_videos(collection: CatalogCollection, video_ids: list[int]) -> list[Video]:
+    selected_ids = {int(video_id) for video_id in video_ids}
+    if not selected_ids:
+        raise ValueError("Vyberte alespoň jedno video.")
     selected = [video for video in collection.videos if video.id in selected_ids]
     if len(selected) != len(selected_ids):
         raise ValueError("Výběr obsahuje cizí nebo neexistující video.")
-    if any(not detect_episode_number(video.filename).is_nonstandard for video in selected):
-        raise ValueError("Oddělit lze touto akcí pouze rozpoznaný nestandardní obsah.")
+    return selected
+
+
+def refresh_collection_state(collection: CatalogCollection) -> None:
+    recalculate_collection_numbering(
+        collection,
+        {
+            title.id: [
+                video for video in collection.videos
+                if video.catalog_title is title or video.catalog_title_id == title.id
+            ]
+            for title in collection.titles
+        },
+    )
+    needs_review = (
+        any(video.catalog_title is None and video.catalog_title_id is None for video in collection.videos)
+        or collection_requires_numbering_review(collection)
+    )
+    collection.hierarchy_status = "review_required" if needs_review else "verified"
+    collection.hierarchy_verified_at = None if needs_review else utc_now()
+    collection.hierarchy_note = (
+        "Číslování nebo nezařazený obsah stále vyžaduje kontrolu."
+        if needs_review else None
+    )
+
+
+def classify_videos_in_place(
+    session: Session, collection_id: int, video_ids: list[int], content_type: str,
+) -> list[Video]:
+    normalized_type = content_type.strip().casefold()
+    if normalized_type not in VIDEO_CONTENT_TYPES:
+        raise ValueError("Neplatný typ doplňkového obsahu.")
+    collection = _load_collection_for_assignment(session, collection_id)
+    selected = _selected_videos(collection, video_ids)
+    for video in selected:
+        video.content_type_manual = normalized_type
+        if video.catalog_title is not None:
+            video.catalog_title.hierarchy_manual_override = True
+            video.catalog_title.hierarchy_verified_at = utc_now()
+    session.flush()
+    refresh_collection_state(collection)
+    return selected
+
+
+def move_videos_to_title(
+    session: Session, collection_id: int, video_ids: list[int], target_title_id: int,
+) -> CatalogTitle:
+    collection = _load_collection_for_assignment(session, collection_id)
+    selected = _selected_videos(collection, video_ids)
+    target = next((title for title in collection.titles if title.id == target_title_id), None)
+    if target is None:
+        raise ValueError("Cílová část neexistuje v této kolekci.")
+    for video in selected:
+        source_type = (
+            video.catalog_title.effective_part_type if video.catalog_title is not None else None
+        )
+        if not video.content_type_manual and source_type in VIDEO_CONTENT_TYPES:
+            video.content_type_manual = source_type
+        video.catalog_title = target
+        video.catalog_collection = collection
+    target.hierarchy_manual_override = True
+    target.hierarchy_verified_at = utc_now()
+    session.flush()
+    refresh_collection_state(collection)
+    return target
+
+
+def create_title_from_videos(
+    session: Session, collection_id: int, video_ids: list[int], *,
+    local_title: str, part_type: str,
+) -> CatalogTitle:
+    name = local_title.strip()[:200]
+    normalized_type = part_type.strip().casefold()
+    if not name:
+        raise ValueError("Nová část musí mít název.")
+    if normalized_type not in VIDEO_CONTENT_TYPES:
+        raise ValueError("Neplatný typ doplňkového obsahu.")
+    collection = _load_collection_for_assignment(session, collection_id)
+    selected = _selected_videos(collection, video_ids)
     position = max((title.effective_sort_order for title in collection.titles), default=0) + 1
     virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}"
     suffix = 1
@@ -349,23 +421,58 @@ def separate_nonstandard_videos(
     session.add(title)
     session.flush()
     for video in selected:
+        video.content_type_manual = video.content_type_manual or normalized_type
         video.catalog_title = title
         video.catalog_collection = collection
-    recalculate_collection_numbering(
-        collection,
-        {item.id: list(item.videos) for item in collection.titles},
-    )
-    needs_review = (
-        any(video.catalog_title is None for video in collection.videos)
-        or collection_requires_numbering_review(collection)
-    )
-    collection.hierarchy_status = "review_required" if needs_review else "verified"
-    collection.hierarchy_verified_at = None if needs_review else utc_now()
-    collection.hierarchy_note = (
-        "Číslování nebo nezařazený obsah stále vyžaduje kontrolu."
-        if needs_review else None
-    )
+    session.flush()
+    refresh_collection_state(collection)
     return title
+
+
+def merge_title_into(
+    session: Session, collection_id: int, source_title_id: int, target_title_id: int,
+) -> CatalogTitle:
+    if source_title_id == target_title_id:
+        raise ValueError("Zdrojová a cílová část musí být odlišná.")
+    collection = _load_collection_for_assignment(session, collection_id)
+    source = next((title for title in collection.titles if title.id == source_title_id), None)
+    if source is None:
+        raise ValueError("Zdrojová část neexistuje v této kolekci.")
+    if not source.videos:
+        raise ValueError("Zdrojová část neobsahuje žádná videa.")
+    return move_videos_to_title(
+        session, collection_id, [video.id for video in source.videos], target_title_id
+    )
+
+
+def delete_empty_local_title(
+    session: Session, collection_id: int, title_id: int,
+) -> None:
+    collection = _load_collection_for_assignment(session, collection_id)
+    title = next((item for item in collection.titles if item.id == title_id), None)
+    if title is None:
+        raise ValueError("Část neexistuje v této kolekci.")
+    if title.videos:
+        raise ValueError("Odstranit lze pouze prázdnou část.")
+    if not title.hierarchy_manual_override or "/.catalog-part-" not in title.relative_root_path:
+        raise ValueError("Odstranit lze pouze lokálně vytvořenou virtuální část.")
+    if title.metadata_record or title.external_links or title.metadata_candidates or title.artwork:
+        raise ValueError("Část má metadata nebo další vazby a nelze ji bezpečně odstranit.")
+    session.delete(title)
+
+
+def separate_nonstandard_videos(
+    session: Session, collection_id: int, video_ids: list[int], *,
+    local_title: str, part_type: str,
+) -> CatalogTitle:
+    """Logicky oddělí vybraná nestandardní videa bez změny jejich cesty."""
+    collection = _load_collection_for_assignment(session, collection_id)
+    selected = _selected_videos(collection, video_ids)
+    if any(not detect_episode_number(video.filename).is_nonstandard for video in selected):
+        raise ValueError("Oddělit lze touto akcí pouze rozpoznaný nestandardní obsah.")
+    return create_title_from_videos(
+        session, collection_id, video_ids, local_title=local_title, part_type=part_type
+    )
 
 
 def apply_manual_split(

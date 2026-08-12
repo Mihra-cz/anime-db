@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Náhled hromadného číslování · AnimeDB{% endblock %}
+{% block content %}
+<p><a href="/hierarchy-review/{{ collection_id }}#assignment">← Zpět na kontrolu kolekce</a></p>
+<h1>Náhled hromadného číslování</h1>
+<p><strong>{{ collection_name }}</strong> · pořadí je deterministické podle přirozeného řazení filename, cesty a ID.</p>
+<div class="table-wrap"><table><thead><tr><th>Pořadí</th><th>Video</th><th>Současné číslo</th><th>Nové číslo</th><th>Konflikt</th></tr></thead><tbody>{% for row in rows %}<tr><td>{{ loop.index }}</td><td>{{ row.filename }}</td><td>{{ 'E' ~ row.current_episode if row.current_episode is not none else '—' }}</td><td><strong>E{{ row.proposed_episode }}</strong></td><td>{{ 'Přepíše ruční číslo' if row.manual_conflict else '—' }}</td></tr>{% endfor %}</tbody></table></div>
+<form method="post" action="/hierarchy-review/{{ collection_id }}/numbering-apply">
+  <input type="hidden" name="start_episode" value="{{ start_episode }}">
+  {% for row in rows %}<input type="hidden" name="video_ids" value="{{ row.video_id }}">{% endfor %}
+  {% if rows|selectattr('manual_conflict')|list %}<label><input type="checkbox" name="confirm_manual_conflicts" value="true" required> Potvrzuji přepsání existujících ručních čísel.</label>{% endif %}
+  <label><input type="checkbox" name="confirm_apply" value="true" required> Potvrzuji uvedené mapování.</label>
+  <button type="submit">Uložit tato čísla</button>
+</form>
+{% endblock %}

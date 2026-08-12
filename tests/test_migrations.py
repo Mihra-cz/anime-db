@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from app.migrations import migrate_schema
@@ -38,8 +38,11 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         """))
         connection.execute(text("""
             INSERT INTO videos
-                (id, relative_path, root_folder, filename, size, mtime_ns)
-            VALUES (1, 'Show/NCOP.mkv', 'Show', 'NCOP.mkv', 1, 1)
+                (id, relative_path, root_folder, filename, size, mtime_ns,
+                 duration, video_codec, width, height)
+            VALUES
+                (1, 'Show/NCOP.mkv', 'Show', 'NCOP.mkv', 987, 654,
+                 123.5, 'h265', 1280, 720)
         """))
         connection.execute(text("""
             INSERT INTO internal_subtitles
@@ -49,15 +52,46 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
 
     migrate_schema(engine)
 
+    assert [
+        column["name"] for column in inspect(engine).get_columns("videos")
+    ].count("content_type_manual") == 1
+
     with Session(engine) as session:
         assert session.scalar(select(Video.file_type)) == "ncop"
         video = session.scalar(select(Video))
-        assert video.filename == "NCOP.mkv"
+        assert (
+            video.id, video.relative_path, video.root_folder, video.filename,
+            video.size, video.mtime_ns, video.duration, video.video_codec,
+            video.width, video.height,
+        ) == (
+            1, "Show/NCOP.mkv", "Show", "NCOP.mkv",
+            987, 654, 123.5, "h265", 1280, 720,
+        )
+        assert video.content_type_manual is None
         assert video.manual_hardsub_cs is False
         assert video.manual_hardsub_sk is False
         assert video.manual_hardsub_verified_at is None
         assert session.scalar(select(InternalSubtitle.language)) == "unknown"
         assert session.scalar(select(InternalSubtitle.normalized_language)) == "eng"
+        video.content_type_manual = "recap"
+        session.commit()
+
+    migrate_schema(engine)
+    migrate_schema(engine)
+
+    assert [
+        column["name"] for column in inspect(engine).get_columns("videos")
+    ].count("content_type_manual") == 1
+    with Session(engine) as session:
+        video = session.scalar(select(Video))
+        assert video.content_type_manual == "recap"
+        assert (
+            video.relative_path, video.filename, video.size, video.mtime_ns,
+            video.duration, video.video_codec, video.width, video.height,
+        ) == (
+            "Show/NCOP.mkv", "NCOP.mkv", 987, 654,
+            123.5, "h265", 1280, 720,
+        )
 
 
 def test_v5_migration_creates_stable_titles_and_is_idempotent(tmp_path):

@@ -159,6 +159,11 @@ def test_candidate_and_artwork_mutations_are_post_only():
     assert paths["/hierarchy-review/{collection_id}/season-one"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/simple-preview"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/separate-nonstandard"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/manage-videos"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/merge-title"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/delete-empty-title"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/numbering-preview"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/numbering-apply"] == {"POST"}
     assert paths["/preferences/title-name"] == {"POST"}
 
 
@@ -592,6 +597,7 @@ def _render_hierarchy_review(*, verified=False, filename="Episode 01.mkv"):
     summary = summarize_title_numbering([video], title)
     groups = {
         "standard": [{"video": video, "detection": detection}] if is_standard else [],
+        "supplemental": [],
         "nonstandard": (
             [{"video": video, "detection": detection}]
             if detection.is_nonstandard else []
@@ -611,7 +617,7 @@ def _render_hierarchy_review(*, verified=False, filename="Episode 01.mkv"):
         message=None, error=None, season_one_suggestion=single_season_suggestion(collection),
         title_numbering=[{
             "title": title, "summary": summary, "videos": groups,
-            "metadata_linked": False,
+            "metadata_linked": False, "can_delete": False,
         }],
         metadata_status_labels={"unlinked": "Bez metadat"},
         simple_rows=simple_definition_rows(collection), definitions_json="[]",
@@ -666,6 +672,34 @@ def test_hierarchy_review_distinguishes_fractional_and_unknown():
     assert "Unknown (1)" in unknown
     assert "Parser bezpečně neurčil číslo epizody" in unknown
     assert "Nestandardní epizoda:" not in unknown
+
+
+def test_hierarchy_review_offers_assignment_for_standard_videos_and_bulk_preview():
+    rendered = _render_hierarchy_review(filename="Title 01.mkv")
+
+    assert "Správa zařazení" in rendered
+    assert "Ponechat v této části a klasifikovat jako" in rendered
+    assert "Přesunout do existující části" in rendered
+    assert "Oddělit do nové části" in rendered
+    assert "Hromadné číslování vybraných videí" in rendered
+    assert 'name="video_ids" value="1"' in rendered
+
+
+def test_bulk_numbering_preview_template_requires_explicit_confirmation():
+    row = type("Row", (), {
+        "video_id": 1, "filename": "OVA P1.mkv", "current_episode": None,
+        "proposed_episode": 1, "manual_conflict": False,
+    })()
+    rendered = templates.env.get_template("bulk_numbering_preview.html").render(
+        request=type("Request", (), {
+            "url_for": lambda self, *args, **kwargs: "/static/style.css",
+        })(),
+        collection_id=1, collection_name="Arifureta", rows=[row], start_episode=1,
+    )
+
+    assert "OVA P1.mkv" in rendered
+    assert "E1" in rendered
+    assert 'name="confirm_apply"' in rendered
 
 
 def test_episode_table_prioritizes_readable_data_and_preserves_editing_and_values():

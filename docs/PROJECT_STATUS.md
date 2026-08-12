@@ -1577,6 +1577,62 @@ git diff --check                          # prošlo
 
 ---
 
+## 6.18 Klasifikace videí, vratné zařazení a rychlé číslování
+
+Kontrola reálné kolekce `Arifureta Shokugyou de Sekai Saikyou (L19-Z22)`
+ukázala, že typ doplňkového obsahu a jeho logické umístění jsou dvě různá
+rozhodnutí. Hierarchy Review proto nově umožňuje:
+
+- označit jednotlivé video jako `preview`, `special`, `recap`, `ova`, `bonus`
+  nebo `other` a ponechat je v současném `CatalogTitle`,
+- přesunout vybraná videa do existující části bez ohledu na to, zda jsou
+  standardní, fractional, `00` nebo unknown,
+- vytvořit z libovolného explicitního výběru novou lokální doplňkovou část,
+- přesunout všechna videa jedné části do jiné; zdrojová část se automaticky
+  nemaže,
+- po samostatném potvrzení odstranit pouze prázdnou lokální virtuální část bez
+  metadat a dalších vazeb,
+- před hromadným sekvenčním číslováním zobrazit deterministický náhled mapování.
+
+Minimální persistentní rozšíření je nullable `Video.content_type_manual`.
+Současný model dříve ukládal typ `recap` nebo `ova` pouze na `CatalogTitle`;
+`Video.file_type` je automatická klasifikace scanneru a není vhodná pro ruční
+rozhodnutí. Nové pole je proto nutné, aby například fractional `5.5` mohlo
+zůstat uvnitř Season 1 jako ručně vyřešený Recap. Takové video nevstupuje do
+standardní completeness, nevytváří mezeru ani samo nedrží kolekci v review.
+Databázová změna je idempotentně připravená v `migrate_schema`; produkční
+databáze v této iteraci automaticky migrována nebyla.
+
+Ruční zařazení používá stávající `hierarchy_manual_override` a explicitní ID
+videí v definici části. Scanner tak zachová klasifikaci, přesuny mezi částmi i
+ruční epizodní čísla. Fyzický adresář není autoritou logické hierarchie a scan
+ruční rozhodnutí nevrací podle umístění na NASu.
+
+Episode parser navíc bezpečně rozpoznává výhradně explicitní koncový vzor
+`OVA P<number>`, včetně `P01`, jako běžné lokální číslo OVA. Samotné `Title
+P1.ext` se nerozpoznává a token `S2` před `OVA P1` se nikdy nepoužije jako
+číslo epizody. Díky tomu lze bez nové hierarchické úrovně vytvořit například:
+
+- `OVA – Serie 1` typu `ova` s E1–E2,
+- `OVA – Serie 2` typu `ova` s E1–E2.
+
+U doplňkového `CatalogTitle` se rozsah E1–E2 může informativně zobrazit, ale
+standardní completeness hlavní season se na něj nepoužije. Externí metadata
+zůstávají pro OVA, Recap, Preview a další doplňkové části volitelná.
+
+Hromadné číslování řadí výběr stabilně podle natural filename ordering, poté
+podle `relative_path` a ID. Než se cokoliv uloží, uživatel vidí přesné mapování
+a musí je potvrdit; přepsání existujících ručních čísel vyžaduje další výslovné
+potvrzení.
+
+Všechny operace této iterace jsou databázové a prezentační. Nemění filename,
+`relative_path`, fyzické soubory ani adresáře na NASu. Nebyla přidána úroveň
+`ParentCatalogTitle`, `SeasonGroup` ani jiný strom. Stále jde o fázi
+**Stabilizace hierarchie a ladění UI nad reálnou knihovnou** a V6 nebyla
+zahájena.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

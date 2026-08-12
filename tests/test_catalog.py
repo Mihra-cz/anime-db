@@ -470,6 +470,21 @@ def test_fractional_episode_is_detected_without_rounding_to_integer():
     assert classify_video("Anime/Title 14.5.mkv") == "other"
 
 
+@pytest.mark.parametrize(("filename", "expected"), [
+    ("Title S2 - OVA P1.mkv", 1),
+    ("Title S2 - OVA P2.mkv", 2),
+    ("Title S2 - OVA P01.mkv", 1),
+])
+def test_explicit_trailing_ova_part_is_safe_episode_number(filename, expected):
+    assert derive_episode_number(filename) == expected
+    assert filename_display_title(filename) == "Title S2"
+
+
+def test_generic_part_suffix_and_season_hint_are_not_episode_numbers():
+    assert derive_episode_number("Title P1.mkv") is None
+    assert derive_episode_number("Title S2.mkv") is None
+
+
 @pytest.mark.parametrize("filename", [
     "100-man no Inochi no Ue ni Ore wa Tatteiru.mkv",
     "Anime title (P20-L21).mkv",

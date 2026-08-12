@@ -26,6 +26,7 @@ class TitleNumberingSummary:
     numbered: int
     unknown: int
     nonstandard: int
+    resolved_supplemental: int
     episode_min: int | None
     episode_max: int | None
     gaps: tuple[int, ...]
@@ -228,21 +229,27 @@ def summarize_title_numbering(
         else None
         for video in videos
     ]
+    resolved = [
+        bool(video.content_type_manual) and not supplemental for video in videos
+    ]
     standard_total = sum(
-        detection is None or detection.is_standard for detection in detections
+        not is_resolved and (detection is None or detection.is_standard)
+        for detection, is_resolved in zip(detections, resolved)
     )
     nonstandard = sum(
-        detection is not None and detection.is_nonstandard for detection in detections
+        not is_resolved and detection is not None and detection.is_nonstandard
+        for detection, is_resolved in zip(detections, resolved)
     )
     unknown = sum(
-        video.season_episode_number is None
+        not is_resolved and video.season_episode_number is None
         and (detection is None or not detection.is_nonstandard)
-        for video, detection in zip(videos, detections)
+        for video, detection, is_resolved in zip(videos, detections, resolved)
     )
     values = [
         video.season_episode_number
         for video in videos
         if video.season_episode_number is not None
+        and (supplemental or not video.content_type_manual)
     ]
     unique_values = set(values)
     episode_min = min(unique_values) if unique_values else None
@@ -259,6 +266,7 @@ def summarize_title_numbering(
         numbered=len(values),
         unknown=unknown,
         nonstandard=nonstandard,
+        resolved_supplemental=sum(resolved),
         episode_min=episode_min,
         episode_max=episode_max,
         gaps=gaps,

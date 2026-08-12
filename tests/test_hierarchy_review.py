@@ -8,8 +8,10 @@ from app.database import Base
 from app.catalog import video_matches_filter
 from app.hierarchy_review import (
     ManualTitleDefinition, apply_manual_split, apply_single_season_suggestion,
-    collection_requires_review, extract_local_period_hint, parse_manual_definitions,
-    parse_simple_definitions, preview_assignments, separate_nonstandard_videos,
+    classify_videos_in_place, collection_requires_review, create_title_from_videos,
+    delete_empty_local_title, extract_local_period_hint, merge_title_into,
+    move_videos_to_title, parse_manual_definitions, parse_simple_definitions,
+    preview_assignments, separate_nonstandard_videos,
     simple_definition_rows,
     single_season_suggestion,
 )
@@ -19,6 +21,7 @@ from app.models import (
 )
 from app.migrations import migrate_schema
 from app.numbering import (
+    apply_sequential_numbering,
     collection_requires_numbering_review as numbering_requires_review,
     summarize_title_numbering,
 )
@@ -505,3 +508,185 @@ def test_separating_zero_persists_without_metadata_or_physical_path_change(
         assert zero.relative_path == original_relative_path
         assert collection.hierarchy_status == "verified"
         assert [path.read_bytes() for path in paths] == [b"video"] * 23
+
+
+def test_fractional_recap_can_stay_in_season_and_survives_session_and_scan(
+    tmp_path: Path, monkeypatch,
+):
+    folder = tmp_path / "Arifureta" / "Season 1"
+    folder.mkdir(parents=True)
+    for filename in [
+        *[f"Arifureta - {number:02}.mkv" for number in range(1, 13)],
+        "Arifureta - 05.5.mkv",
+    ]:
+        (folder / filename).write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        collection = session.scalar(select(CatalogCollection))
+        recap = session.scalar(select(Video).where(Video.filename == "Arifureta - 05.5.mkv"))
+        season_id = recap.catalog_title_id
+        original_path = recap.relative_path
+        classify_videos_in_place(session, collection.id, [recap.id], "recap")
+        session.commit()
+        recap_id = recap.id
+        collection_id = collection.id
+
+    with sessions() as session:
+        recap = session.get(Video, recap_id)
+        collection = session.get(CatalogCollection, collection_id)
+        summary = summarize_title_numbering(list(recap.catalog_title.videos), recap.catalog_title)
+        assert recap.catalog_title_id == season_id
+        assert recap.content_type_manual == "recap"
+        assert recap.relative_path == original_path
+        assert summary.standard_total == 12
+        assert summary.resolved_supplemental == 1
+        assert summary.requires_review is False
+        assert collection.hierarchy_status == "verified"
+
+        scan_library(session, tmp_path)
+        recap = session.get(Video, recap_id)
+        assert recap.catalog_title_id == season_id
+        assert recap.content_type_manual == "recap"
+        assert recap.relative_path == original_path
+
+
+def test_move_merge_and_explicit_delete_change_only_logical_assignment():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Arifureta", normalized_local_title="arifureta",
+            relative_root_path="Anime/Arifureta",
+        )
+        season = CatalogTitle(
+            collection=collection, local_title="Season 1", normalized_local_title="season 1",
+            relative_root_path="Anime/Arifureta/Season 1", part_type_manual="season",
+        )
+        recap_part = CatalogTitle(
+            collection=collection, local_title="Recap", normalized_local_title="recap",
+            relative_root_path="Anime/Arifureta/.catalog-part-2", part_type_manual="recap",
+            hierarchy_manual_override=True,
+        )
+        recap = Video(
+            relative_path="Anime/Arifureta/Season 1/Arifureta 05.5.mkv",
+            root_folder="Anime", filename="Arifureta 05.5.mkv", size=1, mtime_ns=1,
+            catalog_title=recap_part, catalog_collection=collection,
+        )
+        regular = Video(
+            relative_path="Anime/Arifureta/Season 1/Arifureta 01.mkv",
+            root_folder="Anime", filename="Arifureta 01.mkv", size=1, mtime_ns=1,
+            catalog_title=recap_part, catalog_collection=collection,
+        )
+        session.add(collection)
+        session.commit()
+        collection_id, season_id, source_id = collection.id, season.id, recap_part.id
+        recap_id, regular_id = recap.id, regular.id
+        paths = {recap.id: recap.relative_path, regular.id: regular.relative_path}
+
+        move_videos_to_title(session, collection_id, [recap_id], season_id)
+        assert recap.catalog_title_id == season_id
+        assert recap.content_type_manual == "recap"
+        assert recap.relative_path == paths[recap_id]
+
+        merge_title_into(session, collection_id, source_id, season_id)
+        session.commit()
+        assert session.get(Video, regular_id).catalog_title_id == season_id
+        assert session.get(Video, regular_id).relative_path == paths[regular_id]
+        assert session.get(CatalogTitle, source_id) is not None
+        assert session.get(CatalogTitle, source_id).videos == []
+
+        delete_empty_local_title(session, collection_id, source_id)
+        session.commit()
+        assert session.get(CatalogTitle, source_id) is None
+
+
+def test_move_to_existing_title_survives_subsequent_scan(tmp_path: Path, monkeypatch):
+    first_folder = tmp_path / "Arifureta" / "Season 1"
+    second_folder = tmp_path / "Arifureta" / "Season 2"
+    first_folder.mkdir(parents=True)
+    second_folder.mkdir(parents=True)
+    moved_path = first_folder / "Arifureta 05.5.mkv"
+    moved_path.write_bytes(b"video")
+    (second_folder / "Arifureta S2 01.mkv").write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        collection = session.scalar(select(CatalogCollection))
+        moved = session.scalar(select(Video).where(Video.filename == moved_path.name))
+        target = session.scalar(select(CatalogTitle).where(CatalogTitle.local_title == "Season 2"))
+        original_path = moved.relative_path
+        move_videos_to_title(session, collection.id, [moved.id], target.id)
+        session.commit()
+        moved_id, target_id = moved.id, target.id
+
+        scan_library(session, tmp_path)
+        moved = session.get(Video, moved_id)
+        assert moved.catalog_title_id == target_id
+        assert moved.relative_path == original_path
+        assert moved_path.read_bytes() == b"video"
+
+
+def test_standard_and_ova_part_videos_can_be_split_into_two_local_ova_titles():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Arifureta", normalized_local_title="arifureta",
+            relative_root_path="Anime/Arifureta",
+        )
+        source = CatalogTitle(
+            collection=collection, local_title="OVA", normalized_local_title="ova",
+            relative_root_path="Anime/Arifureta/OVA",
+        )
+        names = [
+            "Arifureta OVA Episode 01 Yue's Diary.mkv",
+            "Arifureta OVA Episode 02 Hot Love Springs Eternal.mkv",
+            "Arifureta S2 - OVA P1.mkv", "Arifureta S2 - OVA P2.mkv",
+        ]
+        items = [Video(
+            relative_path=f"Anime/Arifureta/OVA/{name}", root_folder="Anime",
+            filename=name, size=1, mtime_ns=1, catalog_title=source,
+            catalog_collection=collection,
+        ) for name in names]
+        session.add(collection)
+        session.flush()
+        from app.numbering import recalculate_title_numbering
+        recalculate_title_numbering(source, items)
+        first = create_title_from_videos(
+            session, collection.id, [items[0].id, items[1].id],
+            local_title="OVA – Serie 1", part_type="ova",
+        )
+        second = create_title_from_videos(
+            session, collection.id, [items[2].id, items[3].id],
+            local_title="OVA – Serie 2", part_type="ova",
+        )
+        session.commit()
+
+        assert [video.season_episode_number for video in first.videos] == [1, 2]
+        assert [video.season_episode_number for video in second.videos] == [1, 2]
+        assert first.effective_part_type == second.effective_part_type == "ova"
+        assert first.metadata_record is second.metadata_record is None
+
+
+def test_selected_bulk_numbering_is_deterministic_and_preserves_paths():
+    items = [Video(
+        id=index, relative_path=f"Anime/OVA/OVA P{name}.mkv", root_folder="Anime",
+        filename=f"OVA P{name}.mkv", size=1, mtime_ns=1,
+    ) for index, name in [(2, "2"), (1, "1")]]
+    paths = [video.relative_path for video in items]
+
+    rows = apply_sequential_numbering(items, 1)
+
+    assert [(row.filename, row.proposed_episode) for row in rows] == [
+        ("OVA P1.mkv", 1), ("OVA P2.mkv", 2),
+    ]
+    assert [video.relative_path for video in items] == paths

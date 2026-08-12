@@ -37,6 +37,7 @@ class Video(Base):
     episode_number_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     episode_number_manual_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
     episode_number_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    content_type_manual: Mapped[str | None] = mapped_column(String, nullable=True)
     catalog_title_id: Mapped[int | None] = mapped_column(
         ForeignKey("catalog_titles.id"), nullable=True, index=True
     )

@@ -281,3 +281,54 @@ def test_fractional_episode_does_not_create_gap_between_fourteen_and_fifteen():
     assert summary.standard_total == 15
     assert summary.nonstandard == 1
     assert summary.gaps == ()
+
+
+def test_classified_fractional_recap_is_resolved_without_entering_completeness():
+    collection = CatalogCollection(
+        local_title="Show", normalized_local_title="show", relative_root_path="Anime/Show",
+    )
+    title = CatalogTitle(
+        collection=collection, local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", part_type_manual="season",
+    )
+    items = videos(1, 12)
+    recap = Video(
+        id=50, relative_path="Anime/Show/Season 1/Show 05.5.mkv",
+        root_folder="Anime", filename="Show 05.5.mkv", size=1, mtime_ns=1,
+        content_type_manual="recap",
+    )
+    items.append(recap)
+    for item in items:
+        item.catalog_title = title
+        item.catalog_collection = collection
+
+    recalculate_title_numbering(title, items)
+    summary = summarize_title_numbering(items, title)
+
+    assert summary.standard_total == 12
+    assert summary.numbered == 12
+    assert (summary.episode_min, summary.episode_max) == (1, 12)
+    assert summary.gaps == ()
+    assert summary.nonstandard == 0
+    assert summary.resolved_supplemental == 1
+    assert summary.requires_review is False
+
+
+def test_numbered_ova_shows_range_but_does_not_use_season_completeness():
+    title = CatalogTitle(
+        local_title="OVA – Serie 2", normalized_local_title="ova serie 2",
+        relative_root_path="Anime/Show/.catalog-part-2", part_type_manual="ova",
+    )
+    items = [Video(
+        id=number, relative_path=f"Anime/Show/Show S2 - OVA P{number}.mkv",
+        root_folder="Anime", filename=f"Show S2 - OVA P{number}.mkv",
+        size=1, mtime_ns=1, catalog_title=title,
+    ) for number in (1, 2)]
+
+    recalculate_title_numbering(title, items)
+    summary = summarize_title_numbering(items, title)
+
+    assert (summary.numbered, summary.standard_total) == (2, 2)
+    assert (summary.episode_min, summary.episode_max) == (1, 2)
+    assert summary.supplemental is True
+    assert summary.requires_review is False
