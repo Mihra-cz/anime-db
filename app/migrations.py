@@ -17,7 +17,7 @@ from .hierarchy_review import (
 )
 from .models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    InternalSubtitle, TitleMetadata, Video,
+    InternalSubtitle, TitleMetadata, Video, utc_now,
 )
 from .numbering import recalculate_collection_numbering
 
@@ -200,15 +200,31 @@ def migrate_schema(engine) -> None:
                 )
                 for video in collection_videos:
                     target = preview.assignments.get(video.id)
-                    video.catalog_title = split_titles[target] if target is not None else None
+                    if target is not None:
+                        video.catalog_title = split_titles[target]
+                    elif (
+                        video.catalog_title is None
+                        or video.catalog_title.catalog_collection_id != collection.id
+                    ):
+                        video.catalog_title = None
+                unresolved_ids = tuple(
+                    video.id for video in collection_videos
+                    if video.id in preview.unmatched_video_ids and video.catalog_title is None
+                )
                 if preview.conflicts:
                     collection.hierarchy_status = "conflict"
                     collection.hierarchy_note = "Video odpovídá více ručním částem."
                     collection.hierarchy_verified_at = None
-                elif preview.unmatched_video_ids:
+                elif unresolved_ids:
                     collection.hierarchy_status = "review_required"
                     collection.hierarchy_note = "Nové nezařazené video."
                     collection.hierarchy_verified_at = None
+                else:
+                    collection.hierarchy_status = "verified"
+                    collection.hierarchy_note = None
+                    collection.hierarchy_verified_at = (
+                        collection.hierarchy_verified_at or utc_now()
+                    )
                 continue
             reason = collection_requires_review(collection, collection_videos)
             if collection.hierarchy_status != "verified":

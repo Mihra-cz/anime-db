@@ -8,15 +8,19 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from .catalog import derive_episode_number, normalize_title
+from .catalog import detect_episode_number, derive_episode_number, normalize_title
 from .models import CatalogCollection, CatalogTitle, Video, utc_now
-from .numbering import recalculate_collection_numbering
+from .numbering import collection_requires_numbering_review, recalculate_collection_numbering
 
 
 PERIOD_HINT = re.compile(
     r"(?:\(|\s)([A-Z]\d{2}(?:-[A-Z]\d{2})?)(?:\)|\s*$)", re.IGNORECASE
 )
-ALLOWED_PART_TYPES = {"title", "season", "part", "cour", "film", "ova", "special"}
+ALLOWED_PART_TYPES = {
+    "title", "season", "part", "cour", "film", "ova", "special",
+    "preview", "recap", "bonus", "other",
+}
+SUPPLEMENTAL_PART_TYPES = {"film", "ova", "special", "preview", "recap", "bonus", "other"}
 ALLOWED_NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
 SIMPLE_DEFINITION_FIELDS = (
     "title_id", "local_title", "manual_display_title", "season_number_manual",
@@ -65,6 +69,17 @@ def extract_local_period_hint(local_title: str) -> str | None:
 def collection_requires_review(collection: CatalogCollection, videos: list[Video]) -> str | None:
     if extract_local_period_hint(collection.local_title):
         return "Interní časový rozsah neurčuje bezpečně hranice sezón nebo částí."
+    nonstandard = [
+        detection.display_value
+        for video in videos
+        if (detection := detect_episode_number(video.filename)).is_nonstandard
+        and (
+            video.catalog_title is None
+            or video.catalog_title.effective_part_type not in SUPPLEMENTAL_PART_TYPES
+        )
+    ]
+    if nonstandard:
+        return "Nestandardní číslování vyžaduje ruční zařazení."
     numbers = sorted({
         number for video in videos
         if (number := video.local_episode_number or derive_episode_number(video.filename)) is not None
@@ -287,8 +302,70 @@ def manual_split_titles(collection: CatalogCollection) -> list[CatalogTitle]:
         title for title in collection.titles
         if title.hierarchy_manual_override and (
             title.episode_start is not None or title.episode_filename_pattern
+            or title.effective_part_type in SUPPLEMENTAL_PART_TYPES
         )
     ]
+
+
+def separate_nonstandard_videos(
+    session: Session, collection_id: int, video_ids: list[int], *,
+    local_title: str, part_type: str,
+) -> CatalogTitle:
+    """Logicky oddělí vybraná nestandardní videa bez změny jejich cesty."""
+    name = local_title.strip()[:200]
+    normalized_type = part_type.strip().casefold()
+    selected_ids = {int(video_id) for video_id in video_ids}
+    if not name:
+        raise ValueError("Nová část musí mít název.")
+    if normalized_type not in SUPPLEMENTAL_PART_TYPES - {"film"}:
+        raise ValueError("Neplatný typ nestandardního obsahu.")
+    if not selected_ids:
+        raise ValueError("Vyberte alespoň jedno nestandardní video.")
+    collection = session.scalar(select(CatalogCollection).options(
+        selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+        selectinload(CatalogCollection.videos),
+    ).where(CatalogCollection.id == collection_id))
+    if collection is None:
+        raise ValueError("Kolekce nebyla nalezena.")
+    selected = [video for video in collection.videos if video.id in selected_ids]
+    if len(selected) != len(selected_ids):
+        raise ValueError("Výběr obsahuje cizí nebo neexistující video.")
+    if any(not detect_episode_number(video.filename).is_nonstandard for video in selected):
+        raise ValueError("Oddělit lze touto akcí pouze rozpoznaný nestandardní obsah.")
+    position = max((title.effective_sort_order for title in collection.titles), default=0) + 1
+    virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}"
+    suffix = 1
+    while session.scalar(select(CatalogTitle.id).where(
+        CatalogTitle.relative_root_path == virtual_path
+    )):
+        suffix += 1
+        virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}-{suffix}"
+    title = CatalogTitle(
+        collection=collection, local_title=name, normalized_local_title=normalize_title(name),
+        relative_root_path=virtual_path, part_type_manual=normalized_type,
+        sort_order_manual=position, hierarchy_manual_override=True,
+        hierarchy_verified_at=utc_now(), numbering_mode="unknown",
+    )
+    session.add(title)
+    session.flush()
+    for video in selected:
+        video.catalog_title = title
+        video.catalog_collection = collection
+    recalculate_collection_numbering(
+        collection,
+        {item.id: list(item.videos) for item in collection.titles},
+    )
+    needs_review = (
+        any(video.catalog_title is None for video in collection.videos)
+        or collection_requires_numbering_review(collection)
+    )
+    collection.hierarchy_status = "review_required" if needs_review else "verified"
+    collection.hierarchy_verified_at = None if needs_review else utc_now()
+    collection.hierarchy_note = (
+        "Číslování nebo nezařazený obsah stále vyžaduje kontrolu."
+        if needs_review else None
+    )
+    return title
 
 
 def apply_manual_split(

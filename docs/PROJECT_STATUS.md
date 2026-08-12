@@ -2,7 +2,7 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 7. srpna 2026
+> **Aktualizováno:** 12. srpna 2026
 > **Aktuální checkpoint:** V5 dokončena – následuje stabilizace hierarchie a ladění UI nad reálnou knihovnou
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
@@ -1355,6 +1355,226 @@ videí nadále patří do **Hierarchy Review**.
 Změna nevyžadovala databázovou migraci, neupravuje produkční data a nemění
 fyzické cesty souborů. V6 nebyla zahájena.
 
+## 6.15 Nestandardní číslování a logické oddělení doplňkového obsahu
+
+V rámci fáze **Stabilizace hierarchie a ladění UI nad reálnou knihovnou** byl
+parser rozšířen o bezpečnou detekci běžného koncového čísla bez pomlčky.
+Například `Title 01.mkv`, `Title 02.mp4` a `Title 22.mp4` se nyní rozpoznají jako
+E1, E2 a E22. Číslo musí být na konci názvu před příponou. Samostatný číselný
+název anime, rok, rozlišení, codec, release group ani technický suffix se nadále
+nesmí odhadnout jako číslo epizody; nejednoznačný výsledek zůstává `unknown` a
+jde do Hierarchy Review.
+
+Parser nově rozlišuje čtyři výsledky:
+
+- standardní celé číslo větší než nula,
+- nestandardní `00`,
+- nestandardní desetinné číslo, například `14.5`,
+- `unknown`.
+
+`00` se neukládá jako E0. `14.5` se nezaokrouhluje ani nepřevádí na E14 nebo
+E15 a parser mu automaticky neurčuje typ Recap. U obou případů zůstávají
+integer pole `local_episode_number`, `season_episode_number`,
+`absolute_episode_number` a `external_episode_number` prázdná. Druh detekce se
+ukládá do existujícího `episode_number_source` jako `nonstandard_zero` nebo
+`fractional`; původní textová hodnota se bezpečně zobrazuje z filename. Pro
+desetinné číslo tedy nebyla nutná změna datového modelu ani databázová migrace.
+
+Souhrn číslování odděluje fyzický počet videí, standardní epizody, `unknown` a
+nestandardní položky. `00` ani fractional epizoda nevstupují do standardního
+rozsahu a nevytvářejí v něm mezeru. Kolekce s nevyřešenou nestandardní položkou
+zůstává v Hierarchy Review i tehdy, když uživatel ručně označil její hierarchii
+za ověřenou.
+
+Příklad `Ansatsu Kyoushitsu (Z15-Z16)` lze nyní zobrazit takto:
+
+```text
+Season 1
+  videí fyzicky: 23
+  standardních epizod: 22
+  očíslováno: 22/22
+  rozsah: E1–E22
+  nestandardní položky: 1
+  00 -> vyžaduje zařazení
+
+Season 2
+  videí fyzicky: 25
+  standardních epizod: 25
+  očíslováno: 25/25
+  rozsah: E1–E25
+```
+
+Hierarchy Review nabízí pro rozpoznané `00` a fractional položky akci
+**Oddělit do nové části**. Uživatel vybere jedno nebo více videí, zadá lokální
+název a typ `Preview`, `Special`, `Recap`, `OVA`, `Bonus` nebo `Other`. Vznikne
+samostatný `CatalogTitle` a změní se pouze `Video.catalog_title_id`. Fyzický
+`relative_path`, adresář ani videosoubor na NASu se nemění. Ruční logická vazba
+přežije novou databázovou session, restart, idempotentní startupovou migraci i
+následný sken. Nově nalezené nejednoznačné video zůstane nezařazené a znovu
+otevře kontrolu.
+
+Preview, Recap, Special a jiný doplňkový `CatalogTitle` může zůstat ve stavu
+`unlinked` bez `ExternalTitleLink` a bez `TitleMetadata`; nejde o chybu. Pokud
+provider vhodný samostatný titul nabízí, uživatel jej může propojit ručně.
+
+Zdrojová knihovna zůstává read-only. Později může vzniknout samostatný workflow,
+který až nad ručně ověřenou logickou hierarchií nabídne fyzické přeskládání
+souborů na NASu. V této iteraci nebyl takový workflow implementován, produkční
+databáze nebyla automaticky měněna a V6 nebyla zahájena.
+
+Automatické ověření 12. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                       # 230 passed
+.venv/bin/python -m compileall app tests  # prošlo
+načtení všech Jinja2 šablon               # 11 šablon, prošlo
+git diff --check                          # prošlo
+```
+
+## 6.16 Prezentační názvy a přehlednější Hierarchy Review
+
+V rámci fáze **Stabilizace hierarchie a ladění UI nad reálnou knihovnou** byl
+sjednocen způsob, kterým se zobrazuje primární název `CatalogTitle`. Původní
+helper používal `manual_display_title`, uložený `TitleMetadata.display_title` a
+nakonec `CatalogTitle.local_title`. Technické označení části jako `Serie 1`
+proto mohlo bez metadat působit jako název anime.
+
+Centrální helper `catalog_title_display_title` nyní používá toto pořadí:
+
+1. existující explicitní per-title `manual_display_title`, pokud jej uživatel
+   dříve ručně nastavil,
+2. varianty připojených metadat podle preferovaného jazyka,
+3. legacy `TitleMetadata.display_title`, pokud starší metadata nemají jednotlivé
+   varianty,
+4. bezpečný společný název odvozený z filename videí,
+5. `CatalogTitle.local_title`,
+6. obecný text `Titul bez názvu`.
+
+AniList skutečně poskytuje `romaji`, `english` a `native`. Provider je převádí
+na `ProviderTitleMetadata.title_romaji`, `title_english` a `title_native` a při
+potvrzení je všechny persistuje do stejných polí entity `TitleMetadata`.
+Nevznikla žádná nová metadata pole.
+
+Preferovaný jazyk názvu je samostatný vstup resolveru, nikoli vlastnost
+`CatalogTitle`. Výchozí aplikační hodnota je `romaji` a lze ji nastavit přes
+`Settings.preferred_title_language` / `PREFERRED_TITLE_LANGUAGE`. UI v hlavičce
+nabízí globální volby **Romaji**, **Anglický** a **Originální**. Uživatelská
+volba pro současnou single-user instalaci se ukládá do dlouhodobé browser cookie
+`animedb_preferred_title_language`, která má před aplikačním defaultem přednost
+a přežije restart serveru i novou browser session. Cookie není databázové pole
+a změna preference proto nevyžaduje migraci.
+
+Zdroj preference je soustředěn ve funkci `get_preferred_title_language` a je
+oddělen od vlastního resolveru. Po případném budoucím zavedení uživatelských
+účtů nebo doménové autentizace tak půjde cookie/aplikační default nahradit
+hodnotou například z `current_user.preferences`, aniž by se měnil fallback
+názvů nebo jednotlivé šablony. User model, tabulka uživatelských preferencí,
+role, LDAP/Active Directory ani multi-user administrace nyní implementovány
+nebyly.
+
+Fallback metadata názvů je deterministický:
+
+- `romaji`: Romaji → English → Native,
+- `english`: English → Romaji → Native,
+- `native`: Native → Romaji → English.
+
+Chybějící preferovaná varianta tedy nevytvoří prázdný název a nespadne rovnou
+na technické `Serie 1`, pokud metadata obsahují jinou použitelnou variantu.
+Bez metadata linku preference nijak neovlivní filename fallback.
+
+Filename helper odstraňuje pouze suffix, který bezpečně rozpoznal episode
+parser. Podporuje například `Title 01`, `Title - 01`, `Title 00` a `Title 14.5`.
+Z více videí použije výsledek pouze tehdy, když se jejich odvozené prefixy
+shodují. Konfliktní názvy souborů, samotné `Episode 01`, rok, technický suffix
+ani samostatný číselný název se agresivně neořezávají; použije se lokální
+fallback. Tato logika pouze čte filename a nic nepřejmenovává.
+
+Společný display-title mechanismus nyní používají:
+
+- seznam a detail Hierarchy Review,
+- detail `CatalogCollection`,
+- detail `CatalogTitle` včetně seznamu epizod a metadata panelu,
+- workflow root videí a výběr cílového titulu.
+
+Hlavní katalog nadále primárně zobrazuje `CatalogCollection`, nikoli jednotlivý
+`CatalogTitle`; jeho collection název proto zůstává záměrně beze změny. Přehled
+metadat má explicitní sloupec **Lokální název**, který také nadále ukazuje
+`local_title` podle významu sloupce.
+
+Detail Hierarchy Review zobrazuje každý `CatalogTitle` v samostatném bloku s
+display title, lokálním označením části, typem, fyzickým počtem videí,
+standardními epizodami, stavem číslování, rozsahem, počtem `unknown`, počtem
+nestandardních položek a neutrálním stavem metadata linku. Standardní epizody
+jsou kompaktní a rozbalitelné. `00` a fractional obsah jsou viditelné zvlášť od
+`unknown`; problematické položky zůstávají dominantní. Akce **Oddělit do nové
+části** nadále podporuje Preview, Special, Recap, OVA, Bonus a Other, mění pouze
+`Video.catalog_title_id` a nabízí upravitelný lokální název nové části.
+
+Preview, Recap a další doplňkové části mohou zůstat bez externích metadat;
+zobrazení **Bez externích metadat** proto samo o sobě není warning ani chyba.
+Změna preference ani nový fallback nemění `CatalogTitle`, `TitleMetadata`,
+`ExternalTitleLink`, filename, `relative_path` nebo fyzickou strukturu NASu.
+Produkční databáze nebyla automaticky upravena, fyzické přeskládání NASu se
+stále neprovádí a V6 nebyla zahájena.
+
+Automatické ověření 12. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                       # 250 passed
+.venv/bin/python -m compileall app tests  # prošlo
+načtení všech Jinja2 šablon               # 11 šablon, prošlo
+git diff --check                          # prošlo
+```
+
+## 6.17 Výběr a změna externích metadat
+
+Detail `CatalogTitle` po úspěšném přiřazení `ExternalTitleLink` standardně
+zobrazuje pouze aktuální metadata, jejich varianty názvu a základní údaje o
+primární externí vazbě. Dříve uložené, ale nevybrané metadata kandidáty už
+nezůstávají trvale rozbalené.
+
+Metadata panel nyní rozlišuje dvě akce:
+
+- **Změnit metadata** otevře již persistované kandidáty bez nového síťového
+  dotazu, takže lze bezpečně zvolit jiný externí titul;
+- **Vyhledat metadata znovu** vždy explicitně zavolá metadata provider, uloží
+  aktuální výsledky a ihned otevře jejich výběr.
+
+Původní ruční search používal samostatný POST render a šablona přehazovala dvě
+různé podoby proměnné `metadata_candidates`. Výsledek hledání proto neměl
+jednoznačný request/response stav a první render mohl pracovat s jiným seznamem
+než následné načtení detailu. Tok je nyní sjednocen na
+`POST search → uložení kandidátů → 303 redirect → GET detailu s otevřeným
+výběrem`. Výsledky jsou při tomto prvním navazujícím GET již načtené z databáze;
+není potřeba druhé kliknutí ani druhý provider search.
+
+Potvrzení jiného kandidáta používá stávající `ExternalTitleLink` a
+`TitleMetadata`: nová vazba se stane primární a předchozí zůstane neprimární
+historickou vazbou podle dosavadního mechanismu. Běžný detail ukazuje pouze
+aktuální primární vazbu. Změna metadat nemění `CatalogTitle.local_title`,
+`manual_display_title`, hierarchii nebo přiřazení videí, epizodní číslování,
+filename, `relative_path` ani fyzickou strukturu NASu. Nově zvolená vazba je
+uložená v databázi a přežije novou DB session i restart aplikace.
+
+Po změně linku zůstává zobrazovaný název řešen centrálně přes
+`catalog_title_display_title`. Globální prezentační preference Romaji,
+English nebo Native se tedy aplikuje i na právě zvolená metadata a nadále není
+vlastností `CatalogTitle`. Chybějící varianta používá stejný bezpečný fallback
+jako na ostatních obrazovkách.
+
+Tato úprava nepřidala databázovou migraci ani nový stavový subsystém. Produkční
+databáze nebyla automaticky měněna, fyzické soubory ani adresáře na NASu nebyly
+upravovány a V6 nebyla zahájena.
+
+Automatické ověření 12. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                       # 252 passed
+.venv/bin/python -m compileall app tests  # prošlo
+načtení všech Jinja2 šablon               # 11 šablon, prošlo
+git diff --check                          # prošlo
+```
+
 ---
 
 # 7. V6 – Úplnost knihovny ⏳
@@ -1381,8 +1601,10 @@ nikoli skutečně chybějící epizodu.
 
 - chybějící běžná epizoda potvrzené série nebo sezóny je `ERROR`,
 - duplicitní běžná epizoda je `ERROR`,
-- chybějící OVA, ONA, Special, Bonus, OP, ED, NCOP nebo NCED není chyba úplnosti
-  hlavní série,
+- `00`, fractional epizoda, Preview, Recap, Special, Bonus, OVA, ONA, OP, ED,
+  NCOP nebo NCED nejsou součástí completeness hlavní série,
+- chybějící OVA, ONA, Preview, Recap, Special, Bonus, OP, ED, NCOP nebo NCED
+  není chyba úplnosti hlavní série,
 - absence tohoto doplňkového obsahu je maximálně `INFO` o jeho existenci,
 - nejisté nebo nejednoznačné číslování je `WARNING` a vyžaduje ruční kontrolu,
 - doplňkový obsah nesmí způsobit označení hlavní série jako nekompletní.

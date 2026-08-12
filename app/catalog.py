@@ -62,8 +62,11 @@ def classify_video(relative_path: str) -> str:
         return "cm"
     if "menu" in token_set:
         return "menu"
-    filename = value.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-    if "episode" in token_set or re.search(r"(?:^|[^a-z0-9])(?:s\d{1,2}e)?\d{1,4}(?:v\d+)?(?:[^a-z0-9]|$)", filename):
+    filename = value.rsplit("/", 1)[-1]
+    detection = detect_episode_number(filename)
+    if detection.is_nonstandard:
+        return "other"
+    if "episode" in token_set or detection.is_standard:
         return "episode"
     return "other"
 
@@ -96,13 +99,80 @@ ROOT_FOLDER = "."
 ROOT_VIDEO_GROUP_LABEL = "Nezařazená videa z kořene knihovny"
 
 
-def catalog_title_display_title(title: CatalogTitle) -> str:
-    """Vrátí nejlepší uložený uživatelský název bez změny lokální identity."""
-    return (
-        title.manual_display_title
-        or (title.metadata_record.display_title if title.metadata_record else None)
-        or title.local_title
+TITLE_NAME_PREFERENCES = ("romaji", "english", "native")
+TITLE_NAME_PREFERENCE_LABELS = {
+    "romaji": "Romaji",
+    "english": "Anglický",
+    "native": "Originální",
+}
+
+
+def normalize_title_name_preference(value: object, default: str = "romaji") -> str:
+    normalized_default = str(default or "romaji").strip().casefold()
+    if normalized_default not in TITLE_NAME_PREFERENCES:
+        normalized_default = "romaji"
+    normalized = str(value or "").strip().casefold()
+    return normalized if normalized in TITLE_NAME_PREFERENCES else normalized_default
+
+
+def filename_display_title(filename: str) -> str | None:
+    """Odstraní pouze suffix epizody, který bezpečně rozpoznal episode parser."""
+    detection = detect_episode_number(filename)
+    if detection.kind == "unknown":
+        return None
+    stem = PurePosixPath(filename).stem.strip()
+    match = DISPLAY_TITLE_EPISODE_SUFFIX.fullmatch(stem)
+    if match is None:
+        return None
+    candidate = match.group("title").strip().rstrip("-_. ").strip()
+    if candidate.casefold() in {"episode", "ep", "e"}:
+        return None
+    return candidate if len(candidate) >= 2 else None
+
+
+def title_filename_display_title(videos: Iterable[Video]) -> str | None:
+    """Vrátí shodný bezpečný prefix epizodních filename, jinak žádný odhad."""
+    candidates = [
+        candidate
+        for video in videos
+        if (candidate := filename_display_title(video.filename)) is not None
+    ]
+    if not candidates:
+        return None
+    normalized = {normalize_title(candidate) for candidate in candidates}
+    return candidates[0] if len(normalized) == 1 else None
+
+
+def catalog_title_display_title(
+    title: CatalogTitle, preference: object = "romaji",
+    *, videos: Iterable[Video] | None = None,
+) -> str:
+    """Vrátí prezentační název bez změny lokální identity nebo metadat."""
+    manual = (title.manual_display_title or "").strip()
+    if manual:
+        return manual
+    metadata = title.metadata_record
+    if metadata is not None:
+        preferred = normalize_title_name_preference(preference)
+        orders = {
+            "english": ("title_english", "title_romaji", "title_native"),
+            "romaji": ("title_romaji", "title_english", "title_native"),
+            "native": ("title_native", "title_romaji", "title_english"),
+        }
+        for field in orders[preferred]:
+            value = (getattr(metadata, field, None) or "").strip()
+            if value:
+                return value
+        legacy_display = (metadata.display_title or "").strip()
+        if legacy_display:
+            return legacy_display
+    filename_title = title_filename_display_title(
+        videos if videos is not None else title.videos
     )
+    if filename_title:
+        return filename_title
+    local = (title.local_title or "").strip()
+    return local or "Titul bez názvu"
 
 
 def catalog_collection_display_title(collection: CatalogCollection) -> str:
@@ -121,6 +191,8 @@ def catalog_title_series_label(title: CatalogTitle) -> str:
         return f"{prefix} {title.part_number}"
     return {
         "film": "Film", "ova": "OVA", "special": "Special",
+        "preview": "Preview", "recap": "Recap", "bonus": "Bonus",
+        "other": "Other",
         "migration_review": "Kontrola migrace",
     }.get(title.effective_part_type, "—")
 
@@ -572,18 +644,70 @@ EXPLICIT_EPISODE = re.compile(
     re.IGNORECASE,
 )
 TRAILING_EPISODE = re.compile(r"\s+-\s+0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
-BARE_EPISODE = re.compile(r"0*(\d{1,3})(?:v\d+)?", re.IGNORECASE)
+TRAILING_PLAIN_EPISODE = re.compile(r"\s+0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
+BARE_EPISODE = re.compile(r"0\d{1,2}(?:v\d+)?", re.IGNORECASE)
+EXPLICIT_FRACTIONAL_EPISODE = re.compile(
+    r"(?:^|[^a-z0-9])(?:episode|ep|e)\s*[-_. ]*0*(\d{1,3})\.(\d+)"
+    r"(?:v\d+)?(?:[^a-z0-9]|$)",
+    re.IGNORECASE,
+)
+TRAILING_FRACTIONAL_EPISODE = re.compile(
+    r"(?:\s+-\s+|\s+)0*(\d{1,3})\.(\d+)(?:v\d+)?$", re.IGNORECASE
+)
+DISPLAY_TITLE_EPISODE_SUFFIX = re.compile(
+    r"(?P<title>.+?)(?:\s+-\s+|\s+)"
+    r"(?:(?:episode|ep|e)\s*[-_. ]*)?"
+    r"(?:0*\d{1,3}(?:\.\d+)?)(?:v\d+)?$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class EpisodeNumberDetection:
+    kind: str
+    number: int | None = None
+    fraction: str | None = None
+
+    @property
+    def is_standard(self) -> bool:
+        return self.kind == "standard"
+
+    @property
+    def is_nonstandard(self) -> bool:
+        return self.kind in {"zero", "fractional"}
+
+    @property
+    def display_value(self) -> str | None:
+        if self.kind == "zero":
+            return "00"
+        if self.kind == "fractional" and self.number is not None and self.fraction:
+            return f"{self.number}.{self.fraction}"
+        if self.kind == "standard" and self.number is not None:
+            return str(self.number)
+        return None
+
+
+def detect_episode_number(filename: str) -> EpisodeNumberDetection:
+    """Bezpečně rozliší standardní, nulové, desetinné a neznámé číslování."""
+    stem = PurePosixPath(filename).stem
+    for pattern in (EXPLICIT_FRACTIONAL_EPISODE, TRAILING_FRACTIONAL_EPISODE):
+        if match := pattern.search(stem):
+            return EpisodeNumberDetection(
+                "fractional", int(match.group(1)), match.group(2)
+            )
+    for pattern in (EXPLICIT_EPISODE, TRAILING_EPISODE, TRAILING_PLAIN_EPISODE):
+        if match := pattern.search(stem):
+            number = int(match.group(1))
+            return EpisodeNumberDetection("zero" if number == 0 else "standard", number)
+    if BARE_EPISODE.fullmatch(stem):
+        number = int(re.match(r"0*(\d+)", stem, re.IGNORECASE).group(1))
+        return EpisodeNumberDetection("zero" if number == 0 else "standard", number)
+    return EpisodeNumberDetection("unknown")
 
 
 def derive_episode_number(filename: str) -> int | None:
-    stem = PurePosixPath(filename).stem
-    if match := EXPLICIT_EPISODE.search(stem):
-        return int(match.group(1))
-    if match := TRAILING_EPISODE.search(stem):
-        return int(match.group(1))
-    if match := BARE_EPISODE.fullmatch(stem):
-        return int(match.group(1))
-    return None
+    detection = detect_episode_number(filename)
+    return detection.number if detection.is_standard else None
 
 
 TYPE_ORDER = {"episode": 0, "special": 1, "ova": 2, "ncop": 3, "nced": 4, "pv": 5, "cm": 6, "menu": 7, "other": 8}

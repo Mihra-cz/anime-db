@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="{{ url_for('static', path='/metadata.css') }}">
 </head>
 <body>
-  <header><a href="/">AnimeDB</a><a href="/hierarchy-review">Kontrola hierarchie</a><a href="/metadata-review">Kontrola metadat</a><span>read-only katalog knihovny</span></header>
+  <header><a href="/">AnimeDB</a><a href="/hierarchy-review">Kontrola hierarchie</a><a href="/metadata-review">Kontrola metadat</a><form class="title-preference" method="post" action="/preferences/title-name"><label>Preferovaný název anime <select name="preference" onchange="this.form.submit()">{% for value, label in title_name_preference_labels|default({'romaji':'Romaji','english':'Anglický','native':'Originální'})|items %}<option value="{{ value }}" {% if title_name_preference|default('romaji') == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><input type="hidden" name="return_to" value="{{ preference_return_to|default('/') }}"><noscript><button type="submit">Použít</button></noscript></form><span>read-only katalog knihovny</span></header>
   <main>{% block content %}{% endblock %}</main>
 </body>
 </html>

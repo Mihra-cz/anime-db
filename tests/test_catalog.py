@@ -11,11 +11,14 @@ from app.catalog import (
     catalog_title_series_label,
     classify_video,
     derive_episode_number,
+    detect_episode_number,
+    filename_display_title,
     derive_season_info,
     determine_parent_series,
     group_videos_by_series,
     manual_hardsub_state,
     normalize_language,
+    title_filename_display_title,
     set_manual_hardsub,
     sort_title_videos,
     subtitle_track_display,
@@ -23,7 +26,8 @@ from app.catalog import (
     translation_status,
 )
 from app.models import (
-    CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, TitleMetadata, Video,
+    CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
+    InternalSubtitle, TitleMetadata, Video,
 )
 
 
@@ -52,6 +56,128 @@ def test_catalog_title_display_title_prefers_manual_then_metadata_then_local():
     assert catalog_title_display_title(title) == "Metadata title"
     title.metadata_record = None
     assert catalog_title_display_title(title) == "Local title"
+
+
+@pytest.mark.parametrize(("preference", "expected"), [
+    ("romaji", "Ansatsu Kyoushitsu"),
+    ("english", "Assassination Classroom"),
+    ("native", "暗殺教室"),
+])
+def test_catalog_title_display_title_uses_preferred_metadata_variant(
+    preference, expected,
+):
+    title = CatalogTitle(
+        local_title="Serie 1", normalized_local_title="serie 1",
+        relative_root_path="Anime/Show/Serie 1",
+        metadata_record=TitleMetadata(
+            display_title="Assassination Classroom",
+            title_english="Assassination Classroom",
+            title_romaji="Ansatsu Kyoushitsu", title_native="暗殺教室",
+        ),
+    )
+
+    assert catalog_title_display_title(title, preference) == expected
+
+
+def test_missing_preferred_metadata_variant_uses_deterministic_metadata_fallback():
+    title = CatalogTitle(
+        local_title="Serie 1", normalized_local_title="serie 1",
+        relative_root_path="Anime/Show/Serie 1",
+        metadata_record=TitleMetadata(
+            display_title="Romaji only", title_romaji="Romaji only",
+        ),
+    )
+
+    assert catalog_title_display_title(title, "english") == "Romaji only"
+    assert catalog_title_display_title(title, "native") == "Romaji only"
+
+
+@pytest.mark.parametrize(("filename", "expected"), [
+    ("Ansatsu Kyoushitsu 01.mp4", "Ansatsu Kyoushitsu"),
+    ("Ansatsu Kyoushitsu - 01.mkv", "Ansatsu Kyoushitsu"),
+    ("Title 00.mp4", "Title"),
+    ("Title 14.5.mkv", "Title"),
+    ("86 01.mkv", "86"),
+])
+def test_filename_display_title_removes_only_safe_episode_suffix(filename, expected):
+    assert filename_display_title(filename) == expected
+
+
+def test_numeric_title_without_episode_suffix_is_not_aggressively_stripped():
+    assert filename_display_title("86.mkv") is None
+    assert filename_display_title("Episode 01.mkv") is None
+    title = CatalogTitle(
+        local_title="86", normalized_local_title="86", relative_root_path="Anime/86",
+    )
+    video = Video(
+        relative_path="Anime/86/86.mkv", root_folder="Anime", filename="86.mkv",
+        size=1, mtime_ns=1, catalog_title=title,
+    )
+    assert catalog_title_display_title(title, "romaji") == "86"
+
+
+@pytest.mark.parametrize("preference", ["romaji", "english", "native"])
+def test_shared_filename_prefix_wins_over_technical_local_part_name(preference):
+    title = CatalogTitle(
+        local_title="Serie 1", normalized_local_title="serie 1",
+        relative_root_path="Anime/Show/Serie 1",
+    )
+    title.videos = [Video(
+        relative_path=f"Anime/Show/Serie 1/Ansatsu Kyoushitsu {number:02}.mp4",
+        root_folder="Anime", filename=f"Ansatsu Kyoushitsu {number:02}.mp4",
+        size=1, mtime_ns=1,
+    ) for number in range(1, 4)]
+
+    assert title_filename_display_title(title.videos) == "Ansatsu Kyoushitsu"
+    assert catalog_title_display_title(title, preference) == "Ansatsu Kyoushitsu"
+
+
+def test_conflicting_filename_prefixes_use_local_fallback():
+    title = CatalogTitle(
+        local_title="Serie 1", normalized_local_title="serie 1",
+        relative_root_path="Anime/Show/Serie 1",
+    )
+    title.videos = [
+        Video(relative_path="a", root_folder="Anime", filename="First 01.mkv", size=1, mtime_ns=1),
+        Video(relative_path="b", root_folder="Anime", filename="Second 02.mkv", size=1, mtime_ns=1),
+    ]
+
+    assert title_filename_display_title(title.videos) is None
+    assert catalog_title_display_title(title, "romaji") == "Serie 1"
+
+
+def test_changing_display_preference_is_read_only_for_catalog_and_metadata():
+    metadata = TitleMetadata(
+        display_title="English", title_english="English", title_romaji="Romaji",
+        title_native="Native",
+    )
+    link = ExternalTitleLink(
+        provider="anilist", external_id="1", match_method="manual_search",
+        is_primary=True,
+    )
+    title = CatalogTitle(
+        local_title="Serie 1", normalized_local_title="serie 1",
+        relative_root_path="Anime/Show/Serie 1", metadata_record=metadata,
+        external_links=[link],
+    )
+    video = Video(
+        relative_path="Anime/Show/Serie 1/Show 01.mkv", root_folder="Anime",
+        filename="Show 01.mkv", size=1, mtime_ns=1, catalog_title=title,
+    )
+    before = (
+        title.local_title, metadata.display_title, metadata.title_english,
+        metadata.title_romaji, metadata.title_native, link.external_id,
+        video.filename, video.relative_path,
+    )
+
+    assert catalog_title_display_title(title, "english") == "English"
+    assert catalog_title_display_title(title, "romaji") == "Romaji"
+    assert catalog_title_display_title(title, "native") == "Native"
+    assert before == (
+        title.local_title, metadata.display_title, metadata.title_english,
+        metadata.title_romaji, metadata.title_native, link.external_id,
+        video.filename, video.relative_path,
+    )
 
 
 def test_catalog_title_series_label_uses_effective_hierarchy_values():
@@ -315,12 +441,42 @@ def test_derives_trailing_hyphen_episode_number(filename, expected):
     assert derive_episode_number(filename) == expected
 
 
+@pytest.mark.parametrize(("filename", "expected"), [
+    ("Title 01.mkv", 1),
+    ("Title 02.mp4", 2),
+    ("Title 22.mp4", 22),
+])
+def test_derives_safe_plain_trailing_episode_number(filename, expected):
+    assert derive_episode_number(filename) == expected
+
+
+def test_zero_is_nonstandard_and_not_regular_episode_zero():
+    detection = detect_episode_number("Title 00.mp4")
+
+    assert detection.kind == "zero"
+    assert detection.display_value == "00"
+    assert derive_episode_number("Title 00.mp4") is None
+    assert classify_video("Anime/Title 00.mp4") == "other"
+
+
+def test_fractional_episode_is_detected_without_rounding_to_integer():
+    detection = detect_episode_number("Title 14.5.mkv")
+
+    assert detection.kind == "fractional"
+    assert detection.number == 14
+    assert detection.fraction == "5"
+    assert detection.display_value == "14.5"
+    assert derive_episode_number("Title 14.5.mkv") is None
+    assert classify_video("Anime/Title 14.5.mkv") == "other"
+
+
 @pytest.mark.parametrize("filename", [
     "100-man no Inochi no Ue ni Ore wa Tatteiru.mkv",
     "Anime title (P20-L21).mkv",
     "Anime title 2024.mkv",
     "Anime title 1080p x265 10bit.mkv",
     "Anime title [Release Group 12].mkv",
+    "86.mkv",
 ])
 def test_does_not_derive_numbers_inside_title_or_technical_suffixes(filename):
     assert derive_episode_number(filename) is None

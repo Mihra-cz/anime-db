@@ -221,7 +221,6 @@ def confirm_anilist_candidate(
     if candidate is not None:
         candidate.confirmed_at = timestamp
     session.flush()
-    recalculate_title_numbering(title, list(title.videos), external_linked=True)
     return link
 
 

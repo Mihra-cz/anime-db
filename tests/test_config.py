@@ -43,3 +43,8 @@ def test_probe_and_library_timeout_defaults(tmp_path: Path, monkeypatch):
     assert settings.mediainfo_timeout_seconds == 60
     assert settings.library_access_timeout_seconds == 10
     assert settings.library_healthcheck_interval_files == 25
+
+
+def test_default_preferred_title_language_is_romaji(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("PREFERRED_TITLE_LANGUAGE", raising=False)
+    assert get_settings(tmp_path / "missing.env").preferred_title_language == "romaji"

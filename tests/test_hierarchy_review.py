@@ -9,7 +9,8 @@ from app.catalog import video_matches_filter
 from app.hierarchy_review import (
     ManualTitleDefinition, apply_manual_split, apply_single_season_suggestion,
     collection_requires_review, extract_local_period_hint, parse_manual_definitions,
-    parse_simple_definitions, preview_assignments, simple_definition_rows,
+    parse_simple_definitions, preview_assignments, separate_nonstandard_videos,
+    simple_definition_rows,
     single_season_suggestion,
 )
 from app.models import (
@@ -17,6 +18,10 @@ from app.models import (
     TitleMetadata, Video, utc_now,
 )
 from app.migrations import migrate_schema
+from app.numbering import (
+    collection_requires_numbering_review as numbering_requires_review,
+    summarize_title_numbering,
+)
 from app.scanner import scan_library
 
 
@@ -441,3 +446,62 @@ def test_verified_manual_split_survives_scan_and_new_video_reopens_review(
         assert collection.hierarchy_status == "review_required"
         assert collection.hierarchy_note == "Nové nezařazené video."
         assert new_video.catalog_title_id is None
+
+
+def test_separating_zero_persists_without_metadata_or_physical_path_change(
+    tmp_path: Path, monkeypatch,
+):
+    folder = tmp_path / "Ansatsu Kyoushitsu (Z15-Z16)" / "Serie 1"
+    folder.mkdir(parents=True)
+    paths = [folder / f"Ansatsu Kyoushitsu {number:02}.mp4" for number in range(23)]
+    for path in paths:
+        path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        collection = session.scalar(select(CatalogCollection))
+        zero = session.scalar(select(Video).where(Video.filename == "Ansatsu Kyoushitsu 00.mp4"))
+        season = zero.catalog_title
+        original_relative_path = zero.relative_path
+        assert collection.hierarchy_status == "review_required"
+        assert zero.local_episode_number is None
+        assert zero.episode_number_source == "nonstandard_zero"
+
+        preview = separate_nonstandard_videos(
+            session, collection.id, [zero.id], local_title="Preview", part_type="preview",
+        )
+        session.commit()
+        preview_id = preview.id
+        season_id = season.id
+
+    with sessions() as session:
+        zero = session.scalar(select(Video).where(Video.filename == "Ansatsu Kyoushitsu 00.mp4"))
+        preview = session.get(CatalogTitle, preview_id)
+        season = session.get(CatalogTitle, season_id)
+        assert zero.catalog_title_id == preview_id
+        assert zero.relative_path == original_relative_path
+        assert preview.effective_part_type == "preview"
+        assert preview.metadata_record is None
+        assert preview.external_links == []
+        assert [video.season_episode_number for video in sorted(
+            season.videos, key=lambda item: item.season_episode_number
+        )] == list(range(1, 23))
+        season_summary = summarize_title_numbering(list(season.videos), season)
+        assert season_summary.numbered == season_summary.standard_total == 22
+        assert season_summary.nonstandard == 0
+        assert season_summary.requires_review is False
+        assert numbering_requires_review(preview.collection) is False
+
+        scan_library(session, tmp_path)
+
+    with sessions() as session:
+        zero = session.scalar(select(Video).where(Video.filename == "Ansatsu Kyoushitsu 00.mp4"))
+        collection = session.scalar(select(CatalogCollection))
+        assert zero.catalog_title_id == preview_id
+        assert zero.relative_path == original_relative_path
+        assert collection.hierarchy_status == "verified"
+        assert [path.read_bytes() for path in paths] == [b"video"] * 23

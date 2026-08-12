@@ -24,6 +24,7 @@ class Settings:
     metadata_artwork_max_bytes: int = 10_485_760
     metadata_artwork_thumbnail_width: int = 400
     metadata_artwork_directory: Path = Path("data/artwork")
+    preferred_title_language: str = "romaji"
     ffprobe_timeout_seconds: float = 60
     mediainfo_timeout_seconds: float = 60
     library_access_timeout_seconds: float = 10
@@ -58,6 +59,9 @@ def get_settings(dotenv_path: str | Path | None = None) -> Settings:
         metadata_artwork_max_bytes=max(1, int(os.getenv("METADATA_ARTWORK_MAX_BYTES", "10485760"))),
         metadata_artwork_thumbnail_width=max(1, int(os.getenv("METADATA_ARTWORK_THUMBNAIL_WIDTH", "400"))),
         metadata_artwork_directory=Path(os.getenv("METADATA_ARTWORK_DIRECTORY", "data/artwork")),
+        preferred_title_language=os.getenv(
+            "PREFERRED_TITLE_LANGUAGE", "romaji"
+        ).strip().casefold(),
         ffprobe_timeout_seconds=max(0.1, float(os.getenv("FFPROBE_TIMEOUT_SECONDS", "60"))),
         mediainfo_timeout_seconds=max(0.1, float(os.getenv("MEDIAINFO_TIMEOUT_SECONDS", "60"))),
         library_access_timeout_seconds=max(0.1, float(os.getenv("LIBRARY_ACCESS_TIMEOUT_SECONDS", "10"))),

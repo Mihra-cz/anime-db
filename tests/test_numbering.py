@@ -232,3 +232,52 @@ def test_verified_collection_with_fully_numbered_title_has_no_numbering_warning(
     assert collection_requires_numbering_review(collection) is False
     assert summary.requires_review is False
     assert summary.gaps == ()
+
+
+def test_zero_plus_episodes_one_to_twenty_two_has_standard_range_one_to_twenty_two():
+    title = CatalogTitle(
+        local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", part_type_manual="season",
+    )
+    items = [Video(
+        id=number + 1,
+        relative_path=f"Anime/Show/Season 1/Title {number:02}.mp4",
+        root_folder="Anime", filename=f"Title {number:02}.mp4", size=1, mtime_ns=1,
+    ) for number in range(23)]
+
+    recalculate_title_numbering(title, items)
+    summary = summarize_title_numbering(items, title)
+
+    assert items[0].local_episode_number is None
+    assert items[0].season_episode_number is None
+    assert items[0].episode_number_source == "nonstandard_zero"
+    assert summary.total == 23
+    assert summary.standard_total == 22
+    assert summary.numbered == 22
+    assert summary.nonstandard == 1
+    assert (summary.episode_min, summary.episode_max) == (1, 22)
+    assert summary.gaps == ()
+    assert summary.requires_review is True
+
+
+def test_fractional_episode_does_not_create_gap_between_fourteen_and_fifteen():
+    title = CatalogTitle(
+        local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", part_type_manual="season",
+    )
+    items = videos(1, 15)
+    fractional = Video(
+        id=50, relative_path="Anime/Show/Season 1/Title 14.5.mkv",
+        root_folder="Anime", filename="Title 14.5.mkv", size=1, mtime_ns=1,
+    )
+    items.append(fractional)
+
+    recalculate_title_numbering(title, items)
+    summary = summarize_title_numbering(items, title)
+
+    assert fractional.local_episode_number is None
+    assert fractional.season_episode_number is None
+    assert fractional.episode_number_source == "fractional"
+    assert summary.standard_total == 15
+    assert summary.nonstandard == 1
+    assert summary.gaps == ()

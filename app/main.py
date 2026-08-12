@@ -18,9 +18,11 @@ from .catalog import (
     FILTER_LABELS,
     ROOT_FOLDER,
     ROOT_VIDEO_GROUP_LABEL,
+    TITLE_NAME_PREFERENCE_LABELS,
     build_catalog_results,
     catalog_title_display_title,
     catalog_title_series_label,
+    detect_episode_number,
     derive_episode_number,
     derive_season_info,
     determine_parent_series,
@@ -29,6 +31,7 @@ from .catalog import (
     is_root_video,
     manual_hardsub_state,
     normalize_search_query,
+    normalize_title_name_preference,
     normalize_title,
     set_manual_hardsub,
     sort_title_videos,
@@ -45,7 +48,8 @@ from .hierarchy_review import (
     SIMPLE_DEFINITION_FIELDS, apply_manual_split, apply_single_season_suggestion,
     definitions_as_json, definitions_to_json, parse_manual_definitions,
     parse_simple_definitions,
-    preview_assignments, simple_definition_rows, single_season_suggestion,
+    preview_assignments, separate_nonstandard_videos, simple_definition_rows,
+    single_season_suggestion,
 )
 from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
@@ -71,7 +75,30 @@ from .scanner import LibrarySafetyError, scan_library
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 PACKAGE_DIR = Path(__file__).parent
-templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
+PREFERRED_TITLE_LANGUAGE_COOKIE = "animedb_preferred_title_language"
+
+
+def get_preferred_title_language(request: Request) -> str:
+    """Vrátí současný zdroj preference odděleně od display-title resolveru."""
+    settings = getattr(request.app.state, "settings", None)
+    default = getattr(settings, "preferred_title_language", "romaji")
+    return normalize_title_name_preference(
+        request.cookies.get(PREFERRED_TITLE_LANGUAGE_COOKIE), default
+    )
+
+
+def _template_preferences(request: Request) -> dict:
+    query = request.url.query
+    return {
+        "title_name_preference": get_preferred_title_language(request),
+        "title_name_preference_labels": TITLE_NAME_PREFERENCE_LABELS,
+        "preference_return_to": request.url.path + (f"?{query}" if query else ""),
+    }
+
+
+templates = Jinja2Templates(
+    directory=PACKAGE_DIR / "templates", context_processors=[_template_preferences]
+)
 templates.env.globals.update(
     catalog_title_display_title=catalog_title_display_title,
     catalog_title_series_label=catalog_title_series_label,
@@ -136,10 +163,36 @@ def _load_catalog_title(session, catalog_title_id: int | None):
         selectinload(CatalogTitle.collection),
         selectinload(CatalogTitle.metadata_candidates),
         selectinload(CatalogTitle.artwork),
+        selectinload(CatalogTitle.videos),
     ).where(CatalogTitle.id == catalog_title_id))
 
 
-def _metadata_template_values(title: CatalogTitle | None, allow_remote_images: bool, show_rejected: bool = False) -> dict:
+def _hierarchy_video_groups(videos: list[Video]) -> dict[str, list]:
+    standard, nonstandard, unknown = [], [], []
+    for video in sorted(
+        videos,
+        key=lambda item: (
+            item.season_episode_number is None,
+            item.season_episode_number or 0,
+            item.filename.casefold(),
+        ),
+    ):
+        detection = detect_episode_number(video.filename)
+        if detection.is_nonstandard:
+            nonstandard.append({"video": video, "detection": detection})
+        elif video.season_episode_number is not None:
+            standard.append({"video": video, "detection": detection})
+        else:
+            unknown.append({"video": video, "detection": detection})
+    return {"standard": standard, "nonstandard": nonstandard, "unknown": unknown}
+
+
+def _metadata_template_values(
+    title: CatalogTitle | None,
+    allow_remote_images: bool,
+    show_rejected: bool = False,
+    show_candidates: bool = False,
+) -> dict:
     metadata = title.metadata_record if title else None
     def decoded(value: str | None) -> list:
         try:
@@ -148,9 +201,12 @@ def _metadata_template_values(title: CatalogTitle | None, allow_remote_images: b
         except (TypeError, ValueError):
             return []
     artwork = next((item for item in (title.artwork if title else []) if item.is_primary and item.artwork_type == "cover"), None)
-    candidates = sorted(
+    stored_candidates = sorted(
         [item for item in (title.metadata_candidates if title else []) if show_rejected or item.rejected_at is None],
         key=lambda item: (item.rejected_at is not None, -(item.match_score or 0), item.candidate_title.casefold()),
+    )
+    primary_external_link = next(
+        (link for link in (title.external_links if title else []) if link.is_primary), None
     )
     return {
         "title_metadata": metadata,
@@ -161,8 +217,13 @@ def _metadata_template_values(title: CatalogTitle | None, allow_remote_images: b
         "metadata_genres": decoded(metadata.genres_json if metadata else None),
         "metadata_tags": decoded(metadata.tags_json if metadata else None),
         "metadata_synonyms": decoded(metadata.synonyms_json if metadata else None),
-        "metadata_candidates": candidates,
-        "candidate_reasons": {item.id: decode_match_reasons(item) for item in candidates},
+        "primary_external_link": primary_external_link,
+        "metadata_candidates": stored_candidates if show_candidates else [],
+        "candidate_reasons": {
+            item.id: decode_match_reasons(item) for item in stored_candidates
+        },
+        "has_metadata_candidates": bool(stored_candidates),
+        "show_metadata_candidates": show_candidates,
         "low_score_threshold": LOW_SCORE_THRESHOLD,
         "show_rejected": show_rejected,
         "has_rejected_candidates": bool(title and any(item.rejected_at for item in title.metadata_candidates)),
@@ -300,6 +361,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health():
         return {"status": "ok"}
 
+    @app.post("/preferences/title-name")
+    def update_title_name_preference(
+        preference: str = Form(...), return_to: str = Form("/"),
+    ):
+        normalized = preference.strip().casefold()
+        if normalized not in TITLE_NAME_PREFERENCE_LABELS:
+            raise HTTPException(status_code=400, detail="Neplatná varianta názvu.")
+        target = return_to.strip()
+        if not target.startswith("/") or target.startswith("//"):
+            target = "/"
+        response = RedirectResponse(target, status_code=303)
+        response.set_cookie(
+            PREFERRED_TITLE_LANGUAGE_COOKIE, normalized, max_age=31_536_000,
+            httponly=True, samesite="lax",
+        )
+        return response
+
     @app.get("/", response_class=HTMLResponse)
     def index(
         request: Request,
@@ -354,6 +432,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/root-videos", response_class=HTMLResponse)
     def root_videos(request: Request):
+        title_name_preference = get_preferred_title_language(request)
         videos = sorted(
             [
                 video for video in _load_videos(sessions)
@@ -365,6 +444,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             target_titles = list(session.scalars(select(CatalogTitle).options(
                 selectinload(CatalogTitle.collection),
                 selectinload(CatalogTitle.metadata_record),
+                selectinload(CatalogTitle.videos),
             ).join(CatalogTitle.collection).where(
                 CatalogCollection.relative_root_path != ROOT_FOLDER
             ).order_by(CatalogCollection.local_title, CatalogTitle.local_title)).all())
@@ -374,7 +454,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows.append({
                 "video": video,
                 "display_title": (
-                    catalog_title_display_title(video.catalog_title)
+                    catalog_title_display_title(
+                        video.catalog_title, title_name_preference, videos=[video],
+                    )
                     if meaningful_assignment and video.catalog_title
                     else Path(video.filename).stem
                 ),
@@ -517,6 +599,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         require_locked_confirmation: bool = False,
         sequence_start: int | None = None, numbering_error: str | None = None,
         numbering_message: str | None = None,
+        show_metadata_candidates: bool = False,
+        metadata_query: str | None = None,
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
@@ -615,6 +699,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "metadata_default_query": default_metadata_search_query(
                 catalog_title
             ) if catalog_title else "",
+            "metadata_query": metadata_query or (
+                default_metadata_search_query(catalog_title) if catalog_title else ""
+            ),
             "videos": videos,
             "catalog_title_display_title": catalog_title_display_title,
             "catalog_title_series_label": catalog_title_series_label,
@@ -636,8 +723,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 else catalog_state_url(filter_name, results.query, results.sort, results.direction)
             ),
         }
+        context["metadata_change_url"] = metadata_return_url(
+            filter_name,
+            catalog_title.id if catalog_title else 0,
+            results.query,
+            results.sort,
+            results.direction,
+            normalized_video_sort,
+            normalized_video_direction,
+            show_metadata_candidates="true",
+        )
+        context["metadata_rejected_url"] = metadata_return_url(
+            filter_name,
+            catalog_title.id if catalog_title else 0,
+            results.query,
+            results.sort,
+            results.direction,
+            normalized_video_sort,
+            normalized_video_direction,
+            show_metadata_candidates="true",
+            show_rejected="false" if show_rejected else "true",
+            metadata_query=context["metadata_query"],
+        )
         context.update(_metadata_template_values(
-            catalog_title, settings.metadata_allow_remote_images, show_rejected
+            catalog_title,
+            settings.metadata_allow_remote_images,
+            show_rejected,
+            show_metadata_candidates,
         ))
         return templates.TemplateResponse(request, "series.html", context)
 
@@ -653,12 +765,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         require_locked_confirmation: bool = False,
         sequence_start: int | None = None, numbering_error: str | None = None,
         numbering_message: str | None = None,
+        show_metadata_candidates: bool = False,
+        metadata_query: str | None = None,
     ):
         return series_detail(
             request, filter_name, catalog_title_id, None, q, sort, direction,
             video_sort, video_direction, message, metadata_error, metadata_warning, show_rejected, pending_external_id,
             require_conflict_confirmation, require_locked_confirmation,
             sequence_start, numbering_error, numbering_message,
+            show_metadata_candidates, metadata_query,
         )
 
     @app.get("/collections/{collection_id}", response_class=HTMLResponse)
@@ -671,6 +786,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with sessions() as session:
             collection = session.scalar(select(CatalogCollection).options(
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
             ).where(CatalogCollection.id == collection_id))
         if collection is None:
             raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
@@ -709,7 +825,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 else [video for video in filtered if video_matches_search(video, folded_query)]
             )
             if matched or title.metadata_status == "migration_review_required":
-                parts.append({"title": title, "stats": stats, "metadata": title.metadata_record})
+                parts.append({
+                    "title": title, "stats": stats, "metadata": title.metadata_record,
+                    "videos": title_videos_list,
+                })
         state = {"filter_name": filter_name, "q": normalize_search_query(q)}
         if sort:
             state.update(sort=sort, direction=direction or "asc")
@@ -767,7 +886,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {
                     "title": title,
                     "summary": summarize_title_numbering(
+                        [video for video in videos if video.catalog_title_id == title.id], title
+                    ),
+                    "videos": _hierarchy_video_groups(
                         [video for video in videos if video.catalog_title_id == title.id]
+                    ),
+                    "metadata_linked": bool(
+                        title.metadata_record
+                        and any(link.is_primary for link in title.external_links)
                     ),
                 }
                 for title in sorted(
@@ -781,6 +907,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             numbering_unknown = sum(
                 item["summary"].unknown for item in title_numbering
             )
+            nonstandard_videos = [
+                {"video": video, "detection": detection}
+                for video in videos
+                if (detection := detect_episode_number(video.filename)).is_nonstandard
+                and (
+                    video.catalog_title is None
+                    or video.catalog_title.effective_part_type
+                    not in {"film", "ova", "special", "preview", "recap", "bonus", "other"}
+                )
+            ]
+            unassigned_videos = _hierarchy_video_groups([
+                video for video in videos if video.catalog_title_id is None
+            ])
             season_one = single_season_suggestion(collection)
             return templates.TemplateResponse(request, "hierarchy_review_detail.html", {
                 "collection": collection, "videos": videos,
@@ -793,6 +932,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "metadata_status_labels": METADATA_STATUS_LABELS,
                 "title_numbering": title_numbering,
                 "numbering_unknown": numbering_unknown,
+                "nonstandard_videos": nonstandard_videos,
+                "unassigned_videos": unassigned_videos,
                 "season_one_suggestion": season_one,
                 "simple_rows": simple_rows or simple_definition_rows(collection),
                 "message": message,
@@ -803,12 +944,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with sessions() as session:
             collections = list(session.scalars(select(CatalogCollection).options(
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogCollection.videos),
             ).order_by(CatalogCollection.local_title)).all())
             rows = []
             for collection in collections:
                 summaries = [
-                    summarize_title_numbering(list(title.videos))
+                    summarize_title_numbering(list(title.videos), title)
                     for title in collection.titles
                 ]
                 numbering_unknown = sum(summary.unknown for summary in summaries)
@@ -985,6 +1127,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session.commit()
         return RedirectResponse(f"/hierarchy-review/{collection_id}", status_code=303)
 
+    @app.post("/hierarchy-review/{collection_id}/separate-nonstandard")
+    async def hierarchy_review_separate_nonstandard(request: Request, collection_id: int):
+        form = await request.form()
+        raw_ids = [str(value) for value in form.getlist("video_ids")]
+        try:
+            video_ids = [int(value) for value in raw_ids]
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Neplatný výběr videí.") from exc
+        with sessions() as session:
+            try:
+                title = separate_nonstandard_videos(
+                    session, collection_id, video_ids,
+                    local_title=str(form.get("local_title") or ""),
+                    part_type=str(form.get("part_type") or ""),
+                )
+                session.commit()
+                title_id = title.id
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = "Nestandardní obsah byl logicky oddělen; fyzické cesty zůstaly beze změny."
+        return RedirectResponse(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#title-{title_id}",
+            status_code=303,
+        )
+
     @app.post("/hierarchy-review/{collection_id}/season-one")
     def hierarchy_review_set_season_one(
         collection_id: int, confirm_single_season: bool = Form(False),
@@ -1020,7 +1188,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         hierarchy_verified: bool = Form(False), filter_name: str = Form("all"),
         q: str = Form(""), sort: str = Form(""), direction: str = Form(""),
     ):
-        allowed_types = {"", "title", "season", "part", "cour", "film", "ova", "special"}
+        allowed_types = {
+            "", "title", "season", "part", "cour", "film", "ova", "special",
+            "preview", "recap", "bonus", "other",
+        }
         with sessions() as session:
             title = session.get(CatalogTitle, catalog_title_id)
             if title is None or title.catalog_collection_id != collection_id:
@@ -1058,16 +1229,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_code=303,
         )
 
-    @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/search", response_class=HTMLResponse)
+    @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/search")
     def search_metadata(
-        request: Request, filter_name: str, catalog_title_id: int,
+        filter_name: str, catalog_title_id: int,
         metadata_query: str = Form(...), q: str = Form(""), sort: str = Form(""),
         direction: str = Form(""), video_sort: str = Form(""),
         video_direction: str = Form(""),
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
-        candidates, metadata_error = [], None
+        candidate_count, metadata_error = 0, None
         with sessions() as session:
             catalog_title = _load_catalog_title(session, catalog_title_id)
             if catalog_title is None:
@@ -1080,63 +1251,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         session, catalog_title, metadata_query, app.state.metadata_provider,
                         limit=settings.metadata_candidate_limit,
                     )
+                    candidate_count = len(candidates)
                     session.commit()
-                    catalog_title = _load_catalog_title(session, catalog_title_id)
                 except (ValueError, MetadataProviderError) as exc:
                     session.rollback()
                     metadata_error = str(exc)
-                    catalog_title = _load_catalog_title(session, catalog_title_id)
-        all_videos = _load_videos(sessions)
-        results = build_catalog_results(all_videos, filter_name, q, sort, direction)
-        title_videos_for_detail = [
-            video for video in all_videos
-            if video.catalog_title_id == catalog_title.id
-            and video_matches_filter(video, filter_name)
-        ]
-        videos, normalized_video_sort, normalized_video_direction = sort_title_videos(
-            title_videos_for_detail,
-            video_sort, video_direction,
-        )
-        if not videos:
-            raise HTTPException(status_code=404, detail="Titul neodpovídá aktivnímu filtru")
-        def video_sort_url(column: str) -> str:
-            return series_state_url(
-                filter_name, catalog_title.id, results.query, results.sort, results.direction,
-                column, toggled_direction(column, normalized_video_sort, normalized_video_direction),
-            )
-        context = {
-            "filter_name": filter_name, "filter_label": FILTER_LABELS[filter_name],
-            "series": determine_parent_series(videos[0].relative_path),
-            "catalog_title": catalog_title, "videos": videos,
-            "catalog_title_display_title": catalog_title_display_title,
-            "catalog_title_series_label": catalog_title_series_label,
-            "subtitle_track_display": subtitle_track_display,
-            "translation_status": translation_status, "video_matches_filter": video_matches_filter,
-            "derive_season_info": derive_season_info, "derive_episode_number": derive_episode_number,
-            "q": results.query, "sort": results.sort, "direction": results.direction,
-            "video_sort": normalized_video_sort, "video_direction": normalized_video_direction,
-            "video_sort_url": video_sort_url,
-            "back_url": (
-                f"/collections/{catalog_title.catalog_collection_id}?"
-                f"{urlencode({'filter_name': filter_name, 'q': results.query, 'sort': results.sort, 'direction': results.direction})}"
-                if catalog_title.catalog_collection_id
-                else catalog_state_url(filter_name, results.query, results.sort, results.direction)
-            ),
-            "metadata_status_labels": METADATA_STATUS_LABELS,
-            "metadata_error": metadata_error,
+        messages = {
+            "show_metadata_candidates": "true",
+            # Ručně odeslaný dotaz se v navazujícím GET znovu nenormalizuje.
             "metadata_query": metadata_query[:200],
-            "metadata_message": None, "pending_external_id": None,
-            "metadata_warning": None,
-            "require_conflict_confirmation": False,
-            "require_locked_confirmation": False,
-            "metadata_allow_remote_images": settings.metadata_allow_remote_images,
-            # Ručně odeslaný dotaz se znovu nenormalizuje.
-            "metadata_default_query": metadata_query,
         }
-        context.update(_metadata_template_values(
-            catalog_title, settings.metadata_allow_remote_images
-        ))
-        return templates.TemplateResponse(request, "series.html", context)
+        if metadata_error:
+            messages["metadata_error"] = metadata_error
+        else:
+            messages["message"] = (
+                f"Vyhledávání dokončeno: nalezeno {candidate_count} kandidátů."
+            )
+        return action_redirect(
+            filter_name, catalog_title_id, q, sort, direction,
+            video_sort, video_direction, **messages,
+        )
 
     def action_redirect(
         filter_name: str, catalog_title_id: int, q: str, sort: str, direction: str,
@@ -1180,6 +1314,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     filter_name, catalog_title_id, q, sort, direction,
                     detail_sort, detail_direction, metadata_error=str(exc),
                     pending_external_id=external_id,
+                    show_metadata_candidates="true",
                     require_conflict_confirmation="true",
                     require_locked_confirmation="true" if confirm_locked else "",
                 )
@@ -1189,6 +1324,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     filter_name, catalog_title_id, q, sort, direction,
                     detail_sort, detail_direction, metadata_error=str(exc),
                     pending_external_id=external_id,
+                    show_metadata_candidates="true",
                     require_locked_confirmation="true",
                     require_conflict_confirmation="true" if confirm_conflict else "",
                 )
@@ -1197,6 +1333,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return action_redirect(
                     filter_name, catalog_title_id, q, sort, direction,
                     detail_sort, detail_direction, metadata_error=str(exc),
+                    show_metadata_candidates="true",
                 )
         artwork_warning = cache_title_artwork(catalog_title_id)
         return action_redirect(
@@ -1277,6 +1414,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return action_redirect(
             filter_name, catalog_title_id, q, sort, direction, detail_sort, detail_direction,
             message="Kandidát byl odmítnut." if rejected else "Odmítnutí kandidáta bylo zrušeno.",
+            show_metadata_candidates="true",
             show_rejected="true" if not rejected else "",
         )
 

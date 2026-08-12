@@ -1,20 +1,65 @@
+from urllib.parse import parse_qs, urlparse
+
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.catalog import ROOT_VIDEO_GROUP_LABEL, build_catalog_results
+from app.catalog import ROOT_VIDEO_GROUP_LABEL, build_catalog_results, detect_episode_number
 from app.config import Settings
 from app.database import Base
-from app.main import app, create_app, templates
-from app.hierarchy_review import simple_definition_rows, single_season_suggestion
+from app.main import (
+    PREFERRED_TITLE_LANGUAGE_COOKIE, app, create_app,
+    get_preferred_title_language, templates,
+)
+from app.hierarchy_review import (
+    separate_nonstandard_videos, simple_definition_rows, single_season_suggestion,
+)
 from app.metadata.providers.base import ProviderTitleMetadata
 from app.migrations import migrate_schema
 from app.models import (
-    CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, TitleMetadata, Video,
-    utc_now,
+    CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
+    InternalSubtitle, TitleMetadata, Video, utc_now,
 )
 from app.numbering import summarize_title_numbering
 from app.scanner import scan_library
 from starlette.requests import Request
+
+
+class RecordingMetadataProvider:
+    def __init__(self, results):
+        self.results = list(results)
+        self.search_calls = []
+        self.fetch_calls = []
+
+    def search_titles(self, query):
+        self.search_calls.append(query)
+        return list(self.results)
+
+    def fetch_title(self, external_id):
+        self.fetch_calls.append(str(external_id))
+        return next(
+            item for item in self.results if item.external_id == str(external_id)
+        )
+
+
+def metadata_candidate(
+    external_id, romaji, english, native, *, episode_count=12,
+):
+    return ProviderTitleMetadata(
+        provider="anilist", external_id=str(external_id), title_romaji=romaji,
+        title_english=english, title_native=native, release_year=2020,
+        format="TV", episode_count=episode_count,
+        site_url=f"https://anilist.co/anime/{external_id}",
+    )
+
+
+def web_request(web_app, path, *, cookie=None):
+    headers = [(b"cookie", cookie.encode())] if cookie else []
+    return Request({
+        "type": "http", "app": web_app, "method": "GET", "path": path,
+        "root_path": "", "scheme": "http", "query_string": b"",
+        "headers": headers, "server": ("testserver", 80),
+        "client": ("testclient", 50000),
+    })
 
 
 def test_detail_template_displays_anilist_candidates():
@@ -33,6 +78,7 @@ def test_detail_template_displays_anilist_candidates():
         series=type("Series", (), {"name": "Local Test", "relative_path": "Anime/Local Test"})(),
         catalog_title=title, metadata_status_labels={"unlinked": "Bez metadat"},
         metadata_candidates=[candidate], metadata_error=None, filter_name="all",
+        show_metadata_candidates=True, candidate_reasons={}, low_score_threshold=0.55,
         metadata_allow_remote_images=True,
         metadata_default_query="Local Test",
         filter_label="Všechna videa", back_url="/catalog/all", videos=[], q="",
@@ -62,6 +108,7 @@ def test_remote_candidate_image_can_be_disabled():
         series=type("Series", (), {"name": "Local", "relative_path": "Anime/Local"})(),
         catalog_title=title, metadata_status_labels={"unlinked": "Bez metadat"},
         metadata_candidates=[candidate], metadata_error=None, metadata_message=None,
+        show_metadata_candidates=True, candidate_reasons={}, low_score_threshold=0.55,
         metadata_allow_remote_images=False, filter_name="all", filter_label="Všechna videa",
         metadata_default_query="Local",
         back_url="/catalog/all", videos=[], q="", sort="title", direction="asc",
@@ -111,9 +158,416 @@ def test_candidate_and_artwork_mutations_are_post_only():
     assert paths["/titles/{catalog_title_id}/numbering/sequence"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/season-one"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/simple-preview"] == {"POST"}
+    assert paths["/hierarchy-review/{collection_id}/separate-nonstandard"] == {"POST"}
+    assert paths["/preferences/title-name"] == {"POST"}
 
 
-def _render_hierarchy_review(*, verified=False):
+def test_first_metadata_search_redirects_to_visible_persisted_candidates(tmp_path):
+    settings = Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'metadata-search.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    )
+    web_app = create_app(settings)
+    provider = RecordingMetadataProvider([
+        metadata_candidate("101", "First Romaji", "First English", "第一"),
+        metadata_candidate("102", "Second Romaji", "Second English", "第二"),
+    ])
+    web_app.state.metadata_provider = provider
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        title = CatalogTitle(
+            local_title="Serie 1", normalized_local_title="serie 1",
+            relative_root_path="Anime/Example/Serie 1",
+        )
+        video = Video(
+            relative_path="Anime/Example/Serie 1/Example 01.mkv",
+            root_folder="Anime", filename="Example 01.mkv", size=1, mtime_ns=1,
+            file_type="episode", local_episode_number=1,
+            season_episode_number=1, catalog_title=title,
+        )
+        session.add(video)
+        session.commit()
+        title_id = title.id
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    response = endpoints[
+        "/catalog/{filter_name}/titles/{catalog_title_id}/metadata/search"
+    ](
+        "all", title_id, metadata_query="Example", q="", sort="",
+        direction="", video_sort="", video_direction="",
+    )
+
+    assert response.status_code == 303
+    parsed = urlparse(response.headers["location"])
+    query = parse_qs(parsed.query)
+    assert parsed.path == f"/titles/{title_id}"
+    assert query["show_metadata_candidates"] == ["true"]
+    assert query["metadata_query"] == ["Example"]
+    assert provider.search_calls == ["Example"]
+
+    rendered = endpoints["/titles/{catalog_title_id}"](
+        web_request(web_app, parsed.path), title_id,
+        show_metadata_candidates=True, metadata_query="Example",
+        message=query["message"][0],
+    ).body.decode()
+
+    assert "Výběr externích metadat" in rendered
+    assert "First Romaji" in rendered
+    assert "Second Romaji" in rendered
+    assert "nalezeno 2 kandidátů" in rendered
+    # Navazující GET pouze načetl uložené výsledky a druhý search nebyl potřeba.
+    assert provider.search_calls == ["Example"]
+
+
+def test_metadata_change_uses_stored_candidates_and_preserves_local_hierarchy(tmp_path):
+    settings = Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'metadata-change.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    )
+    web_app = create_app(settings)
+    first = metadata_candidate(
+        "201", "Original Romaji", "Original English", "原作", episode_count=24,
+    )
+    second = metadata_candidate(
+        "202", "Changed Romaji", "Changed English", "変更", episode_count=13,
+    )
+    provider = RecordingMetadataProvider([first, second])
+    web_app.state.metadata_provider = provider
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Example", normalized_local_title="example",
+            relative_root_path="Anime/Example", hierarchy_status="verified",
+            hierarchy_verified_at=utc_now(),
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Serie 1",
+            normalized_local_title="serie 1",
+            relative_root_path="Anime/Example/Serie 1", part_type="season",
+            season_number=1, season_label="S1", numbering_mode="season_local",
+            hierarchy_verified_at=utc_now(),
+        )
+        video = Video(
+            relative_path="Anime/Example/Serie 1/Example 01.mkv",
+            root_folder="Anime", filename="Example 01.mkv", size=1, mtime_ns=1,
+            file_type="episode", local_episode_number=1,
+            season_episode_number=1, absolute_episode_number=1,
+            external_episode_number=None, episode_number_source="filename",
+            episode_number_confidence=0.95, catalog_title=title,
+            catalog_collection=collection,
+        )
+        session.add(video)
+        session.commit()
+        title_id, video_id = title.id, video.id
+        unchanged_title = (
+            title.local_title, title.manual_display_title, title.part_type,
+            title.season_number, title.season_label, title.numbering_mode,
+        )
+        unchanged_video = (
+            video.catalog_title_id, video.catalog_collection_id, video.filename,
+            video.relative_path, video.root_folder, video.local_episode_number,
+            video.season_episode_number, video.absolute_episode_number,
+            video.external_episode_number, video.episode_number_source,
+            video.episode_number_confidence,
+        )
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    search = endpoints[
+        "/catalog/{filter_name}/titles/{catalog_title_id}/metadata/search"
+    ]
+    confirm = endpoints[
+        "/catalog/{filter_name}/titles/{catalog_title_id}/metadata/confirm"
+    ]
+    detail = endpoints["/titles/{catalog_title_id}"]
+
+    search(
+        "all", title_id, metadata_query="Example", q="", sort="",
+        direction="", video_sort="", video_direction="",
+    )
+    with web_app.state.sessions() as session:
+        candidates = {
+            item.external_id: item.id
+            for item in session.get(CatalogTitle, title_id).metadata_candidates
+        }
+    confirm(
+        "all", title_id, external_id="201", candidate_id=candidates["201"],
+        confirm_conflict=False, confirm_locked=False, q="", sort="",
+        direction="", detail_sort="", detail_direction="",
+    )
+
+    normal = detail(
+        web_request(web_app, f"/titles/{title_id}"), title_id
+    ).body.decode()
+    assert "Original Romaji" in normal
+    assert "Aktuální vazba: <strong>anilist</strong> · ID 201" in normal
+    assert "Změnit metadata" in normal
+    assert "Vyhledat metadata znovu" in normal
+    assert "Changed Romaji" not in normal
+    assert "Výběr externích metadat" not in normal
+
+    search_calls_before_change_view = list(provider.search_calls)
+    change_view = detail(
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+        show_metadata_candidates=True,
+    ).body.decode()
+    assert "Výběr externích metadat" in change_view
+    assert "Changed Romaji" in change_view
+    assert "Aktuálně přiřazeno" in change_view
+    assert provider.search_calls == search_calls_before_change_view
+
+    provider.results.append(metadata_candidate(
+        "203", "Fresh Romaji", "Fresh English", "新規"
+    ))
+    refreshed = search(
+        "all", title_id, metadata_query="Example fresh", q="", sort="",
+        direction="", video_sort="", video_direction="",
+    )
+    assert refreshed.status_code == 303
+    assert provider.search_calls == ["Example", "Example fresh"]
+    refreshed_page = detail(
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+        show_metadata_candidates=True, metadata_query="Example fresh",
+    ).body.decode()
+    assert "Fresh Romaji" in refreshed_page
+
+    confirm(
+        "all", title_id, external_id="202", candidate_id=candidates["202"],
+        confirm_conflict=False, confirm_locked=False, q="", sort="",
+        direction="", detail_sort="", detail_direction="",
+    )
+    for preference, expected in (
+        ("romaji", "Changed Romaji"),
+        ("english", "Changed English"),
+        ("native", "変更"),
+    ):
+        rendered = detail(
+            web_request(
+                web_app, f"/titles/{title_id}",
+                cookie=f"{PREFERRED_TITLE_LANGUAGE_COOKIE}={preference}",
+            ),
+            title_id,
+        ).body.decode()
+        assert f"<h1>{expected}</h1>" in rendered
+
+    with web_app.state.sessions() as session:
+        stored_title = session.get(CatalogTitle, title_id)
+        stored_video = session.get(Video, video_id)
+        assert (
+            stored_title.local_title, stored_title.manual_display_title,
+            stored_title.part_type, stored_title.season_number,
+            stored_title.season_label, stored_title.numbering_mode,
+        ) == unchanged_title
+        assert (
+            stored_video.catalog_title_id, stored_video.catalog_collection_id,
+            stored_video.filename, stored_video.relative_path, stored_video.root_folder,
+            stored_video.local_episode_number, stored_video.season_episode_number,
+            stored_video.absolute_episode_number, stored_video.external_episode_number,
+            stored_video.episode_number_source, stored_video.episode_number_confidence,
+        ) == unchanged_video
+        primary = session.scalar(select(ExternalTitleLink).where(
+            ExternalTitleLink.catalog_title_id == title_id,
+            ExternalTitleLink.is_primary.is_(True),
+        ))
+        assert primary.external_id == "202"
+        assert stored_title.metadata_record.metadata_external_id == "202"
+
+    restarted_app = create_app(settings)
+    with restarted_app.state.sessions() as session:
+        persisted = session.scalar(select(ExternalTitleLink).where(
+            ExternalTitleLink.catalog_title_id == title_id,
+            ExternalTitleLink.is_primary.is_(True),
+        ))
+        persisted_title = session.get(CatalogTitle, title_id)
+        persisted_video = session.get(Video, video_id)
+        assert persisted.external_id == "202"
+        assert persisted_title.local_title == "Serie 1"
+        assert persisted_video.relative_path == unchanged_video[3]
+
+
+def test_title_language_preference_cookie_survives_recreated_app(tmp_path):
+    settings = Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'preference.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    )
+    first_app = create_app(settings)
+    endpoint = next(
+        route.endpoint for route in first_app.routes
+        if getattr(route, "path", None) == "/preferences/title-name"
+    )
+
+    default_request = Request({
+        "type": "http", "app": first_app, "method": "GET", "path": "/",
+        "root_path": "", "scheme": "http", "query_string": b"", "headers": [],
+        "server": ("testserver", 80), "client": ("testclient", 50000),
+    })
+    assert get_preferred_title_language(default_request) == "romaji"
+
+    response = endpoint(preference="english", return_to="/hierarchy-review")
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/hierarchy-review"
+    assert f"{PREFERRED_TITLE_LANGUAGE_COOKIE}=english" in response.headers["set-cookie"]
+    assert "Max-Age=31536000" in response.headers["set-cookie"]
+    cookie = f"{PREFERRED_TITLE_LANGUAGE_COOKIE}=english".encode()
+    for web_app in (first_app, create_app(settings)):
+        request = Request({
+            "type": "http", "app": web_app, "method": "GET", "path": "/",
+            "root_path": "", "scheme": "http", "query_string": b"",
+            "headers": [(b"cookie", cookie)], "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+        })
+        assert get_preferred_title_language(request) == "english"
+
+
+def test_collection_and_hierarchy_review_share_cookie_title_preference(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'shared-title.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Ansatsu Kyoushitsu", normalized_local_title="ansatsu kyoushitsu",
+            relative_root_path="Anime/Ansatsu Kyoushitsu", hierarchy_status="review_required",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Serie 1", normalized_local_title="serie 1",
+            relative_root_path="Anime/Ansatsu Kyoushitsu/Serie 1", part_type="season",
+            season_number=1, season_label="S1", metadata_status="linked_manual",
+            metadata_record=TitleMetadata(
+                display_title="Assassination Classroom",
+                title_english="Assassination Classroom",
+                title_romaji="Ansatsu Kyoushitsu", title_native="暗殺教室",
+            ),
+        )
+        video = Video(
+            relative_path="Anime/Ansatsu Kyoushitsu/Serie 1/Ansatsu Kyoushitsu 01.mp4",
+            root_folder="Anime", filename="Ansatsu Kyoushitsu 01.mp4",
+            size=1, mtime_ns=1, file_type="episode", local_episode_number=1,
+            season_episode_number=1, catalog_title=title, catalog_collection=collection,
+        )
+        session.add(video)
+        session.commit()
+        collection_id = collection.id
+        title_id = title.id
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")
+    }
+    cookie = f"{PREFERRED_TITLE_LANGUAGE_COOKIE}=native".encode()
+
+    def request(path):
+        return Request({
+            "type": "http", "app": web_app, "method": "GET", "path": path,
+            "root_path": "", "scheme": "http", "query_string": b"",
+            "headers": [(b"cookie", cookie)], "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+        })
+
+    collection_page = endpoints["/collections/{collection_id}"](
+        request(f"/collections/{collection_id}"), collection_id
+    ).body.decode()
+    hierarchy_page = endpoints["/hierarchy-review/{collection_id}"](
+        request(f"/hierarchy-review/{collection_id}"), collection_id
+    ).body.decode()
+
+    assert f'href="/titles/{title_id}?' in collection_page
+    assert ">暗殺教室</a>" in collection_page
+    assert f'href="/titles/{title_id}">暗殺教室</a>' in hierarchy_page
+    assert "Lokální část: <strong>Serie 1</strong>" in hierarchy_page
+
+
+def test_ansatsu_hierarchy_review_summary_before_and_after_zero_separation(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'ansatsu-ui.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Ansatsu Kyoushitsu (Z15-Z16)",
+            normalized_local_title="ansatsu kyoushitsu z15 z16",
+            relative_root_path="Anime/Ansatsu Kyoushitsu (Z15-Z16)",
+            hierarchy_status="review_required",
+        )
+        season = CatalogTitle(
+            collection=collection, local_title="Serie 1",
+            normalized_local_title="serie 1",
+            relative_root_path=f"{collection.relative_root_path}/Serie 1",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        for number in range(23):
+            session.add(Video(
+                relative_path=f"{season.relative_root_path}/Ansatsu Kyoushitsu {number:02}.mp4",
+                root_folder="Anime", filename=f"Ansatsu Kyoushitsu {number:02}.mp4",
+                size=1, mtime_ns=1, file_type="other" if number == 0 else "episode",
+                local_episode_number=number or None,
+                season_episode_number=number or None,
+                episode_number_source="nonstandard_zero" if number == 0 else "filename",
+                catalog_title=season, catalog_collection=collection,
+            ))
+        session.commit()
+        collection_id = collection.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review/{collection_id}"
+    )
+
+    def render():
+        request = Request({
+            "type": "http", "app": web_app, "method": "GET",
+            "path": f"/hierarchy-review/{collection_id}", "root_path": "",
+            "scheme": "http", "query_string": b"", "headers": [],
+            "server": ("testserver", 80), "client": ("testclient", 50000),
+        })
+        return endpoint(request, collection_id).body.decode()
+
+    before = render()
+    assert ">Ansatsu Kyoushitsu</a>" in before
+    assert "Lokální část: <strong>Serie 1</strong>" in before
+    assert "<dt>Fyzických videí</dt><dd>23</dd>" in before
+    assert "<dt>Standardních epizod</dt><dd>22</dd>" in before
+    assert "<dt>Očíslováno</dt><dd>22/22</dd>" in before
+    assert "<dt>Rozsah</dt><dd>E1–E22</dd>" in before
+    assert "<dt>Nestandardní</dt><dd>1</dd>" in before
+    assert "Nestandardní epizoda: 00" in before
+
+    with web_app.state.sessions() as session:
+        zero = session.scalar(select(Video).where(Video.local_episode_number.is_(None)))
+        preview = separate_nonstandard_videos(
+            session, collection_id, [zero.id], local_title="Preview", part_type="preview",
+        )
+        session.commit()
+        preview_id = preview.id
+
+    after = render()
+    season_block = after.split('id="title-1"', 1)[1].split("</article>", 1)[0]
+    preview_block = after.split(f'id="title-{preview_id}"', 1)[1].split("</article>", 1)[0]
+    assert "<dt>Fyzických videí</dt><dd>22</dd>" in season_block
+    assert "<dt>Očíslováno</dt><dd>22/22</dd>" in season_block
+    assert "Stav číslování: vyžaduje kontrolu" not in season_block
+    assert "<dt>Fyzických videí</dt><dd>1</dd>" in preview_block
+    assert "Doplňkový obsah – standardní completeness se nepoužije" in preview_block
+    assert "Bez externích metadat" in preview_block
+
+
+def _render_hierarchy_review(*, verified=False, filename="Episode 01.mkv"):
     collection = CatalogCollection(
         id=1, local_title="Akame ga Kill! (L14)",
         normalized_local_title="akame ga kill l14",
@@ -127,20 +581,38 @@ def _render_hierarchy_review(*, verified=False):
         relative_root_path=collection.relative_root_path, part_type="title",
         hierarchy_verified_at=utc_now() if verified else None,
     )
+    detection = detect_episode_number(filename)
+    is_standard = detection.is_standard
     video = Video(
-        id=1, relative_path=f"{collection.relative_root_path}/Episode 01.mkv",
-        root_folder="Anime", filename="Episode 01.mkv", size=1, mtime_ns=1,
-        season_episode_number=1, catalog_title=title,
+        id=1, relative_path=f"{collection.relative_root_path}/{filename}",
+        root_folder="Anime", filename=filename, size=1, mtime_ns=1,
+        season_episode_number=1 if is_standard else None, catalog_title=title,
         catalog_collection=collection,
     )
-    summary = summarize_title_numbering([video])
+    summary = summarize_title_numbering([video], title)
+    groups = {
+        "standard": [{"video": video, "detection": detection}] if is_standard else [],
+        "nonstandard": (
+            [{"video": video, "detection": detection}]
+            if detection.is_nonstandard else []
+        ),
+        "unknown": (
+            [{"video": video, "detection": detection}]
+            if detection.kind == "unknown" else []
+        ),
+    }
     return templates.env.get_template("hierarchy_review_detail.html").render(
         request=type("Request", (), {
             "url_for": lambda self, *args, **kwargs: "/static/style.css",
         })(),
         collection=collection, videos=[video], numbering_unknown=0,
+        nonstandard_videos=(groups["nonstandard"]),
+        unassigned_videos={"standard": [], "nonstandard": [], "unknown": []},
         message=None, error=None, season_one_suggestion=single_season_suggestion(collection),
-        title_numbering=[{"title": title, "summary": summary}],
+        title_numbering=[{
+            "title": title, "summary": summary, "videos": groups,
+            "metadata_linked": False,
+        }],
         metadata_status_labels={"unlinked": "Bez metadat"},
         simple_rows=simple_definition_rows(collection), definitions_json="[]",
         external_search_candidates=[], external_candidates=[],
@@ -171,6 +643,29 @@ def test_collection_and_title_verification_texts_are_distinct():
     assert "Hierarchie ověřena" in rendered
     assert "Zařazení ověřeno" in rendered
     assert "Nastavit jako Season 1" not in rendered
+
+
+def test_hierarchy_review_marks_zero_and_offers_logical_separation():
+    rendered = _render_hierarchy_review(filename="Title 00.mp4")
+
+    assert "Nestandardní obsah (1)" in rendered
+    assert "Nestandardní epizoda: 00" in rendered
+    assert "Vyžaduje zařazení" in rendered
+    assert "Oddělit do nové části" in rendered
+    assert "relative_path" in rendered
+    assert "Externí metadata jsou volitelná" in rendered
+
+
+def test_hierarchy_review_distinguishes_fractional_and_unknown():
+    fractional = _render_hierarchy_review(filename="Title 14.5.mkv")
+    unknown = _render_hierarchy_review(filename="Opening.mkv")
+
+    assert "Nestandardní epizoda: 14.5" in fractional
+    assert "Nestandardní číslování – vyžaduje kontrolu" in fractional
+    assert "Unknown (1)" not in fractional
+    assert "Unknown (1)" in unknown
+    assert "Parser bezpečně neurčil číslo epizody" in unknown
+    assert "Nestandardní epizoda:" not in unknown
 
 
 def test_episode_table_prioritizes_readable_data_and_preserves_editing_and_values():

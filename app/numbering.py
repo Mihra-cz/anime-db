@@ -4,7 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .catalog import derive_episode_number, natural_sort_key
+from .catalog import detect_episode_number, natural_sort_key
 from .models import CatalogCollection, CatalogTitle, Video
 
 NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
@@ -22,19 +22,29 @@ class SequentialNumberingRow:
 @dataclass(frozen=True)
 class TitleNumberingSummary:
     total: int
+    standard_total: int
     numbered: int
+    unknown: int
+    nonstandard: int
     episode_min: int | None
     episode_max: int | None
     gaps: tuple[int, ...]
     duplicate_numbers: tuple[int, ...]
 
+    supplemental: bool = False
+
     @property
-    def unknown(self) -> int:
-        return self.total - self.numbered
+    def unnumbered_standard(self) -> int:
+        return self.standard_total - self.numbered
 
     @property
     def requires_review(self) -> bool:
-        return bool(self.unknown or self.gaps or self.duplicate_numbers)
+        if self.supplemental:
+            return False
+        return bool(
+            self.unnumbered_standard or self.unknown or self.nonstandard
+            or self.gaps or self.duplicate_numbers
+        )
 
 
 def recalculate_title_numbering(
@@ -44,7 +54,8 @@ def recalculate_title_numbering(
     known_preceding_episodes: int | None = None,
     external_linked: bool | None = None,
 ) -> None:
-    detected = [derive_episode_number(video.filename) for video in videos]
+    detections = [detect_episode_number(video.filename) for video in videos]
+    detected = [item.number if item.is_standard else None for item in detections]
     effective_values = [
         video.episode_number_manual_override
         if video.episode_number_manual_override is not None else local
@@ -66,14 +77,19 @@ def recalculate_title_numbering(
     local_is_absolute = bool(offset is not None and numeric_values and min(numeric_values) > offset)
     has_external = title.metadata_record is not None if external_linked is None else external_linked
 
-    for video, local, effective in zip(videos, detected, effective_values):
+    for video, detection, local, effective in zip(
+        videos, detections, detected, effective_values
+    ):
         video.local_episode_number = local
         if effective is None:
             video.season_episode_number = None
             video.absolute_episode_number = None
             video.external_episode_number = None
-            video.episode_number_source = "unknown"
-            video.episode_number_confidence = None
+            video.episode_number_source = {
+                "zero": "nonstandard_zero",
+                "fractional": "fractional",
+            }.get(detection.kind, "unknown")
+            video.episode_number_confidence = 0.95 if detection.is_nonstandard else None
             continue
         is_manual = video.episode_number_manual_override is not None
         if title.numbering_mode == "absolute":
@@ -196,7 +212,33 @@ def apply_sequential_numbering(
     return rows
 
 
-def summarize_title_numbering(videos: list[Video]) -> TitleNumberingSummary:
+SUPPLEMENTAL_PART_TYPES = {
+    "film", "ova", "special", "preview", "recap", "bonus", "other",
+}
+
+
+def summarize_title_numbering(
+    videos: list[Video], title: CatalogTitle | None = None,
+) -> TitleNumberingSummary:
+    supplemental = bool(
+        title is not None and title.effective_part_type in SUPPLEMENTAL_PART_TYPES
+    )
+    detections = [
+        detect_episode_number(video.filename) if video.episode_number_manual_override is None
+        else None
+        for video in videos
+    ]
+    standard_total = sum(
+        detection is None or detection.is_standard for detection in detections
+    )
+    nonstandard = sum(
+        detection is not None and detection.is_nonstandard for detection in detections
+    )
+    unknown = sum(
+        video.season_episode_number is None
+        and (detection is None or not detection.is_nonstandard)
+        for video, detection in zip(videos, detections)
+    )
     values = [
         video.season_episode_number
         for video in videos
@@ -213,16 +255,20 @@ def summarize_title_numbering(videos: list[Video]) -> TitleNumberingSummary:
     ))
     return TitleNumberingSummary(
         total=len(videos),
+        standard_total=standard_total,
         numbered=len(values),
+        unknown=unknown,
+        nonstandard=nonstandard,
         episode_min=episode_min,
         episode_max=episode_max,
         gaps=gaps,
         duplicate_numbers=duplicates,
+        supplemental=supplemental,
     )
 
 
 def collection_requires_numbering_review(collection: CatalogCollection) -> bool:
     return any(
-        summarize_title_numbering(list(title.videos)).requires_review
+        summarize_title_numbering(list(title.videos), title).requires_review
         for title in collection.titles
     )
