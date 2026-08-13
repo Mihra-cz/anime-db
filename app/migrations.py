@@ -12,7 +12,9 @@ from .catalog import (
 from .database import Base
 from .hierarchy import derive_library_hierarchy
 from .hierarchy_review import (
-    collection_requires_review, definition_from_title, extract_local_period_hint,
+    PROBABLE_GROUPING_REVIEW_REASON, SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
+    collection_requires_review,
+    definition_from_title, extract_local_period_hint,
     manual_split_titles, preview_assignments,
 )
 from .models import (
@@ -147,6 +149,15 @@ def migrate_schema(engine) -> None:
         for identity in identities_by_title_path.values():
             if identity.title.relative_root_path == ROOT_FOLDER:
                 continue
+            part = identity.title
+            title = titles.get(part.relative_root_path)
+            if (
+                title is not None
+                and title.hierarchy_manual_override
+                and title.catalog_collection_id is not None
+            ):
+                used_titles.add(title)
+                continue
             collection_identity = identity.collection
             collection = collections.get(collection_identity.relative_root_path)
             if collection is None:
@@ -158,7 +169,6 @@ def migrate_schema(engine) -> None:
                 session.add(collection)
                 session.flush()
                 collections[collection.relative_root_path] = collection
-            part = identity.title
             title = titles.get(part.relative_root_path)
             if title is None:
                 title = CatalogTitle(
@@ -191,11 +201,22 @@ def migrate_schema(engine) -> None:
                     videos_by_collection.setdefault(assigned_collection.id, []).append(video)
                 continue
             identity = hierarchy[video.relative_path]
-            title = titles[identity.title.relative_root_path]
-            collection = collections[identity.collection.relative_root_path]
+            automatic_title = titles[identity.title.relative_root_path]
+            title = (
+                video.catalog_title
+                if video.catalog_title is not None
+                and video.catalog_title.hierarchy_manual_override
+                and video.catalog_title.collection is not None
+                else automatic_title
+            )
+            collection = (
+                title.collection
+                if title.hierarchy_manual_override and title.collection is not None
+                else collections[identity.collection.relative_root_path]
+            )
             video.catalog_collection_id = collection.id
             videos_by_collection.setdefault(collection.id, []).append(video)
-            if not manual_split_titles(collection):
+            if title.hierarchy_manual_override or not manual_split_titles(collection):
                 video.catalog_title_id = title.id
 
         for collection in collections.values():
@@ -236,7 +257,32 @@ def migrate_schema(engine) -> None:
                         collection.hierarchy_verified_at or utc_now()
                     )
                 continue
-            reason = collection_requires_review(collection, collection_videos)
+            probable_named_grouping = any(
+                not is_root_video(video)
+                and hierarchy[video.relative_path].title.detection_reason
+                == "related_named_child"
+                and (
+                    video.catalog_title is None
+                    or not video.catalog_title.hierarchy_manual_override
+                )
+                for video in collection_videos
+            )
+            supplementary_context_review = any(
+                not is_root_video(video)
+                and hierarchy[video.relative_path].title.detection_reason
+                == "supplementary_named_child"
+                and (
+                    video.catalog_title is None
+                    or not video.catalog_title.hierarchy_manual_override
+                )
+                for video in collection_videos
+            )
+            reason = collection_requires_review(collection, collection_videos) or (
+                PROBABLE_GROUPING_REVIEW_REASON if probable_named_grouping else None
+            ) or (
+                SUPPLEMENTARY_CONTEXT_REVIEW_REASON
+                if supplementary_context_review else None
+            )
             if collection.hierarchy_status != "verified":
                 collection.hierarchy_status = "review_required" if reason else "automatic"
                 collection.hierarchy_note = reason

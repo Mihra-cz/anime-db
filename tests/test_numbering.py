@@ -316,7 +316,7 @@ def test_classified_fractional_recap_is_resolved_without_entering_completeness()
     assert summary.requires_review is False
 
 
-def test_numbered_ova_shows_range_but_does_not_use_season_completeness():
+def test_numbered_ova_keeps_sequence_outside_standard_completeness():
     title = CatalogTitle(
         local_title="OVA – Serie 2", normalized_local_title="ova serie 2",
         relative_root_path="Anime/Show/.catalog-part-2", part_type_manual="ova",
@@ -330,10 +330,160 @@ def test_numbered_ova_shows_range_but_does_not_use_season_completeness():
     recalculate_title_numbering(title, items)
     summary = summarize_title_numbering(items, title)
 
-    assert (summary.numbered, summary.standard_total) == (2, 2)
-    assert (summary.episode_min, summary.episode_max) == (1, 2)
+    assert (summary.numbered, summary.standard_total) == (0, 0)
+    assert (summary.episode_min, summary.episode_max) == (None, None)
     assert summary.supplemental is True
     assert summary.requires_review is False
+    assert [video.season_episode_number for video in items] == [None, None]
+
+
+def test_standard_episode_and_ova_sequence_do_not_form_duplicate_group():
+    title = CatalogTitle(
+        id=1, local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", part_type="season", season_number=1,
+    )
+    videos = [
+        Video(
+            id=1, relative_path="Anime/Show/Season 1/Title - 01.mkv",
+            root_folder="Anime", filename="Title - 01.mkv", size=1, mtime_ns=1,
+            catalog_title=title,
+        ),
+        Video(
+            id=2, relative_path="Anime/Show/Season 1/Title - OVA 01.mkv",
+            root_folder="Anime", filename="Title - OVA 01.mkv", size=1, mtime_ns=1,
+            catalog_title=title,
+        ),
+    ]
+    recalculate_title_numbering(title, videos)
+
+    assert [video.season_episode_number for video in videos] == [1, None]
+    assert unresolved_duplicate_groups(videos) == ()
+    assert summarize_title_numbering(videos, title).standard_total == 1
+
+
+def test_stale_supplementary_episode_value_is_ignored_by_read_only_summary():
+    title = CatalogTitle(
+        id=1, local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", part_type="season", season_number=1,
+    )
+    videos = [
+        Video(
+            id=1, relative_path="Anime/Show/Season 1/Title - 01.mkv",
+            root_folder="Anime", filename="Title - 01.mkv", size=1, mtime_ns=1,
+            local_episode_number=1, season_episode_number=1, catalog_title=title,
+        ),
+        Video(
+            id=2, relative_path="Anime/Show/Season 1/Title - Special 01.mkv",
+            root_folder="Anime", filename="Title - Special 01.mkv", size=1, mtime_ns=1,
+            local_episode_number=1, season_episode_number=1, catalog_title=title,
+        ),
+    ]
+
+    summary = summarize_title_numbering(videos, title)
+
+    assert (summary.standard_total, summary.numbered) == (1, 1)
+    assert summary.duplicate_numbers == ()
+    assert summary.resolved_supplemental == 1
+
+
+def _supplementary_video(identifier, path, filename, title):
+    return Video(
+        id=identifier, relative_path=path, root_folder="Anime", filename=filename,
+        size=identifier, mtime_ns=1, catalog_title=title,
+        catalog_collection=title.collection,
+        catalog_title_id=title.id, catalog_collection_id=title.collection.id,
+    )
+
+
+def test_supplementary_duplicate_identity_respects_subtype_and_season_context():
+    collection = CatalogCollection(
+        id=1, local_title="High School DxD", normalized_local_title="high school dxd",
+        relative_root_path="Anime/High School DxD",
+    )
+    nc = CatalogTitle(
+        id=1, collection=collection, local_title="NC", normalized_local_title="nc",
+        relative_root_path="Anime/High School DxD/NC", part_type="bonus",
+    )
+    videos = [
+        _supplementary_video(
+            1, "Anime/High School DxD/NC/Season 2/OP 02.mkv", "OP 02.mkv", nc,
+        ),
+        _supplementary_video(
+            2, "Anime/High School DxD/NC/Season 3/OP 02.mkv", "OP 02.mkv", nc,
+        ),
+        _supplementary_video(
+            3, "Anime/High School DxD/NC/Season 2/ED 02.mkv", "ED 02.mkv", nc,
+        ),
+    ]
+
+    assert unresolved_duplicate_groups(videos) == ()
+
+
+def test_two_physical_copies_of_same_supplementary_identity_are_candidate_duplicate():
+    collection = CatalogCollection(
+        id=1, local_title="High School DxD", normalized_local_title="high school dxd",
+        relative_root_path="Anime/High School DxD",
+    )
+    nc = CatalogTitle(
+        id=1, collection=collection, local_title="NC – S2", normalized_local_title="nc s2",
+        relative_root_path="Anime/High School DxD/NC/Season 2", part_type="bonus",
+        season_number=2, season_label="S2",
+    )
+    videos = [
+        _supplementary_video(
+            1, "Anime/High School DxD/NC/Season 2/release-a/OP 01.mkv", "OP 01.mkv", nc,
+        ),
+        _supplementary_video(
+            2, "Anime/High School DxD/NC/Season 2/release-b/OP 01.mkv", "OP 01.mkv", nc,
+        ),
+    ]
+
+    groups = unresolved_duplicate_groups(videos)
+
+    assert len(groups) == 1
+    assert groups[0].display_label == "OP 01 · S2"
+    assert groups[0].videos == tuple(videos)
+
+    set_duplicate_group_primary(videos, videos[0])
+
+    confirmed = confirmed_duplicate_groups(videos)
+    assert len(confirmed) == 1
+    assert confirmed[0].display_label == "OP 01 · S2"
+    assert confirmed[0].primary is videos[0]
+
+
+def test_specials_filename_prefix_maps_to_existing_season_title_context():
+    collection = CatalogCollection(
+        id=1, local_title="High School DxD", normalized_local_title="high school dxd",
+        relative_root_path="Anime/High School DxD",
+    )
+    born = CatalogTitle(
+        id=1, collection=collection, local_title="High School DxD Born (J15)",
+        normalized_local_title="high school dxd born j15",
+        relative_root_path="Anime/High School DxD/Born", part_type="season",
+        season_number=3, season_label="S3",
+    )
+    specials = CatalogTitle(
+        id=2, collection=collection, local_title="Specials",
+        normalized_local_title="specials",
+        relative_root_path="Anime/High School DxD/Specials", part_type="special",
+    )
+    videos = [
+        _supplementary_video(
+            1, "Anime/High School DxD/Specials/Born A.mkv",
+            "High School DxD Born - Special 01.mkv", specials,
+        ),
+        _supplementary_video(
+            2, "Anime/High School DxD/Specials/Born B.mkv",
+            "High School DxD Born - Special 01.mkv", specials,
+        ),
+    ]
+
+    groups = unresolved_duplicate_groups(videos)
+
+    assert len(groups) == 1
+    assert groups[0].display_label == "Special 01 · S3"
+    assert born.id == 1
 
 
 def _bungo_duplicate_videos():

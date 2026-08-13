@@ -65,6 +65,15 @@ pytest
 - Selhání jednoho souboru se zaloguje a sken pokračuje. Smazané či přesunuté soubory se odstraní pouze z databázového indexu.
 - Překročení timeoutu `ffprobe` označí pouze daný soubor jako chybu; jeho předchozí databázový záznam zůstane zachovaný.
 - Dostupnost knihovny se kontroluje před skenem, průběžně a znovu před mazací fází. Výpadek vyvolá rollback celého skenu.
+- Logická hierarchie používá `CatalogCollection -> CatalogTitle -> Video`: collection je hlavní anime, title je season, film, OVA nebo doplňková část.
+- `Season 1`, `Season 2`, `OVA`, `Specials`, `NC`, `OP`, `ED`, `Movies`, `Bonus` a podobné child složky pod zjevným anime rootem nevytvářejí samostatné hlavní collections.
+- Hierarchy Review umí bez přesunu souborů vytvořit hlavní collection, přesunout do ní celé CatalogTitle a později rozhodnutí změnit. Ruční assignment má před scannerem přednost.
+- Nejasná příbuznost collections se pouze navrhne ke kontrole. Volba „Ponechat samostatně“ je persistentní pro konkrétní stav návrhu.
+- Collection merge neřeší fyzické duplicity; ty zůstávají ve vlastním duplicate workflow.
+- Explicitní filename suffixy `OVA 01`, `Special 01`, `OP 02`, `ED 02`, `NCOP 01` a `NCED 01` mají přednost před obecným číslem epizody. Jejich pořadí se zobrazuje jako supplementary sequence a nevstupuje do standardní season completeness.
+- Duplicate identita doplňků zahrnuje subtype i bezpečně známý season/name context. Hierarchy Review umí jednotlivé video bez změny cesty přesunout do nové nebo existující OVA/Special/NC části.
+- Prázdný CatalogTitle lze po explicitním potvrzení odstranit spolu s jeho vlastněnými DB metadata záznamy; CatalogCollection se tím nikdy nemaže automaticky.
+- Prázdné CatalogCollection lze odstranit jednotlivě nebo hromadně. Server jejich prázdnost ověřuje z databáze znovu a neprázdné položky bezpečně přeskočí.
 
 ## Aktualizace databáze
 

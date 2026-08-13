@@ -15,6 +15,8 @@ from app.catalog import (
 from app.hierarchy import derive_library_hierarchy
 from app.hierarchy_review import (
     CONFIRMED_DUPLICATES_REVIEW_REASON, MISSING_DUPLICATE_PRIMARY_REVIEW_REASON,
+    PROBABLE_GROUPING_REVIEW_REASON,
+    SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
     collection_requires_review, definition_from_title, extract_local_period_hint,
     manual_split_titles, preview_assignments,
 )
@@ -313,14 +315,6 @@ def _scan_library(
         value.relative_root_path: value
         for value in session.scalars(select(CatalogTitle)).all()
     }
-    videos_by_collection_path: dict[str, list[Video]] = {}
-    for video in current_videos:
-        if is_root_video(video):
-            continue
-        identity = hierarchy[video.relative_path]
-        videos_by_collection_path.setdefault(
-            identity.collection.relative_root_path, []
-        ).append(video)
     for video in current_videos:
         if is_root_video(video):
             meaningful_collection = meaningful_root_collection(video)
@@ -337,6 +331,28 @@ def _scan_library(
             continue
         identity = hierarchy[video.relative_path]
         collection_data, title_data = identity.collection, identity.title
+        assigned_manual_title = (
+            video.catalog_title
+            if video.catalog_title is not None
+            and video.catalog_title.hierarchy_manual_override
+            and video.catalog_title.collection is not None
+            else None
+        )
+        path_title = titles.get(title_data.relative_root_path)
+        reassigned_path_title = (
+            path_title
+            if path_title is not None
+            and path_title.hierarchy_manual_override
+            and path_title.collection is not None
+            and path_title.collection.relative_root_path
+            != collection_data.relative_root_path
+            else None
+        )
+        existing_title = assigned_manual_title or reassigned_path_title
+        if existing_title is not None:
+            video.catalog_title = existing_title
+            video.catalog_collection = existing_title.collection
+            continue
         collection = collections.get(collection_data.relative_root_path)
         if collection is None:
             collection = CatalogCollection(
@@ -372,6 +388,13 @@ def _scan_library(
                 if title_data.part_type in {"part", "cour"} else None
             )
         video.catalog_title = catalog_title
+    session.flush()
+    videos_by_collection_path: dict[str, list[Video]] = {}
+    for video in current_videos:
+        if not is_root_video(video) and video.catalog_collection is not None:
+            videos_by_collection_path.setdefault(
+                video.catalog_collection.relative_root_path, []
+            ).append(video)
     for path, collection_videos in videos_by_collection_path.items():
         collection = collections[path]
         collection.local_period_hint = extract_local_period_hint(collection.local_title)
@@ -417,7 +440,29 @@ def _scan_library(
                     None if reason else collection.hierarchy_verified_at or utc_now()
                 )
             continue
-        reason = collection_requires_review(collection, collection_videos)
+        probable_named_grouping = any(
+            hierarchy[video.relative_path].title.detection_reason == "related_named_child"
+            and (
+                video.catalog_title is None
+                or not video.catalog_title.hierarchy_manual_override
+            )
+            for video in collection_videos
+        )
+        supplementary_context_review = any(
+            hierarchy[video.relative_path].title.detection_reason
+            == "supplementary_named_child"
+            and (
+                video.catalog_title is None
+                or not video.catalog_title.hierarchy_manual_override
+            )
+            for video in collection_videos
+        )
+        reason = collection_requires_review(collection, collection_videos) or (
+            PROBABLE_GROUPING_REVIEW_REASON if probable_named_grouping else None
+        ) or (
+            SUPPLEMENTARY_CONTEXT_REVIEW_REASON
+            if supplementary_context_review else None
+        )
         if collection.hierarchy_status != "verified":
             collection.hierarchy_status = "review_required" if reason else "automatic"
             collection.hierarchy_note = reason

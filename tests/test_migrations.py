@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.migrations import migrate_schema
 from app.database import Base
 from app.models import (
-    CatalogCollection, CatalogTitle, ExternalTitleLink, InternalSubtitle,
+    CatalogCollection, CatalogTitle, CollectionGroupingDecision, ExternalTitleLink, InternalSubtitle,
     TitleMetadata, Video,
 )
 
@@ -52,6 +52,8 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
 
     migrate_schema(engine)
 
+    assert "collection_grouping_decisions" in inspect(engine).get_table_names()
+
     assert [
         column["name"] for column in inspect(engine).get_columns("videos")
     ].count("content_type_manual") == 1
@@ -82,6 +84,9 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         assert session.scalar(select(InternalSubtitle.language)) == "unknown"
         assert session.scalar(select(InternalSubtitle.normalized_language)) == "eng"
         video.content_type_manual = "recap"
+        session.add(CollectionGroupingDecision(
+            suggestion_key="test", state_fingerprint="state", decision="separate",
+        ))
         session.commit()
 
     migrate_schema(engine)
@@ -93,6 +98,7 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
     with Session(engine) as session:
         video = session.scalar(select(Video))
         assert video.content_type_manual == "recap"
+        assert session.scalar(select(CollectionGroupingDecision)).decision == "separate"
         assert (
             video.relative_path, video.filename, video.size, video.mtime_ns,
             video.duration, video.video_codec, video.width, video.height,

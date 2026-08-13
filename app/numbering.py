@@ -4,7 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .catalog import detect_episode_number, natural_sort_key
+from .catalog import detect_episode_number, natural_sort_key, normalize_title
 from .models import CatalogCollection, CatalogTitle, Video
 
 NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
@@ -55,6 +55,20 @@ class EpisodeDuplicateGroup:
     episode_number: int
     videos: tuple[Video, ...]
     primary: Video | None = None
+    supplementary_type: str | None = None
+    context_label: str | None = None
+
+    @property
+    def display_label(self) -> str:
+        if self.supplementary_type:
+            label = {
+                "ova": "OVA", "special": "Special", "ncop": "NCOP", "nced": "NCED",
+                "op": "OP", "ed": "ED", "preview": "Preview", "recap": "Recap",
+                "bonus": "Bonus",
+            }.get(self.supplementary_type, self.supplementary_type.upper())
+            context = f" · {self.context_label}" if self.context_label else ""
+            return f"{label} {self.episode_number:02d}{context}"
+        return f"E{self.episode_number:02d}"
 
     @property
     def duplicate_copies(self) -> tuple[Video, ...]:
@@ -69,23 +83,138 @@ def is_nonprimary_duplicate_video(video: Video) -> bool:
     return is_confirmed_duplicate(video) or video.duplicate_primary_missing
 
 
-def unresolved_duplicate_groups(videos: list[Video]) -> tuple[EpisodeDuplicateGroup, ...]:
-    by_number: dict[int, list[Video]] = {}
+@dataclass(frozen=True)
+class VideoNumberingIdentity:
+    kind: str
+    number: int
+    supplementary_type: str | None = None
+    context_key: str | None = None
+    context_label: str | None = None
+    context_season_number: int | None = None
+
+
+def _normalized_context_name(value: str) -> str:
+    return normalize_title(value.rsplit("(", 1)[0].strip())
+
+
+def supplementary_context_map(videos: list[Video]) -> dict[str, list[CatalogTitle]]:
+    titles: dict[int, CatalogTitle] = {}
     for video in videos:
-        if (
-            video.season_episode_number is not None
-            and not video.content_type_manual
-            and not is_confirmed_duplicate(video)
+        collection = (
+            video.catalog_title.collection if video.catalog_title is not None
+            else video.catalog_collection
+        )
+        if collection is not None:
+            titles.update({title.id: title for title in collection.titles})
+    by_name: dict[str, list[CatalogTitle]] = {}
+    for title in titles.values():
+        for name in {
+            normalize_title(title.local_title), _normalized_context_name(title.local_title),
+            normalize_title(title.manual_display_title or ""),
+        } - {""}:
+            by_name.setdefault(name, []).append(title)
+    return by_name
+
+
+def video_numbering_identity(
+    video: Video, *, title_names: dict[str, list[CatalogTitle]] | None = None,
+) -> VideoNumberingIdentity | None:
+    detection = detect_episode_number(video.filename)
+    if detection.is_supplementary and detection.supplementary_number is not None:
+        title_names = title_names or supplementary_context_map([video])
+        hint = normalize_title(detection.context_hint or "")
+        matched = title_names.get(hint, []) if hint else []
+        current_title = video.catalog_title
+        current_collection = (
+            current_title.collection if current_title is not None
+            else video.catalog_collection
+        )
+        collection_names = {
+            normalize_title(current_collection.local_title),
+            normalize_title(current_collection.manual_display_title or ""),
+        } - {""} if current_collection is not None else set()
+        if len(matched) == 1:
+            context_title = matched[0]
+            context_key = f"title:{context_title.id}"
+            context_label = context_title.effective_season_label or context_title.local_title
+            context_season_number = context_title.effective_season_number
+        elif (
+            hint and hint in collection_names and current_title is not None
+            and (
+                current_title.effective_season_number is not None
+                or current_title.effective_season_label
+            )
         ):
-            by_number.setdefault(video.season_episode_number, []).append(video)
+            context_key = f"title:{current_title.id}"
+            context_label = (
+                current_title.effective_season_label
+                or f"S{current_title.effective_season_number}"
+            )
+            context_season_number = current_title.effective_season_number
+        elif hint:
+            context_key, context_label = f"name:{hint}", detection.context_hint
+            context_season_number = None
+        else:
+            context_title = current_title
+            if context_title is not None and (
+                context_title.effective_season_number is not None
+                or context_title.effective_season_label
+            ):
+                context_key = f"title:{context_title.id}"
+                context_label = (
+                    context_title.effective_season_label
+                    or f"S{context_title.effective_season_number}"
+                )
+                context_season_number = context_title.effective_season_number
+            else:
+                parent = str(video.relative_path.rsplit("/", 1)[0])
+                parent_name = parent.rsplit("/", 1)[-1]
+                context_key = f"path:{normalize_title(parent)}"
+                context_label = (
+                    parent_name
+                    if normalize_title(parent_name) not in {
+                        "nc", "ncop", "nced", "op", "ed", "ova", "oad",
+                        "special", "specials", "bonus", "bonuses", "extras",
+                    }
+                    else None
+                )
+                context_season_number = None
+        return VideoNumberingIdentity(
+            "supplementary", detection.supplementary_number,
+            detection.supplementary_type, context_key, context_label,
+            context_season_number,
+        )
+    if video.season_episode_number is not None and not video.content_type_manual:
+        return VideoNumberingIdentity("standard", video.season_episode_number)
+    return None
+
+
+def unresolved_duplicate_groups(videos: list[Video]) -> tuple[EpisodeDuplicateGroup, ...]:
+    by_identity: dict[VideoNumberingIdentity, list[Video]] = {}
+    title_names = supplementary_context_map(videos)
+    for video in videos:
+        identity = video_numbering_identity(video, title_names=title_names)
+        if identity is not None and not is_confirmed_duplicate(video):
+            by_identity.setdefault(identity, []).append(video)
     return tuple(
-        EpisodeDuplicateGroup(number, tuple(sorted(items, key=deterministic_video_order_key)))
-        for number, items in sorted(by_number.items()) if len(items) > 1
+        EpisodeDuplicateGroup(
+            identity.number, tuple(sorted(items, key=deterministic_video_order_key)),
+            supplementary_type=identity.supplementary_type,
+            context_label=identity.context_label,
+        )
+        for identity, items in sorted(
+            by_identity.items(),
+            key=lambda item: (
+                item[0].kind, item[0].supplementary_type or "",
+                item[0].context_key or "", item[0].number,
+            ),
+        ) if len(items) > 1
     )
 
 
 def confirmed_duplicate_groups(videos: list[Video]) -> tuple[EpisodeDuplicateGroup, ...]:
     videos_by_id = {video.id: video for video in videos if video.id is not None}
+    title_names = supplementary_context_map(videos)
     copies_by_primary: dict[Video, list[Video]] = {}
     for video in videos:
         primary = video.duplicate_of
@@ -96,8 +225,12 @@ def confirmed_duplicate_groups(videos: list[Video]) -> tuple[EpisodeDuplicateGro
     groups = []
     for primary, copies in copies_by_primary.items():
         members = tuple(sorted([primary, *copies], key=deterministic_video_order_key))
+        identity = video_numbering_identity(primary, title_names=title_names)
         groups.append(EpisodeDuplicateGroup(
-            primary.season_episode_number or 0, members, primary=primary,
+            identity.number if identity else primary.season_episode_number or 0,
+            members, primary=primary,
+            supplementary_type=identity.supplementary_type if identity else None,
+            context_label=identity.context_label if identity else None,
         ))
     return tuple(sorted(groups, key=lambda group: (group.episode_number, group.primary.id or 0)))
 
@@ -110,11 +243,14 @@ def set_duplicate_group_primary(videos: list[Video], primary: Video) -> None:
         raise ValueError("Skupina duplicity musí obsahovat primární video a alespoň jednu kopii.")
     title_ids = {video.catalog_title_id for video in members}
     collection_ids = {video.catalog_collection_id for video in members}
-    episode_numbers = {video.season_episode_number for video in members}
+    title_names = supplementary_context_map(list(members))
+    identities = {
+        video_numbering_identity(video, title_names=title_names) for video in members
+    }
     if len(title_ids) != 1 or None in title_ids or len(collection_ids) != 1:
         raise ValueError("Duplicitní videa musí patřit do stejné části a kolekce.")
-    if len(episode_numbers) != 1 or None in episode_numbers:
-        raise ValueError("Duplicitní videa musí mít stejné známé číslo epizody.")
+    if len(identities) != 1 or None in identities:
+        raise ValueError("Duplicitní videa musí mít stejnou známou logickou identitu.")
     for video in members:
         video.duplicate_of = None
         video.duplicate_primary_missing = False
@@ -152,7 +288,11 @@ def recalculate_title_numbering(
     external_linked: bool | None = None,
 ) -> None:
     detections = [detect_episode_number(video.filename) for video in videos]
-    detected = [item.number if item.is_standard else None for item in detections]
+    title_is_supplemental = title.effective_part_type in SUPPLEMENTAL_PART_TYPES
+    detected = [
+        item.number if item.is_standard and not title_is_supplemental else None
+        for item in detections
+    ]
     effective_values = [
         video.episode_number_manual_override
         if video.episode_number_manual_override is not None else local
@@ -182,11 +322,16 @@ def recalculate_title_numbering(
             video.season_episode_number = None
             video.absolute_episode_number = None
             video.external_episode_number = None
-            video.episode_number_source = {
+            video.episode_number_source = (
+                f"supplementary_{detection.supplementary_type}"
+                if detection.is_supplementary else {
                 "zero": "nonstandard_zero",
                 "fractional": "fractional",
-            }.get(detection.kind, "unknown")
-            video.episode_number_confidence = 0.95 if detection.is_nonstandard else None
+                }.get(detection.kind, "unknown")
+            )
+            video.episode_number_confidence = (
+                0.95 if detection.is_nonstandard or detection.is_supplementary else None
+            )
             continue
         is_manual = video.episode_number_manual_override is not None
         if title.numbering_mode == "absolute":
@@ -330,31 +475,33 @@ def summarize_title_numbering(
         for video in videos
     ]
     resolved = [
-        bool(video.content_type_manual) and not supplemental for video in videos
+        (bool(video.content_type_manual) or bool(detection and detection.is_supplementary))
+        and not supplemental
+        for video, detection in zip(videos, detections)
     ]
     confirmed_duplicate = [is_nonprimary_duplicate_video(video) for video in videos]
-    standard_total = sum(
+    standard_total = 0 if supplemental else sum(
         not is_resolved and not is_duplicate and (detection is None or detection.is_standard)
         for detection, is_resolved, is_duplicate
         in zip(detections, resolved, confirmed_duplicate)
     )
-    nonstandard = sum(
+    nonstandard = 0 if supplemental else sum(
         not is_resolved and not is_duplicate
         and detection is not None and detection.is_nonstandard
         for detection, is_resolved, is_duplicate
         in zip(detections, resolved, confirmed_duplicate)
     )
-    unknown = sum(
+    unknown = 0 if supplemental else sum(
         not is_resolved and not is_duplicate and video.season_episode_number is None
         and (detection is None or not detection.is_nonstandard)
         for video, detection, is_resolved, is_duplicate
         in zip(videos, detections, resolved, confirmed_duplicate)
     )
-    values = [
+    values = [] if supplemental else [
         video.season_episode_number
-        for video in videos
+        for video, is_resolved in zip(videos, resolved)
         if video.season_episode_number is not None
-        and (supplemental or not video.content_type_manual)
+        and not is_resolved
         and not is_nonprimary_duplicate_video(video)
     ]
     unique_values = set(values)
@@ -372,7 +519,7 @@ def summarize_title_numbering(
         numbered=len(values),
         unknown=unknown,
         nonstandard=nonstandard,
-        resolved_supplemental=sum(resolved),
+        resolved_supplemental=len(videos) if supplemental else sum(resolved),
         episode_min=episode_min,
         episode_max=episode_max,
         gaps=gaps,

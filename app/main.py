@@ -11,7 +11,7 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from .catalog import (
@@ -48,14 +48,16 @@ from .hierarchy_review import (
     PERIOD_HINT_REVIEW_REASON, SIMPLE_DEFINITION_FIELDS,
     apply_manual_split, apply_single_title_confirmation,
     classify_videos_in_place, clear_confirmed_duplicate_videos,
+    collection_grouping_suggestions, create_main_collection,
     confirm_duplicate_groups, confirm_duplicate_videos, create_title_from_videos,
-    delete_empty_local_title,
+    delete_empty_collection, delete_empty_collections, delete_empty_local_title,
     definitions_as_json, definitions_to_json, parse_manual_definitions,
     manual_hierarchy_resolves_ambiguity, merge_title_into, move_videos_to_title,
+    move_titles_to_collection, record_grouping_decision,
     parse_simple_definitions,
     refresh_collection_state,
     preview_assignments, separate_nonstandard_videos, simple_definition_rows,
-    single_title_confirmation_suggestion,
+    single_title_confirmation_suggestion, supplementary_video_suggestions,
 )
 from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
@@ -71,7 +73,7 @@ from .metadata.service import (
 )
 from .models import CatalogCollection, CatalogTitle, ExternalTitleLink, TitleMetadata, Video, utc_now
 from .numbering import (
-    apply_sequential_numbering, collection_requires_numbering_review,
+    apply_sequential_numbering,
     confirmed_duplicate_groups, preview_sequential_numbering,
     recalculate_title_numbering, set_title_numbering, set_video_episode_override,
     summarize_title_numbering, unresolved_duplicate_groups,
@@ -190,7 +192,7 @@ def _hierarchy_video_groups(videos: list[Video]) -> dict[str, list]:
             or video.duplicate_primary_missing
         ):
             duplicates.append({"video": video, "detection": detection})
-        elif video.content_type_manual:
+        elif video.content_type_manual or detection.is_supplementary:
             supplemental.append({"video": video, "detection": detection})
         elif detection.is_nonstandard:
             nonstandard.append({"video": video, "detection": detection})
@@ -734,7 +736,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         videos, normalized_video_sort, normalized_video_direction = sort_title_videos(
             detail_videos, video_sort, video_direction
         )
-        if not videos:
+        if not videos and catalog_title is None:
             raise HTTPException(status_code=404, detail="Série nebyla nalezena")
         def video_sort_url(column: str) -> str:
             return series_state_url(
@@ -753,7 +755,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         context = {
             "filter_name": filter_name,
             "filter_label": FILTER_LABELS[filter_name],
-            "series": determine_parent_series(videos[0].relative_path),
+            "series": determine_parent_series(
+                videos[0].relative_path if videos else
+                f"{catalog_title.relative_root_path}/.empty-title"
+            ),
             "catalog_title": catalog_title,
             "metadata_status_labels": METADATA_STATUS_LABELS,
             "metadata_candidates": [], "metadata_error": metadata_error,
@@ -774,6 +779,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 default_metadata_search_query(catalog_title) if catalog_title else ""
             ),
             "videos": videos,
+            "title_is_empty": bool(catalog_title and not title_candidates),
+            "title_owned_metadata_count": (
+                bool(catalog_title.metadata_record)
+                + len(catalog_title.external_links)
+                + len(catalog_title.metadata_candidates)
+                + len(catalog_title.artwork)
+                if catalog_title else 0
+            ),
             "catalog_title_display_title": catalog_title_display_title,
             "catalog_title_series_label": catalog_title_series_label,
             "subtitle_track_display": subtitle_track_display,
@@ -949,7 +962,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     })
             episode_numbers = [
                 number for video in videos
-                if (number := video.local_episode_number or derive_episode_number(video.filename))
+                if not video.content_type_manual
+                and not detect_episode_number(video.filename).is_supplementary
+                and (number := video.local_episode_number or derive_episode_number(video.filename))
                 is not None
             ]
             external_candidates = [
@@ -986,12 +1001,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ),
                     "can_delete": bool(
                         not title.videos
-                        and title.hierarchy_manual_override
-                        and "/.catalog-part-" in title.relative_root_path
-                        and title.metadata_record is None
-                        and not title.external_links
-                        and not title.metadata_candidates
-                        and not title.artwork
+                    ),
+                    "owned_metadata_count": (
+                        bool(title.metadata_record)
+                        + len(title.external_links)
+                        + len(title.metadata_candidates)
+                        + len(title.artwork)
                     ),
                 })
             numbering_unknown = sum(
@@ -1012,6 +1027,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 video for video in videos if video.catalog_title_id is None
             ])
             part_confirmation = single_title_confirmation_suggestion(collection)
+            duplicate_candidate_video_ids = {
+                video.id
+                for item in title_numbering
+                for group in item["unresolved_duplicate_groups"]
+                for video in group.videos
+            }
+            supplementary_suggestions = supplementary_video_suggestions(
+                videos, include_video_ids=duplicate_candidate_video_ids,
+            )
+            supplementary_suggestion_by_video = {
+                suggestion.video.id: suggestion
+                for suggestion in supplementary_suggestions
+            }
+            available_collections = list(session.scalars(select(CatalogCollection).where(
+                CatalogCollection.id != collection.id
+            ).order_by(CatalogCollection.local_title)).all())
             return templates.TemplateResponse(request, "hierarchy_review_detail.html", {
                 "collection": collection, "videos": videos,
                 "episode_min": min(episode_numbers) if episode_numbers else None,
@@ -1026,6 +1057,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "nonstandard_videos": nonstandard_videos,
                 "unassigned_videos": unassigned_videos,
                 "part_confirmation_suggestion": part_confirmation,
+                "supplementary_suggestions": supplementary_suggestions,
+                "supplementary_suggestion_by_video": supplementary_suggestion_by_video,
+                "available_collections": available_collections,
                 "duplicate_video_details": {
                     video.id: _duplicate_video_details(video) for video in videos
                 },
@@ -1034,13 +1068,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             })
 
     @app.get("/hierarchy-review", response_class=HTMLResponse)
-    def hierarchy_review_list(request: Request):
+    def hierarchy_review_list(request: Request, message: str | None = None):
         with sessions() as session:
             collections = list(session.scalars(select(CatalogCollection).options(
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
-                selectinload(CatalogCollection.videos),
             ).order_by(CatalogCollection.local_title)).all())
+            video_counts = dict(session.execute(
+                select(Video.catalog_collection_id, func.count(Video.id))
+                .where(Video.catalog_collection_id.is_not(None))
+                .group_by(Video.catalog_collection_id)
+            ).all())
             rows = []
             for collection in collections:
                 summaries = [
@@ -1050,14 +1088,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 numbering_unknown = sum(summary.unknown for summary in summaries)
                 if (
                     collection.hierarchy_status in {"review_required", "conflict"}
-                    or collection_requires_numbering_review(collection)
+                    or any(summary.requires_review for summary in summaries)
                 ):
                     rows.append({
                         "collection": collection,
                         "numbering_unknown": numbering_unknown,
+                        "video_count": video_counts.get(collection.id, 0),
                     })
+            suggestions = collection_grouping_suggestions(
+                session, collections=collections,
+            )
+            selectable_collections = collections
+            empty_collections = [
+                collection for collection in collections
+                if not collection.titles and not video_counts.get(collection.id, 0)
+            ]
         return templates.TemplateResponse(request, "hierarchy_review.html", {
-            "rows": rows,
+            "rows": rows, "suggestions": suggestions,
+            "selectable_collections": selectable_collections,
+            "empty_collections": empty_collections,
+            "message": message,
         })
 
     @app.get("/hierarchy-review/{collection_id}", response_class=HTMLResponse)
@@ -1065,6 +1115,113 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request, collection_id: int, message: str | None = None,
     ):
         return hierarchy_review_context(request, collection_id, message=message)
+
+    def current_grouping_suggestion(session, key: str):
+        suggestion = next(
+            (item for item in collection_grouping_suggestions(session) if item.key == key),
+            None,
+        )
+        if suggestion is None:
+            raise ValueError("Návrh už neodpovídá aktuálnímu stavu; načtěte přehled znovu.")
+        return suggestion
+
+    @app.post("/hierarchy-review/collections/create")
+    async def hierarchy_review_create_collection(request: Request):
+        form = await request.form()
+        try:
+            title_ids = [int(value) for value in form.getlist("title_ids")]
+            suggestion_key = str(form.get("suggestion_key") or "").strip()
+            with sessions() as session:
+                suggestion = (
+                    current_grouping_suggestion(session, suggestion_key)
+                    if suggestion_key else None
+                )
+                collection = create_main_collection(
+                    session, str(form.get("local_title") or ""), title_ids,
+                )
+                if suggestion is not None:
+                    record_grouping_decision(session, suggestion, "merged")
+                session.commit()
+                collection_id = collection.id
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = "Hlavní collection byla vytvořena a vybrané části logicky přesunuty."
+        return RedirectResponse(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}",
+            status_code=303,
+        )
+
+    @app.post("/hierarchy-review/collections/move")
+    async def hierarchy_review_move_titles(request: Request):
+        form = await request.form()
+        try:
+            title_ids = [int(value) for value in form.getlist("title_ids")]
+            target_id = int(str(form.get("target_collection_id") or ""))
+            suggestion_key = str(form.get("suggestion_key") or "").strip()
+            with sessions() as session:
+                suggestion = (
+                    current_grouping_suggestion(session, suggestion_key)
+                    if suggestion_key else None
+                )
+                move_titles_to_collection(session, target_id, title_ids)
+                if suggestion is not None:
+                    record_grouping_decision(session, suggestion, "merged")
+                session.commit()
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = "Vybrané CatalogTitle byly přesunuty; fyzické cesty zůstaly beze změny."
+        return RedirectResponse(
+            f"/hierarchy-review/{target_id}?{urlencode({'message': message})}",
+            status_code=303,
+        )
+
+    @app.post("/hierarchy-review/grouping/keep-separate")
+    def hierarchy_review_keep_grouping_separate(suggestion_key: str = Form(...)):
+        with sessions() as session:
+            try:
+                suggestion = current_grouping_suggestion(session, suggestion_key)
+                record_grouping_decision(session, suggestion, "separate")
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse("/hierarchy-review", status_code=303)
+
+    @app.post("/hierarchy-review/collections/delete-empty")
+    def hierarchy_review_delete_empty_collection(
+        collection_id: int = Form(...), confirm_delete: bool = Form(False),
+    ):
+        if not confirm_delete:
+            raise HTTPException(status_code=400, detail="Odstranění je nutné potvrdit.")
+        with sessions() as session:
+            try:
+                delete_empty_collection(session, collection_id)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse("/hierarchy-review", status_code=303)
+
+    @app.post("/hierarchy-review/collections/delete-empty-bulk")
+    async def hierarchy_review_delete_empty_collections(request: Request):
+        form = await request.form()
+        if str(form.get("confirm_delete") or "").casefold() not in {"true", "on", "1"}:
+            raise HTTPException(
+                status_code=400, detail="Hromadné odstranění je nutné potvrdit."
+            )
+        try:
+            collection_ids = [int(value) for value in form.getlist("collection_ids")]
+            with sessions() as session:
+                result = delete_empty_collections(session, collection_ids)
+                session.commit()
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        deleted = ", ".join(name for _, name in result.deleted) or "žádné"
+        skipped = ", ".join(name for _, name in result.skipped) or "žádné"
+        message = f"Odstraněné collections: {deleted}. Přeskočené: {skipped}."
+        return RedirectResponse(
+            f"/hierarchy-review?{urlencode({'message': message})}", status_code=303,
+        )
 
     def metadata_review_context(request: Request, status: str = "without", batch_result=None):
         allowed = {"without", "pending", "manual", "conflict", "missing-artwork", "low-score"}
@@ -1273,10 +1430,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                     message = "Videa byla logicky přesunuta do existující části."
                 elif operation == "create":
+                    raw_season = str(form.get("season_number") or "").strip()
                     create_title_from_videos(
                         session, collection_id, video_ids,
                         local_title=str(form.get("local_title") or ""),
                         part_type=str(form.get("part_type") or ""),
+                        season_number=int(raw_season) if raw_season else None,
+                        season_label=str(form.get("season_label") or ""),
                     )
                     message = "Byla vytvořena nová logická část a vybraná videa do ní přesunuta."
                 else:
@@ -1401,6 +1561,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return RedirectResponse(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}",
             status_code=303,
+        )
+
+    @app.post("/titles/{catalog_title_id}/delete-empty")
+    def title_delete_empty(
+        catalog_title_id: int, confirm_delete: bool = Form(False),
+    ):
+        if not confirm_delete:
+            raise HTTPException(
+                status_code=400, detail="Odstranění prázdné části je nutné potvrdit."
+            )
+        with sessions() as session:
+            title = session.get(CatalogTitle, catalog_title_id)
+            if title is None:
+                raise HTTPException(status_code=404, detail="Část nebyla nalezena.")
+            collection_id = title.catalog_collection_id
+            if collection_id is None:
+                raise HTTPException(
+                    status_code=400, detail="Část není přiřazena ke collection."
+                )
+            try:
+                delete_empty_local_title(session, collection_id, catalog_title_id)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = "Prázdná část byla odstraněna pouze z databáze."
+        return RedirectResponse(
+            f"/hierarchy-review?{urlencode({'message': message})}", status_code=303,
         )
 
     @app.post("/hierarchy-review/{collection_id}/numbering-preview", response_class=HTMLResponse)

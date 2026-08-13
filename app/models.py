@@ -170,6 +170,24 @@ class CatalogTitle(Base):
         return self.sort_order
 
 
+class CollectionGroupingDecision(Base):
+    """Persistentní odpověď na konkrétní, stavově verzovaný grouping návrh."""
+
+    __tablename__ = "collection_grouping_decisions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    suggestion_key: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    state_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    decision: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    __table_args__ = (CheckConstraint(
+        "decision IN ('separate','merged')",
+        name="ck_collection_grouping_decision",
+    ),)
+
+
 class ExternalTitleLink(Base):
     __tablename__ = "external_title_links"
     id: Mapped[int] = mapped_column(primary_key=True)

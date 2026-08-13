@@ -3,14 +3,16 @@ from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine, func, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.catalog import set_manual_hardsub
 from app.hierarchy_review import (
-    MISSING_DUPLICATE_PRIMARY_REVIEW_REASON, confirm_duplicate_videos,
+    MISSING_DUPLICATE_PRIMARY_REVIEW_REASON, SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
+    confirm_duplicate_videos,
 )
 from app.models import CatalogCollection, CatalogTitle, ExternalSubtitle, Video
+from app.numbering import unresolved_duplicate_groups
 from app.scanner import LibrarySafetyError, iter_videos, scan_library
 
 
@@ -175,6 +177,61 @@ def test_scan_preserves_manual_hierarchy_values(tmp_path: Path, monkeypatch):
         assert title.season_label_manual == "S1"
         assert title.part_type_manual == "season"
         assert title.sort_order_manual == 10
+
+
+def test_scan_keeps_ova_beside_season_episode_out_of_standard_numbering(
+    tmp_path: Path, monkeypatch,
+):
+    folder = tmp_path / "High School DxD" / "Season 1"
+    folder.mkdir(parents=True)
+    (folder / "High School DxD - 01.mkv").write_bytes(b"episode")
+    (folder / "High School DxD - OVA 01.mkv").write_bytes(b"ova")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        videos = {
+            video.filename: video for video in session.scalars(select(Video)).all()
+        }
+        title = videos["High School DxD - 01.mkv"].catalog_title
+
+        assert videos["High School DxD - 01.mkv"].season_episode_number == 1
+        assert videos["High School DxD - OVA 01.mkv"].season_episode_number is None
+        assert videos["High School DxD - OVA 01.mkv"].episode_number_source == (
+            "supplementary_ova"
+        )
+        assert unresolved_duplicate_groups(list(title.videos)) == ()
+
+
+def test_scan_splits_nc_named_children_into_reviewable_season_context_titles(
+    tmp_path: Path, monkeypatch,
+):
+    for season_name, filename in (
+        ("High School DxD New", "ED 02.mkv"),
+        ("High School DxD Born", "OP 02.mkv"),
+        ("High School DxD Hero", "OP 02.mkv"),
+    ):
+        path = tmp_path / "High School DxD" / "NC" / season_name / filename
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        collection = session.scalar(select(CatalogCollection))
+
+        assert {title.local_title for title in collection.titles} == {
+            "NC – High School DxD New",
+            "NC – High School DxD Born",
+            "NC – High School DxD Hero",
+        }
+        assert collection.hierarchy_status == "review_required"
+        assert collection.hierarchy_note == SUPPLEMENTARY_CONTEXT_REVIEW_REASON
+        assert all(video.season_episode_number is None for video in collection.videos)
 
 
 def test_updates_language_of_existing_external_subtitle(tmp_path: Path, monkeypatch):

@@ -470,14 +470,29 @@ def test_fractional_episode_is_detected_without_rounding_to_integer():
     assert classify_video("Anime/Title 14.5.mkv") == "other"
 
 
-@pytest.mark.parametrize(("filename", "expected"), [
-    ("Title S2 - OVA P1.mkv", 1),
-    ("Title S2 - OVA P2.mkv", 2),
-    ("Title S2 - OVA P01.mkv", 1),
+@pytest.mark.parametrize(("filename", "supplementary_type", "number", "display"), [
+    ("Title - OVA 01.mkv", "ova", 1, "OVA 01"),
+    ("Title - OVA 02.mkv", "ova", 2, "OVA 02"),
+    ("Title S2 - OVA P2.mkv", "ova", 2, "OVA 02"),
+    ("Title - Special 01.mkv", "special", 1, "Special 01"),
+    ("Title - Special 02.mkv", "special", 2, "Special 02"),
+    ("OP 01.mkv", "op", 1, "OP 01"),
+    ("OP 02.mkv", "op", 2, "OP 02"),
+    ("ED 01.mkv", "ed", 1, "ED 01"),
+    ("ED 02.mkv", "ed", 2, "ED 02"),
+    ("NCOP 01.mkv", "ncop", 1, "NCOP 01"),
+    ("NCED 01.mkv", "nced", 1, "NCED 01"),
 ])
-def test_explicit_trailing_ova_part_is_safe_episode_number(filename, expected):
-    assert derive_episode_number(filename) == expected
-    assert filename_display_title(filename) == "Title S2"
+def test_explicit_supplementary_sequence_is_not_standard_episode(
+    filename, supplementary_type, number, display,
+):
+    detection = detect_episode_number(filename)
+
+    assert detection.is_supplementary
+    assert detection.supplementary_type == supplementary_type
+    assert detection.supplementary_number == number
+    assert detection.display_value == display
+    assert derive_episode_number(filename) is None
 
 
 def test_generic_part_suffix_and_season_hint_are_not_episode_numbers():

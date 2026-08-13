@@ -18,17 +18,18 @@ from app.hierarchy_review import (
     preview_assignments, refresh_collection_state, separate_nonstandard_videos,
     simple_definition_rows,
     single_title_confirmation_suggestion,
+    supplementary_video_suggestions,
 )
 from app.models import (
-    CatalogCollection, CatalogTitle, ExternalTitleLink, InternalSubtitle,
-    TitleMetadata, Video, utc_now,
+    Artwork, CatalogCollection, CatalogTitle, ExternalTitleLink, InternalSubtitle,
+    MetadataCandidate, TitleMetadata, Video, utc_now,
 )
 from app.migrations import migrate_schema
 from app.numbering import (
     apply_sequential_numbering,
     collection_requires_numbering_review as numbering_requires_review,
     set_video_episode_override,
-    summarize_title_numbering,
+    summarize_title_numbering, unresolved_duplicate_groups,
 )
 from app.scanner import scan_library
 
@@ -809,6 +810,82 @@ def test_move_merge_and_explicit_delete_change_only_logical_assignment():
         assert session.get(CatalogTitle, source_id) is None
 
 
+def test_any_empty_title_with_owned_metadata_can_be_deleted_without_orphans(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    cached_cover = tmp_path / "cover.jpg"
+    cached_cover.write_bytes(b"cover stays on disk")
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="High School DxD", normalized_local_title="high school dxd",
+            relative_root_path="Anime/High School DxD",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="High School DxD OVA",
+            normalized_local_title="high school dxd ova",
+            relative_root_path="Anime/High School DxD/OVA",
+            metadata_status="linked_manual",
+        )
+        title.external_links.append(ExternalTitleLink(
+            provider="anilist", external_id="1", match_method="manual_search",
+            is_primary=True, is_manual=True,
+        ))
+        title.metadata_record = TitleMetadata(
+            display_title="High School DxD OVA", metadata_provider="anilist",
+            metadata_external_id="1",
+        )
+        title.metadata_candidates.append(MetadataCandidate(
+            provider="anilist", external_id="2", candidate_title="Candidate",
+        ))
+        title.artwork.append(Artwork(
+            provider="anilist", external_id="1", artwork_type="cover",
+            remote_url="https://example.invalid/cover.jpg",
+            local_path=str(cached_cover), mime_type="image/jpeg", file_size=19,
+        ))
+        session.add(collection)
+        session.commit()
+        collection_id, title_id = collection.id, title.id
+
+        delete_empty_local_title(session, collection_id, title_id)
+        session.commit()
+
+        assert session.get(CatalogTitle, title_id) is None
+        assert session.scalar(select(func.count()).select_from(ExternalTitleLink)) == 0
+        assert session.scalar(select(func.count()).select_from(TitleMetadata)) == 0
+        assert session.scalar(select(func.count()).select_from(MetadataCandidate)) == 0
+        assert session.scalar(select(func.count()).select_from(Artwork)) == 0
+        assert session.get(CatalogCollection, collection_id) is not None
+        assert session.get(CatalogCollection, collection_id).titles == []
+        assert cached_cover.read_bytes() == b"cover stays on disk"
+
+
+def test_empty_title_delete_rechecks_video_count_and_rejects_nonempty_title():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="OVA", normalized_local_title="ova",
+            relative_root_path="Anime/Show/OVA",
+        )
+        Video(
+            catalog_title=title, catalog_collection=collection,
+            relative_path="Anime/Show/OVA/OVA 01.mkv", root_folder="Anime",
+            filename="OVA 01.mkv", size=1, mtime_ns=1,
+        )
+        session.add(collection)
+        session.commit()
+
+        with pytest.raises(ValueError, match="už není prázdná; obsahuje video"):
+            delete_empty_local_title(session, collection.id, title.id)
+
+        assert session.get(CatalogTitle, title.id) is title
+        assert len(title.videos) == 1
+
+
 def test_move_to_existing_title_survives_subsequent_scan(tmp_path: Path, monkeypatch):
     first_folder = tmp_path / "Arifureta" / "Season 1"
     second_folder = tmp_path / "Arifureta" / "Season 2"
@@ -839,6 +916,78 @@ def test_move_to_existing_title_survives_subsequent_scan(tmp_path: Path, monkeyp
         assert moved_path.read_bytes() == b"video"
 
 
+def test_ova_can_be_moved_from_season_to_new_season_specific_title_and_survives_scan(
+    tmp_path: Path, monkeypatch,
+):
+    folder = tmp_path / "High School DxD" / "Season 1"
+    folder.mkdir(parents=True)
+    episode_path = folder / "High School DxD - 01.mkv"
+    ova_path = folder / "High School DxD - OVA 01.mkv"
+    episode_path.write_bytes(b"episode")
+    ova_path.write_bytes(b"ova")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        collection = session.scalar(select(CatalogCollection))
+        ova = session.scalar(select(Video).where(Video.filename == ova_path.name))
+        original_path = ova.relative_path
+        ova_title = create_title_from_videos(
+            session, collection.id, [ova.id], local_title="OVA – S1",
+            part_type="ova", season_number=1,
+        )
+        session.commit()
+        ova_id, ova_title_id = ova.id, ova_title.id
+
+        scan_library(session, tmp_path)
+
+        ova = session.get(Video, ova_id)
+        ova_title = session.get(CatalogTitle, ova_title_id)
+        assert ova.catalog_title_id == ova_title_id
+        assert ova.content_type_manual == "ova"
+        assert ova.season_episode_number is None
+        assert ova.relative_path == original_path
+        assert ova_title.effective_part_type == "ova"
+        assert ova_title.effective_season_number == 1
+        assert ova_title.effective_season_label == "S1"
+        assert unresolved_duplicate_groups(list(collection.videos)) == ()
+        assert episode_path.read_bytes() == b"episode"
+        assert ova_path.read_bytes() == b"ova"
+
+
+def test_duplicate_candidate_keeps_direct_reassignment_action_in_supplementary_title():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    title = CatalogTitle(
+        id=1, collection=collection, local_title="NC – S2",
+        normalized_local_title="nc s2",
+        relative_root_path="Anime/Show/NC/Season 2", part_type="bonus",
+        season_number=2, season_label="S2",
+    )
+    videos = [
+        Video(
+            id=identifier,
+            relative_path=f"Anime/Show/NC/Season 2/copy-{identifier}/OP 01.mkv",
+            root_folder="Anime", filename="OP 01.mkv", size=1, mtime_ns=1,
+            catalog_title=title, catalog_collection=collection,
+        )
+        for identifier in (1, 2)
+    ]
+
+    assert supplementary_video_suggestions(videos) == ()
+    suggestions = supplementary_video_suggestions(videos, include_video_ids={2})
+
+    assert [suggestion.video.id for suggestion in suggestions] == [2]
+    assert suggestions[0].display_label == "OP 01"
+    assert suggestions[0].context_label == "S2"
+    assert suggestions[0].context_season_number == 2
+
+
 def test_standard_and_ova_part_videos_can_be_split_into_two_local_ova_titles():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -867,16 +1016,18 @@ def test_standard_and_ova_part_videos_can_be_split_into_two_local_ova_titles():
         recalculate_title_numbering(source, items)
         first = create_title_from_videos(
             session, collection.id, [items[0].id, items[1].id],
-            local_title="OVA – Serie 1", part_type="ova",
+            local_title="OVA – Serie 1", part_type="ova", season_number=1,
         )
         second = create_title_from_videos(
             session, collection.id, [items[2].id, items[3].id],
-            local_title="OVA – Serie 2", part_type="ova",
+            local_title="OVA – Serie 2", part_type="ova", season_number=2,
         )
         session.commit()
 
-        assert [video.season_episode_number for video in first.videos] == [1, 2]
-        assert [video.season_episode_number for video in second.videos] == [1, 2]
+        assert [video.season_episode_number for video in first.videos] == [None, None]
+        assert [video.season_episode_number for video in second.videos] == [None, None]
+        assert first.effective_season_number == 1
+        assert second.effective_season_number == 2
         assert first.effective_part_type == second.effective_part_type == "ova"
         assert first.metadata_record is second.metadata_record is None
 

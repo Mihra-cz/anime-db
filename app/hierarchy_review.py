@@ -2,18 +2,25 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import hashlib
 import json
+from pathlib import PurePosixPath
+import posixpath
 import re
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from .catalog import detect_episode_number, derive_episode_number, normalize_title
-from .models import CatalogCollection, CatalogTitle, Video, utc_now
+from .catalog import GENERIC_ROOTS, detect_episode_number, derive_episode_number, normalize_title
+from .hierarchy import parse_explicit_part
+from .models import (
+    CatalogCollection, CatalogTitle, CollectionGroupingDecision, Video, utc_now,
+)
 from .numbering import (
     clear_duplicate_group, collection_requires_numbering_review,
     is_confirmed_duplicate, recalculate_collection_numbering,
-    set_duplicate_group_primary,
+    set_duplicate_group_primary, supplementary_context_map,
+    video_numbering_identity,
 )
 
 
@@ -28,6 +35,14 @@ CONFIRMED_DUPLICATES_REVIEW_REASON = (
 )
 MISSING_DUPLICATE_PRIMARY_REVIEW_REASON = (
     "Primární video potvrzené duplicity chybí; vztah vyžaduje novou ruční kontrolu."
+)
+PROBABLE_GROUPING_REVIEW_REASON = (
+    "Část s vlastním názvem byla seskupena podle společného fyzického parentu a "
+    "příbuzného názvu; vztah vyžaduje ruční potvrzení."
+)
+SUPPLEMENTARY_CONTEXT_REVIEW_REASON = (
+    "Doplňková část zachovává kontext vlastního child názvu, ale související "
+    "season vyžaduje ruční potvrzení."
 )
 ALLOWED_PART_TYPES = {
     "title", "season", "part", "cour", "film", "ova", "special",
@@ -78,6 +93,450 @@ class SingleTitleConfirmationSuggestion:
     proposed_season_label: str | None
 
 
+@dataclass(frozen=True)
+class CollectionGroupingSuggestion:
+    key: str
+    state_fingerprint: str
+    proposed_name: str
+    collections: tuple[CatalogCollection, ...]
+    target_collection_id: int | None
+    reasons: tuple[str, ...]
+
+    @property
+    def title_ids(self) -> tuple[int, ...]:
+        return tuple(
+            title.id for collection in self.collections for title in collection.titles
+        )
+
+
+@dataclass
+class CollectionGroupingMetrics:
+    ancestor_lookups: int = 0
+    sibling_name_comparisons: int = 0
+
+    @property
+    def candidate_comparisons(self) -> int:
+        return self.ancestor_lookups + self.sibling_name_comparisons
+
+
+@dataclass(frozen=True)
+class EmptyCollectionDeleteResult:
+    deleted: tuple[tuple[int, str], ...]
+    skipped: tuple[tuple[int, str], ...]
+
+
+@dataclass(frozen=True)
+class SupplementaryVideoSuggestion:
+    video: Video
+    supplementary_type: str
+    supplementary_number: int
+    display_label: str
+    context_label: str | None
+    context_season_number: int | None
+    proposed_part_type: str
+    proposed_title: str
+
+
+def supplementary_video_suggestion(
+    video: Video, *, title_names: dict[str, list[CatalogTitle]] | None = None,
+    include_already_supplementary: bool = False,
+) -> SupplementaryVideoSuggestion | None:
+    if video.content_type_manual:
+        return None
+    detection = detect_episode_number(video.filename)
+    if not detection.is_supplementary or detection.supplementary_number is None:
+        return None
+    current = video.catalog_title
+    identity = video_numbering_identity(video, title_names=title_names)
+    if identity is None:
+        return None
+    context_label = identity.context_label
+    current_is_supplementary = bool(
+        current and current.effective_part_type in SUPPLEMENTAL_PART_TYPES
+    )
+    context_already_present = bool(
+        current and context_label
+        and normalize_title(context_label) in normalize_title(current.local_title)
+    )
+    if not include_already_supplementary and current_is_supplementary and (
+        not context_label or context_already_present
+    ):
+        return None
+    part_type = {
+        "ova": "ova", "special": "special", "preview": "preview", "recap": "recap",
+    }.get(identity.supplementary_type or "", "bonus")
+    type_label = {
+        "ova": "OVA", "special": "Specials", "ncop": "NCOP", "nced": "NCED",
+        "op": "OP", "ed": "ED", "preview": "Preview", "recap": "Recap",
+        "bonus": "Bonus",
+    }.get(identity.supplementary_type or "", "Doplňkový obsah")
+    proposed_title = f"{type_label} – {context_label}" if context_label else type_label
+    return SupplementaryVideoSuggestion(
+        video, identity.supplementary_type or "bonus", identity.number,
+        detection.display_value or video.filename, context_label,
+        identity.context_season_number, part_type, proposed_title,
+    )
+
+
+def supplementary_video_suggestions(
+    videos: list[Video], *, include_video_ids: set[int] | None = None,
+) -> tuple[SupplementaryVideoSuggestion, ...]:
+    title_names = supplementary_context_map(videos)
+    included = include_video_ids or set()
+    return tuple(
+        suggestion for video in videos
+        if (
+            suggestion := supplementary_video_suggestion(
+                video, title_names=title_names,
+                include_already_supplementary=video.id in included,
+            )
+        ) is not None
+    )
+
+
+def _digest(values: list[str]) -> str:
+    return hashlib.sha256("\n".join(values).encode("utf-8")).hexdigest()
+
+
+def _grouping_name_base(value: str) -> str:
+    text = re.sub(r"\s*\([^)]*\)\s*$", "", value).strip()
+    text = re.sub(
+        r"\s+(?:[IVXLCDM]+|season\s*\d+|s\s*\d+|part\s*\d+)$",
+        "", text, flags=re.IGNORECASE,
+    ).strip()
+    return normalize_title(text)
+
+
+def _related_name_bases(left: str, right: str) -> bool:
+    if not left or not right or min(len(left), len(right)) < 5:
+        return False
+    return left == right or left.startswith(f"{right} ") or right.startswith(f"{left} ")
+
+
+def _is_structural_collection(collection: CatalogCollection) -> bool:
+    return parse_explicit_part(collection.local_title) is not None
+
+
+def _suggestion_state(collections: list[CatalogCollection]) -> str:
+    values = []
+    for collection in sorted(collections, key=lambda item: item.relative_root_path):
+        values.append(f"collection:{collection.id}:{collection.relative_root_path}")
+        for title in sorted(collection.titles, key=lambda item: item.id):
+            values.append(
+                f"title:{title.id}:{title.catalog_collection_id}:{title.relative_root_path}"
+            )
+            for video in sorted(title.videos, key=lambda item: item.id):
+                values.append(
+                    f"video:{video.id}:{video.relative_path}:{video.duplicate_of_video_id}:"
+                    f"{int(video.duplicate_primary_missing)}"
+                )
+    return _digest(values)
+
+
+def collection_grouping_suggestions(
+    session: Session, *, collections: list[CatalogCollection] | None = None,
+    metrics: CollectionGroupingMetrics | None = None,
+) -> list[CollectionGroupingSuggestion]:
+    """Vrátí konzervativní návrhy; samotná podobnost bez ancestry nestačí."""
+    metrics = metrics or CollectionGroupingMetrics()
+    if collections is None:
+        collections = list(session.scalars(select(CatalogCollection).options(
+            selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+        )).all())
+    active = [collection for collection in collections if collection.titles]
+    by_path = {collection.relative_root_path: collection for collection in active}
+    adjacency: dict[int, set[int]] = {collection.id: set() for collection in active}
+    reasons_by_node: dict[int, set[str]] = {collection.id: set() for collection in active}
+    paths = {
+        collection.id: PurePosixPath(collection.relative_root_path)
+        for collection in active
+    }
+    name_bases = {
+        collection.id: _grouping_name_base(collection.local_title)
+        for collection in active
+    }
+    structural = {
+        collection.id: _is_structural_collection(collection)
+        for collection in active
+    }
+
+    def connect(first: CatalogCollection, second: CatalogCollection, reason: str) -> None:
+        adjacency[first.id].add(second.id)
+        adjacency[second.id].add(first.id)
+        reasons_by_node[first.id].add(reason)
+        reasons_by_node[second.id].add(reason)
+
+    by_parent: dict[str, list[CatalogCollection]] = {}
+    for collection in active:
+        path = paths[collection.id]
+        parent = path.parent.as_posix()
+        by_parent.setdefault(parent, []).append(collection)
+        ancestor_path = path.parent
+        while ancestor_path.as_posix() not in {".", "/"}:
+            metrics.ancestor_lookups += 1
+            ancestor = by_path.get(ancestor_path.as_posix())
+            if ancestor is not None and (
+                structural[collection.id]
+                or _related_name_bases(name_bases[ancestor.id], name_bases[collection.id])
+            ):
+                connect(
+                    ancestor, collection,
+                    "collection leží pod fyzickým rootem druhé collection",
+                )
+            ancestor_path = ancestor_path.parent
+
+    for parent, siblings in by_parent.items():
+        parent_name = PurePosixPath(parent).name.casefold()
+        if parent in {".", "/"} or parent_name in GENERIC_ROOTS:
+            continue
+        related_nodes: set[int] = set()
+        by_first_token: dict[str, list[CatalogCollection]] = {}
+        for collection in siblings:
+            base = name_bases[collection.id]
+            first_token = base.split(maxsplit=1)[0] if base else ""
+            if first_token:
+                by_first_token.setdefault(first_token, []).append(collection)
+        for bucket in by_first_token.values():
+            for index, first in enumerate(bucket):
+                for second in bucket[index + 1:]:
+                    metrics.sibling_name_comparisons += 1
+                    if not _related_name_bases(name_bases[first.id], name_bases[second.id]):
+                        continue
+                    connect(first, second, "společný fyzický parent a příbuzný základ názvu")
+                    related_nodes.update((first.id, second.id))
+        structural_siblings = [item for item in siblings if structural[item.id]]
+        anchors = [item for item in siblings if item.id in related_nodes]
+        if structural_siblings:
+            anchors = anchors or structural_siblings
+            for item in structural_siblings:
+                for anchor in anchors:
+                    if item is not anchor:
+                        connect(
+                            item, anchor,
+                            "supplementary/season-like složka má stejný anime parent",
+                        )
+
+    decisions = {
+        decision.suggestion_key: decision
+        for decision in session.scalars(select(CollectionGroupingDecision)).all()
+    }
+    by_id = {collection.id: collection for collection in active}
+    suggestions = []
+    visited: set[int] = set()
+    for collection in active:
+        if collection.id in visited or not adjacency[collection.id]:
+            continue
+        stack, component_ids = [collection.id], set()
+        while stack:
+            current = stack.pop()
+            if current in component_ids:
+                continue
+            component_ids.add(current)
+            stack.extend(adjacency[current] - component_ids)
+        visited.update(component_ids)
+        component = sorted(
+            (by_id[item_id] for item_id in component_ids),
+            key=lambda item: item.relative_root_path,
+        )
+        component_paths = [item.relative_root_path for item in component]
+        key = _digest(component_paths)
+        fingerprint = _suggestion_state(component)
+        prior = decisions.get(key)
+        if prior is not None and prior.state_fingerprint == fingerprint:
+            continue
+        common_parent = PurePosixPath(posixpath.commonpath(component_paths) or ".")
+        direct_target = next((
+            item for item in component
+            if all(
+                other is item
+                or other.relative_root_path.startswith(f"{item.relative_root_path}/")
+                for other in component
+            )
+        ), None)
+        proposed_name = (
+            direct_target.local_title if direct_target is not None
+            else common_parent.name if common_parent.name.casefold() not in GENERIC_ROOTS | {"."}
+            else min(component, key=lambda item: len(_grouping_name_base(item.local_title))).local_title
+        )
+        component_reasons = sorted({
+            reason for item_id in component_ids for reason in reasons_by_node[item_id]
+        })
+        suggestions.append(CollectionGroupingSuggestion(
+            key=key, state_fingerprint=fingerprint, proposed_name=proposed_name,
+            collections=tuple(component),
+            target_collection_id=direct_target.id if direct_target else None,
+            reasons=tuple(component_reasons),
+        ))
+    return sorted(suggestions, key=lambda item: item.proposed_name.casefold())
+
+
+def record_grouping_decision(
+    session: Session, suggestion: CollectionGroupingSuggestion, decision: str,
+) -> None:
+    if decision not in {"separate", "merged"}:
+        raise ValueError("Neplatné rozhodnutí o seskupení.")
+    stored = session.scalar(select(CollectionGroupingDecision).where(
+        CollectionGroupingDecision.suggestion_key == suggestion.key
+    ))
+    if stored is None:
+        stored = CollectionGroupingDecision(suggestion_key=suggestion.key)
+        session.add(stored)
+    stored.state_fingerprint = suggestion.state_fingerprint
+    stored.decision = decision
+
+
+def _unique_manual_collection_path(session: Session, name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", normalize_title(name)).strip("-") or "collection"
+    base = f"@manual/{slug}"
+    path, suffix = base, 1
+    while session.scalar(select(CatalogCollection.id).where(
+        CatalogCollection.relative_root_path == path
+    )) is not None:
+        suffix += 1
+        path = f"{base}-{suffix}"
+    return path
+
+
+def create_main_collection(
+    session: Session, local_title: str, title_ids: list[int],
+) -> CatalogCollection:
+    name = local_title.strip()[:200]
+    if not name:
+        raise ValueError("Hlavní collection musí mít lokální název.")
+    collection = CatalogCollection(
+        local_title=name, normalized_local_title=normalize_title(name),
+        relative_root_path=_unique_manual_collection_path(session, name),
+        manual_display_title=name, hierarchy_status="verified",
+        hierarchy_verified_at=utc_now(),
+    )
+    session.add(collection)
+    session.flush()
+    move_titles_to_collection(session, collection.id, title_ids)
+    return collection
+
+
+def move_titles_to_collection(
+    session: Session, target_collection_id: int, title_ids: list[int],
+) -> CatalogCollection:
+    selected_ids = {int(value) for value in title_ids}
+    if not selected_ids:
+        raise ValueError("Vyberte alespoň jednu část.")
+    target = session.scalar(select(CatalogCollection).options(
+        selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+        selectinload(CatalogCollection.videos),
+    ).where(CatalogCollection.id == target_collection_id))
+    if target is None:
+        raise ValueError("Cílová collection nebyla nalezena.")
+    titles = list(session.scalars(select(CatalogTitle).options(
+        selectinload(CatalogTitle.videos), selectinload(CatalogTitle.collection),
+    ).where(CatalogTitle.id.in_(selected_ids))).all())
+    if len(titles) != len(selected_ids):
+        raise ValueError("Výběr obsahuje cizí nebo neexistující část.")
+    sources = {title.collection for title in titles if title.collection is not None}
+    now = utc_now()
+    for title in titles:
+        title.collection = target
+        title.hierarchy_manual_override = True
+        title.hierarchy_verified_at = now
+        for video in title.videos:
+            video.catalog_collection = target
+    session.flush()
+    for collection in sources | {target}:
+        session.expire(collection, ["titles", "videos"])
+        if not collection.titles and not collection.videos:
+            collection.hierarchy_status = "verified"
+            collection.hierarchy_verified_at = now
+            collection.hierarchy_note = None
+        else:
+            refresh_collection_state(collection)
+    session.flush()
+    return target
+
+
+def delete_empty_collection(session: Session, collection_id: int) -> None:
+    collection = session.get(CatalogCollection, collection_id)
+    if collection is None:
+        raise ValueError("Collection nebyla nalezena.")
+    title_count = session.scalar(select(func.count(CatalogTitle.id)).where(
+        CatalogTitle.catalog_collection_id == collection_id
+    )) or 0
+    video_count = session.scalar(select(func.count(Video.id)).where(
+        Video.catalog_collection_id == collection_id
+    )) or 0
+    if title_count or video_count:
+        raise ValueError("Odstranit lze pouze collection bez částí a videí.")
+    deleted = session.execute(delete(CatalogCollection).where(
+        CatalogCollection.id == collection_id,
+        ~select(CatalogTitle.id).where(
+            CatalogTitle.catalog_collection_id == CatalogCollection.id
+        ).exists(),
+        ~select(Video.id).where(
+            Video.catalog_collection_id == CatalogCollection.id
+        ).exists(),
+    ).execution_options(synchronize_session=False))
+    if deleted.rowcount != 1:
+        raise ValueError(
+            "Collection už není prázdná; byla změněna a nebyla odstraněna."
+        )
+
+
+def delete_empty_collections(
+    session: Session, collection_ids: list[int],
+) -> EmptyCollectionDeleteResult:
+    selected_ids = tuple(dict.fromkeys(int(value) for value in collection_ids))
+    if not selected_ids:
+        raise ValueError("Vyberte alespoň jednu prázdnou collection.")
+    collections = {
+        collection.id: collection
+        for collection in session.scalars(select(CatalogCollection).where(
+            CatalogCollection.id.in_(selected_ids)
+        )).all()
+    }
+    title_counts = dict(session.execute(
+        select(CatalogTitle.catalog_collection_id, func.count(CatalogTitle.id))
+        .where(CatalogTitle.catalog_collection_id.in_(selected_ids))
+        .group_by(CatalogTitle.catalog_collection_id)
+    ).all())
+    video_counts = dict(session.execute(
+        select(Video.catalog_collection_id, func.count(Video.id))
+        .where(Video.catalog_collection_id.in_(selected_ids))
+        .group_by(Video.catalog_collection_id)
+    ).all())
+    deleted, skipped = [], []
+    for collection_id in selected_ids:
+        collection = collections.get(collection_id)
+        if collection is None:
+            skipped.append((collection_id, "collection už neexistuje"))
+        elif title_counts.get(collection_id, 0) or video_counts.get(collection_id, 0):
+            skipped.append((collection_id, collection.local_title))
+        else:
+            deleted.append((collection_id, collection.local_title))
+    if deleted:
+        deletable_ids = [collection_id for collection_id, _ in deleted]
+        session.execute(delete(CatalogCollection).where(
+            CatalogCollection.id.in_(deletable_ids),
+            ~select(CatalogTitle.id).where(
+                CatalogTitle.catalog_collection_id == CatalogCollection.id
+            ).exists(),
+            ~select(Video.id).where(
+                Video.catalog_collection_id == CatalogCollection.id
+            ).exists(),
+        ))
+        session.flush()
+        remaining_ids = set(session.scalars(select(CatalogCollection.id).where(
+            CatalogCollection.id.in_(deletable_ids)
+        )).all())
+        if remaining_ids:
+            skipped.extend(
+                (collection_id, name) for collection_id, name in deleted
+                if collection_id in remaining_ids
+            )
+            deleted = [
+                item for item in deleted if item[0] not in remaining_ids
+            ]
+    return EmptyCollectionDeleteResult(tuple(deleted), tuple(skipped))
+
+
 def extract_local_period_hint(local_title: str) -> str | None:
     matches = PERIOD_HINT.findall(local_title or "")
     return matches[-1].upper() if matches else None
@@ -121,7 +580,9 @@ def collection_requires_review(collection: CatalogCollection, videos: list[Video
         return CONFIRMED_DUPLICATES_REVIEW_REASON
     numbers = sorted({
         number for video in videos
-        if (number := video.local_episode_number or derive_episode_number(video.filename)) is not None
+        if not video.content_type_manual
+        and not detect_episode_number(video.filename).is_supplementary
+        and (number := video.local_episode_number or derive_episode_number(video.filename)) is not None
     })
     if (
         not hierarchy_resolved
@@ -508,8 +969,15 @@ def move_videos_to_title(
         source_type = (
             video.catalog_title.effective_part_type if video.catalog_title is not None else None
         )
-        if not video.content_type_manual and source_type in VIDEO_CONTENT_TYPES:
-            video.content_type_manual = source_type
+        detected_type = detect_episode_number(video.filename).supplementary_type
+        target_type = target.effective_part_type
+        if not video.content_type_manual:
+            video.content_type_manual = (
+                target_type if target_type in VIDEO_CONTENT_TYPES else
+                source_type if source_type in VIDEO_CONTENT_TYPES else
+                detected_type if detected_type in VIDEO_CONTENT_TYPES else
+                "bonus" if detected_type else None
+            )
         video.catalog_title = target
         video.catalog_collection = collection
     target.hierarchy_manual_override = True
@@ -521,7 +989,8 @@ def move_videos_to_title(
 
 def create_title_from_videos(
     session: Session, collection_id: int, video_ids: list[int], *,
-    local_title: str, part_type: str,
+    local_title: str, part_type: str, season_number: int | None = None,
+    season_label: str | None = None,
 ) -> CatalogTitle:
     name = local_title.strip()[:200]
     normalized_type = part_type.strip().casefold()
@@ -529,6 +998,11 @@ def create_title_from_videos(
         raise ValueError("Nová část musí mít název.")
     if normalized_type not in VIDEO_CONTENT_TYPES:
         raise ValueError("Neplatný typ doplňkového obsahu.")
+    if season_number is not None and season_number <= 0:
+        raise ValueError("Číslo související sezóny musí být kladné.")
+    normalized_label = (season_label or "").strip()[:50] or (
+        f"S{season_number}" if season_number is not None else None
+    )
     collection = _load_collection_for_assignment(session, collection_id)
     selected = _selected_videos(collection, video_ids)
     position = max((title.effective_sort_order for title in collection.titles), default=0) + 1
@@ -542,6 +1016,7 @@ def create_title_from_videos(
     title = CatalogTitle(
         collection=collection, local_title=name, normalized_local_title=normalize_title(name),
         relative_root_path=virtual_path, part_type_manual=normalized_type,
+        season_number_manual=season_number, season_label_manual=normalized_label,
         sort_order_manual=position, hierarchy_manual_override=True,
         hierarchy_verified_at=utc_now(), numbering_mode="unknown",
     )
@@ -575,17 +1050,40 @@ def merge_title_into(
 def delete_empty_local_title(
     session: Session, collection_id: int, title_id: int,
 ) -> None:
-    collection = _load_collection_for_assignment(session, collection_id)
-    title = next((item for item in collection.titles if item.id == title_id), None)
+    title = session.scalar(select(CatalogTitle).options(
+        selectinload(CatalogTitle.external_links),
+        selectinload(CatalogTitle.metadata_record),
+        selectinload(CatalogTitle.metadata_candidates),
+        selectinload(CatalogTitle.artwork),
+    ).where(
+        CatalogTitle.id == title_id,
+        CatalogTitle.catalog_collection_id == collection_id,
+    ))
     if title is None:
         raise ValueError("Část neexistuje v této kolekci.")
-    if title.videos:
-        raise ValueError("Odstranit lze pouze prázdnou část.")
-    if not title.hierarchy_manual_override or "/.catalog-part-" not in title.relative_root_path:
-        raise ValueError("Odstranit lze pouze lokálně vytvořenou virtuální část.")
-    if title.metadata_record or title.external_links or title.metadata_candidates or title.artwork:
-        raise ValueError("Část má metadata nebo další vazby a nelze ji bezpečně odstranit.")
-    session.delete(title)
+    video_count = session.scalar(select(func.count(Video.id)).where(
+        Video.catalog_title_id == title_id
+    )) or 0
+    if video_count:
+        raise ValueError(
+            "Část už není prázdná; obsahuje video a nebyla odstraněna."
+        )
+    # Všechny čtyři vztahy jsou vlastněné CatalogTitle přes delete-orphan a jejich
+    # FK mají ON DELETE CASCADE. Explicitní vyprázdnění udrží chování stejné i
+    # tam, kde SQLite foreign_keys není zapnuté.
+    title.external_links.clear()
+    title.metadata_candidates.clear()
+    title.artwork.clear()
+    title.metadata_record = None
+    session.flush()
+    deleted = session.execute(delete(CatalogTitle).where(
+        CatalogTitle.id == title_id,
+        ~select(Video.id).where(Video.catalog_title_id == CatalogTitle.id).exists(),
+    ).execution_options(synchronize_session=False))
+    if deleted.rowcount != 1:
+        raise ValueError(
+            "Část už není prázdná; mezitím do ní přibylo video a nebyla odstraněna."
+        )
 
 
 def separate_nonstandard_videos(

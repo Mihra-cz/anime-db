@@ -168,9 +168,146 @@ def test_candidate_and_artwork_mutations_are_post_only():
     assert paths["/hierarchy-review/{collection_id}/duplicates/clear"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/merge-title"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/delete-empty-title"] == {"POST"}
+    assert paths["/titles/{catalog_title_id}/delete-empty"] == {"POST"}
+    assert paths["/hierarchy-review/collections/delete-empty-bulk"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/numbering-preview"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/numbering-apply"] == {"POST"}
     assert paths["/preferences/title-name"] == {"POST"}
+
+
+def test_empty_title_detail_shows_metadata_warning_and_delete_action(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'empty-title-detail.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="High School DxD", normalized_local_title="high school dxd",
+            relative_root_path="Anime/High School DxD",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="High School DxD OVA",
+            normalized_local_title="high school dxd ova",
+            relative_root_path="Anime/High School DxD/OVA",
+            metadata_status="linked_manual",
+            metadata_record=TitleMetadata(
+                display_title="High School DxD OVA", metadata_provider="anilist",
+                metadata_external_id="1",
+            ),
+        )
+        title.external_links.append(ExternalTitleLink(
+            provider="anilist", external_id="1", match_method="manual_search",
+            is_primary=True, is_manual=True,
+        ))
+        session.add(collection)
+        session.commit()
+        title_id, collection_id = title.id, collection.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+    ).body.decode()
+
+    assert "Odstranit prázdnou část" in rendered
+    assert f'action="/titles/{title_id}/delete-empty"' in rendered
+    assert "Současně bude odstraněno 2 vlastněných metadata/reference záznamů" in rendered
+    assert "collection ani NAS se nemění" in rendered
+
+    delete_endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/titles/{catalog_title_id}/delete-empty"
+    )
+    response = delete_endpoint(title_id, confirm_delete=True)
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/hierarchy-review?message=")
+    with web_app.state.sessions() as session:
+        assert session.get(CatalogTitle, title_id) is None
+        assert session.get(CatalogCollection, collection_id) is not None
+        assert session.get(CatalogCollection, collection_id).titles == []
+
+
+def test_bulk_empty_collection_endpoint_reports_deleted_and_skipped(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'bulk-empty.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collections = [
+            CatalogCollection(
+                local_title=name, normalized_local_title=name.casefold(),
+                relative_root_path=f"@manual/{name.casefold().replace(' ', '-')}",
+            )
+            for name in ("Empty A", "Empty B", "Changed")
+        ]
+        session.add_all(collections)
+        session.commit()
+        empty_a_id, empty_b_id, changed_id = [item.id for item in collections]
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    overview = endpoints["/hierarchy-review"](
+        web_request(web_app, "/hierarchy-review")
+    ).body.decode()
+    assert "Vybrat všechny" in overview
+    assert "Zrušit výběr" in overview
+    assert "Odstranit vybrané prázdné collections" in overview
+    assert overview.count("Potvrzuji odstranění prázdné DB collection") == 3
+
+    # Simuluje změnu stavu mezi vykreslením formuláře a odesláním requestu.
+    with web_app.state.sessions() as session:
+        changed = session.get(CatalogCollection, changed_id)
+        session.add(CatalogTitle(
+            collection=changed, local_title="New part", normalized_local_title="new part",
+            relative_root_path="@manual/changed/new-part",
+        ))
+        session.commit()
+
+    body = urlencode([
+        ("collection_ids", str(empty_a_id)),
+        ("collection_ids", str(empty_b_id)),
+        ("collection_ids", str(changed_id)),
+        ("confirm_delete", "true"),
+    ]).encode()
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if sent:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request = Request({
+        "type": "http", "app": web_app, "method": "POST",
+        "path": "/hierarchy-review/collections/delete-empty-bulk",
+        "root_path": "", "scheme": "http", "query_string": b"",
+        "headers": [(b"content-type", b"application/x-www-form-urlencoded")],
+        "server": ("testserver", 80), "client": ("testclient", 50000),
+    }, receive)
+    response = asyncio.run(
+        endpoints["/hierarchy-review/collections/delete-empty-bulk"](request)
+    )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    message = parse_qs(urlparse(location).query)["message"][0]
+    assert "Odstraněné collections: Empty A, Empty B" in message
+    assert "Přeskočené: Changed" in message
+    with web_app.state.sessions() as session:
+        assert session.get(CatalogCollection, empty_a_id) is None
+        assert session.get(CatalogCollection, empty_b_id) is None
+        assert session.get(CatalogCollection, changed_id) is not None
 
 
 def test_first_metadata_search_redirects_to_visible_persisted_candidates(tmp_path):
@@ -684,6 +821,62 @@ def test_bungo_bulk_duplicate_resolution_keeps_physical_cleanup_warning(tmp_path
     ).body.decode()
     assert title_detail.count("+ 1 potvrzená duplicitní kopie") == 13
     assert "Fyzický cleanup dosud nebyl proveden." in title_detail
+
+
+def test_hierarchy_review_offers_season_specific_ova_reassignment(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'supplementary-review.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="High School DxD",
+            normalized_local_title="high school dxd",
+            relative_root_path="Anime/High School DxD", hierarchy_status="review_required",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/High School DxD/Season 1",
+            part_type_manual="season", season_number_manual=1,
+            season_label_manual="S1", hierarchy_manual_override=True,
+        )
+        Video(
+            relative_path="Anime/High School DxD/Season 1/High School DxD - 01.mkv",
+            root_folder="Anime", filename="High School DxD - 01.mkv",
+            size=1, mtime_ns=1, local_episode_number=1, season_episode_number=1,
+            catalog_title=title, catalog_collection=collection,
+        )
+        Video(
+            relative_path=(
+                "Anime/High School DxD/Season 1/High School DxD - OVA 01.mkv"
+            ),
+            root_folder="Anime", filename="High School DxD - OVA 01.mkv",
+            size=1, mtime_ns=1, catalog_title=title, catalog_collection=collection,
+        )
+        session.add(collection)
+        session.commit()
+        collection_id = collection.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review/{collection_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    assert "Vyřešit duplicity · podezření" not in rendered
+    assert "Pravděpodobně doplňkový obsah" in rendered
+    assert "OVA 01" in rendered
+    assert "OVA – S1" in rendered
+    assert 'name="season_number" value="1"' in rendered
+    assert "Není duplicita / zařadit jinam" in rendered
+    assert "Oddělit do nové části" in rendered
+    assert "<dt>Očíslováno</dt><dd>1/1</dd>" in rendered
 
 
 def _render_hierarchy_review(*, verified=False, filename="Episode 01.mkv"):

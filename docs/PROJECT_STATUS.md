@@ -1797,6 +1797,323 @@ načtení všech Jinja2 šablon               # 12 šablon, prošlo
 git diff --check                          # prošlo
 ```
 
+## 6.22 Seskupování anime rootu a ruční collection reassignment
+
+Audit reálné knihovny potvrdil, že současný datový model je pro problém
+dostatečný. `CatalogCollection` představuje hlavní anime nebo uživatelskou
+logickou collection, `CatalogTitle` představuje jednotlivou season, film, OVA,
+Specials, bonus nebo jinou supplementary část a `Video` zůstává fyzickým
+záznamem souboru. `CatalogTitle.catalog_collection_id` je nullable FK a celé
+CatalogTitle lze bezpečně přesunout změnou této vazby; video nadále ukazuje na
+stejné `catalog_title_id`. Nebyla přidána další hierarchická úroveň.
+
+Původní scanner rozpoznával jako child část pouze číslované Season/Series/Part/
+Cour složky, `OVA`/`OAD`, `Special(s)` a skupinu sourozenců s římským suffixem.
+Ostatní child složky propadly do `determine_parent_series`, které bez známého
+strukturálního adresáře zvolilo nejhlubší fyzický adresář. Proto například
+`NC`, `OP`, `Movies` nebo `CM&PV` mohly vzniknout jako samostatná hlavní
+collection. Referenční `Mob Psycho 100` fungoval správně právě proto, že jeho
+`Season 1`, `Season 2`, `Season 3` a `OVA` patřily do bezpečně rozpoznaných
+vzorů.
+
+Scanner nyní určuje anime root z fyzické ancestry a prvního bezpečně
+rozpoznaného child partu. Pod jedním rootem automaticky seskupí:
+
+- číslované `Season`, `Series`, `Serie`, `S`, `Part` a `Cour` složky;
+- `OVA`, `OAD`, `Special` a `Specials`;
+- `Bonus`, `Bonuses`, `Extra`, `Extras`, `NC`, `NCOP`, `NCED`, `OP`, `ED`,
+  `Preview`, `PV`, `Recap`, `Movies` a `Films` s mapováním na existující typy;
+- filmový root označený `(FILM)` a jeho `CM&PV` jako dva CatalogTitle stejné
+  collection;
+- vnořenou supplementary složku, například `Season 1/NC`, stále pod anime
+  rootem, ale jako samostatný supplementary CatalogTitle.
+
+Nové content type enum hodnoty pro `NC`, `OP` ani `ED` nevznikly. Používá se
+existující obecný `bonus`; `Movies` používá `film`, `PV` používá `preview` a
+nejistý obsah lze nadále ručně klasifikovat existujícími typy. Vlastní název
+season, například `High School DxD Born`, není důvodem pro samostatnou hlavní
+collection, pokud je child složkou parentu se shodným celým základem názvu.
+Taková část se seskupí, ale bez odhadu čísla season a collection zůstane v
+review s důvodem k ručnímu potvrzení. Pouhá podobnost názvů bez společné
+ancestry nic automaticky neslučuje.
+
+Hierarchy Review má tři odlišné DB operace:
+
+1. **Vytvořit hlavní anime / collection** vytvoří lokální CatalogCollection bez
+   povinných externích metadat a přesune do ní vybrané existující CatalogTitle.
+2. **Sloučit collections / přesunout části** přesune všechny nebo jen vybrané
+   CatalogTitle do existující collection.
+3. Původní **merge CatalogTitle** zůstává samostatnou operací, která přesouvá
+   videa mezi CatalogTitle. UI výslovně vysvětluje rozdíl.
+
+Collection grouping nemění `Video.catalog_title_id`, filename, `relative_path`,
+season/episode numbering, `content_type_manual`, manual display title,
+`TitleMetadata`, `ExternalTitleLink`, kandidáty ani artwork. Aktualizuje pouze
+`CatalogTitle.catalog_collection_id`, redundantní
+`Video.catalog_collection_id` a příznak existujícího
+`hierarchy_manual_override`. Scanner i idempotentní startupová synchronizace
+tento ruční assignment respektují. Uživatel může později část přesunout zpět
+nebo do jiné collection, takže rozhodnutí je vratné bez manipulace s NASem.
+
+Po přesunu posledního CatalogTitle zůstává zdrojová CatalogCollection prázdná a
+nikdy se nemaže automaticky. Hierarchy Review ji zobrazí odděleně a odstranění
+vyžaduje explicitní potvrzení. Backend před smazáním ověří, že collection nemá
+žádné CatalogTitle ani Video; collection model nemá vlastní externí metadata
+ani další metadata relationships. Scanner prázdnou ručně opuštěnou collection
+nesmaže.
+
+Přehled navíc vytváří konzervativní návrhy **Možné společné anime**. Kandidáty
+spojuje pouze fyzická ancestry spolu s bezpečným supplementary/season-like
+folderem nebo příbuzným základem názvu; samotná string similarity nestačí.
+Detail návrhu ukazuje collections, CatalogTitle, jejich `relative_root_path` a
+počet videí. Uživatel může vytvořit/vybrat hlavní collection, přesunout vybrané
+části nebo zvolit **Ponechat jako samostatné anime**.
+
+Odmítnutí návrhu se ukládá do malé tabulky
+`collection_grouping_decisions` jako hash identity návrhu, fingerprint jeho
+aktuálních collections/titles/videos a rozhodnutí `separate`. Stejný nezměněný
+návrh se znovu nezobrazuje; přidání nebo přesun části či změna relevantního
+video/duplicate stavu změní fingerprint a dovolí novou kontrolu. Volba sloučit
+se persistuje především existujícím ručním assignmentem na CatalogTitle a
+přežije session, restartovou migraci i scan. Nová tabulka je jediná změna
+datového modelu a vzniká idempotentně přes `Base.metadata.create_all`; nebyl
+potřeba nový hierarchy subsystem ani nový sloupec CatalogTitle.
+
+Collection reassignment fyzickou duplicitu nezakrývá. Dvě různé
+`relative_path` zůstávají dvěma Video záznamy a případný
+`duplicate_of_video_id` se při přesunu CatalogTitle nemění. Shodný
+`relative_path` je nadále unikátní a opakovaný scan nevytvoří druhé Video.
+Hierarchy Review proto u případu typu `Uzaki-chan Season 2` umožní podle cest a
+epizodního číslování rozlišit chybné collection assignment od dvou skutečných
+fyzických kopií; confirmed duplicate workflow zůstává samostatné.
+
+Praktický výsledek pro známé případy:
+
+- `High School DxD (Z12-J18)` seskupí bezpečné Season/Specials/NC children pod
+  parent root; vlastní názvy `New`, `Born` a `Hero` se stejným základem jsou
+  reviewovatelné CatalogTitle a existující rozdrobení lze ručně sloučit;
+- `OVERLORD (L15-L22)/OVERLORD I–IV` zůstává jednou collection díky římským
+  sourozencům a `Movies`/`NC` jsou child části stejného rootu;
+- `Tenki no Ko (FILM)/CM&PV` je jedna collection s filmovým a bonusovým title;
+- správný `Mob Psycho 100` zůstává jednou collection se čtyřmi CatalogTitle a
+  nová logika jej nerozdělí.
+
+Produkční databáze nebyla v této iteraci změněna ani migrována. Pro pozdější
+performance audit byla pouze souborově zkopírována do `/tmp` a veškeré měření
+proběhlo nad touto pracovní kopií. Fyzické soubory a adresáře na NASu nebyly
+změněny. Práce zůstává ve fázi
+**Stabilizace hierarchie a ladění UI nad reálnou knihovnou**; V6 ani V7 nebyly
+zahájeny.
+
+### Výkon Hierarchy Review
+
+První implementace grouping suggestions obsahovala dvě navazující chyby. Pro
+každou aktivní collection procházela všechny ostatní collections kvůli hledání
+ancestor cesty a uvnitř každého parent bucketu porovnávala všechny dvojice
+názvů. Horší byla následná smyčka pro hledání společného parentu: komponenta
+obsahující dvě podobně pojmenované top-level collections z různých root cest
+dospěla k `PurePosixPath(".")`. Jeho `.parent` je znovu `.` a podmínka založená
+na prefixu cest nemohla být splněna. Worker proto neprováděl pomalý SQL dotaz
+ani render; běžel neomezeně v CPU smyčce v
+`collection_grouping_suggestions`.
+
+Profil na read-only pracovní kopii skutečné SQLite DB ukázal 197 collections,
+235 titles a 3096 videí. Před opravou trvalo eager SQL načtení přibližně
+0,215 s a všechny numbering summaries 0,100 s; stack dump po dalších osmi
+sekundách stále ukazoval řádek výpočtu common parentu. Delší měření bylo po více
+než dvou minutách přerušeno a odpovídá pozorovanému reálnému běhu přes 18 minut.
+Candidate discovery před smyčkou provádělo 32 041 globálních ancestor
+porovnání a 13 207 sibling name porovnání, celkem 45 248.
+
+Optimalizace předpočítá pro každou collection `PurePosixPath`, normalizovaný
+name base a structural příznak jednou. Ancestory nenachází globálním
+collection×collection průchodem, ale výstupem po několika skutečných ancestor
+segmentech a O(1) lookupem v `relative_root_path -> collection`. Sibling
+analýza nejprve zahodí root/generic parent buckety a uvnitř specifického parentu
+dále bucketuje podle prvního normalizovaného tokenu. Prefixově příbuzná jména
+nemohou skončit v různých token bucketech, takže význam kontroly zůstává stejný.
+Společný parent používá konečné `posixpath.commonpath`; nekonečná smyčka už
+neexistuje.
+
+Fingerprint nad relevantními collections, titles, videos a duplicate stavem
+zůstal významově i deterministicky stejný. Každá disjunktní candidate komponenta
+projde pouze vlastní data. Grouping decisions se načtou jediným bulk dotazem a
+lookupují podle suggestion key. List route předává již eager-loaded collections
+do suggestion helperu místo jejich druhého načtení. Počty videí načítá jedním
+agregačním SQL dotazem a numbering summary pro jeden title už nepočítá podruhé.
+List view nezobrazuje tisíce jednotlivých video cest; fyzické detaily zůstávají
+na detailu collection.
+
+Na stejné bezpečné kopii DB po opravě:
+
+```text
+načtení dat                  0,147 s
+numbering summaries          0,081 s
+grouping suggestions         0,009 s
+celý výpočet                 0,237 s
+GET + Jinja render           0,402 s
+SQL dotazy                   6
+candidate comparisons        18 (16 ancestor lookupů + 2 sibling porovnání)
+```
+
+Předchozí list path používala 5 eager dotazů a suggestion helper znovu načítal
+collections/titles/videos plus decisions, tedy celkem 9 dotazů. Nešlo o klasické
+N+1, ale o redundantní bulk načtení; nyní jde o 6 dotazů bez závislosti na počtu
+collections. Regresní test vytváří 600 collections a 3000 Video ve 200 parent
+skupinách a deterministicky ověřuje právě 1800 candidate operací místo 360 000
+globálních dvojic. Čas konkrétního hardware není součástí testovací podmínky.
+
+## 6.23 Supplementary číslování, season context a falešné duplicity
+
+Audit parseru ukázal, že obecný trailing pattern zpracoval poslední číslo dříve,
+než numbering a duplicate workflow získaly informaci o druhu obsahu. Soubor
+`High School DxD - OVA 01.mkv`, `Special 01.mkv`, `OP 02.mkv` nebo `ED 02.mkv`
+proto mohl dostat standardní `season_episode_number` a následně tvořit falešnou
+skupinu E01/E02. Duplicate identita navíc dříve používala pouze toto číslo.
+
+Parser nyní před standardními episode patterny kontroluje explicitní,
+tokenově ohraničené supplementary suffixy `OVA`/`OAD`, `Special(s)`, `NCOP`,
+`NCED`, `OP`, `ED`, `Preview`/`PV`, `Recap`, `Bonus` a `Extra`. Výsledek má
+`kind=supplementary`, normalizovaný subtype a odvozené pořadí, které se v UI
+zobrazuje například jako `OVA 01`, `Special 01` nebo `OP 02`. Toto pořadí není
+zapisováno do standardních episode sloupců: `local_episode_number`,
+`season_episode_number`, `absolute_episode_number` a `external_episode_number`
+zůstávají `NULL`; diagnostický `episode_number_source` používá například
+`supplementary_ova`. Nebyl přidán nový DB sloupec ani content type enum.
+
+Read-only numbering summary explicitní doplňky ignoruje i tehdy, pokud starší
+automatický DB záznam ještě obsahuje stale standardní číslo. Supplementary
+CatalogTitle má nulový počet standardních epizod, žádný E rozsah, mezery ani
+standardní duplicate numbers. Automatický přepočet při scanneru nebo startup
+sync staré automatické číslo bezpečně vyčistí; ruční episode override zůstává
+autoritativní a automaticky se nepřepisuje.
+
+Duplicate candidate se nyní skládá z celé logické identity:
+
+```text
+standard:      episode number
+supplementary: subtype + supplementary sequence + season/name/path context
+```
+
+Proto `OP 01` a `ED 01` nejsou stejná identita, stejně jako `OVA 01` a
+`Special 01`. `S2/OP 02` a `S3/OP 02` odděluje season context. Dvě různé
+fyzické cesty se stejným `S2 + OP + 01` naopak zůstávají candidate duplicate a
+lze je potvrdit stávajícím workflow; confirmed `duplicate_of_video_id` se
+nemění a fyzický cleanup zůstává samostatným problémem.
+
+Season context se neodvozuje z pořadí OP/ED/OVA/Special. Používá pouze:
+
+- přesnou normalizovanou shodu filename prefixu s CatalogTitle stejné
+  CatalogCollection, včetně bezpečného odstranění závěrečné interní anotace;
+- známý season context aktuálního CatalogTitle, pokud filename prefix odpovídá
+  názvu hlavní collection;
+- fyzický parent pro doplněk bez title shody;
+- jinak vlastní filename prefix jako reviewovatelný name context bez vymyšleného
+  čísla season.
+
+Při stromu `NC/High School DxD New/ED 02.mkv`, `NC/High School DxD Born/OP
+02.mkv` a `NC/High School DxD Hero/OP 02.mkv` scanner zachová tři oddělené
+CatalogTitle `NC – High School DxD New/Born/Hero` v jedné hlavní collection.
+Pokud v collection již existují odpovídající season titles, přesná shoda prefixu
+přenese jejich potvrzené `S2`/`S3`/`S4`; bez takové shody zůstane vlastní název
+a collection je označena k review. Žádná nová hierarchická vrstva nevznikla.
+
+Detail Hierarchy Review zobrazuje u silného filename hintu upozornění
+**Pravděpodobně doplňkový obsah**. Uživatel může jediné Video přesunout do
+existujícího CatalogTitle nebo vytvořit nový `OVA – S1`, `Specials – S3`,
+`NC – High School DxD New` apod. Formulář předvyplní typ, lokální název a pouze
+bezpečně známý season context. Stejná cesta je dostupná z podezření na duplicitu
+jako **Není duplicita / zařadit jinam** a z obecné správy zařazení. Operace mění
+jen `Video.catalog_title_id` a případnou ruční klasifikaci; filename,
+`relative_path` ani fyzický soubor se nemění.
+
+Nově vytvořený CatalogTitle používá existující `part_type_manual`,
+`season_number_manual`, `season_label_manual` a `hierarchy_manual_override`.
+Přesun do existující části označí cílovou hierarchii jako ruční a zachová již
+existující `content_type_manual`. Scanner i startup sync proto ruční přiřazení a
+season context při dalších bězích respektují. Rozhodnutí lze později opravit
+stejným přesunem do jiné části; nevznikla destruktivní migrace starých ručně
+potvrzených dat.
+
+Season-context lookup v detailu používá jednu předpočítanou mapu názvů všech
+CatalogTitle relevantní collection pro celý request. Duplicate grouping stejnou
+mapu sestaví jednou pro danou malou title skupinu. Nevzniklo globální
+videos×titles ani videos×videos porovnávání a optimalizovaný list collection
+grouping suggestions zůstal beze změny.
+
+Nebyla provedena žádná cílená produkční migrace ani CRUD operace a NAS nebyl
+čtením UI nijak fyzicky měněn. Audit kontrol však odhalil, že import globálního
+`app.main:app` během testů spouštěl idempotentní startup sync proti `DATABASE_URL`
+z `.env`, a tím se změnil mtime produkčního SQLite souboru. Opakování téhož
+startup syncu nad pracovní kopií ponechalo SHA-256 bitově identické. Nový
+`tests/conftest.py` proto před importem testovacích modulů nastavuje in-memory
+SQLite a cesty v `/tmp`; následný celý suite ponechal velikost, mtime i SHA-256
+produkční DB beze změny. Práce zůstává ve fázi **Stabilizace hierarchie a ladění
+UI nad reálnou knihovnou**; V6 ani V7 nebyly zahájeny.
+
+## 6.24 Bezpečný úklid prázdných CatalogTitle a CatalogCollection
+
+Po ručním přesunu posledního Video z CatalogTitle zůstával prázdný title
+záměrně zachován. Původní delete helper dovoloval odstranit pouze ručně
+vytvořenou virtuální cestu `/.catalog-part-*` bez jakýchkoli metadat. Reálná
+část typu `High School DxD OVA` s původní fyzickou cestou nebo s externím
+metadata linkem proto neměla dostupnou bezpečnou delete akci.
+
+Detail CatalogTitle i Hierarchy Review nyní u každého title s nulovým počtem
+Video zobrazí **Odstranit prázdnou část**. Akce vyžaduje explicitní potvrzení.
+Backend načte title pouze v očekávané CatalogCollection, provede aktuální SQL
+`COUNT(Video.id)` a samotný `DELETE` má ještě korelovanou podmínku
+`NOT EXISTS(Video)`. Pokud do části mezi zobrazením stránky a delete requestem
+přibyde Video, operace skončí lidskou chybou a celá transakce se vrátí zpět.
+Filename, `relative_path`, jiné CatalogTitle ani fyzický NAS nejsou součástí
+operace.
+
+Audit modelu našel čtyři druhy záznamů vlastněných CatalogTitle:
+
+- `ExternalTitleLink`;
+- `TitleMetadata`;
+- `MetadataCandidate`;
+- `Artwork` reference.
+
+Všechny vztahy mají ORM `delete-orphan` a jejich FK používají `ON DELETE
+CASCADE`. Helper je navíc explicitně vyprázdní v téže transakci, aby cleanup
+nezávisel na nastavení SQLite `foreign_keys`. Smaže se pouze DB reference
+Artwork; případný soubor uvedený v `local_path` se fyzicky nemaže. Test ověřuje
+nulový počet orphan záznamů i zachování sentinel cover souboru.
+
+Odstranění posledního CatalogTitle nikdy nemaže jeho CatalogCollection. Ta po
+reloadu zůstane v přehledu **Prázdné collections** a teprve samostatná explicitní
+collection delete akce ji může odstranit. Původní individuální formulář a jeho
+potvrzení zůstaly zachované.
+
+Přehled prázdných collections doplňuje výběrové checkboxy, akce **Vybrat
+všechny**, **Zrušit výběr** a **Odstranit vybrané prázdné collections**. Bulk
+backend nepoužívá stav stránky jako autoritu. Jedním bulk dotazem načte
+collections, jednou agregací počty CatalogTitle a jednou agregací počty Video.
+Každý vlastní SQL `DELETE` je navíc omezen dvěma korelovanými `NOT EXISTS`.
+Skutečně prázdné položky odstraní, změněné/neexistující přeskočí a redirect
+vypíše jména obou skupin. Počet SQL dotazů není závislý na počtu zvolených
+collections; nevzniklo N+1.
+
+`collection_grouping_decisions` neobsahuje FK ani ID na CatalogCollection.
+Ukládá pouze deterministický hash suggestion key, state fingerprint a volbu.
+Smazáním collection proto nevzniká relační orphan ani dereference neexistujícího
+objektu. Suggestion builder pracuje pouze s aktuálně existujícími neprázdnými
+collections; historický decision zůstane neaktivním auditem a scanner podle něj
+collection nevytváří. Význam fingerprintu nebyl změněn.
+
+Scannerová regrese modeluje původní samostatnou `High School DxD Born`
+collection, přesune její CatalogTitle do hlavní `High School DxD`, explicitně
+smaže prázdný fragment a provede další scan fyzického stromu. Scanner používá
+existující ručně potvrzený CatalogTitle a anime root, fragmentovanou collection
+znovu nevytvoří, počet Video zůstane stejný a historický grouping decision
+nezpůsobí chybu.
+
+Testovací bootstrap nadále směruje globální aplikaci na in-memory SQLite před
+importem `app.main`. Produkční DB se při testech nesmí změnit ve velikosti,
+mtime ani SHA-256. NAS se nemění a práce zůstává ve fázi **Stabilizace
+hierarchie a ladění UI nad reálnou knihovnou**; V6 ani V7 nebyly zahájeny.
+
 ---
 
 # 7. V6 – Úplnost knihovny ⏳

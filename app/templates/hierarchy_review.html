@@ -1,9 +1,65 @@
 {% extends "base.html" %}
 {% block title %}Kontrola hierarchie · AnimeDB{% endblock %}
-{% block content %}<p><a href="/">← Zpět na katalog</a></p>
+{% block content %}
+<p><a href="/">← Zpět na katalog</a></p>
 <h1>Kontrola hierarchie</h1>
-<p>Automatické návrhy a tituly s nevyřešeným číslováním zde čekají na ruční kontrolu. Žádná akce nemění složky ani videosoubory.</p>
+<p>CatalogCollection je hlavní anime; CatalogTitle je season, film, OVA nebo doplňková část. Všechny akce níže mění pouze databázové vazby, nikdy složky ani videosoubory.</p>
+{% if message %}<div class="notice success">{{ message }}</div>{% endif %}
+
+{% if suggestions %}
+<section class="panel" id="grouping-suggestions">
+  <h2>Možné společné anime</h2>
+  <p>Jde o konzervativní návrhy založené na fyzickém parentu a dalším strukturálním nebo názvovém hintu. Samotná podobnost názvu nestačí a nic se neslučuje automaticky.</p>
+  {% for suggestion in suggestions %}
+  <article class="panel hierarchy-title-card">
+    <h3>Možné společné anime: {{ suggestion.proposed_name }}</h3>
+    <p>{{ suggestion.collections|length }} kandidátních collections · {{ suggestion.title_ids|length }} částí</p>
+    <ul>{% for reason in suggestion.reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+    <form method="post" action="{{ '/hierarchy-review/collections/move' if suggestion.target_collection_id else '/hierarchy-review/collections/create' }}">
+      <input type="hidden" name="suggestion_key" value="{{ suggestion.key }}">
+      {% if suggestion.target_collection_id %}<input type="hidden" name="target_collection_id" value="{{ suggestion.target_collection_id }}">{% else %}<label>Lokální název nové hlavní collection <input type="text" maxlength="200" required name="local_title" value="{{ suggestion.proposed_name }}"></label>{% endif %}
+      {% for collection in suggestion.collections %}
+      <fieldset><legend>{{ collection.local_title }} <small>{{ collection.relative_root_path }}</small></legend>
+        {% for title in collection.titles %}<label><input type="checkbox" name="title_ids" value="{{ title.id }}" checked> <strong>{{ title.local_title }}</strong><small>{{ title.relative_root_path }} · {{ title.videos|length }} videí</small></label>{% endfor %}
+      </fieldset>
+      {% endfor %}
+      <label><input type="checkbox" required> Potvrzuji logické seskupení; fyzické cesty se nemění.</label>
+      <button type="submit">Sloučit pod jedno anime</button>
+    </form>
+    <form class="inline-form" method="post" action="/hierarchy-review/grouping/keep-separate">
+      <input type="hidden" name="suggestion_key" value="{{ suggestion.key }}">
+      <button type="submit">Ponechat jako samostatné anime</button>
+    </form>
+  </article>
+  {% endfor %}
+</section>
+{% endif %}
+
+<section class="panel" id="collection-management">
+  <h2>Vytvořit hlavní anime / collection</h2>
+  <p>Vyberte existující části. Metadata, číslování i vazby videí zůstanou na jejich CatalogTitle.</p>
+  <form method="post" action="/hierarchy-review/collections/create">
+    <label>Lokální název <input type="text" maxlength="200" required name="local_title" placeholder="Např. High School DxD"></label>
+    <details><summary>Vybrat části</summary>{% for collection in selectable_collections %}{% for title in collection.titles %}<label><input type="checkbox" name="title_ids" value="{{ title.id }}"> <strong>{{ title.local_title }}</strong><small>{{ collection.local_title }} · {{ title.relative_root_path }}</small></label>{% endfor %}{% endfor %}</details>
+    <button type="submit">Vytvořit collection a přesunout části</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Sloučit collections / přesunout části</h2>
+  <p>Lze přesunout všechny nebo jen vybrané CatalogTitle. Nejde o merge CatalogTitle: videa se mezi částmi nepřesouvají.</p>
+  <form method="post" action="/hierarchy-review/collections/move">
+    <label>Cílová collection <select name="target_collection_id" required><option value="">vyberte</option>{% for collection in selectable_collections %}<option value="{{ collection.id }}">{{ collection.manual_display_title or collection.local_title }}</option>{% endfor %}</select></label>
+    <details><summary>Vybrat části</summary>{% for collection in selectable_collections %}{% for title in collection.titles %}<label><input type="checkbox" name="title_ids" value="{{ title.id }}"> <strong>{{ title.local_title }}</strong><small>{{ collection.local_title }} · {{ title.relative_root_path }}</small></label>{% endfor %}{% endfor %}</details>
+    <label><input type="checkbox" required> Potvrzuji změnu pouze logické DB vazby.</label>
+    <button type="submit">Přesunout vybrané části</button>
+  </form>
+</section>
+
+{% if empty_collections %}<section class="panel danger-zone"><h2>Prázdné collections</h2><p>Prázdná collection se nikdy nemaže automaticky. Server při každé akci znovu ověří nulový počet CatalogTitle i Video.</p><form id="bulk-empty-collections" method="post" action="/hierarchy-review/collections/delete-empty-bulk"><div class="inline-form"><button type="button" id="select-all-empty">Vybrat všechny</button><button type="button" id="clear-all-empty">Zrušit výběr</button></div>{% for collection in empty_collections %}<label><input class="empty-collection-choice" type="checkbox" name="collection_ids" value="{{ collection.id }}"> <strong>{{ collection.local_title }}</strong><small>{{ collection.relative_root_path }}</small></label>{% endfor %}<label><input type="checkbox" name="confirm_delete" value="true" required> Potvrzuji odstranění vybraných prázdných DB collections.</label><button type="submit">Odstranit vybrané prázdné collections</button></form>{% for collection in empty_collections %}<form class="inline-form" method="post" action="/hierarchy-review/collections/delete-empty"><input type="hidden" name="collection_id" value="{{ collection.id }}"><span><strong>{{ collection.local_title }}</strong> · {{ collection.relative_root_path }}</span><label><input type="checkbox" name="confirm_delete" value="true" required> Potvrzuji odstranění prázdné DB collection</label><button type="submit">Odstranit prázdnou collection</button></form>{% endfor %}<script>const emptyChoices=()=>document.querySelectorAll('.empty-collection-choice');document.getElementById('select-all-empty').addEventListener('click',()=>emptyChoices().forEach(item=>item.checked=true));document.getElementById('clear-all-empty').addEventListener('click',()=>emptyChoices().forEach(item=>item.checked=false));</script></section>{% endif %}
+
 <section class="panel"><div class="table-wrap"><table><thead><tr><th>Kolekce</th><th>Zobrazované názvy částí</th><th>Cesta</th><th>Interní poznámka</th><th>Videa</th><th>Části</th><th>Stav</th><th>Důvod</th></tr></thead><tbody>
-{% for row in rows %}{% set collection = row.collection %}<tr><td><a href="/hierarchy-review/{{ collection.id }}">{{ collection.local_title }}</a></td><td>{% for title in collection.titles %}<a href="/titles/{{ title.id }}">{{ catalog_title_display_title(title, title_name_preference) }}</a><small>Lokální část: {{ title.local_title }}</small>{% if not loop.last %}<hr>{% endif %}{% else %}—{% endfor %}</td><td>{{ collection.relative_root_path }}</td><td>{{ collection.local_period_hint or '—' }}</td><td>{{ collection.videos|length }}</td><td>{{ collection.titles|length }}</td><td>{{ collection.hierarchy_status }}</td><td>{% if collection.hierarchy_note %}{{ collection.hierarchy_note }}{% endif %}{% if row.numbering_unknown %}{{ ' · ' if collection.hierarchy_note else '' }}{{ row.numbering_unknown }} videí nemá určené číslo epizody.{% endif %}{% if not collection.hierarchy_note and not row.numbering_unknown %}Číslování obsahuje mezery nebo duplicity.{% endif %}</td></tr>
-{% else %}<tr><td colspan="8">Žádná kolekce nyní nevyžaduje kontrolu.</td></tr>{% endfor %}
-</tbody></table></div></section>{% endblock %}
+{% for row in rows %}{% set collection = row.collection %}<tr><td><a href="/hierarchy-review/{{ collection.id }}">{{ collection.local_title }}</a></td><td>{% for title in collection.titles %}<a href="/titles/{{ title.id }}">{{ catalog_title_display_title(title, title_name_preference) }}</a><small>Lokální část: {{ title.local_title }}</small>{% if not loop.last %}<hr>{% endif %}{% else %}—{% endfor %}</td><td>{{ collection.relative_root_path }}</td><td>{{ collection.local_period_hint or '—' }}</td><td>{{ row.video_count }}</td><td>{{ collection.titles|length }}</td><td>{{ collection.hierarchy_status }}</td><td>{% if collection.hierarchy_note %}{{ collection.hierarchy_note }}{% endif %}{% if row.numbering_unknown %}{{ ' · ' if collection.hierarchy_note else '' }}{{ row.numbering_unknown }} videí nemá určené číslo epizody.{% endif %}{% if not collection.hierarchy_note and not row.numbering_unknown %}Číslování obsahuje mezery nebo duplicity.{% endif %}</td></tr>
+{% else %}<tr><td colspan="8">Žádná collection nyní nevyžaduje kontrolu číslování nebo vlastní hierarchie.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}

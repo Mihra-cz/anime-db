@@ -48,6 +48,12 @@ def classify_video(relative_path: str) -> str:
     tokens = re.sub(r"[^a-z0-9]+", " ", value).split()
     token_set = set(tokens)
     compact = re.sub(r"[^a-z0-9]+", "", value)
+    supplementary = detect_episode_number(PurePosixPath(relative_path).name)
+    if supplementary.is_supplementary:
+        return {
+            "ova": "ova", "special": "special", "ncop": "ncop", "nced": "nced",
+            "preview": "pv",
+        }.get(supplementary.supplementary_type or "", "other")
     if "ncop" in compact or "creditlessopening" in compact:
         return "ncop"
     if "nced" in compact or "creditlessending" in compact:
@@ -283,7 +289,8 @@ GENERIC_ROOTS = {"anime", "library", "media", "videos", "video"}
 STRUCTURAL_DIRECTORY = re.compile(
     r"^(?:(?:s[ée]rie|series|season|cour|part)\s*[-_. ]*\d+|s\s*[-_. ]*\d+)"
     r"(?:\s*\([^)]*\))?$"
-    r"|^(?:specials?|extras?|bonus|ova|oad)(?:\s*\([^)]*\))?$",
+    r"|^(?:specials?|extras?|bonuses?|ova|oad|nc|ncop|nced|op|ed|"
+    r"previews?|recaps?|movies?|films?|pv|cm\s*[&+]\s*pv)(?:\s*\([^)]*\))?$",
     re.IGNORECASE,
 )
 
@@ -648,8 +655,12 @@ EXPLICIT_EPISODE = re.compile(
 )
 TRAILING_EPISODE = re.compile(r"\s+-\s+0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
 TRAILING_PLAIN_EPISODE = re.compile(r"\s+0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
-TRAILING_OVA_PART_EPISODE = re.compile(
-    r"(?:^|\s)OVA\s+P0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE
+SUPPLEMENTARY_SEQUENCE = re.compile(
+    r"(?:^|[^a-z0-9])"
+    r"(?P<type>NCOP|NCED|OVA|OAD|SPECIALS?|OP|ED|PREVIEWS?|PV|RECAPS?|"
+    r"BONUS(?:ES)?|EXTRAS?)"
+    r"\s*(?:(?:P|EPISODE|EP|E)\s*)?0*(?P<number>\d{1,3})(?:v\d+)?$",
+    re.IGNORECASE,
 )
 BARE_EPISODE = re.compile(r"0\d{1,2}(?:v\d+)?", re.IGNORECASE)
 EXPLICIT_FRACTIONAL_EPISODE = re.compile(
@@ -677,6 +688,8 @@ class EpisodeNumberDetection:
     kind: str
     number: int | None = None
     fraction: str | None = None
+    supplementary_type: str | None = None
+    context_hint: str | None = None
 
     @property
     def is_standard(self) -> bool:
@@ -687,6 +700,14 @@ class EpisodeNumberDetection:
         return self.kind in {"zero", "fractional"}
 
     @property
+    def is_supplementary(self) -> bool:
+        return self.kind == "supplementary"
+
+    @property
+    def supplementary_number(self) -> int | None:
+        return self.number if self.is_supplementary else None
+
+    @property
     def display_value(self) -> str | None:
         if self.kind == "zero":
             return "00"
@@ -694,15 +715,31 @@ class EpisodeNumberDetection:
             return f"{self.number}.{self.fraction}"
         if self.kind == "standard" and self.number is not None:
             return str(self.number)
+        if self.is_supplementary and self.number is not None:
+            label = {
+                "ova": "OVA", "special": "Special", "ncop": "NCOP", "nced": "NCED",
+                "op": "OP", "ed": "ED", "preview": "Preview", "recap": "Recap",
+                "bonus": "Bonus",
+            }.get(self.supplementary_type or "", "Doplněk")
+            return f"{label} {self.number:02d}"
         return None
 
 
 def detect_episode_number(filename: str) -> EpisodeNumberDetection:
     """Bezpečně rozliší standardní, nulové, desetinné a neznámé číslování."""
     stem = PurePosixPath(filename).stem
-    if match := TRAILING_OVA_PART_EPISODE.search(stem):
-        number = int(match.group(1))
-        return EpisodeNumberDetection("zero" if number == 0 else "standard", number)
+    if match := SUPPLEMENTARY_SEQUENCE.search(stem):
+        number = int(match.group("number"))
+        raw_type = match.group("type").casefold()
+        supplementary_type = {
+            "oad": "ova", "specials": "special", "previews": "preview", "pv": "preview",
+            "recaps": "recap", "bonuses": "bonus", "extra": "bonus", "extras": "bonus",
+        }.get(raw_type, raw_type)
+        context_hint = stem[:match.start()].rstrip(" -_.") or None
+        return EpisodeNumberDetection(
+            "supplementary", number, supplementary_type=supplementary_type,
+            context_hint=context_hint,
+        )
     for pattern in (EXPLICIT_FRACTIONAL_EPISODE, TRAILING_FRACTIONAL_EPISODE):
         if match := pattern.search(stem):
             return EpisodeNumberDetection(

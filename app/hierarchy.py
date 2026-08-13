@@ -43,6 +43,27 @@ NUMBERED_PART = re.compile(
 )
 ROMAN_SUFFIX = re.compile(r"^(.*\S)\s+([IVXLCDM]+)$", re.IGNORECASE)
 ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
+ANNOTATION_SUFFIX = re.compile(r"\s*\([^)]*\)\s*$")
+SUPPLEMENTARY_PARTS = {
+    "bonus": ("bonus", None, "Bonus"),
+    "bonuses": ("bonus", None, "Bonus"),
+    "extra": ("bonus", None, "Bonus"),
+    "extras": ("bonus", None, "Bonus"),
+    "nc": ("bonus", None, "NC"),
+    "ncop": ("bonus", None, "NCOP"),
+    "nced": ("bonus", None, "NCED"),
+    "op": ("bonus", None, "OP"),
+    "ed": ("bonus", None, "ED"),
+    "preview": ("preview", None, "Preview"),
+    "previews": ("preview", None, "Preview"),
+    "pv": ("preview", None, "Preview"),
+    "recap": ("recap", None, "Recap"),
+    "recaps": ("recap", None, "Recap"),
+    "movie": ("film", None, "Movies"),
+    "movies": ("film", None, "Movies"),
+    "film": ("film", None, "Movies"),
+    "films": ("film", None, "Movies"),
+}
 
 
 def roman_to_int(value: str) -> int | None:
@@ -76,12 +97,28 @@ def parse_explicit_part(name: str) -> tuple[str, int | None, str | None] | None:
         ) or match.group(5))
         kind = (match.group(4) or "season").casefold()
         return kind, number, f"S{number}"
-    folded = stripped.casefold()
+    folded = ANNOTATION_SUFFIX.sub("", stripped).strip().casefold()
     if folded in {"ova", "oad"}:
         return "ova", None, "OVA"
     if folded in {"special", "specials"}:
         return "special", None, "Specials"
+    compact = re.sub(r"[^a-z0-9]+", "", folded)
+    if compact in {"cmpv", "commercialspv", "commercialsandpv"}:
+        return "bonus", None, "Bonus"
+    if folded in SUPPLEMENTARY_PARTS:
+        return SUPPLEMENTARY_PARTS[folded]
     return None
+
+
+def _name_without_annotation(name: str) -> str:
+    return ANNOTATION_SUFFIX.sub("", name).strip()
+
+
+def _is_related_named_child(parent_name: str, child_name: str) -> bool:
+    """Silný ancestry hint: child opakuje celý základ bez interního suffixu parentu."""
+    parent = normalize_title(_name_without_annotation(parent_name))
+    child = normalize_title(_name_without_annotation(child_name))
+    return bool(parent and child and child != parent and child.startswith(f"{parent} "))
 
 
 def _meaningful_directories(relative_path: str) -> tuple[list[str], int]:
@@ -116,38 +153,70 @@ def derive_library_hierarchy(relative_paths: list[str]) -> dict[str, HierarchyId
     result: dict[str, HierarchyIdentity] = {}
     for path, (directories, offset) in parsed.items():
         part_index = None
+        title_index = None
         part_data = None
         for index in range(offset + 1, len(directories)):
             name = directories[index]
             if explicit := parse_explicit_part(name):
-                part_index, part_data = index, explicit
-                break
+                if part_index is None:
+                    part_index = index
+                title_index, part_data = index, explicit
+                continue
             key = (tuple(directories[:index]), name)
             if key in roman_parts:
                 match = ROMAN_SUFFIX.fullmatch(name.strip())
                 number = roman_to_int(match.group(2)) if match else None
-                part_index, part_data = index, ("season", number, f"S{number}")
-                break
+                if part_index is None:
+                    part_index = index
+                title_index, part_data = index, ("season", number, f"S{number}")
+                continue
+            if (
+                part_index is None
+                and index == offset + 1
+                and _is_related_named_child(directories[index - 1], name)
+            ):
+                part_index = title_index = index
+                part_data = ("title", None, None)
         if part_index is None:
             legacy = determine_parent_series(path)
             collection = CollectionIdentity(legacy.name, legacy.relative_path)
+            direct_type = (
+                "film"
+                if re.search(r"\((?:film|movie)\)\s*$", legacy.name, re.IGNORECASE)
+                else "title"
+            )
             title = TitleIdentity(
-                legacy.name, legacy.relative_path, "title", None, None, None, 0,
-                normalize_title(legacy.name), "direct_title_or_no_safe_part_context",
+                legacy.name, legacy.relative_path, direct_type, None,
+                "Film" if direct_type == "film" else None, None, 0,
+                normalize_title(legacy.name),
+                "direct_film_root" if direct_type == "film"
+                else "direct_title_or_no_safe_part_context",
             )
         else:
             collection_dirs = directories[:part_index]
             collection = CollectionIdentity(
                 collection_dirs[-1], PurePosixPath(*collection_dirs).as_posix()
             )
-            part_name = directories[part_index]
+            assert title_index is not None
+            part_name = directories[title_index]
             kind, number, label = part_data
+            supplementary_named_child = (
+                kind in {"film", "ova", "special", "preview", "recap", "bonus"}
+                and title_index == part_index
+                and len(directories) > part_index + 1
+            )
+            if supplementary_named_child:
+                title_index = part_index + 1
+                part_name = f"{directories[part_index]} – {directories[title_index]}"
             roman_match = ROMAN_SUFFIX.fullmatch(part_name.strip())
             title = TitleIdentity(
-                part_name, PurePosixPath(*directories[:part_index + 1]).as_posix(),
+                part_name, PurePosixPath(*directories[:title_index + 1]).as_posix(),
                 kind, number, label, part_name, number or 0,
                 normalize_title(roman_match.group(1) if roman_match else collection.local_title),
-                "roman_sibling_same_base" if roman_match else "explicit_part_pattern",
+                "roman_sibling_same_base" if roman_match else
+                "related_named_child" if kind == "title" else
+                "supplementary_named_child" if supplementary_named_child else
+                "explicit_part_pattern",
             )
         result[path] = HierarchyIdentity(collection, title)
     return result
