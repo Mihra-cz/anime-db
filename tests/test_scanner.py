@@ -9,7 +9,7 @@ from app.database import Base
 from app.catalog import set_manual_hardsub
 from app.hierarchy_review import (
     MISSING_DUPLICATE_PRIMARY_REVIEW_REASON, SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
-    confirm_duplicate_videos,
+    confirm_duplicate_videos, set_manual_duplicate_status,
 )
 from app.models import CatalogCollection, CatalogTitle, ExternalSubtitle, Video
 from app.numbering import unresolved_duplicate_groups
@@ -432,3 +432,27 @@ def test_scan_preserves_duplicate_relationship_and_marks_missing_primary(
         assert collection.hierarchy_note == MISSING_DUPLICATE_PRIMARY_REVIEW_REASON
         assert primary_path.read_bytes() == b"primary"
         assert duplicate_path.read_bytes() == b"duplicate"
+
+
+def test_scan_preserves_manual_duplicate_suspicion(tmp_path: Path, monkeypatch):
+    video_path = tmp_path / "Show" / "Show - 01.mkv"
+    video_path.parent.mkdir()
+    video_path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        video = session.scalar(select(Video))
+        assert video.duplicate_status_manual is None
+        set_manual_duplicate_status(video, "suspected")
+        session.commit()
+
+        scan_library(session, tmp_path)
+
+        stored = session.scalar(select(Video))
+        assert stored.duplicate_status_manual == "suspected"
+        assert stored.duplicate_of_video_id is None
+        assert video_path.read_bytes() == b"video"

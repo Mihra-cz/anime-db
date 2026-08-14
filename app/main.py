@@ -38,6 +38,7 @@ from .catalog import (
     subtitle_track_display,
     title_videos,
     translation_status,
+    unresolved_duplicate_video_ids,
     video_matches_filter,
     video_matches_search,
 )
@@ -57,6 +58,7 @@ from .hierarchy_review import (
     parse_simple_definitions,
     refresh_collection_state,
     preview_assignments, separate_nonstandard_videos, simple_definition_rows,
+    set_manual_duplicate_status,
     single_title_confirmation_suggestion, supplementary_video_suggestions,
 )
 from .metadata.providers.anilist import AniListProvider
@@ -157,9 +159,12 @@ def _load_videos(sessions) -> list[Video]:
         return list(session.scalars(select(Video).options(
             selectinload(Video.audio_tracks), selectinload(Video.internal_subtitles),
             selectinload(Video.external_subtitles),
-            selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
+            selectinload(Video.catalog_title).selectinload(
+                CatalogTitle.collection
+            ).selectinload(CatalogCollection.titles),
             selectinload(Video.catalog_title).selectinload(CatalogTitle.metadata_record),
-            selectinload(Video.catalog_collection),
+            selectinload(Video.catalog_collection).selectinload(CatalogCollection.titles),
+            selectinload(Video.duplicate_of),
         ).order_by(Video.relative_path)).all())
 
 
@@ -234,8 +239,13 @@ def _duplicate_video_details(video: Video) -> dict[str, str]:
     }
 
 
-def _video_display_rows(videos: list[Video]) -> list[dict]:
+def _video_display_rows(
+    videos: list[Video], known_video_ids: set[int] | None = None,
+) -> list[dict]:
     included_video_ids = {video.id for video in videos}
+    available_video_ids = (
+        included_video_ids if known_video_ids is None else known_video_ids
+    )
     duplicate_copies_by_primary: dict[int, list[Video]] = {}
     for video in videos:
         if video.duplicate_of_video_id in included_video_ids:
@@ -249,7 +259,7 @@ def _video_display_rows(videos: list[Video]) -> list[dict]:
             "orphan_duplicate": bool(
                 video.duplicate_primary_missing
                 or video.duplicate_of_video_id is not None
-                and video.duplicate_of_video_id not in included_video_ids
+                and video.duplicate_of_video_id not in available_video_ids
             ),
         }
         for video in videos
@@ -718,8 +728,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 and video.catalog_title.relative_root_path == selected_path
             )
         ]
+        detail_unresolved_duplicate_ids = unresolved_duplicate_video_ids(title_candidates)
         filtered_candidates = [
-            video for video in title_candidates if video_matches_filter(video, filter_name)
+            video for video in title_candidates
+            if video_matches_filter(
+                video, filter_name,
+                unresolved_duplicate_ids=detail_unresolved_duplicate_ids,
+            )
         ]
         folded_query = results.query.casefold()
         title_query_match = bool(folded_query) and catalog_title and (
@@ -792,7 +807,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "subtitle_track_display": subtitle_track_display,
             "manual_hardsub_state": manual_hardsub_state,
             "translation_status": translation_status,
-            "video_matches_filter": video_matches_filter,
+            "video_matches_filter": lambda video, selected_filter: video_matches_filter(
+                video, selected_filter,
+                unresolved_duplicate_ids=detail_unresolved_duplicate_ids,
+            ),
+            "unresolved_duplicate_video_ids": detail_unresolved_duplicate_ids,
+            "title_video_ids": {
+                video.id for video in title_candidates if video.id is not None
+            },
             "derive_season_info": derive_season_info,
             "derive_episode_number": derive_episode_number,
             "q": results.query,
@@ -875,6 +897,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if collection is None:
             raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
         all_videos = _load_videos(sessions)
+        all_unresolved_duplicate_ids = unresolved_duplicate_video_ids(all_videos)
         videos_by_part: dict[int, list[Video]] = {}
         for video in all_videos:
             if video.catalog_title and video.catalog_title.catalog_collection_id == collection.id:
@@ -898,7 +921,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for video in title_videos_list:
                 _add_video(stats, video)
             filtered = [
-                video for video in title_videos_list if video_matches_filter(video, filter_name)
+                video for video in title_videos_list
+                if video_matches_filter(
+                    video, filter_name,
+                    unresolved_duplicate_ids=all_unresolved_duplicate_ids,
+                )
             ]
             title_query_match = bool(folded_query) and (
                 folded_query in title.local_title.casefold()
@@ -1033,6 +1060,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for group in item["unresolved_duplicate_groups"]
                 for video in group.videos
             }
+            confirmed_duplicate_video_ids = {
+                video.id
+                for item in title_numbering
+                for group in item["confirmed_duplicate_groups"]
+                for video in group.videos
+            }
             supplementary_suggestions = supplementary_video_suggestions(
                 videos, include_video_ids=duplicate_candidate_video_ids,
             )
@@ -1059,6 +1092,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "part_confirmation_suggestion": part_confirmation,
                 "supplementary_suggestions": supplementary_suggestions,
                 "supplementary_suggestion_by_video": supplementary_suggestion_by_video,
+                "duplicate_candidate_video_ids": duplicate_candidate_video_ids,
+                "confirmed_duplicate_video_ids": confirmed_duplicate_video_ids,
                 "available_collections": available_collections,
                 "duplicate_video_details": {
                     video.id: _duplicate_video_details(video) for video in videos
@@ -2042,6 +2077,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         else:
             target = f"/catalog/{filter_name}"
+        return RedirectResponse(target, status_code=303)
+
+    @app.post("/videos/{video_id}/duplicate-status-manual")
+    def update_manual_duplicate_status(
+        video_id: int, duplicate_status_manual: str = Form(""),
+        return_to: str = Form("/"),
+    ):
+        with sessions() as session:
+            video = session.get(Video, video_id)
+            if video is None:
+                raise HTTPException(status_code=404, detail="Video nebylo nalezeno")
+            try:
+                set_manual_duplicate_status(video, duplicate_status_manual or None)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        target = return_to.strip()
+        if not target.startswith("/") or target.startswith("//"):
+            target = "/"
         return RedirectResponse(target, status_code=303)
 
     @app.post("/titles/{catalog_title_id}/numbering")

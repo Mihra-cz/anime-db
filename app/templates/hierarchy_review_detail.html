@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_manual_duplicate.html" import manual_duplicate_control %}
 {% block title %}Kontrola {{ collection.local_title }} · AnimeDB{% endblock %}
 {% block content %}
 <p><a href="/hierarchy-review">← Přehled kontrol</a> · <a href="/collections/{{ collection.id }}">Otevřít kolekci</a></p>
@@ -51,6 +52,25 @@
 </article>
 {% else %}<div class="panel">Kolekce nemá žádné části.</div>{% endfor %}
 </section>
+
+{% set manual_duplicate_suspected_count = videos|selectattr('duplicate_status_manual', 'equalto', 'suspected')|list|length %}
+<details class="panel manual-duplicate-panel" id="manual-duplicates">
+  <summary>Ruční podezření na duplicitu · {{ videos|length }} videí · označeno: {{ manual_duplicate_suspected_count }}</summary>
+  <div class="manual-duplicate-content">
+    <p>Toto označení je nezávislá poznámka pro pozdější kontrolu. Automaticky nalezený problém vychází z logické identity; potvrzená duplicita vzniká pouze ručním výběrem primary a vazbou <code>duplicate_of_video_id</code>.</p>
+    <div class="manual-duplicate-list">
+      {% for video in videos %}<article>
+        <div><strong>{{ video.filename }}</strong><small>{{ video.relative_path }}</small></div>
+        {{ manual_duplicate_control(
+          video,
+          '/hierarchy-review/' ~ collection.id ~ '#manual-duplicate-video-' ~ video.id,
+          confirmed_group=video.id in (confirmed_duplicate_video_ids|default([])),
+          automatic_candidate=video.id in (duplicate_candidate_video_ids|default([]))
+        ) }}
+      </article>{% endfor %}
+    </div>
+  </div>
+</details>
 
 {% if available_collections and title_numbering %}<section class="panel" id="collection-reassignment">
   <h2>Přesunout části do jiné collection</h2>

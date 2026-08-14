@@ -16,6 +16,7 @@ from app.hierarchy_review import (
     delete_empty_local_title, extract_local_period_hint, merge_title_into,
     move_videos_to_title, parse_manual_definitions, parse_simple_definitions,
     preview_assignments, refresh_collection_state, separate_nonstandard_videos,
+    set_manual_duplicate_status,
     simple_definition_rows,
     single_title_confirmation_suggestion,
     supplementary_video_suggestions,
@@ -108,6 +109,79 @@ def test_flat_collection_with_episodes_1_to_26_requires_review():
         collection = session.get(CatalogCollection, collection_id)
         reason = collection_requires_review(collection, list(collection.videos))
         assert reason == PERIOD_HINT_REVIEW_REASON
+
+
+def test_manual_duplicate_suspicion_is_nullable_and_independent_of_other_video_data():
+    collection, title = simple_collection()
+    video = title.videos[0]
+    video.content_type_manual = "recap"
+    title.metadata_record = TitleMetadata(
+        catalog_title_id=title.id, display_title="Metadata title",
+        metadata_provider="anilist", metadata_external_id="123",
+    )
+    original_hierarchy = (
+        video.catalog_collection, video.catalog_title,
+        video.catalog_collection_id, video.catalog_title_id,
+        title.part_type, title.season_number, title.season_label,
+    )
+    original_metadata = (
+        title.metadata_record, title.metadata_record.display_title,
+        title.metadata_record.metadata_external_id,
+    )
+
+    assert video.duplicate_status_manual is None
+    assert video.duplicate_of_video_id is None
+    assert video_matches_filter(video, "manual-duplicate-suspected") is False
+
+    set_manual_duplicate_status(video, "suspected")
+
+    assert video.duplicate_status_manual == "suspected"
+    assert video_matches_filter(video, "manual-duplicate-suspected") is True
+    assert video.duplicate_of_video_id is None
+    assert video.duplicate_of is None
+    assert video.content_type_manual == "recap"
+    assert original_hierarchy == (
+        video.catalog_collection, video.catalog_title,
+        video.catalog_collection_id, video.catalog_title_id,
+        title.part_type, title.season_number, title.season_label,
+    )
+    assert original_metadata == (
+        title.metadata_record, title.metadata_record.display_title,
+        title.metadata_record.metadata_external_id,
+    )
+
+    set_manual_duplicate_status(video, None)
+
+    assert video.duplicate_status_manual is None
+    assert video_matches_filter(video, "manual-duplicate-suspected") is False
+    assert video.duplicate_of_video_id is None
+
+
+def test_manual_duplicate_suspicion_does_not_change_automatic_duplicate_detection():
+    collection, title = simple_collection()
+    first = title.videos[0]
+    second = Video(
+        id=2, relative_path=f"{collection.relative_root_path}/Episode 01 copy.mkv",
+        root_folder="Anime", filename="Episode 01 copy.mkv", size=2, mtime_ns=2,
+        season_episode_number=1, catalog_title=title, catalog_collection=collection,
+    )
+
+    assert len(unresolved_duplicate_groups([first, second])) == 1
+
+    set_manual_duplicate_status(second, "suspected")
+
+    groups = unresolved_duplicate_groups([first, second])
+    assert len(groups) == 1
+    assert {video.id for video in groups[0].videos} == {first.id, second.id}
+
+
+def test_manual_duplicate_status_rejects_explicit_not_duplicate_state():
+    _, title = simple_collection()
+
+    with pytest.raises(ValueError, match="Neplatný stav"):
+        set_manual_duplicate_status(title.videos[0], "not_duplicate")
+
+    assert title.videos[0].duplicate_status_manual is None
 
 
 def test_internal_period_hint_does_not_infer_season_count_or_change_identity():
@@ -323,6 +397,7 @@ def test_confirmed_duplicate_persists_can_change_primary_and_can_be_cleared():
         session.flush()
         refresh_collection_state(collection)
         assert summarize_title_numbering(list(title.videos), title).duplicate_numbers == (1,)
+        set_manual_duplicate_status(second, "suspected")
         paths = [(video.filename, video.relative_path) for video in title.videos]
 
         confirm_duplicate_groups(session, collection.id, [([first.id, second.id], first.id)])
@@ -335,6 +410,7 @@ def test_confirmed_duplicate_persists_can_change_primary_and_can_be_cleared():
         collection = session.get(CatalogCollection, collection_id)
         first, second = session.get(Video, first_id), session.get(Video, second_id)
         assert second.duplicate_of_video_id == first.id
+        assert second.duplicate_status_manual == "suspected"
         summary = summarize_title_numbering(list(first.catalog_title.videos), first.catalog_title)
         assert (summary.total, summary.standard_total, summary.numbered) == (2, 1, 1)
         assert summary.duplicate_numbers == ()
@@ -351,6 +427,7 @@ def test_confirmed_duplicate_persists_can_change_primary_and_can_be_cleared():
         first, second = session.get(Video, first_id), session.get(Video, second_id)
         assert first.duplicate_of_video_id == second.id
         assert second.duplicate_of_video_id is None
+        assert second.duplicate_status_manual == "suspected"
 
         clear_confirmed_duplicate_videos(
             session, collection.id, [first.id, second.id],

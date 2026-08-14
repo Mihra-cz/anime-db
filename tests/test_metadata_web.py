@@ -13,7 +13,7 @@ from app.main import (
 )
 from app.hierarchy_review import (
     CONFIRMED_DUPLICATES_REVIEW_REASON, PERIOD_HINT_REVIEW_REASON,
-    separate_nonstandard_videos,
+    confirm_duplicate_videos, separate_nonstandard_videos,
     simple_definition_rows, single_title_confirmation_suggestion,
 )
 from app.metadata.providers.base import ProviderTitleMetadata
@@ -759,6 +759,7 @@ def test_bungo_bulk_duplicate_resolution_keeps_physical_cleanup_warning(tmp_path
         web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
     ).body.decode()
     assert "Vyřešit duplicity · podezření (13 skupin)" in before
+    assert 'class="automatic-duplicate-badge"' in before
     assert before.count('name="group_key"') == 13
     assert before.count('action="/hierarchy-review/1/duplicates/confirm-bulk"') == 1
     assert "Délka 24:00 · 1920×1080 · h264" in before
@@ -815,12 +816,270 @@ def test_bungo_bulk_duplicate_resolution_keeps_physical_cleanup_warning(tmp_path
     assert "Fyzické duplicity vyžadují vyřešení: 13" in after
     assert "Potvrzené duplicity (13)" in after
     assert "Vyřešit duplicity · podezření" not in after
+    assert 'class="automatic-duplicate-badge"' not in after
 
     title_detail = endpoints["/titles/{catalog_title_id}"](
         web_request(web_app, f"/titles/{title_id}"), title_id,
     ).body.decode()
     assert title_detail.count("+ 1 potvrzená duplicitní kopie") == 13
     assert "Fyzický cleanup dosud nebyl proveden." in title_detail
+
+
+def test_manual_duplicate_endpoint_marks_and_clears_without_other_changes(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'manual-duplicate.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show", hierarchy_status="verified",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1", relative_root_path="Anime/Show/Season 1",
+            part_type_manual="season", season_number_manual=1,
+            season_label_manual="S1", hierarchy_manual_override=True,
+        )
+        title.metadata_record = TitleMetadata(
+            display_title="Remote Show", metadata_provider="anilist",
+            metadata_external_id="123",
+        )
+        video = Video(
+            relative_path="Anime/Show/Season 1/Show - 01.mkv", root_folder="Anime",
+            filename="Show - 01.mkv", size=100, mtime_ns=1,
+            content_type_manual="recap", season_episode_number=1,
+            catalog_title=title, catalog_collection=collection,
+        )
+        session.add(collection)
+        session.commit()
+        video_id, title_id, collection_id = video.id, title.id, collection.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/videos/{video_id}/duplicate-status-manual"
+    )
+    response = endpoint(
+        video_id, duplicate_status_manual="suspected",
+        return_to=f"/titles/{title_id}#video-{video_id}",
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/titles/{title_id}#video-{video_id}"
+
+    with web_app.state.sessions() as session:
+        stored = session.get(Video, video_id)
+        assert stored.duplicate_status_manual == "suspected"
+        assert stored.duplicate_of_video_id is None
+        assert stored.content_type_manual == "recap"
+        assert stored.catalog_title_id == title_id
+        assert stored.catalog_collection_id == collection_id
+        assert stored.catalog_title.metadata_record.display_title == "Remote Show"
+
+    detail_endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+    )
+    rendered = detail_endpoint(
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+    ).body.decode()
+    assert "Ruční podezření na duplicitu" in rendered
+    assert "Zrušit ruční označení" in rendered
+    assert "primary nebylo vybráno" in rendered
+
+    response = endpoint(
+        video_id, duplicate_status_manual="",
+        return_to=f"/hierarchy-review/{collection_id}#manual-duplicate-video-{video_id}",
+    )
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        stored = session.get(Video, video_id)
+        assert stored.duplicate_status_manual is None
+        assert stored.duplicate_of_video_id is None
+        assert stored.content_type_manual == "recap"
+
+
+def test_all_duplicates_filter_renders_unresolved_and_confirmed_not_manual_only(
+    tmp_path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'all-duplicates.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show", hierarchy_status="verified",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Show/Season 1",
+        )
+
+        def video(filename, episode, *, suspected=False):
+            return Video(
+                relative_path=f"Anime/Show/Season 1/{filename}",
+                root_folder="Anime", filename=filename, size=1, mtime_ns=1,
+                file_type="episode", season_episode_number=episode,
+                duplicate_status_manual="suspected" if suspected else None,
+                catalog_title=title, catalog_collection=collection,
+            )
+
+        unresolved = video("AUTO-ONE.mkv", 1)
+        unresolved_suspected = video("AUTO-TWO-SUSPECTED.mkv", 1, suspected=True)
+        normal = video("NORMAL.mkv", 2)
+        manual_only = video("MANUAL-ONLY.mkv", 3, suspected=True)
+        primary = video("PRIMARY.mkv", 4)
+        confirmed = video("CONFIRMED-SUSPECTED.mkv", 4, suspected=True)
+        session.add_all([
+            unresolved, unresolved_suspected, normal, manual_only, primary, confirmed,
+        ])
+        session.flush()
+        confirmed.duplicate_of_video_id = primary.id
+        session.commit()
+        title_id = title.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+        filter_name="all-duplicates",
+    ).body.decode()
+
+    assert "Všechny duplicity" in rendered
+    assert "AUTO-ONE.mkv" in rendered
+    assert "AUTO-TWO-SUSPECTED.mkv" in rendered
+    assert "CONFIRMED-SUSPECTED.mkv" in rendered
+    assert "NORMAL.mkv" not in rendered
+    assert "MANUAL-ONLY.mkv" not in rendered
+    assert "PRIMARY.mkv" not in rendered
+    assert rendered.count("Automaticky nalezený problém") == 2
+    assert "Potvrzená duplicita" in rendered
+    assert "Ruční podezření na duplicitu" in rendered
+    assert "Neplatný vztah duplicity" not in rendered
+
+
+def test_unreviewed_manual_duplicate_ui_does_not_mean_not_duplicate():
+    video = Video(
+        id=1, relative_path="Anime/Show/E01.mkv", root_folder="Anime",
+        filename="E01.mkv", size=1, mtime_ns=1,
+    )
+
+    rendered = str(
+        templates.env.get_template("_manual_duplicate.html").module
+        .manual_duplicate_control(video, "/titles/1#video-1")
+    )
+
+    assert video.duplicate_status_manual is None
+    assert "Označit jako podezřelou duplicitu" in rendered
+    assert "Ruční podezření na duplicitu" not in rendered
+    assert "Není duplicita" not in rendered
+
+
+def test_manual_duplicate_review_section_is_collapsed_and_shows_counts():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    title = CatalogTitle(
+        id=1, collection=collection, local_title="Season 1",
+        normalized_local_title="season 1", relative_root_path="Anime/Show/Season 1",
+    )
+    videos = [
+        Video(
+            id=identifier, relative_path=f"Anime/Show/Season 1/E{identifier:02}.mkv",
+            root_folder="Anime", filename=f"E{identifier:02}.mkv", size=1,
+            mtime_ns=1, duplicate_status_manual=("suspected" if identifier == 2 else None),
+            catalog_title=title, catalog_collection=collection,
+        )
+        for identifier in (1, 2, 3)
+    ]
+    rendered = templates.env.get_template("hierarchy_review_detail.html").render(
+        request=type("Request", (), {
+            "url_for": lambda self, *args, **kwargs: "/static/style.css",
+        })(),
+        collection=collection, videos=videos, numbering_unknown=0,
+        nonstandard_videos=[], unassigned_videos={
+            "standard": [], "supplemental": [], "nonstandard": [], "unknown": [],
+        },
+        message=None, error=None, part_confirmation_suggestion=None,
+        title_numbering=[], metadata_status_labels={}, simple_rows=[],
+        definitions_json="[]", external_search_candidates=[], external_candidates=[],
+        preview=None, preview_rows=[], available_collections=[],
+        supplementary_suggestions=[], supplementary_suggestion_by_video={},
+        duplicate_candidate_video_ids=set(), confirmed_duplicate_video_ids=set(),
+    )
+    opening_tag = rendered.split('id="manual-duplicates"', 1)[0].rsplit("<", 1)[1]
+
+    assert "details class=" in opening_tag
+    assert " open" not in opening_tag
+    assert "Ruční podezření na duplicitu · 3 videí · označeno: 1" in rendered
+    assert "Toto označení je nezávislá poznámka" in rendered
+    assert "Zrušit ruční označení" in rendered
+
+
+def test_confirmed_duplicate_ui_keeps_manual_suspicion_visually_secondary(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'confirmed-manual-duplicate.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show", hierarchy_status="review_required",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1", relative_root_path="Anime/Show/Season 1",
+            part_type_manual="season", hierarchy_manual_override=True,
+        )
+        first = Video(
+            relative_path="Anime/Show/Season 1/Show - 01.mkv", root_folder="Anime",
+            filename="Show - 01.mkv", size=100, mtime_ns=1,
+            season_episode_number=1, catalog_title=title, catalog_collection=collection,
+        )
+        second = Video(
+            relative_path="Anime/Show/Season 1/Show 01.mp4", root_folder="Anime",
+            filename="Show 01.mp4", size=200, mtime_ns=2,
+            season_episode_number=1, duplicate_status_manual="suspected",
+            catalog_title=title, catalog_collection=collection,
+        )
+        session.add(collection)
+        session.flush()
+        confirm_duplicate_videos(
+            session, collection.id, [first.id, second.id], first.id,
+        )
+        session.commit()
+        collection_id, second_id = collection.id, second.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review/{collection_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+    control = rendered.split(
+        f'id="manual-duplicate-video-{second_id}"', 1
+    )[1].split("</div>", 1)[0]
+
+    assert "Potvrzená duplicita" in control
+    assert "Ruční podezření na duplicitu" in control
+    assert "samostatná starší poznámka" in control
+    assert "Zrušit ruční označení" in control
+    assert "Označit jako podezřelou duplicitu" not in control
+    assert "Automaticky nalezený problém" not in control
 
 
 def test_hierarchy_review_offers_season_specific_ova_reassignment(tmp_path):

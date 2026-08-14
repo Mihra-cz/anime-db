@@ -1,0 +1,34 @@
+{% macro manual_duplicate_control(video, return_to, confirmed_group=false, automatic_candidate=false) -%}
+<div class="manual-duplicate-control" id="manual-duplicate-video-{{ video.id }}">
+  {% if confirmed_group %}
+    {% if automatic_candidate %}<span class="automatic-duplicate-badge">Automaticky nalezený problém</span>{% endif %}
+    <span class="confirmed-duplicate-badge">{{ 'Potvrzená duplicita' if video.duplicate_of_video_id is not none else 'Primary video potvrzené skupiny' }}</span>
+    {% if video.duplicate_status_manual == 'suspected' %}
+      <span class="manual-duplicate-badge">Ruční podezření na duplicitu</span>
+      <small>Ruční podezření je samostatná starší poznámka; potvrzený vztah určuje výhradně <code>duplicate_of_video_id</code>.</small>
+      <form class="inline-form" method="post" action="/videos/{{ video.id }}/duplicate-status-manual">
+        <input type="hidden" name="duplicate_status_manual" value="">
+        <input type="hidden" name="return_to" value="{{ return_to }}">
+        <button class="button-secondary" type="submit">Zrušit ruční označení</button>
+      </form>
+    {% endif %}
+  {% else %}
+    {% if automatic_candidate %}<span class="automatic-duplicate-badge">Automaticky nalezený problém</span>{% endif %}
+    {% if video.duplicate_status_manual == 'suspected' %}
+      <span class="manual-duplicate-badge">Ruční podezření na duplicitu</span>
+      <small>Jde pouze o kandidáta k pozdějšímu prověření; primary nebylo vybráno.</small>
+      <form class="inline-form" method="post" action="/videos/{{ video.id }}/duplicate-status-manual">
+        <input type="hidden" name="duplicate_status_manual" value="">
+        <input type="hidden" name="return_to" value="{{ return_to }}">
+        <button class="button-secondary" type="submit">Zrušit ruční označení</button>
+      </form>
+    {% else %}
+      <form class="inline-form" method="post" action="/videos/{{ video.id }}/duplicate-status-manual">
+        <input type="hidden" name="duplicate_status_manual" value="suspected">
+        <input type="hidden" name="return_to" value="{{ return_to }}">
+        <button class="button-secondary" type="submit">Označit jako podezřelou duplicitu</button>
+      </form>
+    {% endif %}
+  {% endif %}
+</div>
+{%- endmacro %}

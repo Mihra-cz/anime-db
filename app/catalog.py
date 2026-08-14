@@ -411,10 +411,34 @@ FILTER_LABELS = {
     "unassigned": "Nezařazená videa",
     "hierarchy-conflict": "Konflikt hierarchie",
     "hierarchy-review": "Hierarchie ke kontrole",
+    "all-duplicates": "Všechny duplicity",
+    "manual-duplicate-suspected": "Ruční podezření na duplicitu",
 }
 
 
-def video_matches_filter(video: Video, filter_name: str) -> bool:
+def unresolved_duplicate_video_ids(videos: Iterable[Video]) -> set[int]:
+    """Return current unresolved duplicate members using the numbering workflow."""
+    # Local import avoids the catalog <-> numbering module cycle. The actual
+    # duplicate rules deliberately remain owned by unresolved_duplicate_groups.
+    from .numbering import unresolved_duplicate_groups
+
+    videos_by_title: dict[int, list[Video]] = {}
+    for video in videos:
+        if video.catalog_title_id is not None:
+            videos_by_title.setdefault(video.catalog_title_id, []).append(video)
+    return {
+        video.id
+        for title_videos_list in videos_by_title.values()
+        for group in unresolved_duplicate_groups(title_videos_list)
+        for video in group.videos
+        if video.id is not None
+    }
+
+
+def video_matches_filter(
+    video: Video, filter_name: str, *,
+    unresolved_duplicate_ids: set[int] | None = None,
+) -> bool:
     status = translation_status(video)
     predicates = {
         "all": True,
@@ -437,6 +461,12 @@ def video_matches_filter(video: Video, filter_name: str) -> bool:
                 or video.season_episode_number is None
             )
         ),
+        "all-duplicates": bool(
+            video.duplicate_of_video_id is not None
+            or video.id is not None
+            and video.id in (unresolved_duplicate_ids or set())
+        ),
+        "manual-duplicate-suspected": video.duplicate_status_manual == "suspected",
     }
     if filter_name.startswith("type-"):
         return video.file_type == filter_name.removeprefix("type-")
@@ -505,11 +535,16 @@ def build_catalog_results(
     videos: Iterable[Video], filter_name: str, query: str | None = None,
     sort: str | None = None, direction: str | None = None,
 ) -> CatalogResults:
+    video_list = list(videos)
+    unresolved_duplicate_ids = (
+        unresolved_duplicate_video_ids(video_list)
+        if filter_name == "all-duplicates" else None
+    )
     query_text = normalize_search_query(query)
     folded_query = query_text.casefold()
     groups: dict[str, SeriesSummary] = {}
     all_by_title: dict[str, list[Video]] = {}
-    for video in list(videos):
+    for video in video_list:
         catalog_title = video.catalog_title
         collection = catalog_title.collection if catalog_title else video.catalog_collection
         root_collection = meaningful_root_collection(video)
@@ -545,7 +580,10 @@ def build_catalog_results(
                 summary.linked_part_ids.add(catalog_title.id)
         summary.total += 1
         status = translation_status(video)
-        filter_match = video_matches_filter(video, filter_name)
+        filter_match = video_matches_filter(
+            video, filter_name,
+            unresolved_duplicate_ids=unresolved_duplicate_ids,
+        )
         summary.problematic += filter_match
         summary.episodes += video.file_type == "episode"
         summary.bonus += video.file_type != "episode"
@@ -573,7 +611,13 @@ def build_catalog_results(
             ROOT_FOLDER if is_unassigned_root
             else first_collection.relative_root_path if first_collection else identity.relative_path
         )
-        filtered = [video for video in title_videos_list if video_matches_filter(video, filter_name)]
+        filtered = [
+            video for video in title_videos_list
+            if video_matches_filter(
+                video, filter_name,
+                unresolved_duplicate_ids=unresolved_duplicate_ids,
+            )
+        ]
         title_matches = bool(folded_query) and (
             _contains_query(display_name, folded_query)
             or _contains_query(display_path, folded_query)

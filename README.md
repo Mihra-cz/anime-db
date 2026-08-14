@@ -70,6 +70,9 @@ pytest
 - Hierarchy Review umí bez přesunu souborů vytvořit hlavní collection, přesunout do ní celé CatalogTitle a později rozhodnutí změnit. Ruční assignment má před scannerem přednost.
 - Nejasná příbuznost collections se pouze navrhne ke kontrole. Volba „Ponechat samostatně“ je persistentní pro konkrétní stav návrhu.
 - Collection merge neřeší fyzické duplicity; ty zůstávají ve vlastním duplicate workflow.
+- Ruční podezření na duplicitu se ukládá samostatně jako `videos.duplicate_status_manual='suspected'`. Výchozí `NULL` znamená pouze, že uživatel video ručně neoznačil; není to potvrzení, že soubor duplicitou není.
+- Automaticky nalezená unresolved duplicita, ruční podezření a potvrzená duplicita přes `duplicate_of_video_id` jsou tři nezávislé stavy. Ruční označení nevybírá primary, nic nemaže a nemění hierarchii, metadata ani typ obsahu.
+- Katalogový filtr **Všechny duplicity** spojuje aktuální členy `unresolved_duplicate_groups` s potvrzenými kopiemi, které mají vlastní `duplicate_of_video_id`. Manual-only `suspected` ani primary video odkazované kopií se do něj samy o sobě nezařazují.
 - Explicitní filename suffixy `OVA 01`, `Special 01`, `OP 02`, `ED 02`, `NCOP 01` a `NCED 01` mají přednost před obecným číslem epizody. Jejich pořadí se zobrazuje jako supplementary sequence a nevstupuje do standardní season completeness.
 - Duplicate identita doplňků zahrnuje subtype i bezpečně známý season/name context. Hierarchy Review umí jednotlivé video bez změny cesty přesunout do nové nebo existující OVA/Special/NC části.
 - Prázdný CatalogTitle lze po explicitním potvrzení odstranit spolu s jeho vlastněnými DB metadata záznamy; CatalogCollection se tím nikdy nemaže automaticky.
@@ -77,4 +80,4 @@ pytest
 
 ## Aktualizace databáze
 
-Při startu aplikace proběhne idempotentní migrace SQLite: chybějící sloupce pro normalizovaný jazyk a typ videa se doplní a existující záznamy se přepočítají. Stávající raw metadata jazyka se zachovají. Před větší aktualizací lze pro jistotu zazálohovat `data/anime.db`; ruční smazání databáze není pro tuto verzi nutné.
+Při startu aplikace proběhne idempotentní migrace SQLite: chybějící sloupce pro normalizovaný jazyk, typ videa a samostatné ruční podezření na duplicitu se doplní a existující záznamy se přepočítají. Existující videa dostanou pro `duplicate_status_manual` hodnotu `NULL`; žádné se automaticky neoznačí jako `suspected`. Stávající raw metadata jazyka se zachovají. Před větší aktualizací lze pro jistotu zazálohovat `data/anime.db`; ruční smazání databáze není pro tuto verzi nutné.

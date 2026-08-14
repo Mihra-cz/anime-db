@@ -24,6 +24,8 @@ from app.catalog import (
     subtitle_track_display,
     title_videos,
     translation_status,
+    unresolved_duplicate_video_ids,
+    video_matches_filter,
 )
 from app.models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
@@ -597,6 +599,114 @@ def test_empty_search_returns_regular_filtered_overview():
         group.relative_path for group in normal.groups
     ]
     assert whitespace.video_count == normal.video_count == 2
+
+
+def test_manual_duplicate_filter_selects_only_explicit_suspicions():
+    unreviewed = _video("Anime/Show/E01.mkv")
+    suspected = _video("Anime/Show/E02.mkv")
+    suspected.duplicate_status_manual = "suspected"
+
+    assert unreviewed.duplicate_status_manual is None
+    assert video_matches_filter(unreviewed, "manual-duplicate-suspected") is False
+    assert video_matches_filter(suspected, "manual-duplicate-suspected") is True
+
+    results = build_catalog_results(
+        [unreviewed, suspected], "manual-duplicate-suspected"
+    )
+    assert results.video_count == 1
+    assert next(iter(results.videos_by_title.values())) == [suspected]
+    assert FILTER_LABELS["manual-duplicate-suspected"] == (
+        "Ruční podezření na duplicitu"
+    )
+
+
+def _all_duplicates_filter_videos():
+    collection = CatalogCollection(
+        id=20, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    title = CatalogTitle(
+        id=10, collection=collection, catalog_collection_id=collection.id,
+        local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1",
+    )
+
+    def video(identifier: int, episode: int, *, suspected: bool = False) -> Video:
+        return Video(
+            id=identifier,
+            relative_path=f"Anime/Show/Season 1/Show {identifier}.mkv",
+            root_folder="Anime", filename=f"Show {identifier}.mkv",
+            size=1, mtime_ns=identifier, file_type="episode",
+            season_episode_number=episode,
+            duplicate_status_manual="suspected" if suspected else None,
+            catalog_title=title, catalog_title_id=title.id,
+            catalog_collection=collection, catalog_collection_id=collection.id,
+        )
+
+    videos = {
+        "unresolved": video(1, 1),
+        "unresolved_suspected": video(2, 1, suspected=True),
+        "normal": video(3, 2),
+        "manual_only": video(4, 3, suspected=True),
+        "primary": video(5, 4),
+        "confirmed_suspected": video(6, 4, suspected=True),
+    }
+    videos["confirmed_suspected"].duplicate_of_video_id = videos["primary"].id
+    return videos
+
+
+def test_all_duplicates_filter_is_current_unresolved_or_confirmed_only():
+    videos = _all_duplicates_filter_videos()
+    all_videos = list(videos.values())
+
+    unresolved_ids = unresolved_duplicate_video_ids(all_videos)
+    results = build_catalog_results(all_videos, "all-duplicates")
+    matched_ids = {
+        video.id
+        for title_videos_list in results.videos_by_title.values()
+        for video in title_videos_list
+    }
+
+    assert unresolved_ids == {1, 2}
+    assert matched_ids == {1, 2, 6}
+    assert videos["normal"].id not in matched_ids
+    assert videos["manual_only"].id not in matched_ids
+    assert videos["primary"].id not in matched_ids
+    assert videos["unresolved_suspected"].id in matched_ids
+    assert videos["confirmed_suspected"].id in matched_ids
+    assert FILTER_LABELS["all-duplicates"] == "Všechny duplicity"
+
+
+def test_confirmed_copy_remains_filtered_after_unresolved_problem_is_resolved():
+    videos = _all_duplicates_filter_videos()
+    resolved_group = [videos["primary"], videos["confirmed_suspected"]]
+    unresolved_ids = unresolved_duplicate_video_ids(resolved_group)
+
+    assert unresolved_ids == set()
+    assert video_matches_filter(
+        videos["confirmed_suspected"], "all-duplicates",
+        unresolved_duplicate_ids=unresolved_ids,
+    ) is True
+    assert video_matches_filter(
+        videos["primary"], "all-duplicates",
+        unresolved_duplicate_ids=unresolved_ids,
+    ) is False
+
+
+def test_manual_duplicate_filter_remains_independent_from_all_duplicates_filter():
+    videos = _all_duplicates_filter_videos()
+    all_videos = list(videos.values())
+
+    manual_results = build_catalog_results(
+        all_videos, "manual-duplicate-suspected"
+    )
+    manual_ids = {
+        video.id
+        for title_videos_list in manual_results.videos_by_title.values()
+        for video in title_videos_list
+    }
+
+    assert manual_ids == {2, 4, 6}
 
 
 def test_title_sorting_ascending_descending_and_naturally():

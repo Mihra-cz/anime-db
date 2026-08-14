@@ -63,6 +63,9 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
     assert [
         column["name"] for column in inspect(engine).get_columns("videos")
     ].count("duplicate_primary_missing") == 1
+    assert [
+        column["name"] for column in inspect(engine).get_columns("videos")
+    ].count("duplicate_status_manual") == 1
 
     with Session(engine) as session:
         assert session.scalar(select(Video.file_type)) == "ncop"
@@ -76,6 +79,7 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
             987, 654, 123.5, "h265", 1280, 720,
         )
         assert video.content_type_manual is None
+        assert video.duplicate_status_manual is None
         assert video.duplicate_of_video_id is None
         assert video.duplicate_primary_missing is False
         assert video.manual_hardsub_cs is False
@@ -84,6 +88,7 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         assert session.scalar(select(InternalSubtitle.language)) == "unknown"
         assert session.scalar(select(InternalSubtitle.normalized_language)) == "eng"
         video.content_type_manual = "recap"
+        video.duplicate_status_manual = "suspected"
         session.add(CollectionGroupingDecision(
             suggestion_key="test", state_fingerprint="state", decision="separate",
         ))
@@ -95,9 +100,13 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
     assert [
         column["name"] for column in inspect(engine).get_columns("videos")
     ].count("content_type_manual") == 1
+    assert [
+        column["name"] for column in inspect(engine).get_columns("videos")
+    ].count("duplicate_status_manual") == 1
     with Session(engine) as session:
         video = session.scalar(select(Video))
         assert video.content_type_manual == "recap"
+        assert video.duplicate_status_manual == "suspected"
         assert session.scalar(select(CollectionGroupingDecision)).decision == "separate"
         assert (
             video.relative_path, video.filename, video.size, video.mtime_ns,
@@ -134,6 +143,7 @@ def test_duplicate_relation_migration_is_idempotent_and_preserves_old_video_data
     columns = [column["name"] for column in inspect(engine).get_columns("videos")]
     assert columns.count("duplicate_of_video_id") == 1
     assert columns.count("duplicate_primary_missing") == 1
+    assert columns.count("duplicate_status_manual") == 1
     with Session(engine) as session:
         videos = list(session.scalars(select(Video).order_by(Video.id)))
         assert [(video.relative_path, video.size, video.video_codec) for video in videos] == [
@@ -142,6 +152,7 @@ def test_duplicate_relation_migration_is_idempotent_and_preserves_old_video_data
         ]
         assert all(video.duplicate_of_video_id is None for video in videos)
         assert all(video.duplicate_primary_missing is False for video in videos)
+        assert all(video.duplicate_status_manual is None for video in videos)
         videos[1].duplicate_of = videos[0]
         session.commit()
 
@@ -150,6 +161,7 @@ def test_duplicate_relation_migration_is_idempotent_and_preserves_old_video_data
 
     columns = [column["name"] for column in inspect(engine).get_columns("videos")]
     assert columns.count("duplicate_of_video_id") == 1
+    assert columns.count("duplicate_status_manual") == 1
     with Session(engine) as session:
         primary, duplicate = session.scalars(select(Video).order_by(Video.id)).all()
         assert duplicate.duplicate_of_video_id == primary.id

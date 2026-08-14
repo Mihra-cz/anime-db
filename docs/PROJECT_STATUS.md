@@ -2,7 +2,7 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 12. srpna 2026
+> **Aktualizováno:** 14. srpna 2026
 > **Aktuální checkpoint:** V5 dokončena – následuje stabilizace hierarchie a ladění UI nad reálnou knihovnou
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
@@ -2113,6 +2113,81 @@ Testovací bootstrap nadále směruje globální aplikaci na in-memory SQLite p�
 importem `app.main`. Produkční DB se při testech nesmí změnit ve velikosti,
 mtime ani SHA-256. NAS se nemění a práce zůstává ve fázi **Stabilizace
 hierarchie a ladění UI nad reálnou knihovnou**; V6 ani V7 nebyly zahájeny.
+
+---
+
+## 6.25 Ruční podezření na duplicitu bez výběru primary
+
+Při ručním procházení knihovny lze nově označit soubor, který nevytvořil
+automatickou duplicate kolizi, ale uživateli připadá jako pravděpodobná
+duplicita nebo bordelový kandidát k pozdějšímu prověření. Jde o samostatnou
+poznámku na `Video`, nikoli o potvrzení společné identity souborů.
+
+Datový model používá nullable řetězcové pole:
+
+```text
+videos.duplicate_status_manual
+NULL         uživatel video ručně z hlediska duplicity neoznačil / neposuzoval
+suspected    uživatel video označil jako podezřelou duplicitu
+```
+
+`NULL` výslovně neznamená „není duplicita“, `keep`, `ok` ani jiný pozitivně
+potvrzený stav. Aplikace v této první verzi přijímá pouze `suspected` nebo
+návrat na `NULL`. Sloupec nemá databázový `CHECK` omezený na jedinou hodnotu,
+takže další skutečné manuální stavy lze v budoucnu přidat rozšířením aplikační
+validace a UI bez přestavby SQLite tabulky.
+
+Duplicate workflow nyní rozlišuje tři nezávislé informace:
+
+1. **Automaticky nalezená unresolved duplicita** vzniká jen z kolize stejné
+   bezpečně odvozené logické identity a nadále ji počítá
+   `unresolved_duplicate_groups`.
+2. **Ruční podezření** je pouze
+   `duplicate_status_manual='suspected'`; nevyžaduje shodné číslo epizody ani
+   výběr primary.
+3. **Potvrzená duplicita** vzniká výhradně existujícím potvrzovacím workflow a
+   self-reference `duplicate_of_video_id` na ručně vybrané primary video.
+
+Nastavení ani zrušení ručního podezření nemění `duplicate_of_video_id`,
+`duplicate_primary_missing`, `CatalogCollection`, `CatalogTitle`, season/part,
+episode numbering, `content_type_manual`, `TitleMetadata`, externí vazby ani
+technická metadata videa. Potvrzení duplicity ruční podezření automaticky
+nepřepisuje a ruční podezření nijak nemění existující automatickou detekci.
+
+Detail `CatalogTitle` a Hierarchy Review nabízejí akci **Označit jako podezřelou
+duplicitu** a po uložení badge **Ruční podezření na duplicitu** s akcí **Zrušit
+ruční označení**. Zrušení pouze vrátí sloupec na `NULL`. Hierarchy Review
+současně používá odlišné badge pro automaticky nalezený problém, ruční
+podezření a členství v potvrzené duplicate skupině. Pokud je podezření uložené
+na již potvrzené kopii, potvrzený vztah zůstává dominantní; UI vysvětlí, že
+ruční stav je samostatná starší poznámka, nenabízí druhé potvrzení a dovolí jen
+její zrušení.
+
+Katalogový filtr **Ruční podezření na duplicitu** vybírá pouze videa s hodnotou
+`suspected`. Neoznačená videa s `NULL` se do něj nedostanou a uživatel nemusí
+potvrzovat každé normální video.
+
+Samostatný katalogový filtr **Všechny duplicity** je sjednocením aktuálních
+členů `unresolved_duplicate_groups` a videí s vlastním nenulovým
+`duplicate_of_video_id`. Nepoužívá historický příznak ani novou detekci:
+vyřešená automatická kolize z něj zmizí, potvrzená kopie v něm naopak zůstane.
+Samotné `duplicate_status_manual='suspected'` není důvodem k zařazení a primary
+video se nezařadí jen proto, že na něj potvrzená kopie odkazuje.
+
+Idempotentní `migrate_schema` doplní chybějící nullable sloupec a index. Všem
+existujícím řádkům SQLite tím logicky zůstane `NULL`; migrace žádné video sama
+neoznačuje. Scanner pole nepřepisuje. Implementace nic fyzicky nemaže,
+nepřesouvá ani nepřejmenovává a nemění žádný soubor nebo adresář na NASu.
+Produkční `data/anime.db` nebyla připojena k aplikaci ani migrována.
+
+Automatické ověření 14. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                       # 341 passed
+.venv/bin/python -m compileall app tests  # prošlo
+načtení všech Jinja2 šablon               # 13 šablon, prošlo
+git diff --check                          # prošlo
+```
 
 ---
 

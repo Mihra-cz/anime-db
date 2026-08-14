@@ -50,6 +50,7 @@ ALLOWED_PART_TYPES = {
 }
 SUPPLEMENTAL_PART_TYPES = {"film", "ova", "special", "preview", "recap", "bonus", "other"}
 VIDEO_CONTENT_TYPES = {"preview", "special", "recap", "ova", "bonus", "other"}
+MANUAL_DUPLICATE_STATUSES = {"suspected"}
 ALLOWED_NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
 SIMPLE_DEFINITION_FIELDS = (
     "title_id", "local_title", "manual_display_title", "season_number_manual",
@@ -135,6 +136,14 @@ class SupplementaryVideoSuggestion:
     context_season_number: int | None
     proposed_part_type: str
     proposed_title: str
+
+
+def set_manual_duplicate_status(video: Video, status: str | None) -> None:
+    """Uloží pouze ruční podezření; potvrzený duplicate vztah zůstává oddělený."""
+    normalized = status.strip().casefold() if status else None
+    if normalized not in MANUAL_DUPLICATE_STATUSES | {None}:
+        raise ValueError("Neplatný stav ručního podezření na duplicitu.")
+    video.duplicate_status_manual = normalized
 
 
 def supplementary_video_suggestion(
