@@ -28,6 +28,7 @@ from .catalog import (
     determine_parent_series,
     group_videos_by_series,
     has_meaningful_root_assignment,
+    is_film_video,
     is_root_video,
     manual_hardsub_state,
     normalize_search_query,
@@ -378,15 +379,20 @@ def toggled_direction(column: str, active_sort: str, active_direction: str) -> s
 
 def _empty_stats() -> dict[str, int]:
     return {key: 0 for key in (
-        "total", "episodes", "bonus", "cs", "sk", "only_cs", "only_sk", "both_cs_sk",
-        "translated", "missing", "unknown",
+        "anime_titles", "total", "episodes", "films", "bonus", "cs", "sk",
+        "only_cs", "only_sk", "both_cs_sk", "translated", "missing", "unknown",
     )}
 
 
-def _add_video(stats: dict[str, int], video: Video) -> None:
+def _add_video(
+    stats: dict[str, int], video: Video, *, separate_films: bool = False,
+) -> None:
     status = translation_status(video)
     stats["total"] += 1
-    stats["episodes" if video.file_type == "episode" else "bonus"] += 1
+    if separate_films and is_film_video(video):
+        stats["films"] += 1
+    else:
+        stats["episodes" if video.file_type == "episode" else "bonus"] += 1
     stats["cs"] += status.has_cs
     stats["sk"] += status.has_sk
     stats["only_cs"] += status.has_cs and not status.has_sk
@@ -483,12 +489,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             }
         folders: dict[str, dict[str, int]] = {}
         totals = _empty_stats()
+        collection_rows = _homepage_collection_rows(videos, collection_title_ids)
+        totals["anime_titles"] = len(collection_rows)
         for video in videos:
             if not (is_root_video(video) and has_meaningful_root_assignment(video)):
                 _add_video(folders.setdefault(video.root_folder, _empty_stats()), video)
-            _add_video(totals, video)
+            _add_video(totals, video, separate_films=True)
         return templates.TemplateResponse(request, "index.html", {
-            "collections": _homepage_collection_rows(videos, collection_title_ids),
+            "collections": collection_rows,
             "folders": sorted(folders.items()), "totals": totals, "message": message,
             "error": error, "confirm_deletions": confirm_deletions,
             "q": normalize_search_query(q),
@@ -1054,6 +1062,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 video for video in videos if video.catalog_title_id is None
             ])
             part_confirmation = single_title_confirmation_suggestion(collection)
+            part_confirmation_summary = next((
+                item["summary"] for item in title_numbering
+                if part_confirmation is not None
+                and item["title"].id == part_confirmation.title.id
+            ), None)
             duplicate_candidate_video_ids = {
                 video.id
                 for item in title_numbering
@@ -1090,6 +1103,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "nonstandard_videos": nonstandard_videos,
                 "unassigned_videos": unassigned_videos,
                 "part_confirmation_suggestion": part_confirmation,
+                "part_confirmation_summary": part_confirmation_summary,
                 "supplementary_suggestions": supplementary_suggestions,
                 "supplementary_suggestion_by_video": supplementary_suggestion_by_video,
                 "duplicate_candidate_video_ids": duplicate_candidate_video_ids,

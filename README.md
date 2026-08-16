@@ -67,6 +67,9 @@ pytest
 - Dostupnost knihovny se kontroluje před skenem, průběžně a znovu před mazací fází. Výpadek vyvolá rollback celého skenu.
 - Logická hierarchie používá `CatalogCollection -> CatalogTitle -> Video`: collection je hlavní anime, title je season, film, OVA nebo doplňková část.
 - `Season 1`, `Season 2`, `OVA`, `Specials`, `NC`, `OP`, `ED`, `Movies`, `Bonus` a podobné child složky pod zjevným anime rootem nevytvářejí samostatné hlavní collections.
+- Explicitní kombinace jako `Season 2 Shorts`, `Season 1 Specials`, `S2 OVA` nebo `S2 SPs` zůstávají ve stejné collection, nesou známý season scope a používají existující supplementary typ CatalogTitle.
+- Potvrzené hierarchy označení (`Season 1`, `S1`, `Season 2`, …) se mechanicky nepřidává do výchozího metadata search dotazu. Běžný skutečný lokální titul zůstává zachován; u čistě strukturálního názvu části se použije známý název konkrétního titulu z metadat, případně čistý název collection.
+- Statistiky homepage počítají anime díla podle aktivních `CatalogCollection`, filmy podle hierarchy typu `film` a fyzická videa rozdělují na běžné epizody, filmy a bonusový/ostatní obsah bez dvojího započtení filmů. Karta Filmů otevírá odpovídající katalogový filtr nad stejnou hierarchy definicí; Anime titulů zůstává neklikací souhrn.
 - Hierarchy Review umí bez přesunu souborů vytvořit hlavní collection, přesunout do ní celé CatalogTitle a později rozhodnutí změnit. Ruční assignment má před scannerem přednost.
 - Nejasná příbuznost collections se pouze navrhne ke kontrole. Volba „Ponechat samostatně“ je persistentní pro konkrétní stav návrhu.
 - Collection merge neřeší fyzické duplicity; ty zůstávají ve vlastním duplicate workflow.

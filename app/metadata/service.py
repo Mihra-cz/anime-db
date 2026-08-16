@@ -42,17 +42,28 @@ def normalize_metadata_search_query(local_title: str) -> str:
 
 
 def default_metadata_search_query(title: CatalogTitle) -> str:
-    if (
-        title.effective_season_number
-        and title.collection
-        and (
-            title.season_number_manual is not None
-            or parse_explicit_part(title.local_title)
-        )
-    ):
-        collection_name = normalize_metadata_search_query(title.collection.local_title)
-        return f"{collection_name} Season {title.effective_season_number}"
-    return normalize_metadata_search_query(title.local_title)
+    local_name = normalize_metadata_search_query(title.local_title)
+    if parse_explicit_part(title.local_title) is None:
+        return local_name
+
+    # A purely structural folder name is not a useful metadata title. Prefer a
+    # real, already known title for this specific part and only then fall back
+    # to the collection identity. Hierarchy labels deliberately do not
+    # participate in the search query.
+    metadata = title.metadata_record
+    specific_names = (
+        title.manual_display_title,
+        metadata.title_romaji if metadata else None,
+        metadata.title_english if metadata else None,
+        metadata.title_native if metadata else None,
+        metadata.display_title if metadata else None,
+    )
+    for specific_name in specific_names:
+        if specific_name and (query := normalize_metadata_search_query(specific_name)):
+            return query
+    if title.collection:
+        return normalize_metadata_search_query(title.collection.local_title)
+    return local_name
 
 
 class MetadataConflictError(RuntimeError):

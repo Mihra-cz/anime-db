@@ -93,6 +93,27 @@ class SingleTitleConfirmationSuggestion:
     proposed_season_number: int | None
     proposed_season_label: str | None
 
+    @property
+    def display_label(self) -> str:
+        part_labels = {
+            "title": "Titul", "season": "Season", "part": "Part", "cour": "Cour",
+            "film": "Film", "ova": "OVA", "special": "Special",
+            "preview": "Preview", "recap": "Recap", "bonus": "Bonus",
+            "other": "Other",
+        }
+        label = part_labels.get(
+            self.proposed_part_type, self.proposed_part_type.replace("_", " ").title()
+        )
+        if self.proposed_part_type != "season":
+            return label
+        season_label = self.proposed_season_label or (
+            f"S{self.proposed_season_number}"
+            if self.proposed_season_number is not None else None
+        )
+        if self.proposed_season_number is not None:
+            label = f"{label} {self.proposed_season_number}"
+        return f"{label} ({season_label})" if season_label else label
+
 
 @dataclass(frozen=True)
 class CollectionGroupingSuggestion:

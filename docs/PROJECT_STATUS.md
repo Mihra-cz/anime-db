@@ -2191,6 +2191,123 @@ git diff --check                          # prošlo
 
 ---
 
+## 6.26 Season-scoped supplementary části a priorita anime rootu
+
+Při stabilizaci reálné knihovny byly nalezeny dvě varianty stejné obecné chyby.
+Child složky `season 1 L20` a `season 2 P22` nebyly rozpoznány jako seasons,
+protože interní časový kód nebyl v závorkách. Složka `Season 2 Shorts (L21)`
+současně kombinovala season scope a supplementary subtype, zatímco původní
+parser přijímal pouze jeden z těchto významů. V obou případech fallback zvolil
+nejhlubší adresář jako anime root a vytvořil samostatnou CatalogCollection.
+
+Parser nyní před určením collection bezpečně rozpoznává:
+
+- explicitní Season/Series/Serie/S token s číslem a koncovým interním kódem
+  `[A-Z][0-9][0-9]`, ať je kód v závorkách nebo bez nich;
+- explicitní kombinace `Season N`/`S<N>` se známým supplementary tokenem,
+  například `Shorts`, `Specials`, `OVA`, `SPs`, `NC`, `OP`, `ED`, `Extras`,
+  `Preview`, `Recap`, `Movies` nebo `CM&PV`.
+
+Collection identity se v těchto případech vždy odvozuje ze společného
+fyzického parentu před první bezpečně rozpoznanou částí. Metadata zůstávají
+vlastností konkrétního CatalogTitle a odlišný oficiální název season proto
+nemůže změnit její CatalogCollection. Nezávislé anime rooty se podle podobnosti
+názvu ani shodného metadata display title neslučují.
+
+Současný model nepotřeboval novou tabulku ani parent-title vztah. Například
+`Season 2 Shorts` se ukládá jako supplementary CatalogTitle s
+`part_type=bonus`, `season_number=2` a `season_label=S2`. Lokální název zachová
+token `Shorts`; číslování jej díky supplementary part typu nezahrne mezi
+standardní epizody. Ručně přesunutý nebo potvrzený CatalogTitle se stávajícím
+`hierarchy_manual_override` zůstává autoritativní pro scanner, startup sync i
+hierarchy rebuild.
+
+Oprava je založená pouze na ancestry a explicitních strukturálních tokenech.
+Nezavádí fuzzy slučování, nemění fyzické cesty a nevyžaduje zásah do NASu ani
+produkční databáze.
+
+---
+
+## 6.27 Výrazné doporučení při potvrzení jediné části
+
+Sekce **Ručně potvrdit typ jediné části** v Hierarchy Review nyní nad
+editovatelným formulářem zobrazuje výrazný blok **Doporučené zařazení**. Název
+doporučení se formátuje přímo z existujícího
+`SingleTitleConfirmationSuggestion`: používá jeho `proposed_part_type`,
+`proposed_season_number` a `proposed_season_label`. Nebyla přidána druhá
+heuristika ani zvláštní pravidlo podle názvu anime.
+
+Pod doporučením se zobrazují pouze již bezpečně známé údaje z existujícího
+`TitleNumberingSummary`: počet očíslovaných a standardních epizod, rozsah E,
+počet unknown a nestandardních položek. Existující proposal příznak může navíc
+uvést podporu metadat `TV / TV_SHORT`. Například čistá jednosériová collection
+`Choyoyu P19` s proposal Season 1 a E1–E12 se zobrazuje jako
+**Doporučené zařazení: Season 1 (S1)** s důvody
+`TV / TV_SHORT · 12/12 standardních epizod · E1–E12 · unknown 0 · nestandardní 0`.
+
+Blok je read-only prezentace. GET detailu nemění manual pole, hierarchy override,
+verified stav, metadata, videa ani cesty. Uživatel může předvyplněný typ, číslo
+a označení změnit; autoritativní zápis nadále vzniká pouze původním potvrzeným
+POST workflow a checkboxem **Potvrzuji uvedený typ a případné číslo této
+části**. Pokud `single_title_confirmation_suggestion()` vrátí `None`, UI žádné
+doporučení nevymýšlí ani nezobrazuje.
+
+---
+
+## 6.28 Oddělení hierarchie od metadata search query
+
+Výchozí hodnota pole **Hledat metadata** už neskládá název collection s
+`Season N` podle `effective_season_number`. Potvrzení `part_type_manual`,
+`season_number_manual` a `season_label_manual` tak nadále ukládá autoritativní
+hierarchii, ale samo nemění text určený pro hledání metadat.
+
+`default_metadata_search_query()` nyní zachová normalizovaný skutečný lokální
+název části. Pouze u názvu, který existující parser bezpečně rozpozná jako čistě
+strukturální část (`Season 2`, `Serie 2` a podobně), hledá vhodnější seed v tomto
+pořadí: ruční zobrazovaný název konkrétního titulu, známé romaji/anglické/native
+metadata konkrétního titulu, legacy metadata display title a čistý název
+collection. Hierarchy číslo ani label se v žádném kroku nepřipojují.
+
+Tím zůstává například Choyoyu po potvrzení S1 hledáno jako
+`Choujin Koukousei-tachi wa Isekai demo Yoyuu de Ikinuku you desu!`, zatímco
+strukturální `season 2 P22` se známými metadaty může dál použít skutečný název
+`Peter Grill to Kenja no Jikan: Super Extra`. Nejde o globální odstraňování
+řetězce `Season N`: pokud jsou tato slova legitimní součástí skutečného názvu,
+zůstanou zachována. Zobrazení detailu ani výpočet seedu nic nezapisují; uživatel
+může input dál ručně změnit a teprve stávající metadata search POST provede
+vyhledání.
+
+---
+
+## 6.29 Rozšířené statistiky homepage
+
+Statistické karty homepage nyní zobrazují v jednom pořadí počet anime titulů,
+běžných epizod, filmů, bonusových/ostatních videí, nezměněné jazykové statistiky
+a celkový počet fyzických videí.
+
+**Anime titul** je aktivní `CatalogCollection`, která je zastoupena alespoň
+jedním evidovaným videem v existujícím logickém katalogu homepage. Více
+`CatalogTitle` jedné collection, například S1, S2 a Shorts, proto stále tvoří
+jeden anime titul. Prázdné collections a historická technická root collection
+`.` se nezapočítávají.
+
+Film se neurčuje z filename. Video patří do kategorie **Filmů**, pouze pokud je
+přiřazeno k `CatalogTitle` s efektivním hierarchy typem `film`; respektuje se
+tedy i autoritativní manual hierarchy override. Zbývající `file_type="episode"`
+zůstávají běžnými epizodami a ostatní fyzická videa jsou bonusová/ostatní.
+V přehledových kartách jsou tyto tři kategorie disjunktní, takže jejich součet
+odpovídá `Celkem videí`. Technické statistiky v ostatních tabulkách ani jejich
+dosavadní navigace se kvůli této změně nepřestavovaly.
+
+Karta **Filmů** používá stejný odkazový styl jako ostatní rychlé filtry a vede
+na `/catalog/films`. Statistiky i katalogový predikát volají jediný
+`is_film_video()`, takže automatický i ruční efektivní hierarchy typ mají shodný
+výsledek. Mixed collection se ve filtru zobrazí, pokud obsahuje alespoň jednu
+filmovou část; její season, OVA, Special ani Bonus videa sama filmovým matchem
+nejsou. Karta **Anime titulů** zůstává neklikací.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

@@ -32,3 +32,8 @@
 .automatic-duplicate-badge { color: #fcd34d; border-color: #d97706; background: #451a03; }
 .confirmed-duplicate-badge { color: #fecaca; border-color: #dc2626; background: #450a0a; }
 @media(max-width:760px){.manual-duplicate-list article{grid-template-columns:1fr}}
+.part-recommendation { margin: 1rem 0; padding: 1rem 1.1rem; border: 1px solid #7c5cff; border-left: .35rem solid #a993ff; border-radius: 10px; background: #201b38; }
+.part-recommendation h3 { margin: 0; color: #ede9fe; font-size: 1.25rem; }
+.part-recommendation p { margin: .55rem 0 0; }
+.part-recommendation-reasons { color: #c4b5fd; font-weight: 700; }
+.part-confirmation-explanation { margin-top: 1rem; color: #7f8ba0; font-size: .9rem; }

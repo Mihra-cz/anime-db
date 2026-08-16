@@ -1138,7 +1138,10 @@ def test_hierarchy_review_offers_season_specific_ova_reassignment(tmp_path):
     assert "<dt>Očíslováno</dt><dd>1/1</dd>" in rendered
 
 
-def _render_hierarchy_review(*, verified=False, filename="Episode 01.mkv"):
+def _render_hierarchy_review(
+    *, verified=False, filename="Episode 01.mkv",
+    automatic_season_number=None,
+):
     collection = CatalogCollection(
         id=1, local_title="Akame ga Kill! (L14)",
         normalized_local_title="akame ga kill l14",
@@ -1149,7 +1152,13 @@ def _render_hierarchy_review(*, verified=False, filename="Episode 01.mkv"):
     title = CatalogTitle(
         id=1, collection=collection, local_title=collection.local_title,
         normalized_local_title=collection.normalized_local_title,
-        relative_root_path=collection.relative_root_path, part_type="title",
+        relative_root_path=collection.relative_root_path,
+        part_type="season" if automatic_season_number is not None else "title",
+        season_number=automatic_season_number,
+        season_label=(
+            f"S{automatic_season_number}"
+            if automatic_season_number is not None else None
+        ),
         hierarchy_verified_at=utc_now() if verified else None,
     )
     detection = detect_episode_number(filename)
@@ -1173,6 +1182,7 @@ def _render_hierarchy_review(*, verified=False, filename="Episode 01.mkv"):
             if detection.kind == "unknown" else []
         ),
     }
+    suggestion = single_title_confirmation_suggestion(collection)
     return templates.env.get_template("hierarchy_review_detail.html").render(
         request=type("Request", (), {
             "url_for": lambda self, *args, **kwargs: "/static/style.css",
@@ -1181,7 +1191,8 @@ def _render_hierarchy_review(*, verified=False, filename="Episode 01.mkv"):
         nonstandard_videos=(groups["nonstandard"]),
         unassigned_videos={"standard": [], "nonstandard": [], "unknown": []},
         message=None, error=None,
-        part_confirmation_suggestion=single_title_confirmation_suggestion(collection),
+        part_confirmation_suggestion=suggestion,
+        part_confirmation_summary=summary if suggestion is not None else None,
         title_numbering=[{
             "title": title, "summary": summary, "videos": groups,
             "metadata_linked": False, "can_delete": False,
@@ -1197,6 +1208,8 @@ def test_hierarchy_review_shows_editable_part_confirmation_and_human_friendly_fo
     rendered = _render_hierarchy_review()
 
     assert "Ručně potvrdit typ jediné části" in rendered
+    assert "Doporučené zařazení: Season 1 (S1)" in rendered
+    assert "1/1 standardních epizod · E1–E1 · unknown 0 · nestandardní 0" in rendered
     assert 'name="season_number_manual" value="1"' in rendered
     assert 'name="season_label_manual" value=""' in rendered
     assert "Jediný CatalogTitle nemusí být Season 1" in rendered
@@ -1210,6 +1223,17 @@ def test_hierarchy_review_shows_editable_part_confirmation_and_human_friendly_fo
     assert rendered.index("Jednoduchá definice ručního rozdělení") < rendered.index(
         "Pokročilé / zobrazit JSON"
     )
+    assert rendered.index("Doporučené zařazení") < rendered.index(
+        'name="part_type_manual"'
+    ) < rendered.index("Jediný CatalogTitle nemusí být Season 1")
+
+
+def test_hierarchy_review_displays_season_two_from_existing_proposal():
+    rendered = _render_hierarchy_review(automatic_season_number=2)
+
+    assert "Doporučené zařazení: Season 2 (S2)" in rendered
+    assert 'name="season_number_manual" value="2"' in rendered
+    assert 'name="season_label_manual" value="S2"' in rendered
 
 
 def test_collection_and_title_verification_texts_are_distinct():
@@ -1218,6 +1242,106 @@ def test_collection_and_title_verification_texts_are_distinct():
     assert "Hierarchie ověřena" in rendered
     assert "Zařazení ověřeno" in rendered
     assert "Ručně potvrdit typ jediné části" not in rendered
+    assert "Doporučené zařazení:" not in rendered
+
+
+def test_choyoyu_recommendation_is_read_only_and_uses_existing_summary(tmp_path):
+    search_title = (
+        "Choujin Koukousei-tachi wa Isekai demo Yoyuu de Ikinuku you desu!"
+    )
+    local_title = f"{search_title} P19"
+    settings = Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'choyoyu-recommendation.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    )
+    web_app = create_app(settings)
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title=local_title,
+            normalized_local_title=(
+                "choujin koukousei tachi wa isekai demo yoyuu de ikinuku you desu p19"
+            ),
+            relative_root_path=f"Anime/{local_title}",
+            hierarchy_status="review_required",
+            hierarchy_note=PERIOD_HINT_REVIEW_REASON,
+        )
+        title = CatalogTitle(
+            collection=collection, local_title=local_title,
+            normalized_local_title=collection.normalized_local_title,
+            relative_root_path=collection.relative_root_path, part_type="title",
+            metadata_record=TitleMetadata(
+                display_title="Choyoyu", format="TV_SHORT", episode_count=12,
+            ),
+        )
+        for number in range(1, 13):
+            Video(
+                relative_path=f"Anime/{local_title}/Choyoyu - {number:02}.mkv",
+                root_folder="Anime", filename=f"Choyoyu - {number:02}.mkv",
+                size=1, mtime_ns=1, local_episode_number=number,
+                season_episode_number=number, absolute_episode_number=number,
+                catalog_title=title, catalog_collection=collection,
+            )
+        session.add(collection)
+        session.commit()
+        collection_id, title_id = collection.id, title.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review/{collection_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    assert "Doporučené zařazení: Season 1 (S1)" in rendered
+    assert (
+        "TV / TV_SHORT · 12/12 standardních epizod · E1–E12 · "
+        "unknown 0 · nestandardní 0"
+    ) in rendered
+    assert "Uloží se až hodnoty ponechané nebo upravené" in rendered
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        title = session.get(CatalogTitle, title_id)
+        assert title.part_type_manual is None
+        assert title.season_number_manual is None
+        assert title.season_label_manual is None
+        assert title.hierarchy_manual_override is False
+        assert title.hierarchy_verified_at is None
+        assert collection.hierarchy_status == "review_required"
+        assert collection.hierarchy_verified_at is None
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    response = endpoints["/hierarchy-review/{collection_id}/confirm-part"](
+        collection_id, part_type_manual="season", season_number_manual="1",
+        season_label_manual="S1", confirm_part=True,
+    )
+    assert response.status_code == 303
+
+    detail = endpoints["/titles/{catalog_title_id}"](
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+    ).body.decode()
+    assert (
+        'name="metadata_query" maxlength="200" required '
+        f'value="{search_title}"'
+    ) in detail
+    assert f'value="{search_title} Season 1"' not in detail
+    assert f'value="{search_title} S1"' not in detail
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        title = session.get(CatalogTitle, title_id)
+        assert title.part_type_manual == "season"
+        assert title.season_number_manual == 1
+        assert title.season_label_manual == "S1"
+        assert title.hierarchy_manual_override is True
+        assert title.metadata_record.display_title == "Choyoyu"
+        assert title.local_title == local_title
+        assert collection.local_title == local_title
 
 
 def test_season_two_confirmation_clears_period_hint_reason_and_renders_verified(
@@ -1271,6 +1395,10 @@ def test_season_two_confirmation_clears_period_hint_reason_and_renders_verified(
         route.path: route.endpoint for route in web_app.routes
         if hasattr(route, "endpoint")
     }
+    proposal_rendered = endpoints["/hierarchy-review/{collection_id}"](
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+    assert "Doporučené zařazení: Season 1 (S1)" in proposal_rendered
     response = endpoints["/hierarchy-review/{collection_id}/confirm-part"](
         collection_id, part_type_manual="season", season_number_manual="2",
         season_label_manual="", confirm_part=True,
@@ -1287,6 +1415,16 @@ def test_season_two_confirmation_clears_period_hint_reason_and_renders_verified(
         assert title.season_label_manual == "S2"
         assert title.part_type_manual == "season"
         assert title.hierarchy_verified_at is not None
+        assert title.metadata_record.title_romaji == "Asobi Asobase"
+        assert title.local_title == "Asobi Asobase (L18)"
+        assert collection.local_title == "Asobi Asobase (L18)"
+
+    detail = endpoints["/titles/{catalog_title_id}"](
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+    ).body.decode()
+    assert 'name="metadata_query" maxlength="200" required value="Asobi Asobase"' in detail
+    assert 'value="Asobi Asobase Season 2"' not in detail
+    assert 'value="Asobi Asobase S2"' not in detail
 
     rendered = endpoints["/hierarchy-review/{collection_id}"](
         web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
@@ -1554,8 +1692,9 @@ def test_root_folder_link_has_readable_label_and_no_dead_dot_url():
 
     rendered = templates.env.get_template("index.html").render(
         request=request, collections=[], folders=[(".", stats)], totals={
-            "episodes": 0, "bonus": 2, "only_cs": 0, "only_sk": 0,
-            "both_cs_sk": 0, "missing": 2, "unknown": 0,
+            "anime_titles": 0, "episodes": 0, "films": 0, "bonus": 2,
+            "only_cs": 0, "only_sk": 0, "both_cs_sk": 0, "missing": 2,
+            "unknown": 0, "total": 2,
         }, message=None, error=None, confirm_deletions=False, q="",
     )
 
@@ -1625,17 +1764,20 @@ def test_homepage_uses_logical_collections_and_simplifies_unambiguous_navigation
             session.add_all(videos)
             return collection, titles, videos
 
-        single, single_titles, _ = add_collection(
+        single, single_titles, single_videos = add_collection(
             "Single Season", "Anime/Single Season", [("Season 1", "season")]
         )
-        film, film_titles, _ = add_collection(
+        film, film_titles, film_videos = add_collection(
             "Standalone Film", "Anime/Standalone Film", [("Film", "film")]
         )
-        multi, multi_titles, _ = add_collection(
+        film_titles[0].part_type = "title"
+        film_titles[0].part_type_manual = "film"
+        film_titles[0].hierarchy_manual_override = True
+        multi, multi_titles, multi_videos = add_collection(
             "Two Seasons", "Anime/Two Seasons",
             [("Season 1", "season"), ("Season 2", "season")],
         )
-        mixed, mixed_titles, _ = add_collection(
+        mixed, mixed_titles, mixed_videos = add_collection(
             "Series Plus OVA", "Anime/Series Plus OVA",
             [("Season 1", "season"), ("OVA", "ova")],
         )
@@ -1658,6 +1800,28 @@ def test_homepage_uses_logical_collections_and_simplifies_unambiguous_navigation
             size=1, mtime_ns=1, file_type="other",
             catalog_collection=legacy_collection, catalog_title=legacy_title,
         )
+        single_videos[0].internal_subtitles.append(InternalSubtitle(
+            stream_index=1, codec="ass", language="cze", normalized_language="cs",
+        ))
+        film_videos[0].internal_subtitles.append(InternalSubtitle(
+            stream_index=1, codec="ass", language="slk", normalized_language="sk",
+        ))
+        multi_videos[0].internal_subtitles.append(InternalSubtitle(
+            stream_index=1, codec="ass", language="cze", normalized_language="cs",
+        ))
+        multi_videos[0].external_subtitles.append(ExternalSubtitle(
+            relative_path="Anime/Two Seasons/Season 1.sk.srt",
+            codec="srt", language="slk", normalized_language="sk",
+        ))
+        multi_videos[1].internal_subtitles.append(InternalSubtitle(
+            stream_index=1, codec="ass", language="und",
+            normalized_language="unknown",
+        ))
+        empty_collection = CatalogCollection(
+            local_title="Empty orphan", normalized_local_title="empty orphan",
+            relative_root_path="Anime/Empty orphan",
+        )
+        session.add(empty_collection)
         session.add(legacy_video)
         session.commit()
         expected_links = {
@@ -1689,9 +1853,48 @@ def test_homepage_uses_logical_collections_and_simplifies_unambiguous_navigation
         "server": ("testserver", 80), "client": ("testclient", 50000),
     })
     rendered = endpoints["/"](request).body.decode()
+    stats_section = rendered.split('<section class="stats">', 1)[1].split(
+        "</section>", 1
+    )[0]
     logical_section = rendered.split('class="panel logical-catalog"', 1)[1].split(
         'class="panel physical-folders"', 1
     )[0]
+
+    expected_stats = [
+        ("Anime titulů", 6),
+        ("Běžných epizod", 4),
+        ("Filmů", 3),
+        ("Bonusových / ostatních videí", 2),
+        ("Pouze CZ", 1),
+        ("Pouze SK", 1),
+        ("CZ i SK", 1),
+        ("Bez CZ/SK", 6),
+        ("S neznámými titulky", 1),
+        ("Celkem videí", 9),
+    ]
+    for label, count in expected_stats:
+        assert f"<strong>{count}</strong><span>{label}</span>" in stats_section
+    assert [stats_section.index(label) for label, _ in expected_stats] == sorted(
+        stats_section.index(label) for label, _ in expected_stats
+    )
+    stats_by_label = dict(expected_stats)
+    assert (
+        stats_by_label["Běžných epizod"]
+        + stats_by_label["Filmů"]
+        + stats_by_label["Bonusových / ostatních videí"]
+        == stats_by_label["Celkem videí"]
+    )
+    assert (
+        'href="/catalog/films"><article><strong>3</strong><span>Filmů</span>'
+        in stats_section
+    )
+    assert stats_section.lstrip().startswith(
+        "<article><strong>6</strong><span>Anime titulů</span></article>"
+    )
+    for filter_name in (
+        "episodes", "bonus", "only-cs", "only-sk", "both", "missing", "unknown",
+    ):
+        assert f'href="/catalog/{filter_name}"' in stats_section
 
     for name, href in expected_links.items():
         assert f'href="{href}">{name}</a>' in logical_section

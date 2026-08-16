@@ -62,6 +62,8 @@ def classify_video(relative_path: str) -> str:
         return "ova"
     if "special" in token_set or "specials" in token_set or "sp" in token_set:
         return "special"
+    if token_set & {"short", "shorts", "bonus", "bonuses", "extra", "extras"}:
+        return "other"
     if "pv" in token_set or "preview" in token_set or "trailer" in token_set:
         return "pv"
     if "cm" in token_set or "commercial" in token_set:
@@ -287,10 +289,15 @@ def translation_status(video: Video) -> TranslationStatus:
 
 GENERIC_ROOTS = {"anime", "library", "media", "videos", "video"}
 STRUCTURAL_DIRECTORY = re.compile(
-    r"^(?:(?:s[ée]rie|series|season|cour|part)\s*[-_. ]*\d+|s\s*[-_. ]*\d+)"
-    r"(?:\s*\([^)]*\))?$"
-    r"|^(?:specials?|extras?|bonuses?|ova|oad|nc|ncop|nced|op|ed|"
-    r"previews?|recaps?|movies?|films?|pv|cm\s*[&+]\s*pv)(?:\s*\([^)]*\))?$",
+    r"^(?:(?:s[ée]rie|series|season)\s*[-_. ]*\d+|s\s*[-_. ]*\d+)"
+    r"(?:\s+(?:shorts?|specials?|sps?|ova|oad|extras?|bonus(?:es)?|nc|ncop|nced|"
+    r"op|ed|previews?|recaps?|movies?|films?|pv|cm\s*[&+]\s*pv))?"
+    r"(?:\s*(?:\([^)]*\)|[A-Z]\d{2}(?:-[A-Z]\d{2})?))?$"
+    r"|^(?:(?:cour|part)\s*[-_. ]*\d+)"
+    r"(?:\s*(?:\([^)]*\)|[A-Z]\d{2}(?:-[A-Z]\d{2})?))?$"
+    r"|^(?:shorts?|specials?|sps?|extras?|bonus(?:es)?|ova|oad|nc|ncop|nced|op|ed|"
+    r"previews?|recaps?|movies?|films?|pv|cm\s*[&+]\s*pv)"
+    r"(?:\s*(?:\([^)]*\)|[A-Z]\d{2}(?:-[A-Z]\d{2})?))?$",
     re.IGNORECASE,
 )
 
@@ -399,6 +406,7 @@ FILTER_LABELS = {
     "missing": "Bez CZ/SK",
     "unknown": "Neznámé titulky",
     "episodes": "Běžné epizody",
+    "films": "Filmy",
     "bonus": "Bonusová / ostatní videa",
     "type-special": "Specials",
     "type-ova": "OVA",
@@ -435,6 +443,14 @@ def unresolved_duplicate_video_ids(videos: Iterable[Video]) -> set[int]:
     }
 
 
+def is_film_video(video: Video) -> bool:
+    """Use the authoritative title hierarchy shared by statistics and filters."""
+    return bool(
+        video.catalog_title is not None
+        and video.catalog_title.effective_part_type == "film"
+    )
+
+
 def video_matches_filter(
     video: Video, filter_name: str, *,
     unresolved_duplicate_ids: set[int] | None = None,
@@ -448,6 +464,7 @@ def video_matches_filter(
         "missing": not status.has_cs_or_sk,
         "unknown": status.has_unknown,
         "episodes": video.file_type == "episode",
+        "films": is_film_video(video),
         "bonus": video.file_type != "episode",
         "unassigned": video.catalog_title_id is None,
         "hierarchy-conflict": bool(

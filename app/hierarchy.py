@@ -41,9 +41,19 @@ NUMBERED_PART = re.compile(
     r"(?:\s*\([^)]*\))?$",
     re.IGNORECASE,
 )
+SEASON_SCOPED_SUPPLEMENTARY = re.compile(
+    r"^(?:(?:serie|s[ée]rie|series|season|s)\s*[-_. ]*0*(\d+)"
+    r"|(\d+)(?:st|nd|rd|th)\s+season"
+    r"|(first|second|third|fourth|fifth)\s+season)"
+    r"\s+(.+)$",
+    re.IGNORECASE,
+)
 ROMAN_SUFFIX = re.compile(r"^(.*\S)\s+([IVXLCDM]+)$", re.IGNORECASE)
 ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
 ANNOTATION_SUFFIX = re.compile(r"\s*\([^)]*\)\s*$")
+INTERNAL_CODE_SUFFIX = re.compile(
+    r"\s+[A-Z]\d{2}(?:-[A-Z]\d{2})?\s*$", re.IGNORECASE
+)
 SUPPLEMENTARY_PARTS = {
     "bonus": ("bonus", None, "Bonus"),
     "bonuses": ("bonus", None, "Bonus"),
@@ -63,6 +73,10 @@ SUPPLEMENTARY_PARTS = {
     "movies": ("film", None, "Movies"),
     "film": ("film", None, "Movies"),
     "films": ("film", None, "Movies"),
+    "short": ("bonus", None, "Shorts"),
+    "shorts": ("bonus", None, "Shorts"),
+    "sp": ("special", None, "Specials"),
+    "sps": ("special", None, "Specials"),
 }
 
 
@@ -89,15 +103,8 @@ def _int_to_roman(number: int) -> str:
     return "".join(result)
 
 
-def parse_explicit_part(name: str) -> tuple[str, int | None, str | None] | None:
-    stripped = name.strip()
-    if match := NUMBERED_PART.fullmatch(stripped):
-        number = int(match.group(1) or match.group(2) or ORDINALS.get(
-            (match.group(3) or "").casefold(), 0
-        ) or match.group(5))
-        kind = (match.group(4) or "season").casefold()
-        return kind, number, f"S{number}"
-    folded = ANNOTATION_SUFFIX.sub("", stripped).strip().casefold()
+def _supplementary_part(value: str) -> tuple[str, int | None, str | None] | None:
+    folded = value.strip(" -_.").casefold()
     if folded in {"ova", "oad"}:
         return "ova", None, "OVA"
     if folded in {"special", "specials"}:
@@ -105,13 +112,35 @@ def parse_explicit_part(name: str) -> tuple[str, int | None, str | None] | None:
     compact = re.sub(r"[^a-z0-9]+", "", folded)
     if compact in {"cmpv", "commercialspv", "commercialsandpv"}:
         return "bonus", None, "Bonus"
-    if folded in SUPPLEMENTARY_PARTS:
-        return SUPPLEMENTARY_PARTS[folded]
-    return None
+    return SUPPLEMENTARY_PARTS.get(folded)
+
+
+def parse_explicit_part(name: str) -> tuple[str, int | None, str | None] | None:
+    stripped = _name_without_annotation(name)
+    if match := SEASON_SCOPED_SUPPLEMENTARY.fullmatch(stripped):
+        number = int(match.group(1) or match.group(2) or ORDINALS[
+            match.group(3).casefold()
+        ])
+        if supplementary := _supplementary_part(match.group(4)):
+            return supplementary[0], number, f"S{number}"
+    if match := NUMBERED_PART.fullmatch(stripped):
+        number = int(match.group(1) or match.group(2) or ORDINALS.get(
+            (match.group(3) or "").casefold(), 0
+        ) or match.group(5))
+        kind = (match.group(4) or "season").casefold()
+        return kind, number, f"S{number}"
+    return _supplementary_part(stripped)
 
 
 def _name_without_annotation(name: str) -> str:
-    return ANNOTATION_SUFFIX.sub("", name).strip()
+    value = name.strip()
+    while value:
+        without_parentheses = ANNOTATION_SUFFIX.sub("", value).strip()
+        without_code = INTERNAL_CODE_SUFFIX.sub("", without_parentheses).strip()
+        if without_code == value:
+            return value
+        value = without_code
+    return value
 
 
 def _is_related_named_child(parent_name: str, child_name: str) -> bool:

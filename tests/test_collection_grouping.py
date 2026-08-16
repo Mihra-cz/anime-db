@@ -62,6 +62,146 @@ def test_scanner_groups_safe_child_parts_into_one_collection(
         assert {title.part_type for title in titles} == expected_types
 
 
+def test_peter_grill_pattern_keeps_different_season_metadata_in_one_collection(
+    tmp_path: Path, monkeypatch,
+):
+    root = tmp_path / "Anime" / "Peter Grill To Kenja No Jikan"
+    for folder in ("season 1 L20", "season 2 P22"):
+        path = root / folder / "E01.mkv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    _, sessions = _sessions()
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        titles = list(session.scalars(select(CatalogTitle).order_by(
+            CatalogTitle.season_number
+        )))
+        session.add_all([
+            TitleMetadata(
+                catalog_title_id=titles[0].id,
+                display_title="Peter Grill To Kenja No Jikan",
+                title_romaji="Peter Grill to Kenja no Jikan",
+            ),
+            TitleMetadata(
+                catalog_title_id=titles[1].id,
+                display_title="Peter Grill To Kenja No Jikan - Super Extra",
+                title_romaji="Peter Grill to Kenja no Jikan: Super Extra",
+            ),
+        ])
+        session.commit()
+
+        scan_library(session, tmp_path)
+
+        collections = list(session.scalars(select(CatalogCollection)))
+        titles = list(session.scalars(select(CatalogTitle).order_by(
+            CatalogTitle.season_number
+        )))
+        assert len(collections) == 1
+        assert collections[0].local_title == "Peter Grill To Kenja No Jikan"
+        assert [(title.part_type, title.season_number) for title in titles] == [
+            ("season", 1), ("season", 2),
+        ]
+        assert {title.catalog_collection_id for title in titles} == {collections[0].id}
+        assert titles[1].metadata_record.title_romaji == (
+            "Peter Grill to Kenja no Jikan: Super Extra"
+        )
+
+
+def test_kobayashi_pattern_groups_season_two_shorts_with_seasons(
+    tmp_path: Path, monkeypatch,
+):
+    root = tmp_path / "Anime" / "Kobayashi-san Chi no Maid Dragon"
+    for folder in ("Season 1 (Z17)", "Season 2 (L21)", "Season 2 Shorts (L21)"):
+        filename = "Short 01.mkv" if "Shorts" in folder else "E01.mkv"
+        path = root / folder / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    _, sessions = _sessions()
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+
+        collections = list(session.scalars(select(CatalogCollection)))
+        titles = list(session.scalars(select(CatalogTitle)))
+        shorts = next(title for title in titles if "Shorts" in title.local_title)
+        assert len(collections) == 1
+        assert collections[0].local_title == "Kobayashi-san Chi no Maid Dragon"
+        assert len(titles) == 3
+        assert {title.catalog_collection_id for title in titles} == {collections[0].id}
+        assert (shorts.part_type, shorts.season_number, shorts.season_label) == (
+            "bonus", 2, "S2",
+        )
+        assert {video.file_type for video in shorts.videos} == {"other"}
+        assert all(video.season_episode_number is None for video in shorts.videos)
+
+
+def test_manual_reassignment_of_scoped_supplementary_title_remains_authoritative(
+    tmp_path: Path, monkeypatch,
+):
+    path = tmp_path / "Anime" / "Show" / "Season 2 Shorts" / "Short 01.mkv"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    _, sessions = _sessions()
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        title = session.scalar(select(CatalogTitle))
+        target = CatalogCollection(
+            local_title="Manual target", normalized_local_title="manual target",
+            relative_root_path="@manual/scoped-shorts",
+        )
+        session.add(target)
+        session.flush()
+        title.collection = target
+        title.hierarchy_manual_override = True
+        for video in title.videos:
+            video.catalog_collection = target
+        session.commit()
+        target_id = target.id
+
+        scan_library(session, tmp_path)
+
+        stored = session.get(CatalogTitle, title.id)
+        assert stored.catalog_collection_id == target_id
+        assert stored.hierarchy_manual_override is True
+        assert {video.catalog_collection_id for video in stored.videos} == {target_id}
+
+
+def test_same_metadata_title_does_not_merge_unrelated_physical_anime_roots(
+    tmp_path: Path, monkeypatch,
+):
+    for folder in ("Unrelated Alpha", "Unrelated Beta"):
+        path = tmp_path / "Anime" / folder / "E01.mkv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    _, sessions = _sessions()
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        titles = list(session.scalars(select(CatalogTitle)))
+        session.add_all([
+            TitleMetadata(
+                catalog_title_id=title.id, display_title="Same metadata title",
+                title_romaji="Same metadata title",
+            )
+            for title in titles
+        ])
+        session.commit()
+
+        scan_library(session, tmp_path)
+
+        collections = list(session.scalars(select(CatalogCollection)))
+        assert len(collections) == 2
+        assert {collection.relative_root_path for collection in collections} == {
+            "Anime/Unrelated Alpha", "Anime/Unrelated Beta",
+        }
+
+
 def test_scanner_groups_film_and_cmpv_bonus(tmp_path: Path, monkeypatch):
     movie = tmp_path / "Anime" / "Tenki no Ko (FILM)" / "Tenki no Ko.mkv"
     bonus = tmp_path / "Anime" / "Tenki no Ko (FILM)" / "CM&PV" / "Trailer.mkv"

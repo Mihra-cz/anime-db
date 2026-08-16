@@ -22,8 +22,11 @@
 {% if part_confirmation_suggestion %}
 <section class="panel">
   <h2>Ručně potvrdit typ jediné části</h2>
-  <p>Jediný CatalogTitle nemusí být Season 1. Předvyplněné číslo je pouze editovatelný návrh; adresář, interní suffix ani pořadí části je definitivně neurčují.{% if part_confirmation_suggestion.metadata_supports_tv %} <span class="verified">Metadata uvádějí TV / TV_SHORT</span>{% endif %}</p>
-  <p>Číslo sezóny lze ponechat neurčené. Pokud potvrdíte číslo a označení necháte prázdné, použije se odpovídající označení S1, S2, S3… Display title, metadata, videa ani fyzické cesty se nemění.</p>
+  <div class="part-recommendation" role="note" aria-label="Doporučené zařazení">
+    <h3>Doporučené zařazení: {{ part_confirmation_suggestion.display_label }}</h3>
+    {% if part_confirmation_summary %}<p class="part-recommendation-reasons">{% if part_confirmation_suggestion.metadata_supports_tv %}TV / TV_SHORT · {% endif %}{{ part_confirmation_summary.numbered }}/{{ part_confirmation_summary.standard_total }} standardních epizod · {% if part_confirmation_summary.episode_min is not none %}E{{ part_confirmation_summary.episode_min }}–E{{ part_confirmation_summary.episode_max }}{% else %}rozsah neznámý{% endif %} · unknown {{ part_confirmation_summary.unknown }} · nestandardní {{ part_confirmation_summary.nonstandard }}</p>{% endif %}
+    <p>Formulář je tímto návrhem pouze předvyplněný. Uloží se až hodnoty ponechané nebo upravené při ručním potvrzení; do té doby se nic nemění.</p>
+  </div>
   <form class="inline-form" method="post" action="/hierarchy-review/{{ collection.id }}/confirm-part">
     <label>Typ části <select name="part_type_manual" required>{% for value, label in [('season','Season'),('title','Titul'),('part','Part'),('cour','Cour'),('film','Film'),('ova','OVA'),('special','Special'),('preview','Preview'),('recap','Recap'),('bonus','Bonus'),('other','Other')] %}<option value="{{ value }}" {% if value == part_confirmation_suggestion.proposed_part_type %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
     <label>Číslo sezóny <input type="number" min="1" name="season_number_manual" value="{{ part_confirmation_suggestion.proposed_season_number if part_confirmation_suggestion.proposed_season_number is not none else '' }}"></label>
@@ -31,6 +34,7 @@
     <label><input type="checkbox" name="confirm_part" value="true" required> Potvrzuji uvedený typ a případné číslo této části.</label>
     <button type="submit">Potvrdit část</button>
   </form>
+  <p class="part-confirmation-explanation">Jediný CatalogTitle nemusí být Season 1. Předvyplněné hodnoty jsou pouze editovatelný návrh; adresář, interní suffix ani pořadí části je definitivně neurčují. Číslo sezóny lze ponechat neurčené. Pokud potvrdíte číslo a označení necháte prázdné, použije se odpovídající označení S1, S2, S3… Display title, metadata, videa ani fyzické cesty se nemění.</p>
 </section>
 {% endif %}
 

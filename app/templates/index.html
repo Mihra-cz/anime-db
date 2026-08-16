@@ -7,13 +7,16 @@
 {% if error %}<div class="notice error"><strong>Sken byl zastaven.</strong> {{ error }}
 {% if confirm_deletions %}<form method="post" action="/scan"><input type="hidden" name="confirm_deletions" value="true"><button type="submit">Potvrdit odstranění chybějících záznamů</button></form>{% endif %}</div>{% endif %}
 <section class="stats">
-  <a class="stat-link" href="/catalog/episodes{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.episodes }}</strong><span>běžných epizod</span></article></a>
-  <a class="stat-link" href="/catalog/bonus{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.bonus }}</strong><span>bonusových / ostatních videí</span></article></a>
-  <a class="stat-link" href="/catalog/only-cs{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.only_cs }}</strong><span>pouze CZ</span></article></a>
-  <a class="stat-link" href="/catalog/only-sk{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.only_sk }}</strong><span>pouze SK</span></article></a>
+  <article><strong>{{ totals.anime_titles }}</strong><span>Anime titulů</span></article>
+  <a class="stat-link" href="/catalog/episodes{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.episodes }}</strong><span>Běžných epizod</span></article></a>
+  <a class="stat-link" href="/catalog/films{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.films }}</strong><span>Filmů</span></article></a>
+  <a class="stat-link" href="/catalog/bonus{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.bonus }}</strong><span>Bonusových / ostatních videí</span></article></a>
+  <a class="stat-link" href="/catalog/only-cs{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.only_cs }}</strong><span>Pouze CZ</span></article></a>
+  <a class="stat-link" href="/catalog/only-sk{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.only_sk }}</strong><span>Pouze SK</span></article></a>
   <a class="stat-link" href="/catalog/both{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.both_cs_sk }}</strong><span>CZ i SK</span></article></a>
-  <a class="stat-link" href="/catalog/missing{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.missing }}</strong><span>bez CZ/SK</span></article></a>
-  <a class="stat-link" href="/catalog/unknown{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.unknown }}</strong><span>s neznámými titulky</span></article></a>
+  <a class="stat-link" href="/catalog/missing{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.missing }}</strong><span>Bez CZ/SK</span></article></a>
+  <a class="stat-link" href="/catalog/unknown{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.unknown }}</strong><span>S neznámými titulky</span></article></a>
+  <a class="stat-link" href="/catalog/all{% if q %}?q={{ q|urlencode }}{% endif %}"><article><strong>{{ totals.total }}</strong><span>Celkem videí</span></article></a>
 </section>
 <section class="panel logical-catalog"><h2>Katalog kolekcí</h2>
 <p>Hlavní přehled vychází z logické hierarchie katalogu. Collection s jedinou jednoznačnou částí otevře rovnou její titul; vícedílná collection otevře seznam částí. Změny struktury se provádějí v <a href="/hierarchy-review">Kontrole hierarchie</a>.</p>

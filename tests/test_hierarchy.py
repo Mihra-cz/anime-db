@@ -76,6 +76,48 @@ def test_season_folders_share_one_anime_collection():
     }
 
 
+def test_season_folders_with_bare_internal_codes_share_anime_root():
+    paths = [
+        "Anime/Peter Grill To Kenja No Jikan/season 1 L20/E01.mkv",
+        "Anime/Peter Grill To Kenja No Jikan/season 2 P22/E01.mkv",
+    ]
+    hierarchy = derive_library_hierarchy(paths)
+
+    assert {item.collection.relative_root_path for item in hierarchy.values()} == {
+        "Anime/Peter Grill To Kenja No Jikan"
+    }
+    assert {
+        (item.title.local_title, item.title.part_type, item.title.season_number)
+        for item in hierarchy.values()
+    } == {
+        ("season 1 L20", "season", 1),
+        ("season 2 P22", "season", 2),
+    }
+
+
+@pytest.mark.parametrize(("folder", "part_type", "season_number"), [
+    ("Season 2 Shorts", "bonus", 2),
+    ("Season 1 Specials", "special", 1),
+    ("Season 2 Specials", "special", 2),
+    ("Season 2 OVA", "ova", 2),
+    ("Season 2 SPs", "special", 2),
+    ("S2 Shorts", "bonus", 2),
+    ("S2 Specials", "special", 2),
+    ("S2 OVA", "ova", 2),
+])
+def test_season_scoped_supplementary_child_keeps_scope(
+    folder, part_type, season_number,
+):
+    path = f"Anime/Anime XYZ/{folder}/item.mkv"
+    identity = derive_library_hierarchy([path])[path]
+
+    assert identity.collection.relative_root_path == "Anime/Anime XYZ"
+    assert identity.title.relative_root_path == f"Anime/Anime XYZ/{folder}"
+    assert identity.title.part_type == part_type
+    assert identity.title.season_number == season_number
+    assert identity.title.season_label == f"S{season_number}"
+
+
 @pytest.mark.parametrize(("folder", "part_type"), [
     ("OVA", "ova"),
     ("Specials", "special"),

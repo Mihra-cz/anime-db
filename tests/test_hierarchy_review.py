@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -210,10 +211,31 @@ def test_single_generic_title_gets_editable_part_confirmation_suggestion():
     assert suggestion.proposed_part_type == "season"
     assert suggestion.proposed_season_number == 1
     assert suggestion.proposed_season_label is None
+    assert suggestion.display_label == "Season 1 (S1)"
     assert title.season_number_manual is None
     assert title.season_label_manual is None
     assert title.part_type_manual is None
     assert not title.hierarchy_manual_override
+
+
+@pytest.mark.parametrize(("part_type", "expected"), [
+    ("title", "Titul"), ("part", "Part"), ("cour", "Cour"),
+    ("film", "Film"), ("ova", "OVA"), ("special", "Special"),
+    ("preview", "Preview"), ("recap", "Recap"), ("bonus", "Bonus"),
+    ("other", "Other"),
+])
+def test_confirmation_proposal_has_human_label_for_supported_part_types(
+    part_type, expected,
+):
+    collection, _ = simple_collection()
+    suggestion = single_title_confirmation_suggestion(collection)
+
+    displayed = replace(
+        suggestion, proposed_part_type=part_type,
+        proposed_season_number=None, proposed_season_label=None,
+    )
+
+    assert displayed.display_label == expected
 
 
 @pytest.mark.parametrize("season_number", [1, 2, 3])
@@ -497,6 +519,7 @@ def test_automatic_folder_season_is_only_editable_confirmation_proposal():
     assert suggestion is not None
     assert suggestion.proposed_season_number == 2
     assert suggestion.proposed_season_label == "S2"
+    assert suggestion.display_label == "Season 2 (S2)"
     assert title.season_number_manual is None
     assert title.season_label_manual is None
     assert title.part_type_manual is None

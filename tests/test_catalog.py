@@ -16,6 +16,7 @@ from app.catalog import (
     derive_season_info,
     determine_parent_series,
     group_videos_by_series,
+    is_film_video,
     manual_hardsub_state,
     normalize_language,
     title_filename_display_title,
@@ -545,7 +546,73 @@ def test_all_main_catalog_filters_return_grouped_title_summaries():
         groups = group_videos_by_series(videos, filter_name)
         assert groups
         assert all(isinstance(group, SeriesSummary) for group in groups)
-    assert set(FILTER_LABELS) >= {"only-cs", "only-sk", "both", "missing", "unknown", "episodes", "bonus"}
+    assert set(FILTER_LABELS) >= {
+        "only-cs", "only-sk", "both", "missing", "unknown", "episodes",
+        "films", "bonus",
+    }
+
+
+def test_film_filter_uses_effective_hierarchy_and_excludes_other_parts():
+    def assigned_video(
+        identifier: int, collection_name: str, part_type: str,
+        *, manual_type: str | None = None,
+    ) -> Video:
+        collection = CatalogCollection(
+            id=identifier, local_title=collection_name,
+            normalized_local_title=collection_name.casefold(),
+            relative_root_path=f"Anime/{collection_name}",
+        )
+        title = CatalogTitle(
+            id=identifier, collection=collection, local_title=part_type,
+            normalized_local_title=part_type,
+            relative_root_path=f"Anime/{collection_name}/{part_type}",
+            part_type=part_type, part_type_manual=manual_type,
+            hierarchy_manual_override=manual_type is not None,
+        )
+        return Video(
+            id=identifier,
+            relative_path=f"Anime/{collection_name}/{part_type}.mkv",
+            root_folder="Anime", filename=f"{part_type}.mkv", size=1,
+            mtime_ns=identifier,
+            file_type="episode" if part_type == "season" else "other",
+            catalog_collection=collection, catalog_title=title,
+        )
+
+    automatic_film = assigned_video(1, "Automatic Film", "film")
+    manual_film = assigned_video(2, "Manual Film", "title", manual_type="film")
+    mixed_episode_title = CatalogTitle(
+        id=7, collection=automatic_film.catalog_collection,
+        local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Automatic Film/Season 1", part_type="season",
+    )
+    mixed_episode = Video(
+        id=7, relative_path="Anime/Automatic Film/Season 1/E01.mkv",
+        root_folder="Anime", filename="E01.mkv", size=1, mtime_ns=7,
+        file_type="episode", catalog_collection=automatic_film.catalog_collection,
+        catalog_title=mixed_episode_title,
+    )
+    episode = assigned_video(3, "TV Series", "season")
+    ova = assigned_video(4, "OVA Work", "ova")
+    special = assigned_video(5, "Special Work", "special")
+    bonus = assigned_video(6, "Bonus Work", "bonus")
+    nonfilms = [mixed_episode, episode, ova, special, bonus]
+    videos = [automatic_film, manual_film, *nonfilms]
+
+    assert is_film_video(automatic_film) is True
+    assert is_film_video(manual_film) is True
+    assert all(is_film_video(video) is False for video in nonfilms)
+    assert all(video_matches_filter(video, "films") for video in videos[:2])
+    assert all(not video_matches_filter(video, "films") for video in nonfilms)
+
+    results = build_catalog_results(videos, "films")
+    assert {group.name for group in results.groups} == {
+        "Automatic Film", "Manual Film",
+    }
+    mixed_group = next(
+        group for group in results.groups if group.name == "Automatic Film"
+    )
+    assert mixed_group.total == 2
+    assert mixed_group.problematic == 1
 
 
 def test_search_by_title_is_case_insensitive_and_returns_all_filtered_title_videos():
