@@ -89,3 +89,7 @@ pytest
 ## Aktualizace databáze
 
 Při startu aplikace proběhne idempotentní migrace SQLite: chybějící sloupce pro normalizovaný jazyk, typ videa a samostatné ruční podezření na duplicitu se doplní a existující záznamy se přepočítají. Existující videa dostanou pro `duplicate_status_manual` hodnotu `NULL`; žádné se automaticky neoznačí jako `suspected`. Stávající raw metadata jazyka se zachovají. Před větší aktualizací lze pro jistotu zazálohovat `data/anime.db`; ruční smazání databáze není pro tuto verzi nutné.
+
+## Licence
+
+AnimeDB je vydán pod licencí GNU General Public License v3.0 (`GPL-3.0-only`). Podrobnosti jsou uvedeny v souboru [LICENSE](LICENSE).
