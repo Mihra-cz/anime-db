@@ -15,3 +15,8 @@ logs/
 *.db
 *.sqlite
 *.sqlite3
+
+# Local development artifacts
+.agents/
+.codex/
+hierarchy-dry-run.txt
