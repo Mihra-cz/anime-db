@@ -1,4 +1,35 @@
-from app.main import catalog_state_url, hardsub_return_url, metadata_return_url, series_state_url
+import pytest
+
+from app.main import (
+    catalog_state_url,
+    hardsub_return_url,
+    metadata_return_url,
+    safe_local_redirect_target,
+    series_state_url,
+)
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("/", "/"),
+        ("/catalog/all?q=test", "/catalog/all?q=test"),
+        ("/titles/123#metadata", "/titles/123#metadata"),
+        ("https://evil.example", "/"),
+        ("http://evil.example", "/"),
+        ("//evil.example", "/"),
+        ("https:/evil.example", "/"),
+        (r"/\evil.example", "/"),
+        (r"\\evil.example", "/"),
+        ("///evil.example", "/"),
+        ("catalog/all", "/"),
+        ("", "/"),
+        (None, "/"),
+        ("/catalog/all\nLocation: https://evil.example", "/"),
+    ],
+)
+def test_safe_local_redirect_target(target, expected):
+    assert safe_local_redirect_target(target) == expected
 
 
 def test_hardsub_return_url_preserves_filter_title_and_video_anchor():

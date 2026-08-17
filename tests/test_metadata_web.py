@@ -1,10 +1,18 @@
 import asyncio
+from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from fastapi import HTTPException
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.catalog import ROOT_VIDEO_GROUP_LABEL, build_catalog_results, detect_episode_number
+from app.catalog import (
+    ROOT_VIDEO_GROUP_LABEL,
+    TITLE_NAME_PREFERENCE_LABELS,
+    build_catalog_results,
+    detect_episode_number,
+)
 from app.config import Settings
 from app.database import Base
 from app.main import (
@@ -635,12 +643,27 @@ def test_title_language_preference_cookie_survives_recreated_app(tmp_path):
     })
     assert get_preferred_title_language(default_request) == "romaji"
 
-    response = endpoint(preference="english", return_to="/hierarchy-review")
+    response = endpoint(preference=" EnGLish ", return_to="/hierarchy-review")
 
     assert response.status_code == 303
     assert response.headers["location"] == "/hierarchy-review"
-    assert f"{PREFERRED_TITLE_LANGUAGE_COOKIE}=english" in response.headers["set-cookie"]
+    parsed_cookie = SimpleCookie()
+    parsed_cookie.load(response.headers["set-cookie"])
+    stored_preference = parsed_cookie[PREFERRED_TITLE_LANGUAGE_COOKIE].value
+    assert stored_preference == "english"
+    assert stored_preference in TITLE_NAME_PREFERENCE_LABELS
     assert "Max-Age=31536000" in response.headers["set-cookie"]
+
+    external_response = endpoint(
+        preference="native", return_to="https://evil.example"
+    )
+    assert external_response.status_code == 303
+    assert external_response.headers["location"] == "/"
+    assert (
+        f"{PREFERRED_TITLE_LANGUAGE_COOKIE}=native"
+        in external_response.headers["set-cookie"]
+    )
+
     cookie = f"{PREFERRED_TITLE_LANGUAGE_COOKIE}=english".encode()
     for web_app in (first_app, create_app(settings)):
         request = Request({
@@ -650,6 +673,24 @@ def test_title_language_preference_cookie_survives_recreated_app(tmp_path):
             "client": ("testclient", 50000),
         })
         assert get_preferred_title_language(request) == "english"
+
+
+def test_title_language_preference_rejects_unknown_cookie_value(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'invalid-preference.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/preferences/title-name"
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        endpoint(preference="klingon", return_to="/")
+
+    assert exc_info.value.status_code == 400
 
 
 def test_collection_and_hierarchy_review_share_cookie_title_preference(tmp_path):
@@ -1036,6 +1077,13 @@ def test_manual_duplicate_endpoint_marks_and_clears_without_other_changes(tmp_pa
     assert response.status_code == 303
     assert response.headers["location"] == f"/titles/{title_id}#video-{video_id}"
 
+    external_response = endpoint(
+        video_id, duplicate_status_manual="suspected",
+        return_to="https://evil.example",
+    )
+    assert external_response.status_code == 303
+    assert external_response.headers["location"] == "/"
+
     with web_app.state.sessions() as session:
         stored = session.get(Video, video_id)
         assert stored.duplicate_status_manual == "suspected"
@@ -1061,6 +1109,9 @@ def test_manual_duplicate_endpoint_marks_and_clears_without_other_changes(tmp_pa
         return_to=f"/hierarchy-review/{collection_id}#manual-duplicate-video-{video_id}",
     )
     assert response.status_code == 303
+    assert response.headers["location"] == (
+        f"/hierarchy-review/{collection_id}#manual-duplicate-video-{video_id}"
+    )
     with web_app.state.sessions() as session:
         stored = session.get(Video, video_id)
         assert stored.duplicate_status_manual is None

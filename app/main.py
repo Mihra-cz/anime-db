@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 import time
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -89,6 +89,40 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 PACKAGE_DIR = Path(__file__).parent
 PREFERRED_TITLE_LANGUAGE_COOKIE = "animedb_preferred_title_language"
+CANONICAL_TITLE_NAME_PREFERENCES = {
+    preference: preference for preference in TITLE_NAME_PREFERENCE_LABELS
+}
+
+
+def safe_local_redirect_target(target: object) -> str:
+    """Vrátí pouze lokální absolute-path URL, jinak bezpečný fallback."""
+    if not isinstance(target, str):
+        return "/"
+    candidate = target.strip()
+    normalized_candidate = candidate.replace("\\", "/")
+    if (
+        not candidate
+        or normalized_candidate != candidate
+        or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+    ):
+        return "/"
+    try:
+        parsed = urlparse(normalized_candidate)
+    except ValueError:
+        return "/"
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or not parsed.path.startswith("/")
+        or normalized_candidate.startswith("//")
+    ):
+        return "/"
+    return normalized_candidate
+
+
+def local_redirect_response(target: object, *, status_code: int = 303) -> RedirectResponse:
+    """Vytvoří redirect s explicitně vynuceným lokálním cílem."""
+    return RedirectResponse(safe_local_redirect_target(target), status_code=status_code)
 
 
 def get_preferred_title_language(request: Request) -> str:
@@ -458,14 +492,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         preference: str = Form(...), return_to: str = Form("/"),
     ):
         normalized = preference.strip().casefold()
-        if normalized not in TITLE_NAME_PREFERENCE_LABELS:
+        canonical_preference = CANONICAL_TITLE_NAME_PREFERENCES.get(normalized)
+        if canonical_preference is None:
             raise HTTPException(status_code=400, detail="Neplatná varianta názvu.")
-        target = return_to.strip()
-        if not target.startswith("/") or target.startswith("//"):
-            target = "/"
-        response = RedirectResponse(target, status_code=303)
+        response = local_redirect_response(return_to)
         response.set_cookie(
-            PREFERRED_TITLE_LANGUAGE_COOKIE, normalized, max_age=31_536_000,
+            PREFERRED_TITLE_LANGUAGE_COOKIE, canonical_preference, max_age=31_536_000,
             httponly=True, samesite="lax",
         )
         return response
@@ -597,7 +629,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for title in {old_title, target_title} - {None}:
                 recalculate_title_numbering(title, list(title.videos))
             session.commit()
-        return RedirectResponse(f"/root-videos#video-{video_id}", status_code=303)
+        return local_redirect_response(f"/root-videos#video-{video_id}")
 
     @app.post("/root-videos/{video_id}/new-title")
     def create_root_video_title(
@@ -653,7 +685,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for affected_title in {old_title, title} - {None}:
                 recalculate_title_numbering(affected_title, list(affected_title.videos))
             session.commit()
-        return RedirectResponse(f"/root-videos#video-{video_id}", status_code=303)
+        return local_redirect_response(f"/root-videos#video-{video_id}")
 
     @app.get("/catalog/{filter_name}", response_class=HTMLResponse)
     def catalog(
@@ -727,7 +759,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 parameters.update(
                     video_sort=video_sort, video_direction=video_direction or "asc"
                 )
-            return RedirectResponse(
+            return local_redirect_response(
                 f"/titles/{catalog_title.id}?{urlencode(parameters)}", status_code=307
             )
         selected_path = catalog_title.relative_root_path if catalog_title else series_path
@@ -1203,9 +1235,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         message = "Hlavní collection byla vytvořena a vybrané části logicky přesunuty."
-        return RedirectResponse(
+        return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}",
-            status_code=303,
         )
 
     @app.post("/hierarchy-review/collections/move")
@@ -1227,9 +1258,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         message = "Vybrané CatalogTitle byly přesunuty; fyzické cesty zůstaly beze změny."
-        return RedirectResponse(
+        return local_redirect_response(
             f"/hierarchy-review/{target_id}?{urlencode({'message': message})}",
-            status_code=303,
         )
 
     @app.post("/hierarchy-review/grouping/keep-separate")
@@ -1276,8 +1306,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         deleted = ", ".join(name for _, name in result.deleted) or "žádné"
         skipped = ", ".join(name for _, name in result.skipped) or "žádné"
         message = f"Odstraněné collections: {deleted}. Přeskočené: {skipped}."
-        return RedirectResponse(
-            f"/hierarchy-review?{urlencode({'message': message})}", status_code=303,
+        return local_redirect_response(
+            f"/hierarchy-review?{urlencode({'message': message})}",
         )
 
     def metadata_review_context(request: Request, status: str = "without", batch_result=None):
@@ -1410,9 +1440,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(
-            f"/hierarchy-review/{collection_id}#result", status_code=303
-        )
+        return local_redirect_response(f"/hierarchy-review/{collection_id}#result")
 
     @app.post("/hierarchy-review/{collection_id}/status")
     def hierarchy_review_status(
@@ -1439,7 +1467,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 utc_now() if hierarchy_status in {"verified", "not_applicable"} else None
             )
             session.commit()
-        return RedirectResponse(f"/hierarchy-review/{collection_id}", status_code=303)
+        return local_redirect_response(f"/hierarchy-review/{collection_id}")
 
     @app.post("/hierarchy-review/{collection_id}/separate-nonstandard")
     async def hierarchy_review_separate_nonstandard(request: Request, collection_id: int):
@@ -1462,9 +1490,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         message = "Nestandardní obsah byl logicky oddělen; fyzické cesty zůstaly beze změny."
-        return RedirectResponse(
+        return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#title-{title_id}",
-            status_code=303,
         )
 
     @app.post("/hierarchy-review/{collection_id}/manage-videos")
@@ -1501,9 +1528,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session.commit()
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(
+        return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#assignment",
-            status_code=303,
         )
 
     @app.post("/hierarchy-review/{collection_id}/merge-title")
@@ -1521,9 +1547,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         message = "Všechna videa byla logicky přesunuta; zdrojová část zůstala prázdná."
-        return RedirectResponse(
+        return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#title-{source_title_id}",
-            status_code=303,
         )
 
     @app.post("/hierarchy-review/{collection_id}/duplicates/confirm")
@@ -1545,9 +1570,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Duplicita byla potvrzena. Číslování je rozlišené, fyzická kopie však "
             "stále vyžaduje budoucí cleanup."
         )
-        return RedirectResponse(
+        return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#current-parts",
-            status_code=303,
         )
 
     @app.post("/hierarchy-review/{collection_id}/duplicates/confirm-bulk")
@@ -1575,9 +1599,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Skupiny byly potvrzeny. Logické číslování je rozlišené, fyzické "
             "duplicitní kopie však nadále vyžadují cleanup."
         )
-        return RedirectResponse(
+        return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#current-parts",
-            status_code=303,
         )
 
     @app.post("/hierarchy-review/{collection_id}/duplicates/clear")
@@ -1595,9 +1618,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         message = "Označení duplicity bylo zrušeno; kolize čísel znovu vyžaduje kontrolu."
-        return RedirectResponse(
+        return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#current-parts",
-            status_code=303,
         )
 
     @app.post("/hierarchy-review/{collection_id}/delete-empty-title")
@@ -1622,9 +1644,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Prázdná část byla odstraněna i z ručního rozdělení."
             if removed_definition else "Prázdná lokální část byla odstraněna."
         )
-        return RedirectResponse(
+        return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}",
-            status_code=303,
         )
 
     @app.post("/titles/{catalog_title_id}/delete-empty")
@@ -1658,8 +1679,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Prázdná část byla odstraněna i z ručního rozdělení."
             if removed_definition else "Prázdná část byla odstraněna pouze z databáze."
         )
-        return RedirectResponse(
-            f"/hierarchy-review?{urlencode({'message': message})}", status_code=303,
+        return local_redirect_response(
+            f"/hierarchy-review?{urlencode({'message': message})}",
         )
 
     @app.post("/hierarchy-review/{collection_id}/numbering-preview", response_class=HTMLResponse)
@@ -1717,9 +1738,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         message = "Vybraná videa byla očíslována v potvrzeném pořadí."
-        return RedirectResponse(
+        return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#assignment",
-            status_code=303,
         )
 
     @app.post("/hierarchy-review/{collection_id}/confirm-part")
@@ -1757,13 +1777,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(
+        return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': (
                 f'{confirmed_label} byla potvrzena a původní nejednoznačnost hierarchie je vyřešena.'
                 if verified else
                 f'{confirmed_label} byla potvrzena; další aktuální problém stále vyžaduje kontrolu.'
             )})}",
-            status_code=303,
         )
 
     @app.post("/collections/{collection_id}/titles/{catalog_title_id}/hierarchy")
@@ -1810,9 +1829,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         params = {"filter_name": filter_name, "q": q, "sort": sort, "direction": direction}
-        return RedirectResponse(
+        return local_redirect_response(
             f"/collections/{collection_id}?{urlencode(params)}#title-{catalog_title_id}",
-            status_code=303,
         )
 
     @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/search")
@@ -1862,10 +1880,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         filter_name: str, catalog_title_id: int, q: str, sort: str, direction: str,
         detail_sort: str, detail_direction: str, **messages: str,
     ):
-        return RedirectResponse(metadata_return_url(
+        return local_redirect_response(metadata_return_url(
             filter_name, catalog_title_id, q, sort, direction,
             detail_sort, detail_direction, **messages,
-        ), status_code=303)
+        ))
 
     @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/confirm")
     def confirm_metadata(
@@ -2113,7 +2131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         else:
             target = f"/catalog/{filter_name}"
-        return RedirectResponse(target, status_code=303)
+        return local_redirect_response(target)
 
     @app.post("/videos/{video_id}/duplicate-status-manual")
     def update_manual_duplicate_status(
@@ -2130,10 +2148,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        target = return_to.strip()
-        if not target.startswith("/") or target.startswith("//"):
-            target = "/"
-        return RedirectResponse(target, status_code=303)
+        return local_redirect_response(return_to)
 
     @app.post("/titles/{catalog_title_id}/numbering")
     def update_title_numbering(
@@ -2157,14 +2172,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session.commit()
             except ValueError as exc:
                 session.rollback()
-                return RedirectResponse(metadata_return_url(
+                return local_redirect_response(metadata_return_url(
                     filter_name, catalog_title_id, q, sort, direction,
                     detail_sort, detail_direction, numbering_error=str(exc),
-                ).replace("#metadata", "#numbering"), status_code=303)
-        return RedirectResponse(metadata_return_url(
+                ).replace("#metadata", "#numbering"))
+        return local_redirect_response(metadata_return_url(
             filter_name, catalog_title_id, q, sort, direction,
             detail_sort, detail_direction, numbering_message="Číslování bylo uloženo.",
-        ).replace("#metadata", "#numbering"), status_code=303)
+        ).replace("#metadata", "#numbering"))
 
     @app.post("/videos/{video_id}/episode-number")
     def update_video_episode_number(
@@ -2188,12 +2203,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(
+        return local_redirect_response(
             metadata_return_url(
                 filter_name, video.catalog_title_id, q, sort, direction,
                 detail_sort, detail_direction,
             ).replace("#metadata", f"#video-{video_id}"),
-            status_code=303,
         )
 
     @app.post("/titles/{catalog_title_id}/numbering/sequence")
@@ -2226,16 +2240,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session.commit()
             except ValueError as exc:
                 session.rollback()
-                return RedirectResponse(metadata_return_url(
+                return local_redirect_response(metadata_return_url(
                     filter_name, catalog_title_id, q, sort, direction,
                     detail_sort, detail_direction,
                     numbering_error=str(exc), sequence_start=str(sequence_start),
-                ).replace("#metadata", "#numbering"), status_code=303)
-        return RedirectResponse(metadata_return_url(
+                ).replace("#metadata", "#numbering"))
+        return local_redirect_response(metadata_return_url(
             filter_name, catalog_title_id, q, sort, direction,
             detail_sort, detail_direction,
             numbering_message="Sekvenční číslování bylo uloženo.",
-        ).replace("#metadata", "#numbering"), status_code=303)
+        ).replace("#metadata", "#numbering"))
 
     @app.post("/scan")
     def scan(confirm_deletions: bool = Form(False)):
@@ -2252,17 +2266,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             message = (f"Sken dokončen: {result.found} videí, {result.created} nových, "
                        f"{result.updated} změněných, {result.errors} chyb.")
-            return RedirectResponse(url=f"/?{urlencode({'message': message})}", status_code=303)
+            return local_redirect_response(f"/?{urlencode({'message': message})}")
         except LibrarySafetyError as exc:
             logger.warning("Sken bezpečnostně přerušen: %s", exc)
             query = {"error": str(exc)}
             if exc.confirmation_allowed:
                 query["confirm_deletions"] = "true"
-            return RedirectResponse(url=f"/?{urlencode(query)}", status_code=303)
+            return local_redirect_response(f"/?{urlencode(query)}")
         except Exception as exc:
             logger.exception("Sken selhal")
             message = f"Sken selhal. Knihovna může být odpojená: {exc}"
-            return RedirectResponse(url=f"/?{urlencode({'error': message})}", status_code=303)
+            return local_redirect_response(f"/?{urlencode({'error': message})}")
 
     return app
 
