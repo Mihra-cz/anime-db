@@ -37,3 +37,7 @@
 .part-recommendation p { margin: .55rem 0 0; }
 .part-recommendation-reasons { color: #c4b5fd; font-weight: 700; }
 .part-confirmation-explanation { margin-top: 1rem; color: #7f8ba0; font-size: .9rem; }
+.assignment-recommendations { display: grid; gap: .8rem; margin-top: 1rem; }
+.assignment-recommendations .part-recommendation h4 { margin: .45rem 0; font-size: 1.05rem; }
+.recommendation-video { margin-top: .75rem; padding: .75rem; border: 1px solid #46536a; border-radius: 8px; background: #101722; }
+.recommendation-video p { margin: .35rem 0; color: #e8edf5; font-weight: 700; }

@@ -18,6 +18,7 @@ from .models import (
 )
 from .numbering import (
     clear_duplicate_group, collection_requires_numbering_review,
+    effective_video_numbering,
     is_confirmed_duplicate, recalculate_collection_numbering,
     set_duplicate_group_primary, supplementary_context_map,
     video_numbering_identity,
@@ -43,6 +44,12 @@ PROBABLE_GROUPING_REVIEW_REASON = (
 SUPPLEMENTARY_CONTEXT_REVIEW_REASON = (
     "Doplňková část zachovává kontext vlastního child názvu, ale související "
     "season vyžaduje ruční potvrzení."
+)
+FILENAME_SEASON_CONFLICT_REVIEW_REASON = (
+    "Season ve filename je v konfliktu s automaticky odvozenou season složkou."
+)
+UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON = (
+    "Explicitně označený doplňkový obsah nemá bezpečně určené canonical číslování."
 )
 ALLOWED_PART_TYPES = {
     "title", "season", "part", "cour", "film", "ova", "special",
@@ -157,6 +164,116 @@ class SupplementaryVideoSuggestion:
     context_season_number: int | None
     proposed_part_type: str
     proposed_title: str
+
+
+@dataclass(frozen=True)
+class SupplementaryAssignmentItem:
+    video: Video
+    filename_episode_hint: int | None
+    title_candidate: str | None
+    supplementary_number: int | None
+    season_hint: int | None
+
+    @property
+    def filename_hint_label(self) -> str | None:
+        if self.season_hint is not None and self.filename_episode_hint is not None:
+            return f"S{self.season_hint:02d}E{self.filename_episode_hint:02d}"
+        return None
+
+
+@dataclass(frozen=True)
+class SupplementaryAssignmentRecommendation:
+    items: tuple[SupplementaryAssignmentItem, ...]
+    supplementary_type: str
+    proposed_part_type: str
+    type_label: str
+    proposed_title: str
+    season_number: int | None
+
+    @property
+    def video_ids(self) -> tuple[int, ...]:
+        return tuple(item.video.id for item in self.items)
+
+    @property
+    def season_display(self) -> str | None:
+        return f"S{self.season_number:02d}" if self.season_number is not None else None
+
+    @property
+    def season_label(self) -> str | None:
+        return f"S{self.season_number}" if self.season_number is not None else None
+
+    @property
+    def canonical_numbering_known(self) -> bool:
+        return all(item.supplementary_number is not None for item in self.items)
+
+    @property
+    def anchor_id(self) -> str:
+        return f"assignment-recommendation-{self.items[0].video.id}"
+
+
+SUPPLEMENTARY_ASSIGNMENT_LABELS = {
+    "special": ("special", "Special", "Specials"),
+    "ova": ("ova", "OVA", "OVA"),
+    "preview": ("preview", "Preview", "Preview"),
+    "recap": ("recap", "Recap", "Recap"),
+    "ncop": ("bonus", "NCOP", "NCOP"),
+    "nced": ("bonus", "NCED", "NCED"),
+    "op": ("bonus", "OP", "OP"),
+    "ed": ("bonus", "ED", "ED"),
+    "bonus": ("bonus", "Bonus", "Bonus"),
+}
+
+
+def supplementary_assignment_recommendations(
+    videos: list[Video],
+) -> tuple[SupplementaryAssignmentRecommendation, ...]:
+    """Navrhne pouze předvyplnění univerzální správy zařazení; nic nemění."""
+    grouped: dict[
+        tuple[int, str, int | None, str], list[SupplementaryAssignmentItem]
+    ] = {}
+    labels: dict[tuple[int, str, int | None, str], tuple[str, str, str]] = {}
+    for video in videos:
+        current = video.catalog_title
+        if (
+            video.content_type_manual
+            or current is None
+            or current.effective_part_type != "season"
+        ):
+            continue
+        detection = detect_episode_number(video.filename)
+        if not detection.is_supplementary or not detection.supplementary_type:
+            continue
+        part_type, type_label, proposed_title = SUPPLEMENTARY_ASSIGNMENT_LABELS.get(
+            detection.supplementary_type,
+            ("bonus", "Doplňkový obsah", "Bonus"),
+        )
+        key = (
+            current.id, detection.supplementary_type,
+            detection.season_hint, proposed_title,
+        )
+        grouped.setdefault(key, []).append(SupplementaryAssignmentItem(
+            video=video,
+            filename_episode_hint=detection.filename_episode_hint,
+            title_candidate=detection.title_candidate,
+            supplementary_number=detection.supplementary_number,
+            season_hint=detection.season_hint,
+        ))
+        labels[key] = (part_type, type_label, proposed_title)
+    return tuple(
+        SupplementaryAssignmentRecommendation(
+            items=tuple(sorted(items, key=lambda item: item.video.relative_path)),
+            supplementary_type=key[1], proposed_part_type=labels[key][0],
+            type_label=labels[key][1], proposed_title=labels[key][2],
+            season_number=key[2],
+        )
+        for key, items in sorted(
+            grouped.items(),
+            key=lambda item: (
+                item[0][2] is None, item[0][2] or 0, item[0][1],
+                item[1][0].video.relative_path,
+            ),
+        )
+    )
 
 
 def set_manual_duplicate_status(video: Video, status: str | None) -> None:
@@ -588,19 +705,38 @@ def manual_hierarchy_resolves_ambiguity(collection: CatalogCollection) -> bool:
     )
 
 
+def _filename_season_conflicts_with_title(video: Video) -> bool:
+    detection = detect_episode_number(video.filename)
+    title = video.catalog_title
+    return bool(
+        detection.season_hint is not None
+        and title is not None
+        and title.effective_season_number is not None
+        and detection.season_hint != title.effective_season_number
+        and not title.hierarchy_manual_override
+    )
+
+
+def _has_unnumbered_explicit_supplementary(video: Video) -> bool:
+    detection = detect_episode_number(video.filename)
+    return bool(
+        detection.is_supplementary
+        and detection.supplementary_number is None
+        and video.episode_number_manual_override is None
+    )
+
+
 def collection_requires_review(collection: CatalogCollection, videos: list[Video]) -> str | None:
     hierarchy_resolved = manual_hierarchy_resolves_ambiguity(collection)
+    if any(_filename_season_conflicts_with_title(video) for video in videos):
+        return FILENAME_SEASON_CONFLICT_REVIEW_REASON
+    if any(_has_unnumbered_explicit_supplementary(video) for video in videos):
+        return UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON
     if extract_local_period_hint(collection.local_title) and not hierarchy_resolved:
         return PERIOD_HINT_REVIEW_REASON
+    states = [effective_video_numbering(video) for video in videos]
     nonstandard = [
-        detection.display_value
-        for video in videos
-        if (detection := detect_episode_number(video.filename)).is_nonstandard
-        and not video.content_type_manual
-        and (
-            video.catalog_title is None
-            or video.catalog_title.effective_part_type not in SUPPLEMENTAL_PART_TYPES
-        )
+        state.detection.display_value for state in states if state.is_nonstandard
     ]
     if nonstandard:
         return "Nestandardní číslování vyžaduje ruční zařazení."
@@ -609,10 +745,8 @@ def collection_requires_review(collection: CatalogCollection, videos: list[Video
     if any(is_confirmed_duplicate(video) for video in videos):
         return CONFIRMED_DUPLICATES_REVIEW_REASON
     numbers = sorted({
-        number for video in videos
-        if not video.content_type_manual
-        and not detect_episode_number(video.filename).is_supplementary
-        and (number := video.local_episode_number or derive_episode_number(video.filename)) is not None
+        state.numbering_input for state in states
+        if state.is_standard and state.numbering_input is not None
     })
     if (
         not hierarchy_resolved
@@ -1078,8 +1212,9 @@ def merge_title_into(
 
 
 def delete_empty_local_title(
-    session: Session, collection_id: int, title_id: int,
-) -> None:
+    session: Session, collection_id: int, title_id: int, *,
+    remove_from_manual_split: bool = False,
+) -> bool:
     title = session.scalar(select(CatalogTitle).options(
         selectinload(CatalogTitle.external_links),
         selectinload(CatalogTitle.metadata_record),
@@ -1091,6 +1226,12 @@ def delete_empty_local_title(
     ))
     if title is None:
         raise ValueError("Část neexistuje v této kolekci.")
+    is_manual_split_entry = title.hierarchy_manual_override
+    if is_manual_split_entry and not remove_from_manual_split:
+        raise ValueError(
+            "Část je součástí ruční definice rozdělení; její odstranění z definice "
+            "je nutné explicitně potvrdit."
+        )
     video_count = session.scalar(select(func.count(Video.id)).where(
         Video.catalog_title_id == title_id
     )) or 0
@@ -1114,6 +1255,12 @@ def delete_empty_local_title(
         raise ValueError(
             "Část už není prázdná; mezitím do ní přibylo video a nebyla odstraněna."
         )
+    session.flush()
+    collection = session.get(CatalogCollection, collection_id)
+    if collection is not None:
+        session.expire(collection, ["titles"])
+        refresh_collection_state(collection)
+    return is_manual_split_entry
 
 
 def separate_nonstandard_videos(
@@ -1123,7 +1270,7 @@ def separate_nonstandard_videos(
     """Logicky oddělí vybraná nestandardní videa bez změny jejich cesty."""
     collection = _load_collection_for_assignment(session, collection_id)
     selected = _selected_videos(collection, video_ids)
-    if any(not detect_episode_number(video.filename).is_nonstandard for video in selected):
+    if any(not effective_video_numbering(video).is_nonstandard for video in selected):
         raise ValueError("Oddělit lze touto akcí pouze rozpoznaný nestandardní obsah.")
     return create_title_from_videos(
         session, collection_id, video_ids, local_title=local_title, part_type=part_type

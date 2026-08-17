@@ -60,7 +60,8 @@ from .hierarchy_review import (
     refresh_collection_state,
     preview_assignments, separate_nonstandard_videos, simple_definition_rows,
     set_manual_duplicate_status,
-    single_title_confirmation_suggestion, supplementary_video_suggestions,
+    single_title_confirmation_suggestion, supplementary_assignment_recommendations,
+    supplementary_video_suggestions,
 )
 from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
@@ -78,6 +79,7 @@ from .models import CatalogCollection, CatalogTitle, ExternalTitleLink, TitleMet
 from .numbering import (
     apply_sequential_numbering,
     confirmed_duplicate_groups, preview_sequential_numbering,
+    effective_video_numbering,
     recalculate_title_numbering, set_title_numbering, set_video_episode_override,
     summarize_title_numbering, unresolved_duplicate_groups,
 )
@@ -192,17 +194,18 @@ def _hierarchy_video_groups(videos: list[Video]) -> dict[str, list]:
             item.filename.casefold(),
         ),
     ):
-        detection = detect_episode_number(video.filename)
+        numbering = effective_video_numbering(video)
+        detection = numbering.detection
         if (
             video.duplicate_of_video_id is not None or video.duplicate_of is not None
             or video.duplicate_primary_missing
         ):
             duplicates.append({"video": video, "detection": detection})
-        elif video.content_type_manual or detection.is_supplementary:
+        elif numbering.is_supplementary:
             supplemental.append({"video": video, "detection": detection})
-        elif detection.is_nonstandard:
+        elif numbering.is_nonstandard:
             nonstandard.append({"video": video, "detection": detection})
-        elif video.season_episode_number is not None:
+        elif numbering.is_standard and numbering.season_episode_number is not None:
             standard.append({"video": video, "detection": detection})
         else:
             unknown.append({"video": video, "detection": detection})
@@ -996,11 +999,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "conflict": indexes is not None,
                     })
             episode_numbers = [
-                number for video in videos
-                if not video.content_type_manual
-                and not detect_episode_number(video.filename).is_supplementary
-                and (number := video.local_episode_number or derive_episode_number(video.filename))
-                is not None
+                state.numbering_input for video in videos
+                if (state := effective_video_numbering(video)).is_standard
+                and state.numbering_input is not None
             ]
             external_candidates = [
                 {"title": title, "metadata": title.metadata_record, "links": title.external_links}
@@ -1037,6 +1038,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "can_delete": bool(
                         not title.videos
                     ),
+                    "manual_split_definition": title.hierarchy_manual_override,
                     "owned_metadata_count": (
                         bool(title.metadata_record)
                         + len(title.external_links)
@@ -1048,15 +1050,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 item["summary"].unknown for item in title_numbering
             )
             nonstandard_videos = [
-                {"video": video, "detection": detection}
+                {"video": video, "detection": state.detection}
                 for video in videos
-                if (detection := detect_episode_number(video.filename)).is_nonstandard
-                and not video.content_type_manual
-                and (
-                    video.catalog_title is None
-                    or video.catalog_title.effective_part_type
-                    not in {"film", "ova", "special", "preview", "recap", "bonus", "other"}
-                )
+                if (state := effective_video_numbering(video)).is_nonstandard
             ]
             unassigned_videos = _hierarchy_video_groups([
                 video for video in videos if video.catalog_title_id is None
@@ -1082,6 +1078,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             supplementary_suggestions = supplementary_video_suggestions(
                 videos, include_video_ids=duplicate_candidate_video_ids,
             )
+            assignment_recommendations = supplementary_assignment_recommendations(videos)
+            assignment_recommendation_by_video = {
+                item.video.id: recommendation
+                for recommendation in assignment_recommendations
+                for item in recommendation.items
+            }
+            supplementary_suggestions = tuple(
+                suggestion for suggestion in supplementary_suggestions
+                if suggestion.video.id not in assignment_recommendation_by_video
+            )
             supplementary_suggestion_by_video = {
                 suggestion.video.id: suggestion
                 for suggestion in supplementary_suggestions
@@ -1106,6 +1112,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "part_confirmation_summary": part_confirmation_summary,
                 "supplementary_suggestions": supplementary_suggestions,
                 "supplementary_suggestion_by_video": supplementary_suggestion_by_video,
+                "assignment_recommendations": assignment_recommendations,
+                "assignment_recommendation_by_video": assignment_recommendation_by_video,
                 "duplicate_candidate_video_ids": duplicate_candidate_video_ids,
                 "confirmed_duplicate_video_ids": confirmed_duplicate_video_ids,
                 "available_collections": available_collections,
@@ -1596,17 +1604,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def hierarchy_review_delete_empty_title(
         collection_id: int, title_id: int = Form(...),
         confirm_delete: bool = Form(False),
+        remove_from_manual_split: bool = Form(False),
     ):
         if not confirm_delete:
             raise HTTPException(status_code=400, detail="Odstranění je nutné explicitně potvrdit.")
         with sessions() as session:
             try:
-                delete_empty_local_title(session, collection_id, title_id)
+                removed_definition = delete_empty_local_title(
+                    session, collection_id, title_id,
+                    remove_from_manual_split=remove_from_manual_split,
+                )
                 session.commit()
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        message = "Prázdná lokální část byla odstraněna."
+        message = (
+            "Prázdná část byla odstraněna i z ručního rozdělení."
+            if removed_definition else "Prázdná lokální část byla odstraněna."
+        )
         return RedirectResponse(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}",
             status_code=303,
@@ -1615,6 +1630,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/titles/{catalog_title_id}/delete-empty")
     def title_delete_empty(
         catalog_title_id: int, confirm_delete: bool = Form(False),
+        remove_from_manual_split: bool = Form(False),
     ):
         if not confirm_delete:
             raise HTTPException(
@@ -1630,12 +1646,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     status_code=400, detail="Část není přiřazena ke collection."
                 )
             try:
-                delete_empty_local_title(session, collection_id, catalog_title_id)
+                removed_definition = delete_empty_local_title(
+                    session, collection_id, catalog_title_id,
+                    remove_from_manual_split=remove_from_manual_split,
+                )
                 session.commit()
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        message = "Prázdná část byla odstraněna pouze z databáze."
+        message = (
+            "Prázdná část byla odstraněna i z ručního rozdělení."
+            if removed_definition else "Prázdná část byla odstraněna pouze z databáze."
+        )
         return RedirectResponse(
             f"/hierarchy-review?{urlencode({'message': message})}", status_code=303,
         )
@@ -2160,6 +2182,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 set_video_episode_override(video, value)
                 title = video.catalog_title
                 recalculate_title_numbering(title, list(title.videos))
+                if title.collection is not None:
+                    refresh_collection_state(title.collection, recalculate=False)
                 session.commit()
             except ValueError as exc:
                 session.rollback()
@@ -2197,6 +2221,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     confirm_manual_conflicts=confirm_manual_conflicts,
                 )
                 recalculate_title_numbering(title, list(title.videos))
+                if title.collection is not None:
+                    refresh_collection_state(title.collection, recalculate=False)
                 session.commit()
             except ValueError as exc:
                 session.rollback()

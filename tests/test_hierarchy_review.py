@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.database import Base
 from app.catalog import catalog_title_display_title, video_matches_filter
 from app.hierarchy_review import (
-    CONFIRMED_DUPLICATES_REVIEW_REASON, PERIOD_HINT_REVIEW_REASON,
+    CONFIRMED_DUPLICATES_REVIEW_REASON, FILENAME_SEASON_CONFLICT_REVIEW_REASON,
+    PERIOD_HINT_REVIEW_REASON, UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON,
     ManualTitleDefinition, apply_manual_split,
     apply_single_title_confirmation,
     classify_videos_in_place, clear_confirmed_duplicate_videos,
@@ -20,6 +21,7 @@ from app.hierarchy_review import (
     set_manual_duplicate_status,
     simple_definition_rows,
     single_title_confirmation_suggestion,
+    supplementary_assignment_recommendations,
     supplementary_video_suggestions,
 )
 from app.models import (
@@ -30,6 +32,7 @@ from app.migrations import migrate_schema
 from app.numbering import (
     apply_sequential_numbering,
     collection_requires_numbering_review as numbering_requires_review,
+    recalculate_title_numbering,
     set_video_episode_override,
     summarize_title_numbering, unresolved_duplicate_groups,
 )
@@ -110,6 +113,84 @@ def test_flat_collection_with_episodes_1_to_26_requires_review():
         collection = session.get(CatalogCollection, collection_id)
         reason = collection_requires_review(collection, list(collection.videos))
         assert reason == PERIOD_HINT_REVIEW_REASON
+
+
+def _season_filename_collection(filename: str, *, manual=False):
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    title = CatalogTitle(
+        id=1, collection=collection, local_title="Serie 1",
+        normalized_local_title="serie 1", relative_root_path="Anime/Show/Serie 1",
+        part_type="season", season_number=1, season_label="S1",
+        hierarchy_manual_override=manual,
+        part_type_manual="season" if manual else None,
+        season_number_manual=1 if manual else None,
+        season_label_manual="S1" if manual else None,
+    )
+    Video(
+        id=1, relative_path=f"{title.relative_root_path}/{filename}",
+        root_folder="Anime", filename=filename, size=1, mtime_ns=1,
+        catalog_title=title, catalog_collection=collection,
+    )
+    return collection
+
+
+def test_filename_season_conflict_requires_review_but_matching_season_does_not():
+    conflicting = _season_filename_collection("S02E03-Whatever.mkv")
+    matching = _season_filename_collection("S01E03-Influenza.mkv")
+
+    assert collection_requires_review(
+        conflicting, list(conflicting.videos)
+    ) == FILENAME_SEASON_CONFLICT_REVIEW_REASON
+    assert collection_requires_review(matching, list(matching.videos)) is None
+
+
+def test_confirmed_manual_season_remains_authoritative_over_filename_hint():
+    collection = _season_filename_collection("S02E03-Whatever.mkv", manual=True)
+
+    assert collection_requires_review(collection, list(collection.videos)) is None
+
+
+def test_unnumbered_explicit_sp_requires_review_until_manually_resolved():
+    collection = _season_filename_collection("S01E14 [SP]-The Common Cold.mkv")
+
+    assert collection_requires_review(
+        collection, list(collection.videos)
+    ) == UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON
+
+
+def test_manual_episode_override_resolves_nonstandard_zero_review_reason():
+    collection = CatalogCollection(
+        local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show", hierarchy_status="review_required",
+    )
+    title = CatalogTitle(
+        collection=collection, local_title="Season 1",
+        normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1",
+        part_type_manual="season", season_number_manual=1,
+        hierarchy_manual_override=True,
+    )
+    zero = Video(
+        relative_path="Anime/Show/Season 1/Show 00.mkv", root_folder="Anime",
+        filename="Show 00.mkv", size=1, mtime_ns=1,
+        catalog_title=title, catalog_collection=collection,
+    )
+    recalculate_title_numbering(title, [zero])
+
+    assert collection_requires_review(collection, [zero]) == (
+        "Nestandardní číslování vyžaduje ruční zařazení."
+    )
+
+    set_video_episode_override(zero, 5)
+    refresh_collection_state(collection)
+
+    assert zero.season_episode_number == 5
+    assert collection_requires_review(collection, [zero]) is None
+    assert collection.hierarchy_status == "verified"
+    assert collection.hierarchy_note is None
 
 
 def test_manual_duplicate_suspicion_is_nullable_and_independent_of_other_video_data():
@@ -905,7 +986,9 @@ def test_move_merge_and_explicit_delete_change_only_logical_assignment():
         assert session.get(CatalogTitle, source_id) is not None
         assert session.get(CatalogTitle, source_id).videos == []
 
-        delete_empty_local_title(session, collection_id, source_id)
+        delete_empty_local_title(
+            session, collection_id, source_id, remove_from_manual_split=True,
+        )
         session.commit()
         assert session.get(CatalogTitle, source_id) is None
 
@@ -983,6 +1066,126 @@ def test_empty_title_delete_rechecks_video_count_and_rejects_nonempty_title():
             delete_empty_local_title(session, collection.id, title.id)
 
         assert session.get(CatalogTitle, title.id) is title
+        assert len(title.videos) == 1
+
+
+def test_manual_split_entry_delete_is_targeted_and_survives_startup_sync():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    original_path = (
+        "Anime/High School DxD/NC/High School DxD New - NCOP 01.mkv"
+    )
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="High School DxD", normalized_local_title="high school dxd",
+            relative_root_path="Anime/High School DxD",
+        )
+        video = Video(
+            relative_path=original_path, root_folder="Anime",
+            filename="High School DxD New - NCOP 01.mkv", size=1, mtime_ns=1,
+            catalog_collection=collection, episode_number_manual_override=7,
+        )
+        session.add(collection)
+        session.commit()
+        definitions = [
+            ManualTitleDefinition(
+                None, "High School DxD S1", None, 1, "S1", None, "season",
+                None, None, None, "unknown", 1, r".*NCOP 01\.mkv$",
+            ),
+            ManualTitleDefinition(
+                None, "NC – High School DxD New", None, None, None, None,
+                "bonus", None, None, None, "unknown", 2,
+            ),
+            ManualTitleDefinition(
+                None, "Specials – High School DxD Born", None, 3, "S3", None,
+                "special", None, None, None, "season_local", 3,
+            ),
+        ]
+        apply_manual_split(session, collection.id, definitions)
+        session.commit()
+        titles_by_name = {title.local_title: title for title in collection.titles}
+        keeper_id = titles_by_name["High School DxD S1"].id
+        removed_id = titles_by_name["NC – High School DxD New"].id
+        other_id = titles_by_name["Specials – High School DxD Born"].id
+        collection_id, video_id = collection.id, video.id
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, collection_id)
+        assert {title.id for title in collection.titles} == {
+            keeper_id, removed_id, other_id,
+        }
+        with pytest.raises(ValueError, match="součástí ruční definice"):
+            delete_empty_local_title(session, collection_id, removed_id)
+        assert session.get(CatalogTitle, removed_id) is not None
+
+        removed_definition = delete_empty_local_title(
+            session, collection_id, removed_id, remove_from_manual_split=True,
+        )
+        session.commit()
+
+        assert removed_definition is True
+        assert session.get(CatalogTitle, removed_id) is None
+        assert {title.id for title in session.get(CatalogCollection, collection_id).titles} == {
+            keeper_id, other_id,
+        }
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, collection_id)
+        video = session.get(Video, video_id)
+        keeper = session.get(CatalogTitle, keeper_id)
+        other = session.get(CatalogTitle, other_id)
+        assert session.get(CatalogTitle, removed_id) is None
+        assert {title.id for title in collection.titles} == {keeper_id, other_id}
+        assert keeper.hierarchy_manual_override is True
+        assert keeper.season_number_manual == 1
+        assert keeper.episode_filename_pattern == r".*NCOP 01\.mkv$"
+        assert other.hierarchy_manual_override is True
+        assert other.part_type_manual == "special"
+        assert other.season_number_manual == 3
+        assert other.numbering_mode == "season_local"
+        assert video.catalog_title_id == keeper_id
+        assert video.episode_number_manual_override == 7
+        assert video.relative_path == original_path
+        assert not any(
+            title.relative_root_path == "Anime/High School DxD/NC"
+            for title in collection.titles
+        )
+
+
+def test_nonempty_manual_split_entry_cannot_be_deleted_with_explicit_flag():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Specials",
+            normalized_local_title="specials",
+            relative_root_path="Anime/Show/.catalog-part-1",
+            hierarchy_manual_override=True, part_type_manual="special",
+        )
+        Video(
+            catalog_title=title, catalog_collection=collection,
+            relative_path="Anime/Show/SP 01.mkv", root_folder="Anime",
+            filename="SP 01.mkv", size=1, mtime_ns=1,
+        )
+        session.add(collection)
+        session.commit()
+
+        with pytest.raises(ValueError, match="už není prázdná; obsahuje video"):
+            delete_empty_local_title(
+                session, collection.id, title.id,
+                remove_from_manual_split=True,
+            )
+
+        assert session.get(CatalogTitle, title.id) is title
+        assert title.hierarchy_manual_override is True
         assert len(title.videos) == 1
 
 
@@ -1086,6 +1289,125 @@ def test_duplicate_candidate_keeps_direct_reassignment_action_in_supplementary_t
     assert suggestions[0].display_label == "OP 01"
     assert suggestions[0].context_label == "S2"
     assert suggestions[0].context_season_number == 2
+
+
+def _explicit_special_assignment_videos(count=1, *, manual_hierarchy=False):
+    collection = CatalogCollection(
+        id=1, local_title="Hataraku Saibou", normalized_local_title="hataraku saibou",
+        relative_root_path="Anime/Hataraku Saibou",
+    )
+    season = CatalogTitle(
+        id=1, collection=collection, local_title="Serie 1",
+        normalized_local_title="serie 1",
+        relative_root_path="Anime/Hataraku Saibou/Serie 1",
+        part_type="season", season_number=1, season_label="S1",
+        hierarchy_manual_override=manual_hierarchy,
+        part_type_manual="season" if manual_hierarchy else None,
+        season_number_manual=1 if manual_hierarchy else None,
+        season_label_manual="S1" if manual_hierarchy else None,
+    )
+    videos = [Video(
+        id=index,
+        relative_path=(
+            f"Anime/Hataraku Saibou/Serie 1/"
+            f"S01E{13 + index:02} [SP]-Special {index}.mkv"
+        ),
+        root_folder="Anime", filename=f"S01E{13 + index:02} [SP]-Special {index}.mkv",
+        size=1, mtime_ns=1, catalog_title=season, catalog_collection=collection,
+    ) for index in range(1, count + 1)]
+    return collection, season, videos
+
+
+def test_explicit_sp_recommends_existing_assignment_form_without_mutating_models():
+    collection, season, videos = _explicit_special_assignment_videos(
+        manual_hierarchy=True,
+    )
+    video = videos[0]
+    before = (
+        video.catalog_title, video.content_type_manual,
+        video.episode_number_manual_override, season.hierarchy_manual_override,
+        collection.hierarchy_status,
+    )
+
+    recommendations = supplementary_assignment_recommendations(videos)
+
+    assert len(recommendations) == 1
+    recommendation = recommendations[0]
+    assert recommendation.video_ids == (video.id,)
+    assert recommendation.supplementary_type == "special"
+    assert recommendation.proposed_part_type == "special"
+    assert recommendation.type_label == "Special"
+    assert recommendation.proposed_title == "Specials"
+    assert recommendation.season_number == 1
+    assert recommendation.season_label == "S1"
+    assert recommendation.season_display == "S01"
+    assert recommendation.canonical_numbering_known is False
+    assert recommendation.items[0].filename_hint_label == "S01E14"
+    assert recommendation.items[0].title_candidate == "Special 1"
+    assert (
+        video.catalog_title, video.content_type_manual,
+        video.episode_number_manual_override, season.hierarchy_manual_override,
+        collection.hierarchy_status,
+    ) == before
+
+
+def test_two_explicit_specials_with_same_scope_share_one_safe_recommendation():
+    _, _, videos = _explicit_special_assignment_videos(count=2)
+
+    recommendations = supplementary_assignment_recommendations(videos)
+
+    assert len(recommendations) == 1
+    assert recommendations[0].video_ids == (1, 2)
+    assert [item.filename_hint_label for item in recommendations[0].items] == [
+        "S01E14", "S01E15",
+    ]
+    assert all(item.supplementary_number is None for item in recommendations[0].items)
+
+
+def test_standard_sxxexx_and_manually_classified_video_get_no_recommendation():
+    _, season, videos = _explicit_special_assignment_videos()
+    standard = Video(
+        id=2, relative_path="Anime/Hataraku Saibou/Serie 1/S01E03-Influenza.mkv",
+        root_folder="Anime", filename="S01E03-Influenza.mkv", size=1, mtime_ns=1,
+        catalog_title=season, catalog_collection=season.collection,
+    )
+    videos[0].content_type_manual = "special"
+
+    assert supplementary_assignment_recommendations([standard]) == ()
+    assert supplementary_assignment_recommendations(videos) == ()
+
+
+def test_create_special_then_existing_numbering_resolves_canonical_review_without_paths():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection, _, videos = _explicit_special_assignment_videos()
+        session.add(collection)
+        session.flush()
+        special = videos[0]
+        original_path = special.relative_path
+
+        title = create_title_from_videos(
+            session, collection.id, [special.id], local_title="Specials",
+            part_type="special", season_number=1, season_label="S1",
+        )
+
+        assert title.effective_part_type == "special"
+        assert title.effective_season_number == 1
+        assert special.catalog_title is title
+        assert special.season_episode_number is None
+        assert special.episode_number_manual_override is None
+        assert collection.hierarchy_status == "review_required"
+        assert "canonical číslování" in collection.hierarchy_note
+
+        set_video_episode_override(special, 1)
+        refresh_collection_state(collection)
+
+        assert special.local_episode_number is None
+        assert special.season_episode_number == 1
+        assert special.episode_number_source == "manual"
+        assert collection.hierarchy_status == "verified"
+        assert special.relative_path == original_path
 
 
 def test_standard_and_ova_part_videos_can_be_split_into_two_local_ova_titles():

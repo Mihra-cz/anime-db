@@ -714,6 +714,17 @@ EXPLICIT_EPISODE = re.compile(
     r"(?:^|[^a-z0-9])(?:episode|ep|e)\s*[-_. ]*0*(\d{1,3})(?:v\d+)?(?:[^a-z0-9]|$)",
     re.IGNORECASE,
 )
+SXXEXX_TOKEN = re.compile(
+    r"(?<![a-z0-9])s0*(?P<season>\d{1,3})[\s._-]*"
+    r"e0*(?P<episode>\d{1,3})(?:v\d+)?(?=$|[^a-z0-9])",
+    re.IGNORECASE,
+)
+SXXEXX_BRACKETED_SUPPLEMENTARY = re.compile(
+    r"(?<![a-z0-9])s0*(?P<season>\d{1,3})[\s._-]*"
+    r"e0*(?P<episode>\d{1,3})(?:v\d+)?[\s._-]*"
+    r"\[\s*(?P<type>SP)\s*\](?P<title>.*)$",
+    re.IGNORECASE,
+)
 TRAILING_EPISODE = re.compile(r"\s+-\s+0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
 TRAILING_PLAIN_EPISODE = re.compile(r"\s+0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
 SUPPLEMENTARY_SEQUENCE = re.compile(
@@ -751,6 +762,9 @@ class EpisodeNumberDetection:
     fraction: str | None = None
     supplementary_type: str | None = None
     context_hint: str | None = None
+    season_hint: int | None = None
+    filename_episode_hint: int | None = None
+    title_candidate: str | None = None
 
     @property
     def is_standard(self) -> bool:
@@ -789,6 +803,16 @@ class EpisodeNumberDetection:
 def detect_episode_number(filename: str) -> EpisodeNumberDetection:
     """Bezpečně rozliší standardní, nulové, desetinné a neznámé číslování."""
     stem = PurePosixPath(filename).stem
+    if match := SXXEXX_BRACKETED_SUPPLEMENTARY.search(stem):
+        title_candidate = match.group("title").lstrip(" -_.").strip() or None
+        return EpisodeNumberDetection(
+            "supplementary",
+            supplementary_type="special",
+            context_hint=stem[:match.start()].rstrip(" -_.") or None,
+            season_hint=int(match.group("season")),
+            filename_episode_hint=int(match.group("episode")),
+            title_candidate=title_candidate,
+        )
     if match := SUPPLEMENTARY_SEQUENCE.search(stem):
         number = int(match.group("number"))
         raw_type = match.group("type").casefold()
@@ -800,6 +824,16 @@ def detect_episode_number(filename: str) -> EpisodeNumberDetection:
         return EpisodeNumberDetection(
             "supplementary", number, supplementary_type=supplementary_type,
             context_hint=context_hint,
+        )
+    if match := SXXEXX_TOKEN.search(stem):
+        number = int(match.group("episode"))
+        title_candidate = stem[match.end():].lstrip(" -_.").strip() or None
+        return EpisodeNumberDetection(
+            "zero" if number == 0 else "standard",
+            number,
+            season_hint=int(match.group("season")),
+            filename_episode_hint=number,
+            title_candidate=title_candidate,
         )
     for pattern in (EXPLICIT_FRACTIONAL_EPISODE, TRAILING_FRACTIONAL_EPISODE):
         if match := pattern.search(stem):

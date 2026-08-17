@@ -1,9 +1,11 @@
 import pytest
 
+from app.catalog import detect_episode_number
 from app.models import CatalogCollection, CatalogTitle, TitleMetadata, Video
 from app.numbering import (
     apply_sequential_numbering, collection_requires_numbering_review,
     confirmed_duplicate_groups,
+    effective_video_numbering,
     preview_sequential_numbering, recalculate_collection_numbering,
     recalculate_title_numbering,
     set_duplicate_group_primary, set_title_numbering, set_video_episode_override,
@@ -262,6 +264,66 @@ def test_zero_plus_episodes_one_to_twenty_two_has_standard_range_one_to_twenty_t
     assert summary.requires_review is True
 
 
+def test_manual_e01_override_makes_raw_zero_an_effective_standard_episode():
+    title = CatalogTitle(
+        local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/High School DxD Hero/Season 1",
+        part_type_manual="season", season_number_manual=1,
+    )
+    items = videos(2, 13)
+    zero = Video(
+        id=50,
+        relative_path=(
+            "Anime/High School DxD Hero/Season 1/High School DxD Hero - 00.mkv"
+        ),
+        root_folder="Anime", filename="High School DxD Hero - 00.mkv",
+        size=1, mtime_ns=1,
+    )
+    items.append(zero)
+
+    recalculate_title_numbering(title, items)
+    assert effective_video_numbering(zero, title).is_nonstandard
+    assert zero.episode_number_source == "nonstandard_zero"
+
+    set_video_episode_override(zero, 1)
+    recalculate_title_numbering(title, items)
+    state = effective_video_numbering(zero, title)
+    summary = summarize_title_numbering(items, title)
+
+    assert state.is_standard
+    assert state.season_episode_number == 1
+    assert state.detection.kind == "zero"
+    assert detect_episode_number(zero.filename).kind == "zero"
+    assert zero.local_episode_number is None
+    assert zero.episode_number_source == "manual"
+    assert zero.filename == "High School DxD Hero - 00.mkv"
+    assert summary.standard_total == summary.numbered == 13
+    assert summary.unknown == summary.nonstandard == 0
+    assert (summary.episode_min, summary.episode_max) == (1, 13)
+    assert summary.gaps == ()
+    assert summary.requires_review is False
+
+
+def test_manual_override_other_than_one_resolves_raw_zero_by_same_priority():
+    title = CatalogTitle(
+        local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", part_type_manual="season",
+    )
+    zero = Video(
+        id=1, relative_path="Anime/Show/Season 1/Show 00.mkv",
+        root_folder="Anime", filename="Show 00.mkv", size=1, mtime_ns=1,
+    )
+
+    set_video_episode_override(zero, 7)
+    recalculate_title_numbering(title, [zero])
+
+    state = effective_video_numbering(zero, title)
+    assert state.is_standard
+    assert state.season_episode_number == 7
+    assert state.detection.kind == "zero"
+    assert summarize_title_numbering([zero], title).nonstandard == 0
+
+
 def test_fractional_episode_does_not_create_gap_between_fourteen_and_fifteen():
     title = CatalogTitle(
         local_title="Season 1", normalized_local_title="season 1",
@@ -359,6 +421,63 @@ def test_standard_episode_and_ova_sequence_do_not_form_duplicate_group():
     assert [video.season_episode_number for video in videos] == [1, None]
     assert unresolved_duplicate_groups(videos) == ()
     assert summarize_title_numbering(videos, title).standard_total == 1
+
+
+def test_sxxexx_uses_specific_source_and_sp_hint_stays_outside_standard_numbering():
+    title = CatalogTitle(
+        local_title="Serie 1", normalized_local_title="serie 1",
+        relative_root_path="Anime/Hataraku Saibou/Serie 1",
+        part_type="season", season_number=1,
+    )
+    episode = Video(
+        relative_path=f"{title.relative_root_path}/S01E01-Pneumococcus.mkv",
+        root_folder="Anime", filename="S01E01-Pneumococcus.mkv",
+        size=1, mtime_ns=1, catalog_title=title,
+    )
+    special = Video(
+        relative_path=f"{title.relative_root_path}/S01E14 [SP]-The Common Cold.mkv",
+        root_folder="Anime", filename="S01E14 [SP]-The Common Cold.mkv",
+        size=1, mtime_ns=1, catalog_title=title,
+    )
+
+    recalculate_title_numbering(title, [episode, special])
+
+    assert (
+        episode.local_episode_number, episode.season_episode_number,
+        episode.episode_number_source,
+    ) == (1, 1, "sxxexx")
+    assert (
+        special.local_episode_number, special.season_episode_number,
+        special.absolute_episode_number, special.external_episode_number,
+    ) == (None, None, None, None)
+    assert special.episode_number_source == "supplementary_special"
+    summary = summarize_title_numbering([episode, special], title)
+    assert (summary.standard_total, summary.numbered, summary.resolved_supplemental) == (
+        1, 1, 1,
+    )
+
+
+def test_manual_number_can_be_canonical_special_number_without_reusing_filename_hint():
+    title = CatalogTitle(
+        local_title="Specials – S1", normalized_local_title="specials s1",
+        relative_root_path="Anime/Hataraku Saibou/.catalog-part-specials",
+        part_type_manual="special", season_number_manual=1,
+        hierarchy_manual_override=True,
+    )
+    special = Video(
+        relative_path="Anime/Hataraku Saibou/Serie 1/S01E14 [SP]-The Common Cold.mkv",
+        root_folder="Anime", filename="S01E14 [SP]-The Common Cold.mkv",
+        size=1, mtime_ns=1, catalog_title=title,
+        content_type_manual="special",
+        episode_number_manual_override=1,
+    )
+
+    recalculate_title_numbering(title, [special])
+
+    assert special.local_episode_number is None
+    assert special.season_episode_number == 1
+    assert special.episode_number_source == "manual"
+    assert summarize_title_numbering([special], title).supplemental is True
 
 
 def test_stale_supplementary_episode_value_is_ignored_by_read_only_summary():

@@ -14,7 +14,8 @@ from app.main import (
 from app.hierarchy_review import (
     CONFIRMED_DUPLICATES_REVIEW_REASON, PERIOD_HINT_REVIEW_REASON,
     confirm_duplicate_videos, separate_nonstandard_videos,
-    simple_definition_rows, single_title_confirmation_suggestion,
+    refresh_collection_state, simple_definition_rows, single_title_confirmation_suggestion,
+    supplementary_assignment_recommendations,
 )
 from app.metadata.providers.base import ProviderTitleMetadata
 from app.migrations import migrate_schema
@@ -22,7 +23,10 @@ from app.models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
     InternalSubtitle, TitleMetadata, Video, utc_now,
 )
-from app.numbering import summarize_title_numbering, unresolved_duplicate_groups
+from app.numbering import (
+    recalculate_title_numbering, summarize_title_numbering,
+    unresolved_duplicate_groups,
+)
 from app.scanner import scan_library
 from starlette.requests import Request
 
@@ -230,6 +234,75 @@ def test_empty_title_detail_shows_metadata_warning_and_delete_action(tmp_path):
         assert session.get(CatalogTitle, title_id) is None
         assert session.get(CatalogCollection, collection_id) is not None
         assert session.get(CatalogCollection, collection_id).titles == []
+
+
+def test_hierarchy_review_distinguishes_manual_split_empty_title_delete(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'manual-empty-title-ui.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="High School DxD", normalized_local_title="high school dxd",
+            relative_root_path="Anime/High School DxD",
+        )
+        manual = CatalogTitle(
+            collection=collection, local_title="NC – High School DxD New",
+            normalized_local_title="nc high school dxd new",
+            relative_root_path="Anime/High School DxD/.catalog-part-1",
+            hierarchy_manual_override=True, part_type_manual="bonus",
+        )
+        automatic = CatalogTitle(
+            collection=collection, local_title="Unused automatic",
+            normalized_local_title="unused automatic",
+            relative_root_path="Anime/High School DxD/Unused",
+        )
+        session.add(collection)
+        session.commit()
+        collection_id, manual_id, automatic_id = (
+            collection.id, manual.id, automatic.id,
+        )
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review/{collection_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+    manual_block = rendered.split(
+        f'id="title-{manual_id}"', 1
+    )[1].split("</article>", 1)[0]
+    automatic_block = rendered.split(
+        f'id="title-{automatic_id}"', 1
+    )[1].split("</article>", 1)[0]
+
+    assert "Tato prázdná část je součástí ruční definice rozdělení" in manual_block
+    assert 'name="remove_from_manual_split" value="true"' in manual_block
+    assert "Odstranit část i z ručního rozdělení" in manual_block
+    assert "Potvrzuji odstranění části i konkrétní položky" in manual_block
+    assert "Odstranit prázdnou část" in automatic_block
+    assert "remove_from_manual_split" not in automatic_block
+    assert "NC – High School DxD New" in rendered
+    assert "Jednoduchá definice ručního rozdělení" in rendered
+
+    delete_endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None)
+        == "/hierarchy-review/{collection_id}/delete-empty-title"
+    )
+    response = delete_endpoint(
+        collection_id, title_id=manual_id, confirm_delete=True,
+        remove_from_manual_split=True,
+    )
+    assert response.status_code == 303
+    assert "ru%C4%8Dn%C3%ADho+rozd%C4%9Blen%C3%AD" in response.headers["location"]
+    with web_app.state.sessions() as session:
+        assert session.get(CatalogTitle, manual_id) is None
+        assert session.get(CatalogTitle, automatic_id) is not None
 
 
 def test_bulk_empty_collection_endpoint_reports_deleted_and_skipped(tmp_path):
@@ -715,6 +788,100 @@ def test_ansatsu_hierarchy_review_summary_before_and_after_zero_separation(tmp_p
     assert "Bez externích metadat" in preview_block
 
 
+def test_dxd_manual_e01_override_updates_effective_hierarchy_review_groups(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'dxd-effective-numbering.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="High School DxD Hero",
+            normalized_local_title="high school dxd hero",
+            relative_root_path="Anime/High School DxD Hero",
+        )
+        season = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/High School DxD Hero/Season 1",
+            part_type_manual="season", season_number_manual=1,
+            season_label_manual="S1", hierarchy_manual_override=True,
+        )
+        for number in range(2, 14):
+            season.videos.append(Video(
+                relative_path=f"{season.relative_root_path}/Episode {number:02}.mkv",
+                root_folder="Anime", filename=f"Episode {number:02}.mkv",
+                size=1, mtime_ns=1, catalog_collection=collection,
+            ))
+        zero = Video(
+            relative_path=(
+                f"{season.relative_root_path}/High School DxD Hero - 00.mkv"
+            ),
+            root_folder="Anime", filename="High School DxD Hero - 00.mkv",
+            size=1, mtime_ns=1, catalog_title=season,
+            catalog_collection=collection,
+        )
+        session.add(collection)
+        session.flush()
+        recalculate_title_numbering(season, list(season.videos))
+        refresh_collection_state(collection, recalculate=False)
+        session.commit()
+        collection_id, title_id, zero_id = collection.id, season.id, zero.id
+
+    review_endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review/{collection_id}"
+    )
+
+    def render():
+        return review_endpoint(
+            web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+        ).body.decode()
+
+    before = render()
+    before_part = before.split(f'id="title-{title_id}"', 1)[1].split("</article>", 1)[0]
+    assert "Standardní epizody (12)" in before_part
+    assert "Nestandardní obsah (1)" in before_part
+    assert "Nestandardní epizoda: 00" in before_part
+    assert "Vyžaduje zařazení" in before_part
+
+    update_endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/videos/{video_id}/episode-number"
+    )
+    response = update_endpoint(
+        zero_id, manual_episode_number="1", filter_name="all", q="", sort="",
+        direction="", detail_sort="", detail_direction="",
+    )
+    assert response.status_code == 303
+
+    after = render()
+    after_part = after.split(f'id="title-{title_id}"', 1)[1].split("</article>", 1)[0]
+    assert "<dt>Fyzických videí</dt><dd>13</dd>" in after_part
+    assert "<dt>Logických standardních epizod</dt><dd>13</dd>" in after_part
+    assert "<dt>Očíslováno</dt><dd>13/13</dd>" in after_part
+    assert "<dt>Rozsah</dt><dd>E1–E13</dd>" in after_part
+    assert "<dt>Unknown</dt><dd>0</dd>" in after_part
+    assert "<dt>Nestandardní</dt><dd>0</dd>" in after_part
+    assert "Číslování vyřešeno" in after_part
+    assert "Standardní epizody (13)" in after_part
+    assert "Nestandardní obsah" not in after_part
+    assert "Vyžaduje zařazení" not in after_part
+
+    with web_app.state.sessions() as session:
+        stored_zero = session.get(Video, zero_id)
+        stored_collection = session.get(CatalogCollection, collection_id)
+        assert stored_zero.episode_number_manual_override == 1
+        assert stored_zero.season_episode_number == 1
+        assert stored_zero.episode_number_source == "manual"
+        assert detect_episode_number(stored_zero.filename).kind == "zero"
+        assert stored_zero.filename == "High School DxD Hero - 00.mkv"
+        assert stored_collection.hierarchy_status == "verified"
+        assert stored_collection.hierarchy_note is None
+
+
 def test_bungo_bulk_duplicate_resolution_keeps_physical_cleanup_warning(tmp_path):
     web_app = create_app(Settings(
         anime_path=tmp_path,
@@ -1129,13 +1296,97 @@ def test_hierarchy_review_offers_season_specific_ova_reassignment(tmp_path):
     ).body.decode()
 
     assert "Vyřešit duplicity · podezření" not in rendered
-    assert "Pravděpodobně doplňkový obsah" in rendered
+    assert "AnimeDB doporučuje" in rendered
+    assert "Doporučené oddělení" in rendered
     assert "OVA 01" in rendered
-    assert "OVA – S1" in rendered
-    assert 'name="season_number" value="1"' in rendered
-    assert "Není duplicita / zařadit jinam" in rendered
+    assert 'data-part-type="ova"' in rendered
+    assert 'data-season-number=""' in rendered
+    assert "Použít doporučení" in rendered
     assert "Oddělit do nové části" in rendered
+    assert "Správa zařazení" in rendered
     assert "<dt>Očíslováno</dt><dd>1/1</dd>" in rendered
+
+
+def test_hataraku_sp_recommendation_is_read_only_prefill_for_existing_form(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'hataraku-recommendation.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Hataraku Saibou", normalized_local_title="hataraku saibou",
+            relative_root_path="Anime/Hataraku Saibou", hierarchy_status="review_required",
+        )
+        season = CatalogTitle(
+            collection=collection, local_title="Serie 1",
+            normalized_local_title="serie 1",
+            relative_root_path="Anime/Hataraku Saibou/Serie 1",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        special = Video(
+            relative_path=(
+                "Anime/Hataraku Saibou/Serie 1/"
+                "S01E14 [SP]-The Common Cold.mkv"
+            ),
+            root_folder="Anime", filename="S01E14 [SP]-The Common Cold.mkv",
+            size=1, mtime_ns=1, catalog_title=season, catalog_collection=collection,
+        )
+        session.add(collection)
+        session.commit()
+        collection_id, season_id, video_id = collection.id, season.id, special.id
+        before = (
+            special.catalog_title_id, special.content_type_manual,
+            special.episode_number_manual_override, special.season_episode_number,
+            season.part_type_manual, season.season_number_manual,
+            season.hierarchy_manual_override,
+        )
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review/{collection_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    assert "AnimeDB doporučuje" in rendered
+    assert "Doporučené oddělení" in rendered
+    assert "S01E14 [SP]-The Common Cold.mkv" in rendered
+    assert "Special · související S01 · canonical číslo neurčeno" in rendered
+    assert "Původní filename hint: S01E14" in rendered
+    assert "Název z filename: The Common Cold" in rendered
+    assert "Canonical číslo: neurčeno" in rendered
+    assert 'type="button" class="apply-assignment-recommendation"' in rendered
+    assert f'data-video-ids="{video_id}"' in rendered
+    assert 'data-part-type="special"' in rendered
+    assert 'data-local-title="Specials"' in rendered
+    assert 'data-season-number="1"' in rendered
+    assert 'data-season-label="S1"' in rendered
+    assert 'id="assignment-form"' in rendered
+    assert f'action="/hierarchy-review/{collection_id}/manage-videos"' in rendered
+    assert "Provést změnu zařazení" in rendered
+    assert "form.elements.part_type.value=button.dataset.partType" in rendered
+    assert "form.elements.season_number.value=button.dataset.seasonNumber" in rendered
+    assert "form.elements.season_label.value=button.dataset.seasonLabel" in rendered
+    assert "form.elements.start_episode" not in rendered
+    assert '<select name="part_type">' in rendered
+    assert 'min="1" name="season_number"' in rendered
+    assert 'maxlength="50" name="season_label"' in rendered
+    assert "zatím nebylo nic uloženo" in rendered
+    assert "Pravděpodobně doplňkový obsah" not in rendered
+
+    with web_app.state.sessions() as session:
+        special = session.get(Video, video_id)
+        season = session.get(CatalogTitle, season_id)
+        assert (
+            special.catalog_title_id, special.content_type_manual,
+            special.episode_number_manual_override, special.season_episode_number,
+            season.part_type_manual, season.season_number_manual,
+            season.hierarchy_manual_override,
+        ) == before
 
 
 def _render_hierarchy_review(
@@ -1201,6 +1452,14 @@ def _render_hierarchy_review(
         simple_rows=simple_definition_rows(collection), definitions_json="[]",
         external_search_candidates=[], external_candidates=[],
         preview=None, preview_rows=[],
+        assignment_recommendations=supplementary_assignment_recommendations([video]),
+        assignment_recommendation_by_video={
+            video.id: recommendation
+            for recommendation in supplementary_assignment_recommendations([video])
+        },
+        supplementary_suggestions=[], supplementary_suggestion_by_video={},
+        duplicate_candidate_video_ids=set(), confirmed_duplicate_video_ids=set(),
+        available_collections=[], duplicate_video_details={},
     )
 
 

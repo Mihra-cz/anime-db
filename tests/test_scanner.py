@@ -205,6 +205,48 @@ def test_scan_keeps_ova_beside_season_episode_out_of_standard_numbering(
         assert unresolved_duplicate_groups(list(title.videos)) == ()
 
 
+def test_scan_hataraku_sxxexx_and_bracketed_sp_without_touching_files(
+    tmp_path: Path, monkeypatch,
+):
+    folder = tmp_path / "Hataraku Saibou" / "Serie 1 (L18)"
+    folder.mkdir(parents=True)
+    episode_paths = [
+        folder / f"S01E{number:02}-{title}.mkv"
+        for number, title in enumerate([
+            "Pneumococcus", "Scrape Wound", "Influenza", "Food Poisoning",
+            "Cedar Pollen Allergy", "Erythroblasts and Myelocytes",
+            "Cancer Cell", "Blood Circulation", "Thymocyte", "Staphylococcus Aureus",
+            "Heat Stroke", "Hemorrhagic Shock", "Hemorrhagic Shock Part 2",
+        ], 1)
+    ]
+    special_path = folder / "S01E14 [SP]-The Common Cold.mkv"
+    for path in [*episode_paths, special_path]:
+        path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        videos = session.scalars(select(Video).order_by(Video.filename)).all()
+        regular = [video for video in videos if video.filename != special_path.name]
+        special = next(video for video in videos if video.filename == special_path.name)
+
+        assert {video.local_episode_number for video in regular} == set(range(1, 14))
+        assert {video.season_episode_number for video in regular} == set(range(1, 14))
+        assert {video.episode_number_source for video in regular} == {"sxxexx"}
+        assert {video.file_type for video in regular} == {"episode"}
+        assert special.file_type == "special"
+        assert special.catalog_title.effective_season_number == 1
+        assert special.local_episode_number is None
+        assert special.season_episode_number is None
+        assert special.episode_number_source == "supplementary_special"
+        assert special.catalog_collection.hierarchy_status == "review_required"
+        assert [path.read_bytes() for path in [*episode_paths, special_path]] == [
+            b"video"
+        ] * 14
+
+
 def test_scan_splits_nc_named_children_into_reviewable_season_context_titles(
     tmp_path: Path, monkeypatch,
 ):

@@ -4,7 +4,9 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .catalog import detect_episode_number, natural_sort_key, normalize_title
+from .catalog import (
+    EpisodeNumberDetection, detect_episode_number, natural_sort_key, normalize_title,
+)
 from .models import CatalogCollection, CatalogTitle, Video
 
 NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
@@ -353,7 +355,7 @@ def recalculate_title_numbering(
         video.external_episode_number = video.season_episode_number if has_external else None
         video.episode_number_source = (
             "manual" if is_manual else "derived_from_part_offset" if offset is not None
-            else "filename"
+            else "sxxexx" if detection.season_hint is not None else "filename"
         )
         video.episode_number_confidence = 1.0 if is_manual else 0.9 if offset is not None else 0.95
 
@@ -463,45 +465,99 @@ SUPPLEMENTAL_PART_TYPES = {
 }
 
 
+@dataclass(frozen=True)
+class EffectiveVideoNumbering:
+    """Aktivní interpretace videa; raw filename detekce zůstává dostupná pro audit."""
+
+    detection: EpisodeNumberDetection
+    classification: str
+    season_episode_number: int | None
+    numbering_input: int | None
+    manual_override: bool
+
+    @property
+    def is_standard(self) -> bool:
+        return self.classification == "standard"
+
+    @property
+    def is_supplementary(self) -> bool:
+        return self.classification == "supplementary"
+
+    @property
+    def is_nonstandard(self) -> bool:
+        return self.classification == "nonstandard"
+
+    @property
+    def is_unknown(self) -> bool:
+        return self.classification == "unknown"
+
+
+def effective_video_numbering(
+    video: Video, title: CatalogTitle | None = None,
+) -> EffectiveVideoNumbering:
+    """Sjednotí manual/content/title autoritu nad automatickým filename parserem."""
+    detection = detect_episode_number(video.filename)
+    effective_title = title if title is not None else video.catalog_title
+    title_is_supplemental = bool(
+        effective_title is not None
+        and effective_title.effective_part_type in SUPPLEMENTAL_PART_TYPES
+    )
+    if video.content_type_manual or title_is_supplemental:
+        classification = "supplementary"
+    elif video.episode_number_manual_override is not None:
+        classification = "standard"
+    elif detection.is_supplementary:
+        classification = "supplementary"
+    elif detection.is_nonstandard:
+        classification = "nonstandard"
+    elif video.season_episode_number is not None or detection.is_standard:
+        classification = "standard"
+    else:
+        classification = "unknown"
+    numbering_input = (
+        video.episode_number_manual_override
+        if video.episode_number_manual_override is not None
+        else video.local_episode_number
+        if video.local_episode_number is not None
+        else detection.number if detection.is_standard else None
+    )
+    return EffectiveVideoNumbering(
+        detection=detection,
+        classification=classification,
+        season_episode_number=video.season_episode_number,
+        numbering_input=numbering_input,
+        manual_override=video.episode_number_manual_override is not None,
+    )
+
+
 def summarize_title_numbering(
     videos: list[Video], title: CatalogTitle | None = None,
 ) -> TitleNumberingSummary:
     supplemental = bool(
         title is not None and title.effective_part_type in SUPPLEMENTAL_PART_TYPES
     )
-    detections = [
-        detect_episode_number(video.filename) if video.episode_number_manual_override is None
-        else None
-        for video in videos
-    ]
-    resolved = [
-        (bool(video.content_type_manual) or bool(detection and detection.is_supplementary))
-        and not supplemental
-        for video, detection in zip(videos, detections)
-    ]
+    states = [effective_video_numbering(video, title) for video in videos]
     confirmed_duplicate = [is_nonprimary_duplicate_video(video) for video in videos]
     standard_total = 0 if supplemental else sum(
-        not is_resolved and not is_duplicate and (detection is None or detection.is_standard)
-        for detection, is_resolved, is_duplicate
-        in zip(detections, resolved, confirmed_duplicate)
+        state.is_standard and not is_duplicate
+        for state, is_duplicate in zip(states, confirmed_duplicate)
     )
     nonstandard = 0 if supplemental else sum(
-        not is_resolved and not is_duplicate
-        and detection is not None and detection.is_nonstandard
-        for detection, is_resolved, is_duplicate
-        in zip(detections, resolved, confirmed_duplicate)
+        state.is_nonstandard and not is_duplicate
+        for state, is_duplicate in zip(states, confirmed_duplicate)
     )
     unknown = 0 if supplemental else sum(
-        not is_resolved and not is_duplicate and video.season_episode_number is None
-        and (detection is None or not detection.is_nonstandard)
-        for video, detection, is_resolved, is_duplicate
-        in zip(videos, detections, resolved, confirmed_duplicate)
+        (
+            state.is_unknown
+            or state.is_standard and state.season_episode_number is None
+        ) and not is_duplicate
+        for state, is_duplicate in zip(states, confirmed_duplicate)
     )
     values = [] if supplemental else [
-        video.season_episode_number
-        for video, is_resolved in zip(videos, resolved)
-        if video.season_episode_number is not None
-        and not is_resolved
+        state.season_episode_number
+        for video, state in zip(videos, states)
+        if state.is_standard
+        and state.season_episode_number is not None
         and not is_nonprimary_duplicate_video(video)
     ]
     unique_values = set(values)
@@ -519,7 +575,9 @@ def summarize_title_numbering(
         numbered=len(values),
         unknown=unknown,
         nonstandard=nonstandard,
-        resolved_supplemental=len(videos) if supplemental else sum(resolved),
+        resolved_supplemental=(
+            len(videos) if supplemental else sum(state.is_supplementary for state in states)
+        ),
         episode_min=episode_min,
         episode_max=episode_max,
         gaps=gaps,

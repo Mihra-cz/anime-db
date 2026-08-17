@@ -434,6 +434,44 @@ def test_derives_safe_episode_numbers():
     assert derive_episode_number("Show 2024 1080p.mkv") is None
 
 
+@pytest.mark.parametrize(("filename", "season", "episode", "title"), [
+    ("S01E01.mkv", 1, 1, None),
+    ("S1E1.mkv", 1, 1, None),
+    ("S01E01-Pneumococcus.mkv", 1, 1, "Pneumococcus"),
+    ("S1E2 Title.mkv", 1, 2, "Title"),
+    ("S02E12 - Title.mkv", 2, 12, "Title"),
+    ("S01E01_Title.mkv", 1, 1, "Title"),
+    ("S01-E01.Title.mkv", 1, 1, "Title"),
+])
+def test_sxxexx_keeps_season_episode_and_local_title_candidate(
+    filename, season, episode, title,
+):
+    detection = detect_episode_number(filename)
+
+    assert detection.is_standard
+    assert detection.season_hint == season
+    assert detection.number == episode
+    assert detection.filename_episode_hint == episode
+    assert detection.title_candidate == title
+    assert derive_episode_number(filename) == episode
+    assert classify_video(f"Anime/Show/{filename}") == "episode"
+
+
+def test_bracketed_sp_overrides_sxxexx_without_inventing_canonical_number():
+    filename = "S01E14 [SP]-The Common Cold.mkv"
+
+    detection = detect_episode_number(filename)
+
+    assert detection.is_supplementary
+    assert detection.supplementary_type == "special"
+    assert detection.supplementary_number is None
+    assert detection.season_hint == 1
+    assert detection.filename_episode_hint == 14
+    assert detection.title_candidate == "The Common Cold"
+    assert derive_episode_number(filename) is None
+    assert classify_video(f"Anime/Hataraku Saibou/Serie 1/{filename}") == "special"
+
+
 @pytest.mark.parametrize(("filename", "expected"), [
     ("Title - 01.mkv", 1),
     ("Title - 02.mkv", 2),

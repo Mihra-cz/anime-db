@@ -2308,6 +2308,161 @@ nejsou. Karta **Anime titulů** zůstává neklikací.
 
 ---
 
+## 6.30 SxxExx parser a explicitní bracketed Special
+
+Parser episode čísel bezpečně rozpoznává tokenově ohraničené tvary `SxxExx`,
+včetně `S01E01`, `S1E1`, `S01E01-Title`, `S01E01 - Title`, `S01E01 Title`,
+`S01E01_Title` a obdobných oddělovačů mezi season a episode tokenem. Výsledek
+`EpisodeNumberDetection` odděluje `season_hint`, standardní episode number,
+`filename_episode_hint` a nezávazný `title_candidate` za tokenem. Standardní
+video ukládá číslo do dosavadních numbering polí a používá diagnostický source
+`sxxexx`; žádný nový DB sloupec nevznikl.
+
+Současný model nemá per-episode metadata ani lokální episode-title sloupec.
+`TitleMetadata` patří celému `CatalogTitle`. Filename title candidate se proto
+zatím uchovává pouze jako bezpečně znovu odvoditelná hodnota parseru a samotný
+filename zůstává beze změny. Candidate nepřepisuje manual display title,
+potvrzená metadata ani jinou autoritativní vrstvu.
+
+Prioritní větev před standardním `SxxExx` rozpoznává explicitní `[SP]`. Pro
+`S01E14 [SP]-The Common Cold.mkv` vrací subtype `special`, season hint `1`,
+původní filename episode hint `14` a title candidate `The Common Cold`.
+`supplementary_number` zůstává `NULL`: číslo 14 se nezapisuje do
+`local_episode_number`, `season_episode_number`, `absolute_episode_number` ani
+`external_episode_number` a nevstupuje do completeness Season 1. Source je
+`supplementary_special`. Dokud video není ručně klasifikované nebo přesunuté do
+supplementary CatalogTitle, chybějící canonical číslo otevře hierarchy review;
+žádné pravidlo „první `[SP]` = Special E1“ neexistuje.
+
+Canonical Special E1 lze již existujícím workflow reprezentovat přes
+season-scoped `CatalogTitle` s `part_type_manual=special`,
+`season_number_manual=1`, manual hierarchy override a explicitní
+`episode_number_manual_override=1`. Původní hint 14 zůstává v nezměněném
+filename a parser jej vždy umí znovu získat odděleně od canonical čísla. Budoucí
+V6/V7 tak může po potvrzení navrhnout fyzickou strukturu `Specials/E01`, tato
+změna ale nic nepřejmenovává ani nepřesouvá.
+
+Pokud automaticky odvozený CatalogTitle představuje například folder S1 a
+filename obsahuje `S02E03`, collection dostane konkrétní důvod
+`review_required`. Shodné `S01E03` konflikt nevytváří. Explicitně potvrzený
+manual hierarchy override má nad filename hintem přednost a scanner jej
+nepřepisuje.
+
+Regresní integrační test používá pouze dočasnou knihovnu a in-memory SQLite pro
+strukturu `Hataraku Saibou/Serie 1 (L18)`: S01E01 až S01E13 jsou standardní
+epizody, zatímco `S01E14 [SP]` je Special s neurčeným canonical číslem. Produkční
+databáze ani NAS nejsou součástí testu.
+
+---
+
+## 6.31 Doporučené oddělení explicitního supplementary obsahu
+
+Hierarchy Review nad informacemi z existujícího filename parseru zobrazuje
+výrazné **Doporučené oddělení**, pokud je bezpečně rozpoznaný explicitní
+supplementary soubor stále zařazený v běžné Season části. Nevznikla žádná nová
+fuzzy heuristika: recommendation používá výhradně `is_supplementary`, subtype,
+`season_hint`, původní `filename_episode_hint` a `title_candidate`, které už
+vrací parser. Manual content type a manual hierarchy zůstávají autoritativní.
+
+Pro `S01E14 [SP]-The Common Cold.mkv` karta ukáže Special, související S01,
+původní hint S01E14, filename title candidate a výslovně neurčené canonical
+číslo. Více explicitních videí se seskupí jen při shodném současném title,
+subtype a parserem bezpečně známém season scope. Standardní `S01E03-Influenza`
+žádnou supplementary recommendation nedostane.
+
+**Použít doporučení** je čistě klientské tlačítko bez POSTu. Ve stávající
+univerzální **Správě zařazení** označí pouze doporučená videa, zvolí operaci
+oddělení do nové části a předvyplní editovatelný typ, season a label. Nevyplňuje
+numbering. Teprve původní tlačítko **Provést změnu zařazení** volá existující
+backend a autoritativně mění DB zařazení. Libovolný ruční výběr, klasifikace,
+přesun i vlastní hodnoty formuláře zůstávají dostupné bez recommendation.
+
+Po vytvoření části `Specials` zůstává `[SP]` video bez canonical čísla a
+collection oprávněně zůstane `review_required`. Dosavadní ruční numbering
+workflow může následně potvrdit například Special E1; filename E14 se za
+canonical Special 14 ani Special 1 nepovažuje. DB schema, fyzické cesty,
+metadata providery ani duplicate workflow se kvůli této UI zkratce nemění.
+
+Regresní testy používají in-memory nebo dočasnou SQLite a testovací cesty.
+Produkční databáze a NAS nejsou součástí tohoto workflow.
+
+---
+
+## 6.32 Effective numbering v Hierarchy Review
+
+Horní numbering summary už dříve při přítomnosti
+`episode_number_manual_override` ignoroval raw nestandardní filename detekci.
+Spodní seznamy Hierarchy Review však filename parsovaly znovu bez této priority,
+stejně jako samostatný collection review reason. Video opravené z raw `00` na
+canonical E01 se proto současně zobrazovalo jako vyřešená standardní epizoda i
+jako aktivní `nonstandard_zero`.
+
+Nový centralizovaný `effective_video_numbering()` vrací aktivní klasifikaci,
+canonical season číslo, numbering input a zároveň původní
+`EpisodeNumberDetection`. Priorita je ruční content/title zařazení, ruční
+episode override a teprve potom automatický filename parser. Stejný view-model
+nyní používá summary, standard/supplementary/nonstandard/unknown grouping,
+collection review reason, seznam oddělitelných nestandardních videí a validace
+jejich oddělení.
+
+`High School DxD Hero - 00.mkv` bez override zůstává `nonstandard_zero`, nemá
+canonical číslo a drží collection v review. Po autoritativním E01 override je
+effective standardní epizodou E1. Ve scénáři s E02–E13 pak Hierarchy Review
+ukazuje 13 standardních epizod, 13/13, rozsah E1–E13, unknown 0 a nestandardní
+0. Pokud neexistuje jiný nezávislý důvod, review reason zmizí. Stejné pravidlo
+platí pro libovolné jiné kladné ručně zadané číslo.
+
+Po uložení jednotlivého i sekvenčního ručního numbering se nově přepočítá také
+collection review stav. `episode_number_source` nadále popisuje aktivní zdroj,
+takže po opravě obsahuje `manual`; raw stav `zero` zůstává auditovatelný z
+nezměněného filename přes parser. Nové auditní DB pole ani schema migrace nebyly
+potřeba. Supplementary, manual hierarchy/content a duplicate workflow zůstávají
+oddělené a autoritativní.
+
+Regresní testy používají pouze in-memory nebo dočasné SQLite databáze. Fyzické
+cesty a NAS se nemění.
+
+---
+
+## 6.33 Trvalé odstranění prázdné ručně definované části
+
+„Jednoduchá definice ručního rozdělení“ nemá samostatnou tabulku ani uložený
+JSON. Každá persistentní položka je přímo konkrétní `CatalogTitle` s
+`hierarchy_manual_override=True`; její stabilní identitou je `CatalogTitle.id`
+a pravidla jsou uložena v jeho `episode_start`, `episode_end`,
+`episode_filename_pattern`, manual season/type/sort a numbering polích. Formulář
+tyto stejné řádky pouze serializuje.
+
+Zdroj znovuvytváření byl v pořadí startup synchronizace. `migrate_schema()`
+nejprve odvodil automatický title pro každou fyzickou hierarchy cestu, následně
+aplikoval autoritativní manual split a přesunul všechna videa do ručních částí.
+Automatický mezivýsledek však už zůstal označený jako použitý a přežil bez
+videí. V dalším UI se pak opět objevil i v jednoduché definici, protože ta
+zobrazuje všechny současné titles, nejen manual overrides.
+
+Hierarchy Review nyní rozlišuje prázdnou automatickou část a přímou manual split
+entry podle `hierarchy_manual_override`, nikoli podle podobnosti názvu. Pro
+manual entry nabízí **Odstranit část i z ručního rozdělení** s explicitním
+potvrzením. Definition entry a výsledný title jsou tentýž DB řádek, takže jejich
+odstranění proběhne jedním cíleným DELETE v jedné transakci. Backend znovu
+ověří nulový počet všech `Video` FK; tím jsou zahrnuta standardní, ručně
+zařazená i duplicate videa. Vlastněná metadata/reference používají dosavadní
+explicitní cascade workflow. Při chybě route provede rollback.
+
+Po DELETE se přepočítá collection review stav. Startup sync po aplikaci manual
+splitu navíc odstraní pouze automatické titles, které v dané collection nemají
+žádné přiřazené video, nejsou manual override a nevlastní metadata, odkazy,
+kandidáty ani artwork. Používané automatické titles a všechny zbývající manual
+entries zůstávají autoritativní. Nejde o globální zákaz rekonstrukce.
+
+Regresní test vytvoří fyzickou `NC` cestu, tři manual entries a ruční přiřazení,
+odstraní pouze jednu prázdnou NC entry a dvakrát spustí skutečný
+`migrate_schema()`. Odstraněná část se nevrátí; ostatní title ID, pattern,
+season/type/numbering overrides, manual episode number, filename a relative
+path zůstávají zachované. Nové DB pole ani schema migrace nebyly potřeba.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

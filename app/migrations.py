@@ -261,6 +261,43 @@ def migrate_schema(engine) -> None:
                     collection.hierarchy_verified_at = (
                         collection.hierarchy_verified_at or utc_now()
                     )
+                session.flush()
+                assigned_title_ids = {
+                    video.catalog_title_id for video in collection_videos
+                    if video.catalog_title_id is not None
+                }
+                for title in list(titles.values()):
+                    if (
+                        title.catalog_collection_id != collection.id
+                        or title.hierarchy_manual_override
+                        or title.id in assigned_title_ids
+                        or title.metadata_record is not None
+                        or title.external_links
+                        or title.metadata_candidates
+                        or title.artwork
+                        or title.manual_display_title
+                        or title.preferred_metadata_provider
+                        or title.preferred_external_id
+                        or title.metadata_locked
+                        or title.metadata_status != "unlinked"
+                        or title.numbering_manual
+                        or title.numbering_verified_at is not None
+                        or title.season_number_manual is not None
+                        or title.season_label_manual
+                        or title.part_type_manual
+                        or title.sort_order_manual is not None
+                        or title.episode_start is not None
+                        or title.episode_end is not None
+                        or title.episode_start_offset is not None
+                        or title.episode_filename_pattern
+                    ):
+                        continue
+                    # Startup nejprve odvodí title z fyzické cesty. Pokud však
+                    # autoritativní manual split všechna videa přiřadil jinam,
+                    # tento automatický prázdný mezivýsledek nesmí přežít sync.
+                    session.delete(title)
+                    titles.pop(title.relative_root_path, None)
+                session.flush()
                 continue
             probable_named_grouping = any(
                 not is_root_video(video)
