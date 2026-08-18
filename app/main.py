@@ -61,8 +61,9 @@ from .hierarchy_review import (
     preview_assignments, separate_nonstandard_videos, simple_definition_rows,
     set_manual_duplicate_status,
     single_title_confirmation_suggestion, supplementary_assignment_recommendations,
-    supplementary_video_suggestions,
+    supplementary_video_suggestions, set_manual_title_hierarchy,
 )
+from .hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPE_CHOICES
 from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
 from .metadata.artwork import ArtworkCacheError, cache_cover
@@ -152,6 +153,8 @@ templates.env.globals.update(
     subtitle_track_display=subtitle_track_display,
     manual_hardsub_state=manual_hardsub_state,
     detect_episode_number=detect_episode_number,
+    part_type_choices=PART_TYPE_CHOICES,
+    video_content_type_choices=VIDEO_CONTENT_TYPE_CHOICES,
 )
 METADATA_STATUS_LABELS = {
     "unlinked": "Bez metadat", "candidates_available": "Čeká na potvrzení",
@@ -1792,11 +1795,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         part_type_manual: str = Form(""), sort_order_manual: str = Form(""),
         hierarchy_verified: bool = Form(False), filter_name: str = Form("all"),
         q: str = Form(""), sort: str = Form(""), direction: str = Form(""),
+        return_to: str = Form("collection"),
     ):
-        allowed_types = {
-            "", "title", "season", "part", "cour", "film", "ova", "special",
-            "preview", "recap", "bonus", "other",
-        }
         with sessions() as session:
             title = session.get(CatalogTitle, catalog_title_id)
             if title is None or title.catalog_collection_id != collection_id:
@@ -1804,30 +1804,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 number = int(season_number_manual) if season_number_manual.strip() else None
                 order = int(sort_order_manual) if sort_order_manual.strip() else None
-                label = season_label_manual.strip() or None
-                part_type = part_type_manual.strip().casefold() or None
-                if number is not None and number <= 0:
-                    raise ValueError("Pořadí sezóny musí být kladné číslo.")
-                if order is not None and order < 0:
-                    raise ValueError("Pořadí části nesmí být záporné.")
-                if label and len(label) > 50:
-                    raise ValueError("Označení části může mít nejvýše 50 znaků.")
-                if (part_type or "") not in allowed_types:
-                    raise ValueError("Neplatný typ části.")
-                has_manual = any(value is not None for value in (number, label, part_type, order))
-                if has_manual and not hierarchy_verified:
-                    raise ValueError("Ruční hierarchii je nutné potvrdit jako ověřenou.")
-                title.season_number_manual = number
-                title.season_label_manual = label
-                title.part_type_manual = part_type
-                title.sort_order_manual = order
-                title.hierarchy_manual_override = has_manual
-                title.hierarchy_verified_at = utc_now() if hierarchy_verified else None
-                refresh_collection_state(title.collection)
+                set_manual_title_hierarchy(
+                    title, season_number=number, season_label=season_label_manual,
+                    part_type=part_type_manual, sort_order=order,
+                    hierarchy_verified=hierarchy_verified,
+                )
                 session.commit()
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if return_to == "hierarchy_review":
+            return local_redirect_response(
+                f"/hierarchy-review/{collection_id}#title-{catalog_title_id}",
+            )
         params = {"filter_name": filter_name, "q": q, "sort": sort, "direction": direction}
         return local_redirect_response(
             f"/collections/{collection_id}?{urlencode(params)}#title-{catalog_title_id}",

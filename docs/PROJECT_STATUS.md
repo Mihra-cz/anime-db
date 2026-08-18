@@ -2463,6 +2463,54 @@ path zůstávají zachované. Nové DB pole ani schema migrace nebyly potřeba.
 
 ---
 
+## 6.34 Sjednocená ruční klasifikace celého CatalogTitle
+
+Hierarchy Review nově zobrazuje u každého současného `CatalogTitle` malý formulář
+**Typ celé části**. Formulář nabízí stejné manual hierarchy údaje jako detail
+collection: `part_type_manual`, volitelné číslo a označení sezóny,
+`sort_order_manual` a checkbox **Zařazení ověřeno**. Nezavádí nový paralelní
+zápisový endpoint. Odesílá přímo na dosavadní
+`POST /collections/{collection_id}/titles/{catalog_title_id}/hierarchy`; parametr
+návratu pouze přesměruje uživatele zpět na odpovídající kartu Hierarchy Review.
+
+Validace a zápis tohoto endpointu byly vytaženy do
+`set_manual_title_hierarchy()`. Ruční hodnoty nastavují stávající
+`hierarchy_manual_override` a `hierarchy_verified_at`, takže zůstávají
+autoritativní vůči scanneru, startup sync i hierarchy rebuild. Operace nemění
+`Video.content_type_manual`, episode numbering, metadata, collection identity,
+filename ani `relative_path`.
+
+Part-level typy mají jeden uspořádaný zdroj `PART_TYPE_CHOICES` a validační
+množinu `PART_TYPES`: Season, Part, Cour, Film, OVA, Special, Preview, Recap,
+Bonus, Other a Title. Používá je detail collection, oba hierarchy formuláře,
+jednoduchá definice ručního rozdělení a oba selecty **Oddělit do nové části**.
+Backend vytváření nové části přijímá stejnou množinu. Samostatný
+`VIDEO_CONTENT_TYPE_CHOICES` zůstává omezený na Recap, Preview, Special, OVA,
+Bonus a Other. `Film` tedy zůstává výhradně typem celého `CatalogTitle`; při
+vytvoření filmové části se do videí nezapisuje neexistující
+`content_type_manual="film"`.
+
+Regresní scénář `Isekai Quartet` ověřuje změnu celé části
+`Isekai Quartet - Another World Movie` na `film` přímo přes sdílený endpoint,
+rozpoznání videa filmovým filtrem přes `effective_part_type`, zachování Season 1
+a Season 2, metadata, filename, `relative_path` a fyzického testovacího souboru.
+Následný skutečný `migrate_schema()` manual override nepřepíše. Testy používají
+pouze dočasné SQLite databáze a dočasné soubory.
+
+Změna nevyžaduje nové DB pole ani schema migraci. Produkční `data/anime.db`,
+produkční scan a NAS nebyly použity ani změněny.
+
+Automatické ověření 18. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                         # 419 passed
+.venv/bin/python -m compileall app tests    # prošlo
+načtení všech Jinja2 šablon                 # 13 šablon, prošlo
+git diff --check                            # prošlo
+```
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

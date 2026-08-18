@@ -24,6 +24,7 @@ from app.hierarchy_review import (
     supplementary_assignment_recommendations,
     supplementary_video_suggestions,
 )
+from app.hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPES
 from app.models import (
     Artwork, CatalogCollection, CatalogTitle, ExternalTitleLink, InternalSubtitle,
     MetadataCandidate, TitleMetadata, Video, utc_now,
@@ -1408,6 +1409,47 @@ def test_create_special_then_existing_numbering_resolves_canonical_review_withou
         assert special.episode_number_source == "manual"
         assert collection.hierarchy_status == "verified"
         assert special.relative_path == original_path
+
+
+def test_create_title_from_videos_accepts_all_part_types_without_inventing_video_types():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show", hierarchy_status="review_required",
+        )
+        source = CatalogTitle(
+            collection=collection, local_title="Source", normalized_local_title="source",
+            relative_root_path="Anime/Show/Source",
+        )
+        videos = [Video(
+            relative_path=f"Anime/Show/Source/Item {index:02}.mkv",
+            root_folder="Anime", filename=f"Item {index:02}.mkv", size=index,
+            mtime_ns=index, catalog_title=source, catalog_collection=collection,
+        ) for index, _ in enumerate(PART_TYPE_CHOICES, 1)]
+        session.add(collection)
+        session.flush()
+        original_paths = {video.id: (video.filename, video.relative_path) for video in videos}
+
+        created = []
+        for video, (part_type, label) in zip(videos, PART_TYPE_CHOICES, strict=True):
+            created.append(create_title_from_videos(
+                session, collection.id, [video.id], local_title=label,
+                part_type=part_type,
+            ))
+
+        assert [title.effective_part_type for title in created] == [
+            value for value, _ in PART_TYPE_CHOICES
+        ]
+        for video, (part_type, _) in zip(videos, PART_TYPE_CHOICES, strict=True):
+            assert (video.filename, video.relative_path) == original_paths[video.id]
+            assert video.content_type_manual == (
+                part_type if part_type in VIDEO_CONTENT_TYPES else None
+            )
+        film_video = videos[[value for value, _ in PART_TYPE_CHOICES].index("film")]
+        assert film_video.catalog_title.effective_part_type == "film"
+        assert film_video.content_type_manual is None
 
 
 def test_standard_and_ova_part_videos_can_be_split_into_two_local_ova_titles():

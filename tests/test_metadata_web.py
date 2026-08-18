@@ -1,5 +1,6 @@
 import asyncio
 from http.cookies import SimpleCookie
+import re
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from fastapi import HTTPException
@@ -12,6 +13,8 @@ from app.catalog import (
     TITLE_NAME_PREFERENCE_LABELS,
     build_catalog_results,
     detect_episode_number,
+    is_film_video,
+    video_matches_filter,
 )
 from app.config import Settings
 from app.database import Base
@@ -25,6 +28,7 @@ from app.hierarchy_review import (
     refresh_collection_state, simple_definition_rows, single_title_confirmation_suggestion,
     supplementary_assignment_recommendations,
 )
+from app.hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPE_CHOICES
 from app.metadata.providers.base import ProviderTitleMetadata
 from app.migrations import migrate_schema
 from app.models import (
@@ -75,6 +79,13 @@ def web_request(web_app, path, *, cookie=None):
         "headers": headers, "server": ("testserver", 80),
         "client": ("testclient", 50000),
     })
+
+
+def select_option_values(rendered: str, name: str) -> list[tuple[str, ...]]:
+    blocks = re.findall(
+        rf'<select name="{re.escape(name)}"[^>]*>(.*?)</select>', rendered, re.DOTALL,
+    )
+    return [tuple(re.findall(r'<option value="([^"]*)"', block)) for block in blocks]
 
 
 def test_detail_template_displays_anilist_candidates():
@@ -1438,6 +1449,205 @@ def test_hataraku_sp_recommendation_is_read_only_prefill_for_existing_form(tmp_p
             season.part_type_manual, season.season_number_manual,
             season.hierarchy_manual_override,
         ) == before
+
+
+def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'part-type-choices.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show", hierarchy_status="review_required",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show", part_type="title",
+        )
+        Video(
+            relative_path="Anime/Show/Show 00.mkv", root_folder="Anime",
+            filename="Show 00.mkv", size=1, mtime_ns=1,
+            catalog_title=title, catalog_collection=collection,
+        )
+        session.add(collection)
+        session.commit()
+        collection_id = collection.id
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")
+    }
+    request = web_request(web_app, f"/collections/{collection_id}")
+    collection_html = endpoints["/collections/{collection_id}"](
+        request, collection_id, filter_name="all", q="", sort=None, direction=None,
+    ).body.decode()
+    review_html = endpoints["/hierarchy-review/{collection_id}"](
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    expected_part_types = tuple(value for value, _ in PART_TYPE_CHOICES)
+    collection_choices = select_option_values(collection_html, "part_type_manual")
+    review_manual_choices = select_option_values(review_html, "part_type_manual")
+    review_split_choices = select_option_values(review_html, "part_type")
+    video_choices = select_option_values(review_html, "content_type")
+
+    assert collection_choices
+    assert review_manual_choices
+    assert review_split_choices
+    assert all(tuple(value for value in choices if value) == expected_part_types
+               for choices in collection_choices + review_manual_choices)
+    assert all(choices == expected_part_types for choices in review_split_choices)
+    assert all(choices == tuple(value for value, _ in VIDEO_CONTENT_TYPE_CHOICES)
+               for choices in video_choices)
+    assert "film" in expected_part_types
+    assert all("film" not in choices for choices in video_choices)
+    assert (
+        f'action="/collections/{collection_id}/titles/{title.id}/hierarchy"'
+        in review_html
+    )
+    assert 'name="return_to" value="hierarchy_review"' in review_html
+    assert "Typ celé části" in review_html
+    assert "Klasifikace vybraných videí" in review_html
+
+
+def test_isekai_quartet_movie_can_be_marked_as_film_from_hierarchy_review(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'isekai-quartet.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    movie_file = tmp_path / "Isekai Quartet Movie - Another World Movie.mkv"
+    movie_file.write_bytes(b"unchanged movie")
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Isekai Quartet", normalized_local_title="isekai quartet",
+            relative_root_path="Anime/Isekai Quartet", hierarchy_status="review_required",
+        )
+        movie = CatalogTitle(
+            collection=collection, local_title="Isekai Quartet - Another World Movie",
+            normalized_local_title="isekai quartet another world movie",
+            relative_root_path=(
+                "Anime/Isekai Quartet/Isekai Quartet - Another World Movie"
+            ),
+            part_type="title", sort_order=0,
+            metadata_record=TitleMetadata(
+                display_title="Isekai Quartet Movie: Another World",
+                title_romaji="Isekai Quartet Movie: Another World",
+                release_year=2022, format="MOVIE",
+            ),
+        )
+        season_one = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Isekai Quartet/Season 1",
+            part_type="season", season_number=1, season_label="S1", sort_order=1,
+        )
+        season_two = CatalogTitle(
+            collection=collection, local_title="Season 2",
+            normalized_local_title="season 2",
+            relative_root_path="Anime/Isekai Quartet/Season 2",
+            part_type="season", season_number=2, season_label="S2", sort_order=2,
+        )
+        movie_video = Video(
+            relative_path=(
+                "Anime/Isekai Quartet/Isekai Quartet - Another World Movie/"
+                "Isekai Quartet Movie - Another World Movie.mkv"
+            ),
+            root_folder="Anime",
+            filename="Isekai Quartet Movie - Another World Movie.mkv",
+            size=len(b"unchanged movie"), mtime_ns=123,
+            catalog_title=movie, catalog_collection=collection,
+        )
+        for number, title in ((1, season_one), (2, season_two)):
+            Video(
+                relative_path=f"{title.relative_root_path}/Episode 01.mkv",
+                root_folder="Anime", filename="Episode 01.mkv", size=1,
+                mtime_ns=number, season_episode_number=1,
+                catalog_title=title, catalog_collection=collection,
+            )
+        session.add(collection)
+        session.commit()
+        collection_id, movie_id = collection.id, movie.id
+        season_ids = (season_one.id, season_two.id)
+        video_id = movie_video.id
+        engine = session.get_bind()
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None)
+        == "/collections/{collection_id}/titles/{catalog_title_id}/hierarchy"
+    )
+    response = endpoint(
+        collection_id, movie_id,
+        season_number_manual="", season_label_manual="",
+        part_type_manual="film", sort_order_manual="",
+        hierarchy_verified=True, filter_name="all", q="", sort="", direction="",
+        return_to="hierarchy_review",
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == (
+        f"/hierarchy-review/{collection_id}#title-{movie_id}"
+    )
+    with web_app.state.sessions() as session:
+        movie = session.get(CatalogTitle, movie_id)
+        movie_video = session.get(Video, video_id)
+        seasons = [session.get(CatalogTitle, title_id) for title_id in season_ids]
+        assert movie.effective_part_type == "film"
+        assert movie.part_type_manual == "film"
+        assert movie.hierarchy_manual_override is True
+        assert movie.hierarchy_verified_at is not None
+        assert movie_video.content_type_manual is None
+        assert movie_video.catalog_collection_id == collection_id
+        assert movie_video.catalog_title_id == movie_id
+        assert (
+            movie_video.local_episode_number,
+            movie_video.season_episode_number,
+            movie_video.absolute_episode_number,
+            movie_video.external_episode_number,
+            movie_video.episode_number_manual_override,
+        ) == (None, None, None, None, None)
+        assert is_film_video(movie_video) is True
+        assert video_matches_filter(movie_video, "films") is True
+        assert [(title.effective_part_type, title.effective_season_number)
+                for title in seasons] == [("season", 1), ("season", 2)]
+        assert [title.videos[0].season_episode_number for title in seasons] == [1, 1]
+        assert movie_video.filename == "Isekai Quartet Movie - Another World Movie.mkv"
+        assert movie_video.relative_path.endswith(
+            "/Isekai Quartet Movie - Another World Movie.mkv"
+        )
+        assert movie_video.mtime_ns == 123
+        assert movie.metadata_record.display_title == (
+            "Isekai Quartet Movie: Another World"
+        )
+        assert movie.metadata_record.release_year == 2022
+
+    migrate_schema(engine)
+
+    with web_app.state.sessions() as session:
+        movie = session.get(CatalogTitle, movie_id)
+        movie_video = session.get(Video, video_id)
+        seasons = [session.get(CatalogTitle, title_id) for title_id in season_ids]
+        assert movie.effective_part_type == "film"
+        assert movie.hierarchy_manual_override is True
+        assert movie_video.content_type_manual is None
+        assert movie_video.catalog_collection_id == collection_id
+        assert movie_video.catalog_title_id == movie_id
+        assert movie_video.season_episode_number is None
+        assert is_film_video(movie_video) is True
+        assert [(title.effective_part_type, title.effective_season_number)
+                for title in seasons] == [("season", 1), ("season", 2)]
+        assert [title.videos[0].season_episode_number for title in seasons] == [1, 1]
+        assert movie_video.filename == "Isekai Quartet Movie - Another World Movie.mkv"
+        assert movie.metadata_record.title_romaji == (
+            "Isekai Quartet Movie: Another World"
+        )
+    assert movie_file.read_bytes() == b"unchanged movie"
 
 
 def _render_hierarchy_review(

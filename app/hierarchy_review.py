@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from .catalog import GENERIC_ROOTS, detect_episode_number, derive_episode_number, normalize_title
 from .hierarchy import parse_explicit_part
+from .hierarchy_types import PART_TYPE_LABELS, PART_TYPES, VIDEO_CONTENT_TYPES
 from .models import (
     CatalogCollection, CatalogTitle, CollectionGroupingDecision, Video, utc_now,
 )
@@ -51,12 +52,7 @@ FILENAME_SEASON_CONFLICT_REVIEW_REASON = (
 UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON = (
     "Explicitně označený doplňkový obsah nemá bezpečně určené canonical číslování."
 )
-ALLOWED_PART_TYPES = {
-    "title", "season", "part", "cour", "film", "ova", "special",
-    "preview", "recap", "bonus", "other",
-}
 SUPPLEMENTAL_PART_TYPES = {"film", "ova", "special", "preview", "recap", "bonus", "other"}
-VIDEO_CONTENT_TYPES = {"preview", "special", "recap", "ova", "bonus", "other"}
 MANUAL_DUPLICATE_STATUSES = {"suspected"}
 ALLOWED_NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
 SIMPLE_DEFINITION_FIELDS = (
@@ -102,17 +98,13 @@ class SingleTitleConfirmationSuggestion:
 
     @property
     def display_label(self) -> str:
-        part_labels = {
-            "title": "Titul", "season": "Season", "part": "Part", "cour": "Cour",
-            "film": "Film", "ova": "OVA", "special": "Special",
-            "preview": "Preview", "recap": "Recap", "bonus": "Bonus",
-            "other": "Other",
-        }
-        label = part_labels.get(
+        label = PART_TYPE_LABELS.get(
             self.proposed_part_type, self.proposed_part_type.replace("_", " ").title()
         )
         if self.proposed_part_type != "season":
             return label
+        # The recommendation has historically used this concise English label.
+        label = "Season"
         season_label = self.proposed_season_label or (
             f"S{self.proposed_season_number}"
             if self.proposed_season_number is not None else None
@@ -803,7 +795,7 @@ def apply_single_title_confirmation(
     if suggestion is None:
         raise ValueError("Kolekce už nesplňuje podmínky ručního potvrzení jediné části.")
     normalized_type = part_type.strip().casefold()
-    if normalized_type not in ALLOWED_PART_TYPES:
+    if normalized_type not in PART_TYPES:
         raise ValueError("Neplatný typ části.")
     if season_number is not None and season_number <= 0:
         raise ValueError("Číslo sezóny musí být kladné.")
@@ -821,6 +813,39 @@ def apply_single_title_confirmation(
     title.hierarchy_manual_override = True
     title.hierarchy_verified_at = utc_now()
     refresh_collection_state(collection, recalculate=False)
+    return title
+
+
+def set_manual_title_hierarchy(
+    title: CatalogTitle, *, season_number: int | None, season_label: str | None,
+    part_type: str | None, sort_order: int | None, hierarchy_verified: bool,
+) -> CatalogTitle:
+    """Apply the authoritative CatalogTitle hierarchy override used by admin UIs."""
+    normalized_label = (season_label or "").strip() or None
+    normalized_type = (part_type or "").strip().casefold() or None
+    if season_number is not None and season_number <= 0:
+        raise ValueError("Pořadí sezóny musí být kladné číslo.")
+    if sort_order is not None and sort_order < 0:
+        raise ValueError("Pořadí části nesmí být záporné.")
+    if normalized_label and len(normalized_label) > 50:
+        raise ValueError("Označení části může mít nejvýše 50 znaků.")
+    if normalized_type is not None and normalized_type not in PART_TYPES:
+        raise ValueError("Neplatný typ části.")
+    has_manual = any(
+        value is not None
+        for value in (season_number, normalized_label, normalized_type, sort_order)
+    )
+    if has_manual and not hierarchy_verified:
+        raise ValueError("Ruční hierarchii je nutné potvrdit jako ověřenou.")
+
+    title.season_number_manual = season_number
+    title.season_label_manual = normalized_label
+    title.part_type_manual = normalized_type
+    title.sort_order_manual = sort_order
+    title.hierarchy_manual_override = has_manual
+    title.hierarchy_verified_at = utc_now() if hierarchy_verified else None
+    if title.collection is not None:
+        refresh_collection_state(title.collection)
     return title
 
 
@@ -854,7 +879,7 @@ def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
         if integer_fields["episode_start_offset"] is not None and integer_fields["episode_start_offset"] < 0:
             raise ValueError(f"Část {position} má záporný offset.")
         part_type = str(value.get("part_type_manual") or "").strip().casefold() or None
-        if part_type and part_type not in ALLOWED_PART_TYPES:
+        if part_type and part_type not in PART_TYPES:
             raise ValueError(f"Část {position} má neplatný typ.")
         mode = str(value.get("numbering_mode") or "unknown").strip().casefold()
         if mode not in ALLOWED_NUMBERING_MODES:
@@ -1160,8 +1185,8 @@ def create_title_from_videos(
     normalized_type = part_type.strip().casefold()
     if not name:
         raise ValueError("Nová část musí mít název.")
-    if normalized_type not in VIDEO_CONTENT_TYPES:
-        raise ValueError("Neplatný typ doplňkového obsahu.")
+    if normalized_type not in PART_TYPES:
+        raise ValueError("Neplatný typ části.")
     if season_number is not None and season_number <= 0:
         raise ValueError("Číslo související sezóny musí být kladné.")
     normalized_label = (season_label or "").strip()[:50] or (
@@ -1187,7 +1212,8 @@ def create_title_from_videos(
     session.add(title)
     session.flush()
     for video in selected:
-        video.content_type_manual = video.content_type_manual or normalized_type
+        if normalized_type in VIDEO_CONTENT_TYPES:
+            video.content_type_manual = video.content_type_manual or normalized_type
         video.catalog_title = title
         video.catalog_collection = collection
     session.flush()
