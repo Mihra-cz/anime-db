@@ -29,7 +29,7 @@ from app.probe import ProbeError, probe_video
 from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, subtitle_matches
 
 logger = logging.getLogger(__name__)
-VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi"}
+VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi"}
 IGNORED_DIRECTORIES = {"#recycle", "@eadir"}
 MAX_REMOVAL_PERCENT = 20
 

@@ -1,6 +1,6 @@
 # AnimeDB
 
-AnimeDB je jednoduchý read-only katalog anime knihovny. Rekurzivně najde MKV, MP4 a AVI, načte technická metadata přes `ffprobe`, spáruje externí titulky a zobrazí souhrn ve webovém rozhraní. Do adresáře knihovny nikdy nezapisuje.
+AnimeDB je jednoduchý read-only katalog anime knihovny. Rekurzivně najde MKV, MP4, M4V a AVI, načte technická metadata přes `ffprobe`, spáruje externí titulky a zobrazí souhrn ve webovém rozhraní. Do adresáře knihovny nikdy nezapisuje.
 
 ## Spuštění bez Dockeru
 

@@ -2511,6 +2511,27 @@ git diff --check                            # prošlo
 
 ---
 
+## 6.35 Podpora M4V ve scanneru
+
+Scanner používá jediný seznam podporovaných video přípon `VIDEO_EXTENSIONS` v
+`app/scanner/service.py`. `iter_videos()` podle něj filtruje soubory a stejný
+iterátor přímo používá celý `scan_library()` workflow; další duplicitní seznam
+video přípon v aplikaci není.
+
+K dosavadním `.mkv`, `.mp4` a `.avi` byla doplněna `.m4v`. Porovnání přípony
+zůstává case-insensitive. Rozšíření se týká pouze výběru vstupních videosouborů
+pro existující bezpečný scan a `ffprobe`; nemění hierarchii ani databázový model.
+Audio, archivy, obrázky, fonty a textové doprovodné soubory se tím nestávají
+videem.
+
+Regresní test nad dočasnou knihovnou a in-memory SQLite ověřuje import MKV, MP4,
+M4V a AVI a současně odmítnutí MKA, M4A, FLAC, ZIP, RAR, PNG, JPG, BMP, TTF a
+TXT. Produkční databáze, produkční scan a NAS nejsou součástí testu.
+
+Změna nevyžaduje DB migraci ani změnu schema.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

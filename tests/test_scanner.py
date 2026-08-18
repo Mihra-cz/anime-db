@@ -113,6 +113,42 @@ def test_ignores_recycle(tmp_path: Path):
     assert [path.name for path in iter_videos(tmp_path)] == ["episode.mkv"]
 
 
+def test_scan_imports_supported_video_extensions_and_ignores_companion_files(
+    tmp_path: Path, monkeypatch,
+):
+    folder = tmp_path / "Show"
+    folder.mkdir()
+    supported = {
+        "Episode 01.mkv", "Episode 02.mp4", "Episode 03.m4v", "Episode 04.avi",
+    }
+    unsupported = {
+        "audio.mka", "audio.m4a", "audio.flac", "archive.zip", "archive.rar",
+        "cover.png", "cover.jpg", "cover.bmp", "font.ttf", "notes.txt",
+    }
+    for filename in supported | unsupported:
+        (folder / filename).write_bytes(b"test")
+    probed = []
+
+    def record_probe(path, **_):
+        probed.append(path.name)
+        return PROBE_RESULT
+
+    monkeypatch.setattr("app.scanner.service.probe_video", record_probe)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    assert {path.name for path in iter_videos(tmp_path)} == supported
+    with Session(engine) as session:
+        result = scan_library(session, tmp_path)
+        stored = set(session.scalars(select(Video.filename)).all())
+
+    assert result.found == result.created == len(supported)
+    assert result.errors == 0
+    assert stored == supported
+    assert set(probed) == supported
+    assert unsupported.isdisjoint(stored)
+
+
 def test_repeated_scan_has_no_duplicates(tmp_path: Path, monkeypatch):
     video_path = tmp_path / "Show" / "episode.mkv"
     video_path.parent.mkdir()
