@@ -2240,6 +2240,101 @@ def test_root_folder_link_has_readable_label_and_no_dead_dot_url():
     assert "/collections/None" not in catalog_rendered
 
 
+def test_homepage_collection_name_uses_metadata_preference_and_local_fallback(
+    tmp_path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'homepage-display-title.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        metadata_collection = CatalogCollection(
+            local_title="Fyzický název (P21)",
+            normalized_local_title="fyzicky nazev p21",
+            relative_root_path="Anime/Fyzický název (P21)",
+        )
+        metadata_title = CatalogTitle(
+            collection=metadata_collection,
+            local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Fyzický název (P21)/Season 1",
+            part_type="part",
+            part_number=1,
+            metadata_status="linked_manual",
+            metadata_record=TitleMetadata(
+                display_title="Metadata English - Part 1",
+                title_romaji="Metadata Romaji - Part 1",
+                title_english="Metadata English - Part 1",
+                title_native="メタデータ原題",
+            ),
+        )
+        metadata_video = Video(
+            relative_path="Anime/Fyzický název (P21)/Season 1/01.mkv",
+            root_folder="Anime", filename="01.mkv", size=1, mtime_ns=1,
+            file_type="episode", catalog_collection=metadata_collection,
+            catalog_title=metadata_title,
+        )
+        fallback_collection = CatalogCollection(
+            local_title="Bez metadat (L21)",
+            normalized_local_title="bez metadat l21",
+            relative_root_path="Anime/Bez metadat (L21)",
+        )
+        fallback_title = CatalogTitle(
+            collection=fallback_collection,
+            local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Bez metadat (L21)/Season 1",
+        )
+        fallback_video = Video(
+            relative_path="Anime/Bez metadat (L21)/Season 1/01.mkv",
+            root_folder="Anime", filename="01.mkv", size=1, mtime_ns=1,
+            file_type="episode", catalog_collection=fallback_collection,
+            catalog_title=fallback_title,
+        )
+        session.add_all([metadata_video, fallback_video])
+        session.commit()
+        metadata_title_id = metadata_title.id
+        fallback_title_id = fallback_title.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/"
+    )
+
+    def render(preference: str | None = None) -> str:
+        headers = [] if preference is None else [(
+            b"cookie",
+            f"{PREFERRED_TITLE_LANGUAGE_COOKIE}={preference}".encode(),
+        )]
+        request = Request({
+            "type": "http", "app": web_app, "method": "GET", "path": "/",
+            "root_path": "", "scheme": "http", "query_string": b"",
+            "headers": headers, "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+        })
+        page = endpoint(request).body.decode()
+        return page.split('class="panel logical-catalog"', 1)[1].split(
+            'class="panel physical-folders"', 1
+        )[0]
+
+    default_catalog = render()
+    assert f'href="/titles/{metadata_title_id}">Metadata Romaji</a>' in default_catalog
+    assert f'href="/titles/{fallback_title_id}">Bez metadat (L21)</a>' in default_catalog
+    assert ">Fyzický název (P21)</a>" not in default_catalog
+
+    expected_by_preference = {
+        "english": "Metadata English",
+        "native": "メタデータ原題",
+    }
+    for preference, expected in expected_by_preference.items():
+        catalog = render(preference)
+        assert f'href="/titles/{metadata_title_id}">{expected}</a>' in catalog
+        assert ">Fyzický název (P21)</a>" not in catalog
+
+
 def test_homepage_uses_logical_collections_and_simplifies_unambiguous_navigation(
     tmp_path,
 ):

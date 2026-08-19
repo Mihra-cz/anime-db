@@ -7,6 +7,7 @@ from app.catalog import (
     ROOT_VIDEO_GROUP_LABEL,
     SeriesSummary,
     build_catalog_results,
+    catalog_collection_display_title,
     catalog_title_display_title,
     catalog_title_series_label,
     classify_video,
@@ -93,6 +94,116 @@ def test_missing_preferred_metadata_variant_uses_deterministic_metadata_fallback
 
     assert catalog_title_display_title(title, "english") == "Romaji only"
     assert catalog_title_display_title(title, "native") == "Romaji only"
+
+
+@pytest.mark.parametrize(("preference", "full_title", "collection_title"), [
+    ("romaji", "Example Anime - Part 1", "Example Anime"),
+    ("english", "Example Anime English - Part 1", "Example Anime English"),
+    ("native", "原題 - Part 1", "原題"),
+])
+def test_collection_strips_structural_part_suffix_confirmed_by_hierarchy(
+    preference, full_title, collection_title,
+):
+    collection = CatalogCollection(
+        local_title="Physical Anime (P21)",
+        normalized_local_title="physical anime p21",
+        relative_root_path="Anime/Physical Anime (P21)",
+    )
+    title = CatalogTitle(
+        collection=collection,
+        local_title="Part 1",
+        normalized_local_title="part 1",
+        relative_root_path="Anime/Physical Anime (P21)/Part 1",
+        part_type="part",
+        part_number=1,
+        sort_order=1,
+        metadata_record=TitleMetadata(
+            display_title="Example Anime English - Part 1",
+            title_romaji="Example Anime - Part 1",
+            title_english="Example Anime English - Part 1",
+            title_native="原題 - Part 1",
+        ),
+    )
+
+    assert catalog_collection_display_title(
+        collection, preference, titles=[title]
+    ) == collection_title
+    assert catalog_title_display_title(title, preference) == full_title
+
+
+def test_collection_uses_common_part_base_confirmed_by_sibling_titles():
+    collection = CatalogCollection(
+        local_title="Physical Example (L20)",
+        normalized_local_title="physical example l20",
+        relative_root_path="Anime/Physical Example (L20)",
+    )
+    titles = [
+        CatalogTitle(
+            collection=collection,
+            local_title=f"Local {number}",
+            normalized_local_title=f"local {number}",
+            relative_root_path=f"Anime/Physical Example (L20)/Local {number}",
+            part_type="title",
+            sort_order=number,
+            metadata_record=TitleMetadata(
+                display_title=f"Example Anime - Part {number}",
+                title_romaji=f"Example Anime - Part {number}",
+            ),
+        )
+        for number in (1, 2)
+    ]
+
+    assert catalog_collection_display_title(
+        collection, "romaji", titles=titles
+    ) == "Example Anime"
+
+
+@pytest.mark.parametrize(("name", "part_type"), [
+    ("The Part-Time Hero", "part"),
+    ("Example Part 1: The Return", "part"),
+    ("Legitimate Title Part 1", "title"),
+])
+def test_collection_does_not_strip_part_without_structural_suffix_context(
+    name, part_type,
+):
+    collection = CatalogCollection(
+        local_title="Physical fallback",
+        normalized_local_title="physical fallback",
+        relative_root_path="Anime/Physical fallback",
+    )
+    title = CatalogTitle(
+        collection=collection,
+        local_title="Local title",
+        normalized_local_title="local title",
+        relative_root_path="Anime/Physical fallback/Local title",
+        part_type=part_type,
+        sort_order=1,
+        metadata_record=TitleMetadata(display_title=name, title_romaji=name),
+    )
+
+    assert catalog_collection_display_title(
+        collection, "romaji", titles=[title]
+    ) == name
+
+
+def test_collection_without_display_metadata_keeps_local_fallback():
+    collection = CatalogCollection(
+        local_title="Local fallback (Z20)",
+        normalized_local_title="local fallback z20",
+        relative_root_path="Anime/Local fallback (Z20)",
+    )
+    title = CatalogTitle(
+        collection=collection,
+        local_title="Part 1",
+        normalized_local_title="part 1",
+        relative_root_path="Anime/Local fallback (Z20)/Part 1",
+        part_type="part",
+        sort_order=1,
+    )
+
+    assert catalog_collection_display_title(
+        collection, "romaji", titles=[title]
+    ) == "Local fallback (Z20)"
 
 
 @pytest.mark.parametrize(("filename", "expected"), [

@@ -166,9 +166,13 @@ METADATA_STATUS_LABELS = {
 
 def _homepage_collection_rows(
     videos: list[Video], collection_title_ids: dict[int, tuple[int, ...]],
+    title_name_preference: object = "romaji",
 ) -> list[dict]:
     """Sestaví navigační homepage nad uloženou logickou hierarchií."""
-    results = build_catalog_results(videos, "all", sort="title", direction="asc")
+    results = build_catalog_results(
+        videos, "all", sort="title", direction="asc",
+        title_name_preference=title_name_preference,
+    )
     rows = []
     for group in results.groups:
         if group.is_root_group or group.catalog_collection_id is None:
@@ -517,6 +521,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             videos = session.scalars(select(Video).options(
                 selectinload(Video.internal_subtitles), selectinload(Video.external_subtitles),
                 selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
+                selectinload(Video.catalog_title).selectinload(CatalogTitle.metadata_record),
                 selectinload(Video.catalog_collection),
             )).all()
             collection_title_ids = {
@@ -527,7 +532,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             }
         folders: dict[str, dict[str, int]] = {}
         totals = _empty_stats()
-        collection_rows = _homepage_collection_rows(videos, collection_title_ids)
+        collection_rows = _homepage_collection_rows(
+            videos,
+            collection_title_ids,
+            get_preferred_title_language(request),
+        )
         totals["anime_titles"] = len(collection_rows)
         for video in videos:
             if not (is_root_video(video) and has_meaningful_root_assignment(video)):
@@ -545,7 +554,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if folder in {"", ROOT_FOLDER}:
             return RedirectResponse("/root-videos", status_code=307)
         videos = [video for video in _load_videos(sessions) if video.root_folder == folder]
-        results = build_catalog_results(videos, "all")
+        results = build_catalog_results(
+            videos, "all",
+            title_name_preference=get_preferred_title_language(request),
+        )
         def sort_url(column: str) -> str:
             return catalog_state_url(
                 "all", "", column,
@@ -698,7 +710,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
         videos = _load_videos(sessions)
-        results = build_catalog_results(videos, filter_name, q, sort, direction)
+        results = build_catalog_results(
+            videos, filter_name, q, sort, direction,
+            title_name_preference=get_preferred_title_language(request),
+        )
         def sort_url(column: str) -> str:
             return catalog_state_url(
                 filter_name, results.query, column,
@@ -734,7 +749,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
         all_videos = _load_videos(sessions)
-        results = build_catalog_results(all_videos, filter_name, q, sort, direction)
+        results = build_catalog_results(
+            all_videos, filter_name, q, sort, direction,
+            title_name_preference=get_preferred_title_language(request),
+        )
         with sessions() as session:
             catalog_title = _load_catalog_title(session, catalog_title_id)
             if catalog_title is None and series_path:

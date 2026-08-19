@@ -205,11 +205,10 @@ def title_filename_display_title(videos: Iterable[Video]) -> str | None:
     return candidates[0] if len(normalized) == 1 else None
 
 
-def catalog_title_display_title(
-    title: CatalogTitle, preference: object = "romaji",
-    *, videos: Iterable[Video] | None = None,
-) -> str:
-    """Vrátí prezentační název bez změny lokální identity nebo metadat."""
+def _catalog_title_explicit_display_title(
+    title: CatalogTitle, preference: object,
+) -> str | None:
+    """Vrátí ruční nebo metadata název bez lokálních fallbacků."""
     manual = (title.manual_display_title or "").strip()
     if manual:
         return manual
@@ -228,6 +227,17 @@ def catalog_title_display_title(
         legacy_display = (metadata.display_title or "").strip()
         if legacy_display:
             return legacy_display
+    return None
+
+
+def catalog_title_display_title(
+    title: CatalogTitle, preference: object = "romaji",
+    *, videos: Iterable[Video] | None = None,
+) -> str:
+    """Vrátí prezentační název bez změny lokální identity nebo metadat."""
+    explicit = _catalog_title_explicit_display_title(title, preference)
+    if explicit:
+        return explicit
     filename_title = title_filename_display_title(
         videos if videos is not None else title.videos
     )
@@ -237,9 +247,76 @@ def catalog_title_display_title(
     return local or "Titul bez názvu"
 
 
-def catalog_collection_display_title(collection: CatalogCollection) -> str:
-    """Vrátí uživatelský název kolekce bez změny její logické identity."""
-    return collection.manual_display_title or collection.local_title
+COLLECTION_STRUCTURAL_PART_SUFFIX = re.compile(
+    r"^(?P<base>.+?)(?:\s+[-–—:]\s*|\s+)part\s+(?P<number>[1-9]\d*)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _collection_structural_part_suffix(value: str) -> tuple[str, int] | None:
+    match = COLLECTION_STRUCTURAL_PART_SUFFIX.fullmatch(value.strip())
+    if match is None:
+        return None
+    base = match.group("base").strip()
+    return (base, int(match.group("number"))) if base else None
+
+
+def catalog_collection_display_title(
+    collection: CatalogCollection, preference: object = "romaji",
+    *, titles: Iterable[CatalogTitle] | None = None,
+) -> str:
+    """Vrátí hlavní název kolekce z ruční volby, metadat nebo lokální identity."""
+    manual = (collection.manual_display_title or "").strip()
+    if manual:
+        return manual
+
+    candidates: dict[tuple[str, int], CatalogTitle] = {}
+    for title in collection.titles if titles is None else titles:
+        belongs_to_collection = (
+            title.collection is collection
+            or collection.id is not None
+            and title.catalog_collection_id == collection.id
+        )
+        if not belongs_to_collection:
+            continue
+        key = ("db", title.id) if title.id is not None else ("object", id(title))
+        candidates[key] = title
+    ordered = sorted(
+        candidates.values(),
+        key=lambda title: (
+            title.effective_sort_order,
+            title.id is None,
+            title.id or 0,
+            title.local_title.casefold(),
+        ),
+    )
+    explicit_titles = [
+        (title, explicit)
+        for title in ordered
+        if (explicit := _catalog_title_explicit_display_title(title, preference))
+    ]
+    sibling_part_numbers: dict[str, set[int]] = {}
+    for _, explicit in explicit_titles:
+        suffix = _collection_structural_part_suffix(explicit)
+        if suffix is not None:
+            base, number = suffix
+            sibling_part_numbers.setdefault(
+                " ".join(base.casefold().split()), set()
+            ).add(number)
+
+    for title, explicit in explicit_titles:
+        suffix = _collection_structural_part_suffix(explicit)
+        if suffix is not None:
+            base, _ = suffix
+            sibling_confirms_parts = len(sibling_part_numbers.get(
+                " ".join(base.casefold().split()), set()
+            )) >= 2
+            if title.effective_part_type in {"part", "cour"} or sibling_confirms_parts:
+                return base
+        return explicit
+
+    local = (collection.local_title or "").strip()
+    return local or "Kolekce bez názvu"
 
 
 def catalog_title_series_label(title: CatalogTitle) -> str:
@@ -712,6 +789,7 @@ def video_matches_search(video: Video, query: str) -> bool:
 def build_catalog_results(
     videos: Iterable[Video], filter_name: str, query: str | None = None,
     sort: str | None = None, direction: str | None = None,
+    title_name_preference: object = "romaji",
 ) -> CatalogResults:
     video_list = list(videos)
     unresolved_duplicate_ids = (
@@ -738,7 +816,8 @@ def build_catalog_results(
         )
         group_name = (
             ROOT_VIDEO_GROUP_LABEL if is_unassigned_root
-            else catalog_collection_display_title(collection) if collection else identity.name
+            else catalog_collection_display_title(collection, titles=())
+            if collection else identity.name
         )
         all_by_title.setdefault(group_path, []).append(video)
         summary = groups.setdefault(
@@ -782,9 +861,18 @@ def build_catalog_results(
         is_unassigned_root = is_root_video(title_videos_list[0]) and root_collection is None
         display_name = (
             ROOT_VIDEO_GROUP_LABEL if is_unassigned_root
-            else catalog_collection_display_title(first_collection)
+            else catalog_collection_display_title(
+                first_collection,
+                title_name_preference,
+                titles=(
+                    video.catalog_title
+                    for video in title_videos_list
+                    if video.catalog_title is not None
+                ),
+            )
             if first_collection else identity.name
         )
+        groups[title_path].name = display_name
         display_path = (
             ROOT_FOLDER if is_unassigned_root
             else first_collection.relative_root_path if first_collection else identity.relative_path
