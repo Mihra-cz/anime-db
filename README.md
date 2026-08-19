@@ -61,6 +61,7 @@ pytest
 - Přeskakuje `#recycle`, `@eaDir` a adresáře začínající tečkou.
 - Externí SRT/ASS/SSA/VTT páruje podle shodného názvu (`ep01.srt`) i běžné jazykové přípony (`ep01.cs.srt`).
 - Češtinu a slovenštinu odhaduje lokální, transparentní heuristikou typických slov a znaků; neurčité texty označí `unknown`.
+- Dynamický `VideoLanguageProfile` bez nových DB polí sjednocuje raw audio stopy, interní a externí titulky a ruční CZ/SK hardsub. Rozlišuje JP audio `present`/`missing`/`unknown`/`no_audio`; EN fallback hlavního subtitle stavu používá pouze interní EN stream.
 - Relativní cesta je jedinečná. Nezměněné video znovu nevolá `ffprobe`; velikost nebo čas změny vyvolá aktualizaci. Externí titulky se obnovují při každém skenu.
 - Selhání jednoho souboru se zaloguje a sken pokračuje. Smazané či přesunuté soubory se odstraní pouze z databázového indexu.
 - Překročení timeoutu `ffprobe` označí pouze daný soubor jako chybu; jeho předchozí databázový záznam zůstane zachovaný.

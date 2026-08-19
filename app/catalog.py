@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 import re
+from typing import Literal
 import unicodedata
 
 from .models import CatalogCollection, CatalogTitle, Video
@@ -88,6 +89,56 @@ class TranslationStatus:
     has_unknown: bool
     automatic_has_cs: bool
     automatic_has_sk: bool
+
+
+JapaneseAudioStatus = Literal["present", "missing", "unknown", "no_audio"]
+SubtitleStatus = Literal["cs_sk_available", "en_only", "no_subtitles"]
+CsSkSubtitlePriority = Literal["none", "normal", "high"]
+SubtitleSource = Literal["internal", "external", "hardsub"]
+
+
+@dataclass(frozen=True)
+class AudioLanguageTrack:
+    stream_index: int
+    codec: str | None
+    raw_language: str
+    normalized_language: str
+
+
+@dataclass(frozen=True)
+class VideoLanguageProfile:
+    audio_tracks: tuple[AudioLanguageTrack, ...]
+    audio_languages: tuple[str, ...]
+    japanese_audio_status: JapaneseAudioStatus
+    has_japanese_audio: bool
+    internal_subtitle_languages: frozenset[str]
+    external_subtitle_languages: frozenset[str]
+    hardsub_languages: frozenset[str]
+    sources_by_language: Mapping[str, frozenset[SubtitleSource]]
+    has_cs: bool
+    has_sk: bool
+    has_cs_or_sk: bool
+    has_en: bool
+    has_unknown_subtitle_language: bool
+    subtitle_status: SubtitleStatus
+    needs_cs_sk_subtitles: bool
+    cs_sk_subtitle_priority: CsSkSubtitlePriority
+
+
+@dataclass(frozen=True)
+class _SubtitleLanguageProfile:
+    internal_languages: frozenset[str]
+    external_languages: frozenset[str]
+    hardsub_languages: frozenset[str]
+    sources_by_language: Mapping[str, frozenset[SubtitleSource]]
+    has_cs: bool
+    has_sk: bool
+    has_cs_or_sk: bool
+    has_en: bool
+    has_unknown: bool
+    status: SubtitleStatus
+    needs_cs_sk: bool
+    priority: CsSkSubtitlePriority
 
 
 @dataclass(frozen=True)
@@ -265,23 +316,133 @@ def manual_hardsub_state(video: Video) -> str:
     return "yes" if video.manual_hardsub_cs or video.manual_hardsub_sk else "no"
 
 
+def _build_subtitle_language_profile(video: Video) -> _SubtitleLanguageProfile:
+    internal_languages = frozenset(
+        (track.normalized_language or "unknown").strip().casefold()
+        for track in video.internal_subtitles
+    )
+    external_languages = frozenset(
+        (track.normalized_language or "unknown").strip().casefold()
+        for track in video.external_subtitles
+    )
+
+    # translation_status() historicky započítává uložené ruční příznaky i u
+    # legacy řádku bez timestampu. Profil tento význam existujících dat nemění.
+    hardsub_languages = frozenset(
+        language
+        for language, enabled in (
+            ("cs", video.manual_hardsub_cs),
+            ("sk", video.manual_hardsub_sk),
+        )
+        if enabled
+    )
+
+    mutable_sources: dict[str, set[SubtitleSource]] = {}
+    for language in internal_languages:
+        mutable_sources.setdefault(language, set()).add("internal")
+    for language in external_languages:
+        mutable_sources.setdefault(language, set()).add("external")
+    for language in hardsub_languages:
+        mutable_sources.setdefault(language, set()).add("hardsub")
+    sources_by_language = {
+        language: frozenset(sources)
+        for language, sources in mutable_sources.items()
+    }
+
+    has_cs = "cs" in sources_by_language
+    has_sk = "sk" in sources_by_language
+    has_cs_or_sk = has_cs or has_sk
+    # EN fallback je záměrně pouze interní subtitle stream.
+    has_en = "eng" in internal_languages
+    has_unknown = "unknown" in internal_languages or "unknown" in external_languages
+
+    if has_cs_or_sk:
+        status: SubtitleStatus = "cs_sk_available"
+        priority: CsSkSubtitlePriority = "none"
+    elif has_en:
+        status = "en_only"
+        priority = "normal"
+    else:
+        status = "no_subtitles"
+        priority = "high"
+
+    return _SubtitleLanguageProfile(
+        internal_languages=internal_languages,
+        external_languages=external_languages,
+        hardsub_languages=hardsub_languages,
+        sources_by_language=sources_by_language,
+        has_cs=has_cs,
+        has_sk=has_sk,
+        has_cs_or_sk=has_cs_or_sk,
+        has_en=has_en,
+        has_unknown=has_unknown,
+        status=status,
+        needs_cs_sk=not has_cs_or_sk,
+        priority=priority,
+    )
+
+
+def build_video_language_profile(video: Video) -> VideoLanguageProfile:
+    """Odvodí jazykový stav videa bez zápisu nebo změny databázových entit."""
+    audio_tracks = tuple(
+        AudioLanguageTrack(
+            stream_index=track.stream_index,
+            codec=track.codec,
+            raw_language=track.language or "unknown",
+            normalized_language=normalize_language(track.language),
+        )
+        for track in sorted(video.audio_tracks, key=lambda item: item.stream_index)
+    )
+    audio_languages = tuple(dict.fromkeys(
+        track.normalized_language for track in audio_tracks
+    ))
+    if "jpn" in audio_languages:
+        japanese_audio_status: JapaneseAudioStatus = "present"
+    elif not audio_tracks:
+        japanese_audio_status = "no_audio"
+    elif "unknown" in audio_languages:
+        japanese_audio_status = "unknown"
+    else:
+        japanese_audio_status = "missing"
+
+    subtitle = _build_subtitle_language_profile(video)
+
+    return VideoLanguageProfile(
+        audio_tracks=audio_tracks,
+        audio_languages=audio_languages,
+        japanese_audio_status=japanese_audio_status,
+        has_japanese_audio=japanese_audio_status == "present",
+        internal_subtitle_languages=subtitle.internal_languages,
+        external_subtitle_languages=subtitle.external_languages,
+        hardsub_languages=subtitle.hardsub_languages,
+        sources_by_language=subtitle.sources_by_language,
+        has_cs=subtitle.has_cs,
+        has_sk=subtitle.has_sk,
+        has_cs_or_sk=subtitle.has_cs_or_sk,
+        has_en=subtitle.has_en,
+        has_unknown_subtitle_language=subtitle.has_unknown,
+        subtitle_status=subtitle.status,
+        needs_cs_sk_subtitles=subtitle.needs_cs_sk,
+        cs_sk_subtitle_priority=subtitle.priority,
+    )
+
+
 def translation_status(video: Video) -> TranslationStatus:
-    internal = {track.normalized_language for track in video.internal_subtitles}
-    external = {track.normalized_language for track in video.external_subtitles}
+    profile = _build_subtitle_language_profile(video)
+    internal = profile.internal_languages
+    external = profile.external_languages
     target = {"cs", "sk"}
     internal_target = bool(internal & target)
     external_target = bool(external & target)
     source = "both" if internal_target and external_target else "internal" if internal_target else "external" if external_target else None
     automatic_has_cs = "cs" in internal or "cs" in external
     automatic_has_sk = "sk" in internal or "sk" in external
-    has_cs = automatic_has_cs or bool(video.manual_hardsub_cs)
-    has_sk = automatic_has_sk or bool(video.manual_hardsub_sk)
     return TranslationStatus(
-        has_cs=has_cs,
-        has_sk=has_sk,
-        has_cs_or_sk=has_cs or has_sk,
+        has_cs=profile.has_cs,
+        has_sk=profile.has_sk,
+        has_cs_or_sk=profile.has_cs_or_sk,
         subtitle_source=source,
-        has_unknown="unknown" in internal or "unknown" in external,
+        has_unknown=profile.has_unknown,
         automatic_has_cs=automatic_has_cs,
         automatic_has_sk=automatic_has_sk,
     )

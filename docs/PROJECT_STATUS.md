@@ -2,7 +2,7 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 14. srpna 2026
+> **Aktualizováno:** 19. srpna 2026
 > **Aktuální checkpoint:** V5 dokončena – následuje stabilizace hierarchie a ladění UI nad reálnou knihovnou
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
@@ -2529,6 +2529,27 @@ M4V a AVI a současně odmítnutí MKA, M4A, FLAC, ZIP, RAR, PNG, JPG, BMP, TTF 
 TXT. Produkční databáze, produkční scan a NAS nejsou součástí testu.
 
 Změna nevyžaduje DB migraci ani změnu schema.
+
+---
+
+## 6.36 Centrální dynamický jazykový profil videa
+
+`build_video_language_profile(video)` v `app/catalog.py` sjednocuje existující
+`AudioTrack`, `InternalSubtitle`, `ExternalSubtitle` a ruční CZ/SK hardsub do
+jednoho read-modelu. Nic nepersistuje a nevznikly nové DB sloupce ani migrace.
+Raw jazyk audia normalizuje za běhu přes existující `normalize_language()` a
+JP audio rozlišuje jako `present`, `missing`, `unknown` nebo `no_audio` bez
+odhadování default stopy.
+
+Subtitle profil zachovává více zdrojů stejného jazyka (`internal`, `external`,
+`hardsub`). Hlavní stav je `cs_sk_available`, `en_only` nebo `no_subtitles`.
+EN fallback se počítá pouze z interního EN streamu; externí EN a subtitle s
+neznámým jazykem zůstávají technickým detailem a nemění hlavní stav ani prioritu
+doplnění CZ/SK (`none`, `normal`, `high`). Dosavadní `translation_status()`
+používá stejný profil a zachovává své veřejné chování v aktuálním UI.
+
+Scanner, `probe_video()`, audio/subtitle entity, UI a produkční data se touto
+změnou nemění.
 
 ---
 
