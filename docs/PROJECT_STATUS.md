@@ -2551,6 +2551,46 @@ používá stejný profil a zachovává své veřejné chování v aktuálním U
 Scanner, `probe_video()`, audio/subtitle entity, UI a produkční data se touto
 změnou nemění.
 
+### Budoucí ruční určení jazyka subtitle stopy
+
+Současná pole `language` a `normalized_language` u `ExternalSubtitle` a
+`InternalSubtitle` jsou detekované hodnoty spravované scannerem. Budoucí ruční
+oprava jazyka se do nich nesmí zapisovat, protože opakovaný scan by mohl ruční
+rozhodnutí přepsat. Další implementace má přidat oddělenou nullable ruční
+normalizovanou hodnotu a efektivní jazyk číst v pořadí:
+
+```text
+manual normalized language
+→ detected normalized language
+→ unknown
+```
+
+První priorita je `ExternalSubtitle`; stejný mechanismus lze později použít i
+pro chybná nebo neznámá metadata `InternalSubtitle`. V aktuálním kroku nebylo
+přidáno žádné DB pole, migrace, formulář ani zápisová logika a
+`VideoLanguageProfile` stále čte současnou detekovanou hodnotu.
+
+### Identita, vazba a filename externích titulků
+
+Budoucí import musí oddělit pět různých informací:
+
+1. identitu fyzického subtitle souboru,
+2. detekovaný a případně ručně opravený jazyk,
+3. logickou vazbu subtitle souboru na konkrétní `Video`,
+4. aktuální filename a cestu,
+5. budoucí navržený cílový filename a cestu.
+
+Filename není autoritou logické vazby. Import proto musí umět navrhnout vazbu
+například mezi `Anime S01E03.mkv` a `titulky_epizoda_3_final.ass` podle dalších
+dostupných informací a před potvrzením ji pouze zobrazit uživateli. Až po ručním
+potvrzení vazby může navrhnout cílový subtitle filename odpovídající cílovému
+videu. Fyzické přejmenování nebo přesun patří výhradně do budoucího
+import/reorganizačního workflow a vyžaduje samostatné explicitní potvrzení.
+
+Současné párování podle shodného filename stemu zůstává beze změny jako
+praktické pravidlo normálního scanu již uspořádané knihovny. Nebylo rozšířeno na
+fuzzy importní párování ani použito jako jediný obecný zdroj pravdy.
+
 ---
 
 # 7. V6 – Úplnost knihovny ⏳
