@@ -1461,7 +1461,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return local_redirect_response(f"/hierarchy-review/{collection_id}#result")
+        message = "Ruční rozdělení bylo úspěšně aplikováno."
+        return local_redirect_response(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}"
+            "#operation-result"
+        )
 
     @app.post("/hierarchy-review/{collection_id}/status")
     def hierarchy_review_status(
@@ -1523,11 +1527,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             operation = str(form.get("operation") or "").strip()
             with sessions() as session:
                 if operation == "classify":
+                    content_type = str(form.get("content_type") or "")
                     classify_videos_in_place(
                         session, collection_id, video_ids,
-                        str(form.get("content_type") or ""),
+                        content_type,
                     )
-                    message = "Obsah byl ručně zařazen v současné části."
+                    message = (
+                        "Ruční klasifikace byla zrušena; obsah se znovu určuje "
+                        "automaticky."
+                        if not content_type.strip()
+                        else "Obsah byl ručně zařazen v současné části."
+                    )
                 elif operation == "move":
                     move_videos_to_title(
                         session, collection_id, video_ids,

@@ -33,6 +33,7 @@ from app.migrations import migrate_schema
 from app.numbering import (
     apply_sequential_numbering,
     collection_requires_numbering_review as numbering_requires_review,
+    effective_video_numbering,
     recalculate_title_numbering,
     set_video_episode_override,
     summarize_title_numbering, unresolved_duplicate_groups,
@@ -940,6 +941,62 @@ def test_fractional_recap_can_stay_in_season_and_survives_session_and_scan(
         assert recap.catalog_title_id == season_id
         assert recap.content_type_manual == "recap"
         assert recap.relative_path == original_path
+
+
+def test_manual_video_classification_can_return_to_automatic_without_other_changes():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Arifureta", normalized_local_title="arifureta",
+            relative_root_path="Anime/Arifureta", hierarchy_status="verified",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Arifureta/Season 1",
+            part_type_manual="season", season_number_manual=1,
+            season_label_manual="S1", sort_order_manual=4,
+            hierarchy_manual_override=True, hierarchy_verified_at=utc_now(),
+        )
+        video = Video(
+            relative_path="Anime/Arifureta/Season 1/Arifureta - 05.5.mkv",
+            root_folder="Anime", filename="Arifureta - 05.5.mkv",
+            size=123, mtime_ns=456, content_type_manual="recap",
+            duplicate_status_manual="suspected", manual_hardsub_cs=True,
+            catalog_title=title, catalog_collection=collection,
+        )
+        session.add(collection)
+        session.commit()
+        title_state = (
+            title.part_type_manual, title.season_number_manual,
+            title.season_label_manual, title.sort_order_manual,
+            title.hierarchy_manual_override, title.hierarchy_verified_at,
+        )
+        unrelated_video_state = (
+            video.duplicate_status_manual, video.manual_hardsub_cs,
+            video.manual_hardsub_verified_at, video.relative_path,
+            video.catalog_title_id, video.catalog_collection_id,
+        )
+
+        classify_videos_in_place(session, collection.id, [video.id], "")
+
+        assert video.content_type_manual is None
+        assert effective_video_numbering(video).is_nonstandard
+        assert (
+            title.part_type_manual, title.season_number_manual,
+            title.season_label_manual, title.sort_order_manual,
+            title.hierarchy_manual_override, title.hierarchy_verified_at,
+        ) == title_state
+        assert (
+            video.duplicate_status_manual, video.manual_hardsub_cs,
+            video.manual_hardsub_verified_at, video.relative_path,
+            video.catalog_title_id, video.catalog_collection_id,
+        ) == unrelated_video_state
+        assert collection.hierarchy_status == "review_required"
+        assert collection.hierarchy_note == (
+            "Číslování nebo nezařazený obsah stále vyžaduje kontrolu."
+        )
 
 
 def test_move_merge_and_explicit_delete_change_only_logical_assignment():

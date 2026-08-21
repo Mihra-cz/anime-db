@@ -1075,14 +1075,14 @@ def refresh_collection_state(
 def classify_videos_in_place(
     session: Session, collection_id: int, video_ids: list[int], content_type: str,
 ) -> list[Video]:
-    normalized_type = content_type.strip().casefold()
-    if normalized_type not in VIDEO_CONTENT_TYPES:
+    normalized_type = content_type.strip().casefold() or None
+    if normalized_type is not None and normalized_type not in VIDEO_CONTENT_TYPES:
         raise ValueError("Neplatný typ doplňkového obsahu.")
     collection = _load_collection_for_assignment(session, collection_id)
     selected = _selected_videos(collection, video_ids)
     for video in selected:
         video.content_type_manual = normalized_type
-        if video.catalog_title is not None:
+        if normalized_type is not None and video.catalog_title is not None:
             video.catalog_title.hierarchy_manual_override = True
             video.catalog_title.hierarchy_verified_at = utc_now()
     session.flush()

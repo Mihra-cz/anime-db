@@ -1500,8 +1500,9 @@ def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_pat
     assert all(tuple(value for value in choices if value) == expected_part_types
                for choices in collection_choices + review_manual_choices)
     assert all(choices == expected_part_types for choices in review_split_choices)
-    assert all(choices == tuple(value for value, _ in VIDEO_CONTENT_TYPE_CHOICES)
+    assert all(choices == ("", *(value for value, _ in VIDEO_CONTENT_TYPE_CHOICES))
                for choices in video_choices)
+    assert "Automaticky / zrušit ruční klasifikaci" in review_html
     assert "film" in expected_part_types
     assert all("film" not in choices for choices in video_choices)
     assert (
@@ -1511,6 +1512,72 @@ def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_pat
     assert 'name="return_to" value="hierarchy_review"' in review_html
     assert "Typ celé části" in review_html
     assert "Klasifikace vybraných videí" in review_html
+
+
+def test_manual_split_apply_redirects_to_visible_success_message(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'manual-split-apply.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show", hierarchy_status="review_required",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        videos = [Video(
+            relative_path=f"Anime/Show/Show - {number:02}.mkv",
+            root_folder="Anime", filename=f"Show - {number:02}.mkv",
+            size=number, mtime_ns=number, local_episode_number=number,
+            season_episode_number=number, catalog_title=title,
+            catalog_collection=collection,
+        ) for number in (1, 2)]
+        session.add(collection)
+        session.commit()
+        collection_id, title_id = collection.id, title.id
+        video_ids = [video.id for video in videos]
+
+    definitions_json = (
+        '[{"title_id": %d, "local_title": "Season 1", '
+        '"part_type_manual": "season", "season_number_manual": 1, '
+        '"season_label_manual": "S1", "video_ids": [%s]}]'
+        % (title_id, ", ".join(str(video_id) for video_id in video_ids))
+    )
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")
+    }
+
+    response = endpoints["/hierarchy-review/{collection_id}/apply"](
+        collection_id, definitions_json=definitions_json, confirm_conflicts=False,
+    )
+
+    assert response.status_code == 303
+    target = urlparse(response.headers["location"])
+    assert target.path == f"/hierarchy-review/{collection_id}"
+    assert target.fragment == "operation-result"
+    message = parse_qs(target.query)["message"][0]
+    assert message == "Ruční rozdělení bylo úspěšně aplikováno."
+
+    rendered = endpoints["/hierarchy-review/{collection_id}"](
+        web_request(web_app, target.path), collection_id, message=message,
+    ).body.decode()
+    assert (
+        '<div class="notice success" id="operation-result">'
+        "Ruční rozdělení bylo úspěšně aplikováno.</div>"
+    ) in rendered
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        title = session.get(CatalogTitle, title_id)
+        assert collection.hierarchy_status == "verified"
+        assert title.hierarchy_manual_override is True
+        assert title.effective_part_type == "season"
+        assert title.effective_season_number == 1
 
 
 def test_isekai_quartet_movie_can_be_marked_as_film_from_hierarchy_review(tmp_path):
@@ -1963,7 +2030,8 @@ def test_season_two_confirmation_clears_period_hint_reason_and_renders_verified(
     assert "<dt>Rozsah</dt><dd>E1–E12</dd>" in rendered
     assert "<dt>Unknown</dt><dd>0</dd>" in rendered
     assert "<dt>Nestandardní</dt><dd>0</dd>" in rendered
-    assert "<dt>Ručně zařazený doplněk</dt><dd>0</dd>" in rendered
+    assert "<dt>Zařazený doplňkový obsah</dt><dd>0</dd>" in rendered
+    assert "Ručně zařazený doplněk" not in rendered
     assert "Metadata propojena" in rendered
     assert "Číslování vyřešeno" in rendered
 
