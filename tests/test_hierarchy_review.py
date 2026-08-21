@@ -109,12 +109,86 @@ def simple_collection(*, part_type="title", status="review_required", with_video
     return collection, title
 
 
-def test_flat_collection_with_episodes_1_to_26_requires_review():
+def test_flat_collection_with_episodes_1_to_26_requires_review_for_possible_parts():
     engine, collection_id, _ = seeded_collection()
     with Session(engine) as session:
         collection = session.get(CatalogCollection, collection_id)
         reason = collection_requires_review(collection, list(collection.videos))
-        assert reason == PERIOD_HINT_REVIEW_REASON
+        assert reason == (
+            "Souvislá řada epizod bez sezónních podsložek může obsahovat více částí."
+        )
+
+
+def explicit_season_collection(local_title: str) -> CatalogCollection:
+    collection = CatalogCollection(
+        id=1, local_title=local_title, normalized_local_title="anime",
+        relative_root_path=f"Anime/{local_title}",
+    )
+    for season_number in (1, 2):
+        title = CatalogTitle(
+            id=season_number, collection=collection,
+            local_title=f"Serie{season_number}",
+            normalized_local_title=f"serie{season_number}",
+            relative_root_path=f"Anime/{local_title}/Serie{season_number}",
+            part_type="season", season_number=season_number,
+            season_label=f"S{season_number}",
+        )
+        Video(
+            id=season_number,
+            relative_path=f"{title.relative_root_path}/E01.mkv",
+            root_folder="Anime", filename="E01.mkv", size=1, mtime_ns=1,
+            local_episode_number=1, season_episode_number=1,
+            absolute_episode_number=1, catalog_title=title,
+            catalog_collection=collection,
+        )
+    return collection
+
+
+def test_bare_legacy_period_range_does_not_require_review_for_explicit_seasons():
+    collection = explicit_season_collection("Anime L20-P23")
+
+    assert extract_local_period_hint(collection.local_title) == "L20-P23"
+    assert all(not title.hierarchy_manual_override for title in collection.titles)
+    assert collection_requires_review(collection, list(collection.videos)) is None
+
+
+@pytest.mark.parametrize("local_title", ["Anime (L20-P23)", "Anime ( L20-P23 )"])
+def test_parenthesized_legacy_period_range_does_not_require_hierarchy_review(
+    local_title,
+):
+    collection = explicit_season_collection(local_title)
+
+    assert extract_local_period_hint(collection.local_title) == "L20-P23"
+    assert collection_requires_review(collection, list(collection.videos)) is None
+
+
+def test_single_legacy_period_hint_is_not_a_hierarchy_reason():
+    collection = CatalogCollection(
+        id=1, local_title="Anime P21", normalized_local_title="anime p21",
+        relative_root_path="Anime/Anime P21",
+    )
+    title = CatalogTitle(
+        id=1, collection=collection, local_title="Anime P21",
+        normalized_local_title="anime p21", relative_root_path="Anime/Anime P21",
+    )
+    Video(
+        id=1, relative_path="Anime/Anime P21/E01.mkv", root_folder="Anime",
+        filename="E01.mkv", size=1, mtime_ns=1, local_episode_number=1,
+        season_episode_number=1, absolute_episode_number=1,
+        catalog_title=title, catalog_collection=collection,
+    )
+
+    assert extract_local_period_hint(collection.local_title) == "P21"
+    assert collection_requires_review(collection, list(collection.videos)) is None
+
+
+def test_legacy_period_hint_does_not_hide_real_hierarchy_problem():
+    collection = _season_filename_collection("S02E03-Whatever.mkv")
+    collection.local_title = "Anime P21"
+
+    assert collection_requires_review(
+        collection, list(collection.videos)
+    ) == FILENAME_SEASON_CONFLICT_REVIEW_REASON
 
 
 def _season_filename_collection(filename: str, *, manual=False):
@@ -413,7 +487,7 @@ def test_new_unknown_reopens_confirmed_season_and_manual_numbering_resolves_it()
     assert collection.hierarchy_verified_at is not None
 
 
-def test_confirmed_period_hint_collection_reopens_for_new_scan_problem(
+def test_nonblocking_period_hint_collection_reopens_for_new_scan_problem(
     tmp_path: Path, monkeypatch,
 ):
     folder = tmp_path / "Asobi Asobase (L18)"
@@ -431,8 +505,8 @@ def test_confirmed_period_hint_collection_reopens_for_new_scan_problem(
     with sessions() as session:
         scan_library(session, tmp_path)
         collection = session.scalar(select(CatalogCollection))
-        assert collection.hierarchy_status == "review_required"
-        assert collection.hierarchy_note == PERIOD_HINT_REVIEW_REASON
+        assert collection.hierarchy_status == "automatic"
+        assert collection.hierarchy_note is None
 
         title = apply_single_title_confirmation(
             collection, part_type="season", season_number=2, season_label=None,

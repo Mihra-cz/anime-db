@@ -68,6 +68,7 @@ pytest
 - Překročení timeoutu `ffprobe` označí pouze daný soubor jako chybu; jeho předchozí databázový záznam zůstane zachovaný.
 - Dostupnost knihovny se kontroluje před skenem, průběžně a znovu před mazací fází. Výpadek vyvolá rollback celého skenu.
 - Logická hierarchie používá `CatalogCollection -> CatalogTitle -> Video`: collection je hlavní anime, title je season, film, OVA nebo doplňková část.
+- Legacy značky `Z`/`J`/`L`/`P` + dvouciferný rok (např. `P21` nebo `L20-P23`) jsou pouze historické časové poznámky. Neurčují season, part ani hranice `CatalogTitle` a samy nevyvolávají Hierarchy Review. Závorková varianta, včetně `(L20-P23)` a `( L20-P23 )`, historicky znamenala také „dokoukáno“; watch-state se z ní nyní nemigruje. Případné budoucí použití jako slabého hintu pro metadata candidate scoring je pouze roadmapa.
 - `Season 1`, `Season 2`, `OVA`, `Specials`, `NC`, `OP`, `ED`, `Movies`, `Bonus` a podobné child složky pod zjevným anime rootem nevytvářejí samostatné hlavní collections.
 - Explicitní kombinace jako `Season 2 Shorts`, `Season 1 Specials`, `S2 OVA` nebo `S2 SPs` zůstávají ve stejné collection, nesou známý season scope a používají existující supplementary typ CatalogTitle.
 - Potvrzené hierarchy označení (`Season 1`, `S1`, `Season 2`, …) se mechanicky nepřidává do výchozího metadata search dotazu. Běžný skutečný lokální titul zůstává zachován; u čistě strukturálního názvu části se použije známý název konkrétního titulu z metadat, případně čistý název collection.

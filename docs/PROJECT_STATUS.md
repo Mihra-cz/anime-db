@@ -576,8 +576,13 @@ not_applicable
 ```
 
 Interní poznámky jako `J19`, `Z18-L20` nebo `L15-L22` se mohou uložit do
-`local_period_hint`. Neurčují automaticky počet sezón, částí ani epizod a původní
-`local_title` a cesta zůstávají beze změny.
+`local_period_hint`. Jde o legacy časové/metadata hinty, nikoli hierarchy
+autoritu: neurčují počet sezón, částí ani epizod a samy nejsou důvodem
+`review_required`. Závorková varianta, například `(L20-P23)` nebo
+`( L20-P23 )`, historicky navíc znamenala „dokoukáno“; ani tato informace není
+hierarchy údaj a současná verze z ní nemigruje watch-state. Původní `local_title`
+a cesta zůstávají beze změny. Budoucí slabé použití při metadata candidate
+scoringu je pouze roadmapa a zatím není implementované.
 
 ### `CatalogTitle`
 
@@ -1734,6 +1739,10 @@ zahájena.
 
 ## 6.20 Uzavření suffixové ambiguity potvrzením Season 1
 
+Tato sekce zaznamenává dřívější stav implementace. Od změny popsané v části
+6.37 se legacy period hint už jako hierarchy ambiguity ani review reason
+nepoužívá; confirmation workflow zůstává platné pro jiné skutečné nejasnosti.
+
 Při kontrole `Asobi Asobase (L18)` se ukázalo, že potvrzení návrhu **Nastavit
 jako Season 1** sice persistovalo `season_number_manual=1`,
 `season_label_manual="S1"`, `part_type_manual="season"` a
@@ -1780,10 +1789,11 @@ hodnota proto znovu neaktivuje dřívější automatický folder hint.
 
 Po potvrzení například Season 2 se uloží `season_number_manual=2` a label S2,
 nastaví se existující `hierarchy_manual_override` a ruční rozhodnutí přežije
-následný scan. Tím se suffixová nejednoznačnost uzavírá stejně jako u Season 1,
-pokud neexistuje jiný aktuální problém. Display title, lokální název,
-`ExternalTitleLink`, filename a `relative_path` jsou na čísle sezóny nezávislé
-a confirmation je nemění.
+následný scan. V tehdejším chování se tím uzavírala suffixová nejednoznačnost;
+od části 6.37 samotný suffix žádnou hierarchy nejednoznačnost nevytváří.
+Confirmation nadále řeší jiné skutečné nejasnosti. Display title, lokální název,
+`ExternalTitleLink`, filename a `relative_path` jsou na čísle sezóny nezávislé a
+confirmation je nemění.
 
 Nebyla přidána databázová tabulka, sloupec ani migrace. Produkční databáze a
 fyzická struktura NASu se nemění a V6 zůstává nezahájena.
@@ -2590,6 +2600,35 @@ import/reorganizačního workflow a vyžaduje samostatné explicitní potvrzení
 Současné párování podle shodného filename stemu zůstává beze změny jako
 praktické pravidlo normálního scanu již uspořádané knihovny. Nebylo rozšířeno na
 fuzzy importní párování ani použito jako jediný obecný zdroj pravdy.
+
+---
+
+## 6.37 Legacy seasonal/year suffix není hierarchy autorita
+
+Značky `Z`, `J`, `L` a `P` s dvouciferným rokem jsou historické uživatelské
+časové poznámky: zima, jaro, léto a podzim. Hodnoty jako `P21` nebo `L20-P23`
+nepopisují season number, part, cour ani hranice `CatalogTitle`. Varianta v
+závorkách, například `(L20-P23)` nebo `( L20-P23 )`, historicky navíc vyjadřovala
+„dokoukáno“; tato informace se pro hierarchy nepoužívá a watch-state migrace
+nebyla implementována.
+
+`extract_local_period_hint()` a `CatalogCollection.local_period_hint` zůstávají
+zachované jako informační základ pro možné budoucí metadata matching. Samotná
+přítomnost hintu už ale není větví `collection_requires_review()` a nevyžaduje
+`hierarchy_manual_override` jednotlivých částí. Explicitní child adresáře jako
+`Serie1`, `Serie2`, `Season 1` a `Season 2` se nadále parsují nezávisle na suffixu
+parent collection.
+
+Ostatní review důvody zůstávají aktivní: konflikt season ve filename, explicitní
+supplementary obsah bez canonical čísla, nestandardní číslování, chybějící nebo
+potvrzené duplicity a souvislá dlouhá řada epizod bez bezpečných hranic částí.
+Scanner navíc nadále kontroluje nezařazená videa, konflikty manual splitu a
+nejisté seskupení pojmenovaných či season-scoped supplementary částí.
+
+Možné budoucí použití `P21` jako slabého hintu pro Fall 2021 nebo rozsahu
+`L20-P23` při skórování metadata kandidátů je pouze roadmapa. V této změně nebyl
+period hint zapojen do metadata matching, nebylo změněno DB schema a nebyla
+přidána watch-state migrace.
 
 ---
 

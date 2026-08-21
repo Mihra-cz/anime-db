@@ -27,8 +27,11 @@ from .numbering import (
 
 
 PERIOD_HINT = re.compile(
-    r"(?:\(|\s)([A-Z]\d{2}(?:-[A-Z]\d{2})?)(?:\)|\s*$)", re.IGNORECASE
+    r"(?:\(\s*|\s)([A-Z]\d{2}(?:-[A-Z]\d{2})?)(?:\s*\)|\s*$)",
+    re.IGNORECASE,
 )
+# Zachováno pouze pro rozpoznání dříve persistované poznámky v administračním
+# formuláři. collection_requires_review už legacy časový hint jako důvod nevrací.
 PERIOD_HINT_REVIEW_REASON = (
     "Interní časový rozsah neurčuje bezpečně hranice sezón nebo částí."
 )
@@ -724,8 +727,6 @@ def collection_requires_review(collection: CatalogCollection, videos: list[Video
         return FILENAME_SEASON_CONFLICT_REVIEW_REASON
     if any(_has_unnumbered_explicit_supplementary(video) for video in videos):
         return UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON
-    if extract_local_period_hint(collection.local_title) and not hierarchy_resolved:
-        return PERIOD_HINT_REVIEW_REASON
     states = [effective_video_numbering(video) for video in videos]
     nonstandard = [
         state.detection.display_value for state in states if state.is_nonstandard

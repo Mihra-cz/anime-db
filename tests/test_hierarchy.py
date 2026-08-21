@@ -17,6 +17,26 @@ def test_ansatsu_season_folders_create_two_parts_in_one_collection():
     assert second.title.season_number == 2 and second.title.season_label == "S2"
 
 
+@pytest.mark.parametrize(("first_folder", "second_folder"), [
+    ("Serie1", "Serie2"),
+    ("Season 1", "Season 2"),
+])
+def test_explicit_season_folders_keep_their_hierarchy_with_legacy_root_suffix(
+    first_folder, second_folder,
+):
+    paths = [
+        f"Anime/Show L20-P23/{first_folder}/E01.mkv",
+        f"Anime/Show L20-P23/{second_folder}/E01.mkv",
+    ]
+
+    hierarchy = derive_library_hierarchy(paths)
+
+    assert {
+        (item.title.part_type, item.title.season_number, item.title.season_label)
+        for item in hierarchy.values()
+    } == {("season", 1, "S1"), ("season", 2, "S2")}
+
+
 @pytest.mark.parametrize(("roman", "number"), [
     ("I", 1), ("II", 2), ("III", 3), ("IV", 4),
 ])
