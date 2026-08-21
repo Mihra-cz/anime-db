@@ -1,5 +1,6 @@
 import asyncio
 from http.cookies import SimpleCookie
+from pathlib import Path
 import re
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -79,6 +80,25 @@ def web_request(web_app, path, *, cookie=None):
         "headers": headers, "server": ("testserver", 80),
         "client": ("testclient", 50000),
     })
+
+
+def post_form_request(web_app, path, items):
+    body = urlencode(items).encode()
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if sent:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request({
+        "type": "http", "app": web_app, "method": "POST", "path": path,
+        "root_path": "", "scheme": "http", "query_string": b"",
+        "headers": [(b"content-type", b"application/x-www-form-urlencoded")],
+        "server": ("testserver", 80), "client": ("testclient", 50000),
+    }, receive)
 
 
 def select_option_values(rendered: str, name: str) -> list[tuple[str, ...]]:
@@ -1451,6 +1471,284 @@ def test_hataraku_sp_recommendation_is_read_only_prefill_for_existing_form(tmp_p
         ) == before
 
 
+def test_fractional_video_can_be_classified_directly_without_confirming_title(
+    tmp_path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'direct-video-classification.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Kandagawa Jet Girls P19",
+            normalized_local_title="kandagawa jet girls p19",
+            relative_root_path="Anime/Kandagawa Jet Girls P19",
+            hierarchy_status="review_required",
+            hierarchy_note="Nestandardní číslování vyžaduje ruční zařazení.",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Kandagawa Jet Girls P19",
+            normalized_local_title="kandagawa jet girls p19",
+            relative_root_path="Anime/Kandagawa Jet Girls P19",
+        )
+        for number in range(1, 13):
+            Video(
+                relative_path=(
+                    f"Anime/Kandagawa Jet Girls P19/"
+                    f"Kandagawa Jet Girls - {number:02}.mkv"
+                ),
+                root_folder="Anime",
+                filename=f"Kandagawa Jet Girls - {number:02}.mkv",
+                size=number, mtime_ns=number, local_episode_number=number,
+                season_episode_number=number, absolute_episode_number=number,
+                catalog_title=title, catalog_collection=collection,
+            )
+        fractional = Video(
+            relative_path=(
+                "Anime/Kandagawa Jet Girls P19/Kandagawa Jet Girls - 04.5.mkv"
+            ),
+            root_folder="Anime", filename="Kandagawa Jet Girls - 04.5.mkv",
+            size=45, mtime_ns=45, duplicate_status_manual="suspected",
+            manual_hardsub_cs=True, manual_hardsub_verified_at=utc_now(),
+            catalog_title=title, catalog_collection=collection,
+        )
+        session.add(collection)
+        refresh_collection_state(collection)
+        session.commit()
+        collection_id, title_id, video_id = collection.id, title.id, fractional.id
+        title_state = (
+            title.part_type_manual, title.season_number_manual,
+            title.season_label_manual, title.sort_order_manual,
+            title.hierarchy_manual_override, title.hierarchy_verified_at,
+        )
+        unrelated_video_state = (
+            fractional.duplicate_status_manual, fractional.manual_hardsub_cs,
+            fractional.manual_hardsub_verified_at.replace(tzinfo=None),
+            fractional.relative_path,
+            fractional.catalog_title_id, fractional.catalog_collection_id,
+        )
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    detail_endpoint = endpoints["/hierarchy-review/{collection_id}"]
+    rendered = detail_endpoint(
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    assert "stav <strong>review_required</strong>" in rendered
+    assert "<dt>Logických standardních epizod</dt><dd>12</dd>" in rendered
+    assert "<dt>Rozsah</dt><dd>E1–E12</dd>" in rendered
+    assert "<dt>Nestandardní</dt><dd>1</dd>" in rendered
+    assert "Doporučené zařazení: Season 1 (S1)" in rendered
+    assert "Tento návrh hierarchie části je oddělený" in rendered
+    assert "Potvrzení návrhu Season 1 (S1) nevyřeší nestandardní číslování" in rendered
+    block = rendered.split(f'id="nonstandard-video-{video_id}"', 1)[1].split(
+        "</li>", 1,
+    )[0]
+    assert "Kandagawa Jet Girls - 04.5.mkv" in block
+    assert "Nestandardní epizoda: 4.5" in block
+    assert "Toto video je důvod kontroly a zde ho lze vyřešit." in block
+    assert "Vyřešit jako" in block
+    assert "Potvrdit řešení" in block
+    expected_choices = tuple(value for value, _ in VIDEO_CONTENT_TYPE_CHOICES)
+    assert select_option_values(block, "content_type") == [("", *expected_choices)]
+    assert "Automaticky / zrušit ruční klasifikaci" not in block
+
+    path = f"/hierarchy-review/{collection_id}/manage-videos"
+    response = asyncio.run(endpoints["/hierarchy-review/{collection_id}/manage-videos"](
+        post_form_request(web_app, path, [
+            ("video_ids", str(video_id)),
+            ("operation", "classify"),
+            ("content_type", "recap"),
+        ]),
+        collection_id,
+    ))
+
+    assert response.status_code == 303
+    target = urlparse(response.headers["location"])
+    assert target.fragment == "operation-result"
+    message = parse_qs(target.query)["message"][0]
+    assert message == "Video bylo ručně klasifikováno jako recap."
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        title = session.get(CatalogTitle, title_id)
+        fractional = session.get(Video, video_id)
+        assert fractional.content_type_manual == "recap"
+        assert (
+            fractional.duplicate_status_manual, fractional.manual_hardsub_cs,
+            fractional.manual_hardsub_verified_at.replace(tzinfo=None),
+            fractional.relative_path,
+            fractional.catalog_title_id, fractional.catalog_collection_id,
+        ) == unrelated_video_state
+        assert (
+            title.part_type_manual, title.season_number_manual,
+            title.season_label_manual, title.sort_order_manual,
+            title.hierarchy_manual_override, title.hierarchy_verified_at,
+        ) == title_state
+        assert (title.part_type, title.season_number, title.season_label) == (
+            "season", 1, "S1",
+        )
+        assert collection.hierarchy_status == "automatic"
+        assert collection.hierarchy_note is None
+
+    after = detail_endpoint(
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+        message=message,
+    ).body.decode()
+    assert (
+        '<div class="notice success" id="operation-result">'
+        "Video bylo ručně klasifikováno jako recap.</div>"
+    ) in after
+    assert "Důvod kontroly: Nestandardní číslování" not in after
+    assert "stav <strong>automatic</strong>" in after
+    assert "· Hierarchie ověřena" not in after
+    assert "<dt>Nestandardní</dt><dd>0</dd>" in after
+    assert "Číslování vyřešeno" in after
+
+    invalid_request = post_form_request(web_app, path, [
+        ("video_ids", str(video_id)),
+        ("operation", "classify"),
+        ("content_type", "film"),
+    ])
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(endpoints["/hierarchy-review/{collection_id}/manage-videos"](
+            invalid_request, collection_id,
+        ))
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Neplatný typ doplňkového obsahu."
+    with web_app.state.sessions() as session:
+        assert session.get(Video, video_id).content_type_manual == "recap"
+
+
+@pytest.mark.parametrize("episode_count", [15, 24])
+def test_hierarchy_review_renders_nonblocking_long_sequence_notice(
+    tmp_path, episode_count,
+):
+    local_title = (
+        "Mugen no Juunin - Immortal P19" if episode_count == 15 else "Long Show"
+    )
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / f'long-{episode_count}.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title=local_title, normalized_local_title=local_title.casefold(),
+            relative_root_path=f"Anime/{local_title}",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title=local_title,
+            normalized_local_title=local_title.casefold(),
+            relative_root_path=collection.relative_root_path, part_type="title",
+        )
+        for number in range(1, episode_count + 1):
+            Video(
+                relative_path=(
+                    f"Anime/{local_title}/{local_title} - {number:02}.mkv"
+                ),
+                root_folder="Anime", filename=f"{local_title} - {number:02}.mkv",
+                size=1, mtime_ns=number, catalog_title=title,
+                catalog_collection=collection,
+            )
+        session.add(collection)
+        refresh_collection_state(collection)
+        session.commit()
+        collection_id = collection.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review/{collection_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    assert "stav <strong>automatic</strong>" in rendered
+    card = rendered.split('class="panel hierarchy-title-card"', 1)[1].split(
+        "</article>", 1,
+    )[0]
+    assert 'class="notice soft-warning" role="note"' in card
+    assert "ℹ Informativní upozornění:" in card
+    assert (
+        f"Delší souvislá řada E1–E{episode_count} bez explicitního dělení. "
+        "Zkontrolujte případné rozdělení na sezóny nebo části."
+    ) in card
+    assert "Důvod kontroly:" not in rendered
+
+
+def test_hierarchy_review_offers_existing_confirmation_and_split_for_over_24(
+    tmp_path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'very-long.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Very Long Show", normalized_local_title="very long show",
+            relative_root_path="Anime/Very Long Show",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Very Long Show",
+            normalized_local_title="very long show",
+            relative_root_path=collection.relative_root_path, part_type="title",
+        )
+        for number in range(1, 26):
+            Video(
+                relative_path=(
+                    f"Anime/Very Long Show/Very Long Show - {number:02}.mkv"
+                ),
+                root_folder="Anime", filename=f"Very Long Show - {number:02}.mkv",
+                size=1, mtime_ns=number, catalog_title=title,
+                catalog_collection=collection,
+            )
+        session.add(collection)
+        refresh_collection_state(collection)
+        session.commit()
+        collection_id = collection.id
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")
+    }
+    rendered = endpoints["/hierarchy-review/{collection_id}"](
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    assert "stav <strong>review_required</strong>" in rendered
+    assert "Neobvykle dlouhá souvislá řada: E1–E25" in rendered
+    assert "Informativní upozornění:" not in rendered
+    assert "Doporučené zařazení: Season 1 (S1)" in rendered
+    assert "Potvrdit jako jednu sezónu" in rendered
+    assert 'href="#manual-split"' in rendered
+    assert 'id="manual-split"' in rendered
+
+    response = endpoints["/hierarchy-review/{collection_id}/confirm-part"](
+        collection_id, part_type_manual="season", season_number_manual="1",
+        season_label_manual="S1", confirm_part=True,
+    )
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        title = collection.titles[0]
+        assert collection.hierarchy_status == "verified"
+        assert title.part_type_manual == "season"
+        assert title.season_number_manual == 1
+        assert title.season_label_manual == "S1"
+        assert title.hierarchy_manual_override is True
+        assert title.hierarchy_verified_at is not None
+
+
 def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_path):
     web_app = create_app(Settings(
         anime_path=tmp_path,
@@ -1504,14 +1802,45 @@ def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_pat
                for choices in video_choices)
     assert "Automaticky / zrušit ruční klasifikaci" in review_html
     assert "film" in expected_part_types
+    assert "title" not in expected_part_types
     assert all("film" not in choices for choices in video_choices)
     assert (
         f'action="/collections/{collection_id}/titles/{title.id}/hierarchy"'
         in review_html
     )
+    disabled_save = (
+        'class="manual-hierarchy-save" type="submit" disabled'
+    )
+    enable_on_concrete_type = (
+        "onchange=\"this.form.querySelector('.manual-hierarchy-save').disabled "
+        "= !this.value\""
+    )
+    assert disabled_save in collection_html
+    assert disabled_save in review_html
+    assert enable_on_concrete_type in collection_html
+    assert enable_on_concrete_type in review_html
     assert 'name="return_to" value="hierarchy_review"' in review_html
     assert "Typ celé části" in review_html
     assert "Klasifikace vybraných videí" in review_html
+
+
+def test_disabled_buttons_have_shared_inactive_visual_style():
+    stylesheet = (Path(__file__).parents[1] / "app/static/style.css").read_text()
+    disabled_rule = stylesheet.split("button:disabled{", 1)[1].split("}", 1)[0]
+
+    assert "background:#374151" in disabled_rule
+    assert "color:#94a3b8" in disabled_rule
+    assert "cursor:not-allowed" in disabled_rule
+    assert "opacity:.72" in disabled_rule
+
+
+def test_soft_sequence_warning_has_distinct_informational_style():
+    stylesheet = (Path(__file__).parents[1] / "app/static/style.css").read_text()
+    warning_rule = stylesheet.split(".soft-warning{", 1)[1].split("}", 1)[0]
+
+    assert "background:#172554" in warning_rule
+    assert "border:1px solid #3b82f6" in warning_rule
+    assert "color:#bfdbfe" in warning_rule
 
 
 def test_manual_split_apply_redirects_to_visible_success_message(tmp_path):
@@ -1872,6 +2201,7 @@ def test_choyoyu_recommendation_is_read_only_and_uses_existing_summary(tmp_path)
                 catalog_title=title, catalog_collection=collection,
             )
         session.add(collection)
+        refresh_collection_state(collection)
         session.commit()
         collection_id, title_id = collection.id, title.id
 
@@ -1888,7 +2218,7 @@ def test_choyoyu_recommendation_is_read_only_and_uses_existing_summary(tmp_path)
         "TV / TV_SHORT · 12/12 standardních epizod · E1–E12 · "
         "unknown 0 · nestandardní 0"
     ) in rendered
-    assert "Uloží se až hodnoty ponechané nebo upravené" in rendered
+    assert "Formulář z něj vytvoří autoritativní ruční snapshot" in rendered
     with web_app.state.sessions() as session:
         collection = session.get(CatalogCollection, collection_id)
         title = session.get(CatalogTitle, title_id)
@@ -1897,7 +2227,10 @@ def test_choyoyu_recommendation_is_read_only_and_uses_existing_summary(tmp_path)
         assert title.season_label_manual is None
         assert title.hierarchy_manual_override is False
         assert title.hierarchy_verified_at is None
-        assert collection.hierarchy_status == "review_required"
+        assert (title.part_type, title.season_number, title.season_label) == (
+            "season", 1, "S1",
+        )
+        assert collection.hierarchy_status == "automatic"
         assert collection.hierarchy_verified_at is None
 
     endpoints = {

@@ -14,10 +14,12 @@ PART_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
     ("recap", "Recap"),
     ("bonus", "Bonus"),
     ("other", "Other"),
-    ("title", "Titul"),
 )
 PART_TYPES = frozenset(value for value, _ in PART_TYPE_CHOICES)
 PART_TYPE_LABELS = dict(PART_TYPE_CHOICES)
+# ``title`` remains readable as a legacy/technical inference fallback, but new
+# authoritative hierarchy input must always choose a concrete structural type.
+TECHNICAL_PART_TYPES = frozenset({*PART_TYPES, "title"})
 
 VIDEO_CONTENT_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
     ("recap", "Recap"),

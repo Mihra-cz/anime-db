@@ -15,13 +15,16 @@ from .hierarchy_review import (
     PROBABLE_GROUPING_REVIEW_REASON, SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
     collection_requires_review,
     definition_from_title, extract_local_period_hint,
-    manual_split_titles, preview_assignments,
+    manual_split_titles, preview_assignments, resolve_collection_hierarchy_status,
 )
 from .models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    InternalSubtitle, TitleMetadata, Video, utc_now,
+    InternalSubtitle, TitleMetadata, Video,
 )
 from .numbering import recalculate_collection_numbering
+from .structural_inference import (
+    GENERIC_TITLE_REVIEW_REASON, apply_automatic_structural_inference,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -256,10 +259,9 @@ def migrate_schema(engine) -> None:
                     collection.hierarchy_note = "Nové nezařazené video."
                     collection.hierarchy_verified_at = None
                 else:
-                    collection.hierarchy_status = "verified"
-                    collection.hierarchy_note = None
-                    collection.hierarchy_verified_at = (
-                        collection.hierarchy_verified_at or utc_now()
+                    resolve_collection_hierarchy_status(
+                        collection,
+                        collection_requires_review(collection, collection_videos),
                     )
                 session.flush()
                 assigned_title_ids = {
@@ -299,6 +301,7 @@ def migrate_schema(engine) -> None:
                     titles.pop(title.relative_root_path, None)
                 session.flush()
                 continue
+            apply_automatic_structural_inference(collection)
             probable_named_grouping = any(
                 not is_root_video(video)
                 and hierarchy[video.relative_path].title.detection_reason
@@ -319,15 +322,15 @@ def migrate_schema(engine) -> None:
                 )
                 for video in collection_videos
             )
-            reason = collection_requires_review(collection, collection_videos) or (
-                PROBABLE_GROUPING_REVIEW_REASON if probable_named_grouping else None
-            ) or (
+            reason = collection_requires_review(collection, collection_videos)
+            contextual_reason = (
+                PROBABLE_GROUPING_REVIEW_REASON if probable_named_grouping else
                 SUPPLEMENTARY_CONTEXT_REVIEW_REASON
                 if supplementary_context_review else None
             )
-            if collection.hierarchy_status != "verified":
-                collection.hierarchy_status = "review_required" if reason else "automatic"
-                collection.hierarchy_note = reason
+            if reason in {None, GENERIC_TITLE_REVIEW_REASON} and contextual_reason:
+                reason = contextual_reason
+            resolve_collection_hierarchy_status(collection, reason)
 
         check_sql = " ".join(
             constraint.get("sqltext") or ""

@@ -54,6 +54,7 @@ from .hierarchy_review import (
     confirm_duplicate_groups, confirm_duplicate_videos, create_title_from_videos,
     delete_empty_collection, delete_empty_collections, delete_empty_local_title,
     definitions_as_json, definitions_to_json, parse_manual_definitions,
+    confirm_effective_collection_hierarchy,
     manual_hierarchy_resolves_ambiguity, merge_title_into, move_videos_to_title,
     move_titles_to_collection, record_grouping_decision,
     parse_simple_definitions,
@@ -85,6 +86,10 @@ from .numbering import (
     summarize_title_numbering, unresolved_duplicate_groups,
 )
 from .scanner import LibrarySafetyError, scan_library
+from .structural_inference import (
+    automatic_flat_sequence_notice, direct_root_episode_profile,
+    has_long_flat_sequence_requiring_review,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -653,7 +658,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         name = display_title.strip()
         if not name or len(name) > 200:
             raise HTTPException(status_code=400, detail="Název musí mít 1 až 200 znaků")
-        labels = {"title": None, "film": "Film", "ova": "OVA", "special": "Special"}
+        labels = {"film": "Film", "ova": "OVA", "special": "Special"}
         if part_type not in labels:
             raise HTTPException(status_code=400, detail="Neplatný typ titulu")
         with sessions() as session:
@@ -1098,6 +1103,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         + len(title.metadata_candidates)
                         + len(title.artwork)
                     ),
+                    "soft_structural_warning": automatic_flat_sequence_notice(title),
+                    "long_flat_review": has_long_flat_sequence_requiring_review(title),
+                    "direct_root_profile": direct_root_episode_profile(
+                        title_videos_list
+                    ),
                 })
             numbering_unknown = sum(
                 item["summary"].unknown for item in title_numbering
@@ -1116,6 +1126,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if part_confirmation is not None
                 and item["title"].id == part_confirmation.title.id
             ), None)
+            part_confirmation_long_flat = any(
+                item["long_flat_review"]
+                for item in title_numbering
+                if part_confirmation is not None
+                and item["title"].id == part_confirmation.title.id
+            )
             duplicate_candidate_video_ids = {
                 video.id
                 for item in title_numbering
@@ -1163,6 +1179,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "unassigned_videos": unassigned_videos,
                 "part_confirmation_suggestion": part_confirmation,
                 "part_confirmation_summary": part_confirmation_summary,
+                "part_confirmation_long_flat": part_confirmation_long_flat,
                 "supplementary_suggestions": supplementary_suggestions,
                 "supplementary_suggestion_by_video": supplementary_suggestion_by_video,
                 "assignment_recommendations": assignment_recommendations,
@@ -1480,6 +1497,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             collection = session.get(CatalogCollection, collection_id)
             if collection is None:
                 raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
+            if hierarchy_status == "verified":
+                try:
+                    confirm_effective_collection_hierarchy(collection)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
             collection.hierarchy_status = hierarchy_status
             collection.hierarchy_note = (
                 None
@@ -1536,7 +1558,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "Ruční klasifikace byla zrušena; obsah se znovu určuje "
                         "automaticky."
                         if not content_type.strip()
-                        else "Obsah byl ručně zařazen v současné části."
+                        else (
+                            f"Video bylo ručně klasifikováno jako "
+                            f"{content_type.strip().casefold()}."
+                            if len(video_ids) == 1
+                            else f"Vybraná videa byla ručně klasifikována jako "
+                            f"{content_type.strip().casefold()}."
+                        )
                     )
                 elif operation == "move":
                     move_videos_to_title(
@@ -1560,7 +1588,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return local_redirect_response(
-            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#assignment",
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}"
+            "#operation-result",
         )
 
     @app.post("/hierarchy-review/{collection_id}/merge-title")

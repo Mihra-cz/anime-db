@@ -108,3 +108,37 @@ def test_manual_hierarchy_fields_have_priority_and_survive_rebuild():
         assert title.effective_part_type == "season"
         assert title.effective_sort_order == 20
         assert title.season_number_manual == 2
+
+
+def test_rebuild_uses_shared_direct_root_season_one_inference():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show", part_type="title",
+        )
+        for number in range(1, 13):
+            Video(
+                relative_path=f"Anime/Show/Show - {number:02}.mkv",
+                root_folder="Anime", filename=f"Show - {number:02}.mkv",
+                size=1, mtime_ns=number, catalog_title=title,
+                catalog_collection=collection,
+            )
+        session.add(collection)
+        session.commit()
+
+        changes = rebuild_hierarchy(session, apply=True)
+        session.refresh(title)
+
+        assert len(changes) == 1
+        assert changes[0].reason == "direct_root_contiguous_episode_sequence"
+        assert (title.part_type, title.season_number, title.season_label) == (
+            "season", 1, "S1",
+        )
+        assert title.part_type_manual is None
+        assert title.hierarchy_manual_override is False

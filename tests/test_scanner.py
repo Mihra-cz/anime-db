@@ -534,3 +534,28 @@ def test_scan_preserves_manual_duplicate_suspicion(tmp_path: Path, monkeypatch):
         assert stored.duplicate_status_manual == "suspected"
         assert stored.duplicate_of_video_id is None
         assert video_path.read_bytes() == b"video"
+
+
+def test_scanner_applies_shared_direct_root_season_one_inference(
+    tmp_path: Path, monkeypatch,
+):
+    folder = tmp_path / "Show"
+    folder.mkdir()
+    for number in range(1, 13):
+        (folder / f"Show - {number:02}.mkv").write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        collection = session.scalar(select(CatalogCollection))
+        title = session.scalar(select(CatalogTitle))
+
+        assert (title.part_type, title.season_number, title.season_label) == (
+            "season", 1, "S1",
+        )
+        assert title.part_type_manual is None
+        assert title.hierarchy_manual_override is False
+        assert collection.hierarchy_status == "automatic"
+        assert collection.hierarchy_verified_at is None

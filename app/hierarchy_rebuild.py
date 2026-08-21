@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from .catalog import normalize_title
 from .hierarchy import derive_library_hierarchy
 from .models import CatalogCollection, CatalogTitle, Video
+from .structural_inference import infer_automatic_structural_values
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,27 @@ def rebuild_hierarchy(session: Session, *, apply: bool = False) -> list[Hierarch
             continue
         seen_titles.add(title.id)
         target = identity.title
+        inferred = infer_automatic_structural_values(
+            part_type=target.part_type,
+            season_number=target.season_number,
+            season_label=target.season_label,
+            is_direct_root=(
+                target.relative_root_path == identity.collection.relative_root_path
+            ),
+            videos=list(title.videos),
+        )
+        target = replace(
+            target,
+            part_type=inferred.part_type,
+            season_number=inferred.season_number,
+            season_label=inferred.season_label,
+            sort_order=(inferred.season_number or target.sort_order),
+            detection_reason=(
+                inferred.reason
+                if inferred.reason.startswith("direct_root_")
+                else target.detection_reason
+            ),
+        )
         collection_changed = (
             title.collection is None
             or title.collection.relative_root_path != identity.collection.relative_root_path

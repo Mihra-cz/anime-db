@@ -24,6 +24,11 @@ from .numbering import (
     set_duplicate_group_primary, supplementary_context_map,
     video_numbering_identity,
 )
+from .structural_inference import (
+    GENERIC_TITLE_REVIEW_REASON, LONG_FLAT_SEQUENCE_REVIEW_REASON,
+    apply_automatic_structural_inference, direct_root_episode_profile,
+    has_long_flat_sequence_requiring_review,
+)
 
 
 PERIOD_HINT = re.compile(
@@ -688,16 +693,43 @@ def manual_hierarchy_resolves_ambiguity(collection: CatalogCollection) -> bool:
     """Rozliší potvrzenou strukturu od pouhého obecného statusu verified."""
     return bool(collection.titles) and all(
         title.hierarchy_manual_override
-        and (
-            title.season_number_manual is not None
-            or title.season_label_manual is not None
-            or title.part_type_manual is not None
-            or title.episode_start is not None
-            or title.episode_end is not None
-            or bool(title.episode_filename_pattern)
-        )
+        and title.part_type_manual in PART_TYPES
         for title in collection.titles
     )
+
+
+def confirm_effective_collection_hierarchy(collection: CatalogCollection) -> None:
+    """Persist the current concrete effective hierarchy as manual authority."""
+    if not collection.titles:
+        raise ValueError("Prázdnou collection nelze potvrdit jako hierarchii.")
+    if any(title.effective_part_type == "title" for title in collection.titles):
+        raise ValueError(
+            "Hierarchii nelze potvrdit, dokud všechny části nemají konkrétní typ."
+        )
+    now = utc_now()
+    for title in collection.titles:
+        title.part_type_manual = title.effective_part_type
+        title.season_number_manual = title.effective_season_number
+        title.season_label_manual = title.effective_season_label
+        title.sort_order_manual = title.effective_sort_order
+        title.hierarchy_manual_override = True
+        title.hierarchy_verified_at = now
+
+
+def resolve_collection_hierarchy_status(
+    collection: CatalogCollection, reason: str | None,
+) -> None:
+    """Keep problem state separate from explicit human hierarchy authority."""
+    collection.hierarchy_note = reason
+    if reason:
+        collection.hierarchy_status = "review_required"
+        collection.hierarchy_verified_at = None
+    elif manual_hierarchy_resolves_ambiguity(collection):
+        collection.hierarchy_status = "verified"
+        collection.hierarchy_verified_at = collection.hierarchy_verified_at or utc_now()
+    else:
+        collection.hierarchy_status = "automatic"
+        collection.hierarchy_verified_at = None
 
 
 def _filename_season_conflicts_with_title(video: Video) -> bool:
@@ -722,7 +754,6 @@ def _has_unnumbered_explicit_supplementary(video: Video) -> bool:
 
 
 def collection_requires_review(collection: CatalogCollection, videos: list[Video]) -> str | None:
-    hierarchy_resolved = manual_hierarchy_resolves_ambiguity(collection)
     if any(_filename_season_conflicts_with_title(video) for video in videos):
         return FILENAME_SEASON_CONFLICT_REVIEW_REASON
     if any(_has_unnumbered_explicit_supplementary(video) for video in videos):
@@ -737,17 +768,10 @@ def collection_requires_review(collection: CatalogCollection, videos: list[Video
         return MISSING_DUPLICATE_PRIMARY_REVIEW_REASON
     if any(is_confirmed_duplicate(video) for video in videos):
         return CONFIRMED_DUPLICATES_REVIEW_REASON
-    numbers = sorted({
-        state.numbering_input for state in states
-        if state.is_standard and state.numbering_input is not None
-    })
-    if (
-        not hierarchy_resolved
-        and len(collection.titles) <= 1
-        and len(numbers) >= 14
-        and numbers == list(range(numbers[0], numbers[-1] + 1))
-    ):
-        return "Souvislá řada epizod bez sezónních podsložek může obsahovat více částí."
+    if any(has_long_flat_sequence_requiring_review(title) for title in collection.titles):
+        return LONG_FLAT_SEQUENCE_REVIEW_REASON
+    if any(title.effective_part_type == "title" for title in collection.titles):
+        return GENERIC_TITLE_REVIEW_REASON
     return None
 
 
@@ -776,6 +800,13 @@ def single_title_confirmation_suggestion(
         title.metadata_record.format.strip().upper()
         if title.metadata_record and title.metadata_record.format else ""
     )
+    profile = direct_root_episode_profile(list(title.videos))
+    if (
+        title.part_type != "season"
+        and metadata_format not in {"TV", "TV_SHORT"}
+        and not (profile.episode_min == 1 and profile.standard_count >= 1)
+    ):
+        return None
     automatic_season_number = title.season_number
     return SingleTitleConfirmationSuggestion(
         title=title,
@@ -832,19 +863,44 @@ def set_manual_title_hierarchy(
         raise ValueError("Označení části může mít nejvýše 50 znaků.")
     if normalized_type is not None and normalized_type not in PART_TYPES:
         raise ValueError("Neplatný typ části.")
-    has_manual = any(
+    manual_values_without_type = any(
+        value is not None
+        for value in (season_number, normalized_label, sort_order)
+    )
+    if normalized_type is None and (
+        manual_values_without_type or hierarchy_verified
+    ):
+        raise ValueError(
+            "Pro ruční zařazení zvolte konkrétní typ části."
+        )
+    has_manual_input = any(
         value is not None
         for value in (season_number, normalized_label, normalized_type, sort_order)
     )
-    if has_manual and not hierarchy_verified:
+    if has_manual_input and not hierarchy_verified:
         raise ValueError("Ruční hierarchii je nutné potvrdit jako ověřenou.")
-
-    title.season_number_manual = season_number
-    title.season_label_manual = normalized_label
-    title.part_type_manual = normalized_type
-    title.sort_order_manual = sort_order
-    title.hierarchy_manual_override = has_manual
-    title.hierarchy_verified_at = utc_now() if hierarchy_verified else None
+    if hierarchy_verified:
+        effective_number = title.effective_season_number
+        effective_label = title.effective_season_label
+        effective_order = title.effective_sort_order
+        snapshot_type = normalized_type
+        title.season_number_manual = (
+            season_number if season_number is not None else effective_number
+        )
+        title.season_label_manual = normalized_label or effective_label
+        title.part_type_manual = snapshot_type
+        title.sort_order_manual = (
+            sort_order if sort_order is not None else effective_order
+        )
+        title.hierarchy_manual_override = True
+        title.hierarchy_verified_at = utc_now()
+    else:
+        title.season_number_manual = None
+        title.season_label_manual = None
+        title.part_type_manual = None
+        title.sort_order_manual = None
+        title.hierarchy_manual_override = False
+        title.hierarchy_verified_at = None
     if title.collection is not None:
         refresh_collection_state(title.collection)
     return title
@@ -1045,6 +1101,7 @@ def _selected_videos(collection: CatalogCollection, video_ids: list[int]) -> lis
 def refresh_collection_state(
     collection: CatalogCollection, *, recalculate: bool = True,
 ) -> None:
+    apply_automatic_structural_inference(collection)
     if recalculate:
         recalculate_collection_numbering(
             collection,
@@ -1068,9 +1125,7 @@ def refresh_collection_state(
         note = "Číslování nebo nezařazený obsah stále vyžaduje kontrolu."
     else:
         note = hierarchy_reason
-    collection.hierarchy_status = "review_required" if note else "verified"
-    collection.hierarchy_verified_at = None if note else utc_now()
-    collection.hierarchy_note = note
+    resolve_collection_hierarchy_status(collection, note)
 
 
 def classify_videos_in_place(
@@ -1083,9 +1138,6 @@ def classify_videos_in_place(
     selected = _selected_videos(collection, video_ids)
     for video in selected:
         video.content_type_manual = normalized_type
-        if normalized_type is not None and video.catalog_title is not None:
-            video.catalog_title.hierarchy_manual_override = True
-            video.catalog_title.hierarchy_verified_at = utc_now()
     session.flush()
     refresh_collection_state(collection)
     return selected
@@ -1323,6 +1375,18 @@ def apply_manual_split(
         title = existing.get(definition.title_id) if definition.title_id else None
         if definition.title_id and title is None:
             raise ValueError("Definice odkazuje na cizí nebo neexistující část.")
+        existing_effective_type = title.effective_part_type if title is not None else None
+        existing_effective_number = (
+            title.effective_season_number if title is not None else None
+        )
+        existing_effective_label = (
+            title.effective_season_label if title is not None else None
+        )
+        concrete_type = definition.part_type_manual or existing_effective_type
+        if concrete_type in {None, "title"}:
+            raise ValueError(
+                f"Část {position} musí mít před potvrzením konkrétní strukturální typ."
+            )
         if title is None:
             virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}"
             suffix = 1
@@ -1338,10 +1402,15 @@ def apply_manual_split(
         title.local_title = definition.local_title
         title.normalized_local_title = normalize_title(definition.local_title)
         title.manual_display_title = definition.manual_display_title
-        title.season_number_manual = definition.season_number_manual
-        title.season_label_manual = definition.season_label_manual
+        title.season_number_manual = (
+            definition.season_number_manual
+            if definition.season_number_manual is not None else existing_effective_number
+        )
+        title.season_label_manual = (
+            definition.season_label_manual or existing_effective_label
+        )
         title.part_number = definition.part_number
-        title.part_type_manual = definition.part_type_manual
+        title.part_type_manual = concrete_type
         title.episode_start = definition.episode_start
         title.episode_end = definition.episode_end
         title.episode_start_offset = definition.episode_start_offset
@@ -1356,20 +1425,19 @@ def apply_manual_split(
         target_index = preview.assignments.get(video.id)
         video.catalog_title = resolved[target_index] if target_index is not None else None
         video.catalog_collection = collection
-    collection.hierarchy_status = "conflict" if preview.conflicts else (
-        "review_required" if preview.unmatched_video_ids else "verified"
-    )
-    collection.hierarchy_verified_at = now if collection.hierarchy_status == "verified" else None
-    collection.hierarchy_note = (
-        "Konflikt překrývajících se pravidel."
-        if preview.conflicts else "Nové nebo nezařazené video."
-        if preview.unmatched_video_ids else None
-    )
     recalculate_collection_numbering(
         collection,
         {title.id: [video for video in collection.videos if video.catalog_title is title]
          for title in resolved},
     )
+    if preview.conflicts:
+        collection.hierarchy_status = "conflict"
+        collection.hierarchy_verified_at = None
+        collection.hierarchy_note = "Konflikt překrývajících se pravidel."
+    elif preview.unmatched_video_ids:
+        resolve_collection_hierarchy_status(collection, "Nové nebo nezařazené video.")
+    else:
+        refresh_collection_state(collection, recalculate=False)
     return preview
 
 

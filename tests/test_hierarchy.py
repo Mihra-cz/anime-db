@@ -192,15 +192,16 @@ def test_nc_named_season_child_preserves_context_as_separate_title():
     }
 
 
-def test_film_bonus_folder_is_not_a_main_collection():
+@pytest.mark.parametrize("marker", ["FILM", "MOVIE"])
+def test_film_bonus_folder_is_not_a_main_collection(marker):
     paths = [
-        "Anime/Tenki no Ko (FILM)/Tenki no Ko.mkv",
-        "Anime/Tenki no Ko (FILM)/CM&PV/Trailer.mkv",
+        f"Anime/Tenki no Ko ({marker})/Tenki no Ko.mkv",
+        f"Anime/Tenki no Ko ({marker})/CM&PV/Trailer.mkv",
     ]
     hierarchy = derive_library_hierarchy(paths)
 
     assert {item.collection.relative_root_path for item in hierarchy.values()} == {
-        "Anime/Tenki no Ko (FILM)"
+        f"Anime/Tenki no Ko ({marker})"
     }
     assert hierarchy[paths[0]].title.part_type == "film"
     assert hierarchy[paths[1]].title.part_type == "bonus"

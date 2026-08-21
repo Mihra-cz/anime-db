@@ -14,17 +14,18 @@ from app.catalog import (
 )
 from app.hierarchy import derive_library_hierarchy
 from app.hierarchy_review import (
-    CONFIRMED_DUPLICATES_REVIEW_REASON, MISSING_DUPLICATE_PRIMARY_REVIEW_REASON,
     PROBABLE_GROUPING_REVIEW_REASON,
     SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
     collection_requires_review, definition_from_title, extract_local_period_hint,
-    manual_split_titles, preview_assignments,
+    manual_split_titles, preview_assignments, resolve_collection_hierarchy_status,
 )
 from app.models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, Video,
-    utc_now,
 )
 from app.numbering import recalculate_collection_numbering
+from app.structural_inference import (
+    GENERIC_TITLE_REVIEW_REASON, apply_automatic_structural_inference,
+)
 from app.probe import ProbeError, probe_video
 from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, subtitle_matches
 
@@ -427,19 +428,10 @@ def _scan_library(
                 collection.hierarchy_note = "Nové nezařazené video."
                 collection.hierarchy_verified_at = None
             else:
-                reason = (
-                    MISSING_DUPLICATE_PRIMARY_REVIEW_REASON
-                    if any(video.duplicate_primary_missing for video in collection_videos)
-                    else CONFIRMED_DUPLICATES_REVIEW_REASON
-                    if any(video.duplicate_of_video_id is not None for video in collection_videos)
-                    else None
-                )
-                collection.hierarchy_status = "review_required" if reason else "verified"
-                collection.hierarchy_note = reason
-                collection.hierarchy_verified_at = (
-                    None if reason else collection.hierarchy_verified_at or utc_now()
-                )
+                reason = collection_requires_review(collection, collection_videos)
+                resolve_collection_hierarchy_status(collection, reason)
             continue
+        apply_automatic_structural_inference(collection)
         probable_named_grouping = any(
             hierarchy[video.relative_path].title.detection_reason == "related_named_child"
             and (
@@ -457,15 +449,14 @@ def _scan_library(
             )
             for video in collection_videos
         )
-        reason = collection_requires_review(collection, collection_videos) or (
-            PROBABLE_GROUPING_REVIEW_REASON if probable_named_grouping else None
-        ) or (
-            SUPPLEMENTARY_CONTEXT_REVIEW_REASON
-            if supplementary_context_review else None
+        reason = collection_requires_review(collection, collection_videos)
+        contextual_reason = (
+            PROBABLE_GROUPING_REVIEW_REASON if probable_named_grouping else
+            SUPPLEMENTARY_CONTEXT_REVIEW_REASON if supplementary_context_review else None
         )
-        if collection.hierarchy_status != "verified":
-            collection.hierarchy_status = "review_required" if reason else "automatic"
-            collection.hierarchy_note = reason
+        if reason in {None, GENERIC_TITLE_REVIEW_REASON} and contextual_reason:
+            reason = contextual_reason
+        resolve_collection_hierarchy_status(collection, reason)
     session.flush()
     videos_by_title: dict[int, list[Video]] = {}
     for video in current_videos:

@@ -2632,6 +2632,47 @@ přidána watch-state migrace.
 
 ---
 
+## 6.38 Automatic direct-root Season 1 a autoritativní stav hierarchie
+
+Generický `CatalogTitle.part_type=title` je od této změny pouze technický nebo
+přechodný fallback. Není legitimním konečným effective structural typem ani
+novou ruční volbou. Pokud společná inference nedokáže určit konkrétní typ,
+collection zůstane v `review_required` s důvodem k ručnímu určení typu.
+
+Sdílená structural inference používá effective video numbering a volají ji
+scanner, startup hierarchy sync, hierarchy rebuild i runtime
+`refresh_collection_state()`. Direct-root titul bez manual hierarchy override
+se odvodí jako automatic `season`, číslo `1` a label `S1`, pokud obsahuje
+nejméně dvě standardní epizody, řada začíná E1, je souvislá a nemá nevyřešenou
+duplicitu čísla. Video-level recap, OVA, special, bonus a další supplementary
+obsah se do řady ani délkových limitů nepočítá. Inference zapisuje jen
+automatická pole; manual pole, `hierarchy_manual_override` a title verification
+nemění. Existující manual override se nikdy nepřepisuje.
+
+Stavy collection mají oddělenou semantiku:
+
+- `review_required` znamená aktivní hierarchy, numbering nebo type problém;
+- `automatic` znamená bezpečnou automatickou strukturu bez aktivního problému,
+  která nebyla autoritativně potvrzena člověkem;
+- `verified` vyžaduje konkrétní manual hierarchy snapshot všech částí.
+
+Odstranění posledního review reasonu proto vede na `automatic`. Explicitní
+potvrzení současné effective hierarchie uloží její konkrétní typ, season number,
+label a pořadí do manual polí a teprve potom může stav přejít na `verified`.
+Samotná video-level klasifikace například `04.5 -> recap` hierarchy nepotvrzuje.
+
+Délková kontrola direct-root řady je dvoustupňová. E1–E14 nemá length warning.
+E1–E15 až E1–E24 zůstává automatic S1 a UI dynamicky zobrazí pouze neblokující
+upozornění, které se neukládá do `hierarchy_note`. Více než 24 standardních
+epizod ponechá automatic návrh S1, ale aktivuje safety `review_required`.
+Hierarchy Review nabídne potvrzení celé řady jako jedné sezóny přes existující
+authoritative confirmation workflow a odkaz na existující ruční split. Počet
+epizod nikdy sám nevytváří ani neurčuje hranici sezóny.
+
+Změna nevyžaduje DB schema migraci a nemění fyzické soubory ani adresáře.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

@@ -18,7 +18,7 @@ from app.hierarchy_review import (
     delete_empty_local_title, extract_local_period_hint, merge_title_into,
     move_videos_to_title, parse_manual_definitions, parse_simple_definitions,
     preview_assignments, refresh_collection_state, separate_nonstandard_videos,
-    set_manual_duplicate_status,
+    set_manual_duplicate_status, set_manual_title_hierarchy,
     simple_definition_rows,
     single_title_confirmation_suggestion,
     supplementary_assignment_recommendations,
@@ -39,6 +39,9 @@ from app.numbering import (
     summarize_title_numbering, unresolved_duplicate_groups,
 )
 from app.scanner import scan_library
+from app.structural_inference import (
+    GENERIC_TITLE_REVIEW_REASON, LONG_FLAT_SEQUENCE_REVIEW_REASON,
+)
 
 
 PROBE_RESULT = {
@@ -114,9 +117,7 @@ def test_flat_collection_with_episodes_1_to_26_requires_review_for_possible_part
     with Session(engine) as session:
         collection = session.get(CatalogCollection, collection_id)
         reason = collection_requires_review(collection, list(collection.videos))
-        assert reason == (
-            "Souvislá řada epizod bez sezónních podsložek může obsahovat více částí."
-        )
+        assert reason == LONG_FLAT_SEQUENCE_REVIEW_REASON
 
 
 def explicit_season_collection(local_title: str) -> CatalogCollection:
@@ -376,7 +377,7 @@ def test_single_generic_title_gets_editable_part_confirmation_suggestion():
 
 
 @pytest.mark.parametrize(("part_type", "expected"), [
-    ("title", "Titul"), ("part", "Part"), ("cour", "Cour"),
+    ("part", "Part"), ("cour", "Cour"),
     ("film", "Film"), ("ova", "OVA"), ("special", "Special"),
     ("preview", "Preview"), ("recap", "Recap"), ("bonus", "Bonus"),
     ("other", "Other"),
@@ -460,6 +461,73 @@ def test_confirmed_season_can_keep_number_and_label_unspecified():
     assert title.effective_season_number is None
     assert title.effective_season_label is None
     assert collection.hierarchy_status == "verified"
+
+
+@pytest.mark.parametrize(("season_number", "season_label", "sort_order", "verified"), [
+    (2, "S2", 1, False),
+    (2, "S2", 1, True),
+    (None, None, None, True),
+])
+def test_manual_title_hierarchy_rejects_snapshot_without_concrete_type(
+    season_number, season_label, sort_order, verified,
+):
+    collection, title = simple_collection(part_type="season", status="automatic")
+    original = (
+        title.season_number_manual, title.season_label_manual,
+        title.part_type_manual, title.sort_order_manual,
+        title.hierarchy_manual_override, title.hierarchy_verified_at,
+    )
+
+    with pytest.raises(ValueError, match="zvolte konkrétní typ části"):
+        set_manual_title_hierarchy(
+            title, season_number=season_number, season_label=season_label,
+            part_type=None, sort_order=sort_order,
+            hierarchy_verified=verified,
+        )
+
+    assert (
+        title.season_number_manual, title.season_label_manual,
+        title.part_type_manual, title.sort_order_manual,
+        title.hierarchy_manual_override, title.hierarchy_verified_at,
+    ) == original
+
+
+def test_manual_title_hierarchy_stores_authoritative_season_two_snapshot():
+    collection, title = simple_collection(part_type="season", status="automatic")
+
+    set_manual_title_hierarchy(
+        title, season_number=2, season_label="S2", part_type="season",
+        sort_order=1, hierarchy_verified=True,
+    )
+
+    assert title.part_type_manual == "season"
+    assert title.season_number_manual == 2
+    assert title.season_label_manual == "S2"
+    assert title.sort_order_manual == 1
+    assert title.hierarchy_manual_override is True
+    assert title.hierarchy_verified_at is not None
+    assert collection.hierarchy_status == "verified"
+
+
+def test_refresh_preserves_historical_incomplete_manual_override_for_review():
+    collection, title = simple_collection(status="verified")
+    verified_at = utc_now()
+    title.season_number_manual = 2
+    title.season_label_manual = "S2"
+    title.sort_order_manual = 1
+    title.hierarchy_manual_override = True
+    title.hierarchy_verified_at = verified_at
+
+    refresh_collection_state(collection)
+
+    assert title.part_type_manual is None
+    assert title.season_number_manual == 2
+    assert title.season_label_manual == "S2"
+    assert title.sort_order_manual == 1
+    assert title.hierarchy_manual_override is True
+    assert title.hierarchy_verified_at == verified_at
+    assert collection.hierarchy_status == "review_required"
+    assert collection.hierarchy_note == GENERIC_TITLE_REVIEW_REASON
 
 
 def test_new_unknown_reopens_confirmed_season_and_manual_numbering_resolves_it():
@@ -968,7 +1036,7 @@ def test_separating_zero_persists_without_metadata_or_physical_path_change(
         collection = session.scalar(select(CatalogCollection))
         assert zero.catalog_title_id == preview_id
         assert zero.relative_path == original_relative_path
-        assert collection.hierarchy_status == "verified"
+        assert collection.hierarchy_status == "automatic"
         assert [path.read_bytes() for path in paths] == [b"video"] * 23
 
 
@@ -1008,7 +1076,7 @@ def test_fractional_recap_can_stay_in_season_and_survives_session_and_scan(
         assert summary.standard_total == 12
         assert summary.resolved_supplemental == 1
         assert summary.requires_review is False
-        assert collection.hierarchy_status == "verified"
+        assert collection.hierarchy_status == "automatic"
 
         scan_library(session, tmp_path)
         recap = session.get(Video, recap_id)
@@ -1538,7 +1606,7 @@ def test_create_special_then_existing_numbering_resolves_canonical_review_withou
         assert special.local_episode_number is None
         assert special.season_episode_number == 1
         assert special.episode_number_source == "manual"
-        assert collection.hierarchy_status == "verified"
+        assert collection.hierarchy_status == "automatic"
         assert special.relative_path == original_path
 
 

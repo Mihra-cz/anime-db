@@ -9,6 +9,30 @@ from app.models import (
 )
 
 
+def test_startup_sync_applies_shared_direct_root_season_one_inference(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'structural-sync.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        for number in range(1, 13):
+            session.add(Video(
+                relative_path=f"Anime/Show/Show - {number:02}.mkv",
+                root_folder="Anime", filename=f"Show - {number:02}.mkv",
+                size=1, mtime_ns=number,
+            ))
+        session.commit()
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        collection = session.scalar(select(CatalogCollection))
+        title = session.scalar(select(CatalogTitle))
+        assert (title.part_type, title.season_number, title.season_label) == (
+            "season", 1, "S1",
+        )
+        assert collection.hierarchy_status == "automatic"
+        assert collection.hierarchy_verified_at is None
+
+
 def test_migrates_existing_database_and_backfills_values(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
     with engine.begin() as connection:
