@@ -2,4 +2,9 @@
 .candidate.rejected { opacity: .65; }
 .button-danger { background: #8b3038; }
 .match-reasons { font-size: .9rem; }
-.metadata-cover { max-width: 240px; height: auto; border-radius: 8px; }
+.metadata-cover { display: block; max-width: min(240px, 100%); height: auto; border-radius: 8px; }
+.metadata-detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+.candidate-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: 1rem; }
+.candidate { min-width: 0; padding: 1rem; border: 1px solid #364258; border-radius: 10px; background: #101722; }
+.candidate img { display: block; max-width: min(180px, 100%); height: auto; border-radius: 8px; }
+.candidate form { margin-top: .75rem; }

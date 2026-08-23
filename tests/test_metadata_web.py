@@ -1757,7 +1757,7 @@ def test_fractional_supplementary_position_and_effective_type_match_in_views(
     assert "OVA · ručně zařazeno" in ova_row
     assert ">other<" not in ova_row
     assert "E14.5" not in ova_row
-    assert '<td class="compact-column">episode</td>' in automatic_row
+    assert '<td data-label="Typ" class="content-type-column">episode</td>' in automatic_row
 
     with web_app.state.sessions() as session:
         collection = session.get(CatalogCollection, collection_id)
@@ -2930,11 +2930,11 @@ def test_episode_table_uses_metadata_title_and_safe_empty_subtitle_fallback():
 
     assert '<strong>Metadata Show</strong><small class="technical-filename">OVA.mkv</small>' in rendered
     assert ">OVA<" in rendered
-    assert '<td class="subtitle-list">—</td>' in rendered
-    assert '<td class="compact-column">Ne</td>' in rendered
-    assert '<td class="compact-column">Neznámé</td>' in rendered
+    assert '<td data-label="Titulky" class="subtitle-list">—</td>' in rendered
+    assert '<td data-label="Hardsub" class="compact-column">Ne</td>' in rendered
+    assert '<td data-label="Hardsub" class="compact-column">Neznámé</td>' in rendered
     assert "Hardsub nepřítomen" in rendered
-    assert '<td class="verification-column">Neověřeno</td>' in rendered
+    assert '<td data-label="Ověření" class="verification-column">Neověřeno</td>' in rendered
 
 
 def test_existing_manual_video_edits_still_persist_without_changing_hierarchy(tmp_path):
