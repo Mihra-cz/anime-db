@@ -2,9 +2,9 @@
 {% block title %}{{ folder }} · AnimeDB{% endblock %}
 {% block content %}<p><a href="/">← Zpět na přehled</a></p><h1>{{ folder }}</h1>
 <section class="panel"><div class="table-wrap"><table><thead><tr><th>Soubor</th><th>Typ</th><th>Překlad</th><th>Velikost</th><th>Délka</th><th>Video</th><th>Audio</th><th>Titulky</th></tr></thead><tbody>
-{% for video in videos %}<tr>
+{% for video in videos %}{% set content_display = effective_video_content_display(video) %}<tr>
 <td title="{{ video.relative_path }}">{{ video.filename }}<small>{{ video.relative_path }}</small></td>
-<td>{{ video.file_type }}</td>
+<td>{{ content_display.display_label }}{% if content_display.noncanonical_position %}<small>Pozice {{ content_display.noncanonical_position }}</small>{% endif %}</td>
 {% set status = translation_status(video) %}<td>{% if status.has_cs %}<span class="tag accent">CZ</span>{% endif %}{% if status.has_sk %}<span class="tag accent">SK</span>{% endif %}{% if status.has_cs_or_sk %}<small>{{ status.subtitle_source }}</small>{% else %}bez CZ/SK{% endif %}{% if status.has_unknown %}<small>obsahuje unknown</small>{% endif %}</td>
 <td>{{ "%.2f"|format(video.size / 1073741824) }} GB</td>
 <td>{% if video.duration is not none %}{{ "%02d:%02d"|format((video.duration // 60)|int, (video.duration % 60)|int) }}{% else %}—{% endif %}</td>

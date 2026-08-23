@@ -26,6 +26,7 @@ from .catalog import (
     derive_episode_number,
     derive_season_info,
     determine_parent_series,
+    effective_video_content_display,
     group_videos_by_series,
     has_meaningful_root_assignment,
     is_film_video,
@@ -56,7 +57,8 @@ from .hierarchy_review import (
     definitions_as_json, definitions_to_json, parse_manual_definitions,
     confirm_effective_collection_hierarchy,
     catalog_title_hierarchy_is_verified, manual_hierarchy_resolves_ambiguity,
-    manual_hierarchy_snapshot_issue, merge_title_into, move_videos_to_title,
+    hierarchy_review_diagnostics, manual_hierarchy_snapshot_issue,
+    merge_title_into, move_videos_to_title,
     move_titles_to_collection, record_grouping_decision,
     parse_simple_definitions,
     refresh_collection_state,
@@ -91,10 +93,6 @@ from .numbering import (
     summarize_title_numbering, unresolved_duplicate_groups,
 )
 from .scanner import LibrarySafetyError, scan_library
-from .structural_inference import (
-    automatic_flat_sequence_notice, direct_root_episode_profile,
-    has_long_flat_sequence_requiring_review,
-)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -165,6 +163,7 @@ templates.env.globals.update(
     subtitle_track_display=subtitle_track_display,
     manual_hardsub_state=manual_hardsub_state,
     detect_episode_number=detect_episode_number,
+    effective_video_content_display=effective_video_content_display,
     part_type_choices=PART_TYPE_CHOICES,
     video_content_type_choices=VIDEO_CONTENT_TYPE_CHOICES,
     media_part_label=media_part_label,
@@ -1054,10 +1053,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(CatalogCollection.videos).selectinload(Video.audio_tracks),
                 selectinload(CatalogCollection.videos).selectinload(Video.internal_subtitles),
                 selectinload(CatalogCollection.videos).selectinload(Video.external_subtitles),
+                selectinload(CatalogCollection.videos).selectinload(Video.duplicate_of),
             ).where(CatalogCollection.id == collection_id))
             if collection is None:
                 raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
             videos = sorted(collection.videos, key=lambda video: video.relative_path)
+            review_diagnostics = hierarchy_review_diagnostics(collection, videos)
             definitions_json = definitions_json or definitions_as_json(collection)
             preview_rows = []
             if preview is not None:
@@ -1095,6 +1096,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 title_videos_list = [
                     video for video in videos if video.catalog_title_id == title.id
                 ]
+                title_card_issues = review_diagnostics.for_title_card(title)
                 title_numbering.append({
                     "title": title,
                     "summary": summarize_title_numbering(
@@ -1121,10 +1123,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         + len(title.metadata_candidates)
                         + len(title.artwork)
                     ),
-                    "soft_structural_warning": automatic_flat_sequence_notice(title),
-                    "long_flat_review": has_long_flat_sequence_requiring_review(title),
-                    "direct_root_profile": direct_root_episode_profile(
-                        title_videos_list
+                    "long_flat_review": any(
+                        issue.code == "long_flat_sequence"
+                        for issue in title_card_issues
+                    ),
+                    "diagnostic_issues": title_card_issues,
+                    "has_blocking_issue": any(
+                        issue.blocking for issue in title_card_issues
                     ),
                 })
             numbering_unknown = sum(
@@ -1184,6 +1189,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ).order_by(CatalogCollection.local_title)).all())
             return templates.TemplateResponse(request, "hierarchy_review_detail.html", {
                 "collection": collection, "videos": videos,
+                "review_diagnostics": review_diagnostics,
+                "unassigned_diagnostic_issues": tuple(
+                    issue for issue in review_diagnostics.issues
+                    if issue.scope == "video"
+                    and any(
+                        video.catalog_title_id is None
+                        and video.catalog_title is None
+                        for video in issue.videos
+                    )
+                ),
                 "episode_min": min(episode_numbers) if episode_numbers else None,
                 "episode_max": max(episode_numbers) if episode_numbers else None,
                 "definitions_json": definitions_json, "preview": preview,

@@ -14,6 +14,7 @@ from app.catalog import (
     TITLE_NAME_PREFERENCE_LABELS,
     build_catalog_results,
     detect_episode_number,
+    effective_video_content_display,
     is_film_video,
     video_matches_filter,
 )
@@ -1624,6 +1625,152 @@ def test_fractional_video_can_be_classified_directly_without_confirming_title(
     assert exc_info.value.detail == "Neplatný typ doplňkového obsahu."
     with web_app.state.sessions() as session:
         assert session.get(Video, video_id).content_type_manual == "recap"
+
+
+@pytest.mark.parametrize(
+    ("filename", "file_type", "manual_type", "label", "position"),
+    [
+        ("Anime - 05.5.mkv", "other", "recap", "Recap · ručně zařazeno", "5.5"),
+        ("Anime - 14.5.mkv", "other", "ova", "OVA · ručně zařazeno", "14.5"),
+        ("Anime Special.mkv", "special", None, "special", None),
+    ],
+)
+def test_effective_video_content_display_prefers_manual_classification(
+    filename, file_type, manual_type, label, position,
+):
+    video = Video(
+        relative_path=f"Anime/{filename}", root_folder="Anime", filename=filename,
+        size=1, mtime_ns=1, file_type=file_type,
+        content_type_manual=manual_type,
+    )
+
+    display = effective_video_content_display(video)
+
+    assert display.display_label == label
+    assert display.noncanonical_position == position
+    assert display.is_manual is (manual_type is not None)
+
+
+def test_fractional_supplementary_position_and_effective_type_match_in_views(
+    tmp_path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'fractional-content-display.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Arifureta Shokugyou de Sekai Saikyou",
+            normalized_local_title="arifureta shokugyou de sekai saikyou",
+            relative_root_path="Anime/Arifureta Shokugyou de Sekai Saikyou",
+        )
+        title = CatalogTitle(
+            collection=collection,
+            local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path=(
+                "Anime/Arifureta Shokugyou de Sekai Saikyou/Season 1"
+            ),
+            part_type="season", season_number=1, season_label="S1",
+        )
+        for number in range(1, 13):
+            standard_video = Video(
+                relative_path=(
+                    "Anime/Arifureta Shokugyou de Sekai Saikyou/Season 1/"
+                    f"Arifureta - {number:02}.mkv"
+                ),
+                root_folder="Anime", filename=f"Arifureta - {number:02}.mkv",
+                size=number, mtime_ns=number, file_type="episode",
+                local_episode_number=number, season_episode_number=number,
+                absolute_episode_number=number, catalog_title=title,
+                catalog_collection=collection,
+            )
+            if number == 1:
+                automatic_video = standard_video
+        recap = Video(
+            relative_path=(
+                "Anime/Arifureta Shokugyou de Sekai Saikyou/Season 1/"
+                "Arifureta Shokugyou de Sekai Saikyou - 05.5.mkv"
+            ),
+            root_folder="Anime",
+            filename="Arifureta Shokugyou de Sekai Saikyou - 05.5.mkv",
+            size=55, mtime_ns=55, file_type="other", content_type_manual="recap",
+            catalog_title=title, catalog_collection=collection,
+        )
+        ova = Video(
+            relative_path=(
+                "Anime/Arifureta Shokugyou de Sekai Saikyou/Season 1/"
+                "Arifureta Shokugyou de Sekai Saikyou - 14.5.mkv"
+            ),
+            root_folder="Anime",
+            filename="Arifureta Shokugyou de Sekai Saikyou - 14.5.mkv",
+            size=145, mtime_ns=145, file_type="other", content_type_manual="ova",
+            catalog_title=title, catalog_collection=collection,
+        )
+        session.add(collection)
+        refresh_collection_state(collection)
+        session.commit()
+        collection_id, title_id = collection.id, title.id
+        recap_id, ova_id = recap.id, ova.id
+        automatic_video_id = automatic_video.id
+        status_before = (collection.hierarchy_status, collection.hierarchy_note)
+        summary = summarize_title_numbering(title.videos, title)
+        assert (
+            summary.standard_total, summary.nonstandard,
+            summary.resolved_supplemental,
+        ) == (12, 0, 2)
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    hierarchy_html = endpoints["/hierarchy-review/{collection_id}"](
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+    title_html = endpoints["/titles/{catalog_title_id}"](
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+    ).body.decode()
+
+    assert "5.5 · Recap · ručně zařazeno" in hierarchy_html
+    assert "14.5 · OVA · ručně zařazeno" in hierarchy_html
+    assert "<dt>Logických standardních epizod</dt><dd>12</dd>" in hierarchy_html
+    assert "<dt>Nestandardní</dt><dd>0</dd>" in hierarchy_html
+    assert "<dt>Zařazený doplňkový obsah</dt><dd>2</dd>" in hierarchy_html
+
+    recap_row = title_html.split(f'id="video-{recap_id}"', 1)[1].split(
+        "</tr>", 1,
+    )[0]
+    ova_row = title_html.split(f'id="video-{ova_id}"', 1)[1].split(
+        "</tr>", 1,
+    )[0]
+    automatic_row = title_html.split(
+        f'id="video-{automatic_video_id}"', 1,
+    )[1].split("</tr>", 1)[0]
+    assert "<strong>5.5</strong><small>Nekanonická pozice</small>" in recap_row
+    assert "Recap · ručně zařazeno" in recap_row
+    assert ">other<" not in recap_row
+    assert "E5.5" not in recap_row
+    assert "<strong>14.5</strong><small>Nekanonická pozice</small>" in ova_row
+    assert "OVA · ručně zařazeno" in ova_row
+    assert ">other<" not in ova_row
+    assert "E14.5" not in ova_row
+    assert '<td class="compact-column">episode</td>' in automatic_row
+
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        recap = session.get(Video, recap_id)
+        ova = session.get(Video, ova_id)
+        assert (collection.hierarchy_status, collection.hierarchy_note) == status_before
+        assert recap.content_type_manual == "recap"
+        assert ova.content_type_manual == "ova"
+        for video in (recap, ova):
+            assert (
+                video.local_episode_number, video.season_episode_number,
+                video.absolute_episode_number,
+            ) == (None, None, None)
 
 
 @pytest.mark.parametrize("episode_count", [15, 24])

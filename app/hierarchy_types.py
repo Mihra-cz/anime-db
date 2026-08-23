@@ -30,4 +30,5 @@ VIDEO_CONTENT_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
     ("bonus", "Bonus"),
     ("other", "Other"),
 )
+VIDEO_CONTENT_TYPE_LABELS = dict(VIDEO_CONTENT_TYPE_CHOICES)
 VIDEO_CONTENT_TYPES = frozenset(value for value, _ in VIDEO_CONTENT_TYPE_CHOICES)

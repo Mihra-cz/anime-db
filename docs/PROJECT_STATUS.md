@@ -2750,6 +2750,31 @@ přesuny ani automatická přestavba existujících titulů nejsou implementovan
 
 ---
 
+## 6.41 Lokalizovaná diagnostika Hierarchy Review
+
+Hierarchy Review zobrazuje problém co nejblíže objektu, kterého se skutečně
+týká. Společný nebo vztahový problém collection zůstává v horním souhrnu,
+problém konkrétního `CatalogTitle` je přímo v jeho kartě a video-level problém
+je u konkrétního videa. Bezproblémové karty a videa se neoznačují pouze
+proto, že jiná část stejné collection vyžaduje kontrolu.
+
+Centralizovaný dynamický read-model odvozuje z aktuální hierarchy, numberingu
+a video diagnostiky collection-, title- a video-level issues. Nepřidává kvůli
+tomu DB pole a nemění parser, inference ani význam stavů `automatic`,
+`verified` a `review_required`. Uložený `CatalogCollection.hierarchy_note`
+při standardním přepočtu nadále reprezentuje agregovaný první blokující důvod
+(nebo explicitní ruční poznámku); není zdrojem úplného seznamu. UI proto ze
+stejného read-modelu dynamicky vypíše všechny současné problémy a přiřadí je
+skutečným objektům.
+
+Horní souhrn uvádí počet problémů a dotčených částí; jednoduché anchory
+umožňují přejít na příslušnou kartu nebo video. Blokující problémy jsou
+vizuálně odlišené od neblokujících informačních upozornění, například
+soft warningu pro flat episodickou řadu E1–E15 až E1–E24. Soft warning stav
+collection ani `hierarchy_note` nemění.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

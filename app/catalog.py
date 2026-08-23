@@ -8,6 +8,7 @@ import re
 from typing import Literal
 import unicodedata
 
+from .hierarchy_types import VIDEO_CONTENT_TYPE_LABELS
 from .models import CatalogCollection, CatalogTitle, Video
 
 LANGUAGE_ALIASES = {
@@ -1116,6 +1117,42 @@ def detect_episode_number(filename: str) -> EpisodeNumberDetection:
         number = int(re.match(r"0*(\d+)", stem, re.IGNORECASE).group(1))
         return EpisodeNumberDetection("zero" if number == 0 else "standard", number)
     return EpisodeNumberDetection("unknown")
+
+
+@dataclass(frozen=True)
+class VideoContentDisplay:
+    """Prezentační effective klasifikace a nekanonická pozice videa."""
+
+    value: str
+    label: str
+    is_manual: bool
+    display_label: str
+    noncanonical_position: str | None
+
+
+def effective_video_content_display(video: Video) -> VideoContentDisplay:
+    """Vrátí read-model klasifikace bez zápisu do numbering nebo DB.
+
+    Ruční klasifikace je autoritativní pouze pro prezentaci typu obsahu.
+    Desetinné/nestandardní označení se znovu bezpečně čte z filename a
+    slouží jen jako lokální prezentační pozice; nikdy se nepřevádí do
+    integer canonical episode polí.
+    """
+    manual_value = (video.content_type_manual or "").strip().casefold()
+    is_manual = bool(manual_value)
+    value = manual_value if is_manual else video.file_type
+    label = VIDEO_CONTENT_TYPE_LABELS.get(value, value) if is_manual else value
+    detection = detect_episode_number(video.filename)
+    noncanonical_position = (
+        detection.display_value if detection.is_nonstandard else None
+    )
+    return VideoContentDisplay(
+        value=value,
+        label=label,
+        is_manual=is_manual,
+        display_label=(f"{label} · ručně zařazeno" if is_manual else label),
+        noncanonical_position=noncanonical_position,
+    )
 
 
 def derive_episode_number(filename: str) -> int | None:
