@@ -202,6 +202,7 @@ def test_candidate_and_artwork_mutations_are_post_only():
     assert paths["/catalog/{filter_name}/titles/{catalog_title_id}/metadata/artwork/refresh"] == {"POST"}
     assert paths["/metadata/batch-search"] == {"POST"}
     assert paths["/titles/{catalog_title_id}/numbering/sequence"] == {"POST"}
+    assert paths["/videos/{video_id}/media-part"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/confirm-part"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/simple-preview"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/separate-nonstandard"] == {"POST"}
@@ -2592,12 +2593,159 @@ def test_episode_table_prioritizes_readable_data_and_preserves_editing_and_value
     assert "Hardsub potvrzen" in rendered
     assert "Číslování ručně ověřeno" in rendered
     assert 'action="/videos/1/episode-number"' in rendered
+    assert 'action="/videos/1/media-part"' in rendered
+    assert "Část média" in rendered
     assert 'action="/videos/1/hardsub"' in rendered
     assert (
         video.local_episode_number, video.season_episode_number,
         video.absolute_episode_number, video.external_episode_number,
         video.catalog_title_id, title.season_number, title.season_label,
     ) == values_before_render
+
+
+def test_media_part_web_workflow_is_separate_from_hierarchy_and_metadata(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'media-part-web.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Movie Collection", normalized_local_title="movie collection",
+            relative_root_path="Anime/Movie Collection",
+            hierarchy_status="automatic", hierarchy_note=None,
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Movie Part 2",
+            normalized_local_title="movie part 2",
+            relative_root_path="Anime/Movie Collection/Movie Part 2",
+            part_type="part", season_number=1, part_number=2,
+            season_label="S1", metadata_status="linked_manual",
+            metadata_record=TitleMetadata(
+                display_title="Movie Metadata", metadata_provider="anilist",
+                metadata_external_id="123",
+            ),
+        )
+        first = Video(
+            relative_path=f"{title.relative_root_path}/Segment A.mkv",
+            root_folder="Anime", filename="Segment A.mkv", size=1, mtime_ns=1,
+            season_episode_number=4, catalog_title=title,
+            catalog_collection=collection,
+        )
+        second = Video(
+            relative_path=f"{title.relative_root_path}/Segment B.mkv",
+            root_folder="Anime", filename="Segment B.mkv", size=1, mtime_ns=2,
+            season_episode_number=4, media_part_number=2,
+            catalog_title=title, catalog_collection=collection,
+        )
+        duplicate = Video(
+            relative_path=f"{title.relative_root_path}/Segment A copy.mkv",
+            root_folder="Anime", filename="Segment A copy.mkv", size=1, mtime_ns=3,
+            season_episode_number=4, media_part_number=1,
+            catalog_title=title, catalog_collection=collection,
+            duplicate_of=first,
+        )
+        session.add(collection)
+        session.commit()
+        collection_id, title_id = collection.id, title.id
+        first_id, second_id, duplicate_id = first.id, second.id, duplicate.id
+        metadata_identity = (
+            title.metadata_record.metadata_provider,
+            title.metadata_record.metadata_external_id,
+            title.metadata_record.display_title,
+        )
+        hierarchy_before = (
+            collection.hierarchy_status, collection.hierarchy_note,
+            title.part_type, title.part_number, title.part_number_manual,
+            title.season_number, title.season_number_manual, title.numbering_mode,
+            first.season_episode_number, second.season_episode_number,
+        )
+
+    endpoints = {
+        route.path: route.endpoint
+        for route in web_app.routes if hasattr(route, "endpoint")
+    }
+    media_endpoint = endpoints["/videos/{video_id}/media-part"]
+
+    response = media_endpoint(
+        first_id, media_part_number="1", filter_name="all", q="", sort="",
+        direction="", detail_sort="", detail_direction="",
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].endswith(f"#video-{first_id}")
+
+    detail_html = endpoints["/titles/{catalog_title_id}"](
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+    ).body.decode()
+    collection_html = endpoints["/collections/{collection_id}"](
+        web_request(web_app, f"/collections/{collection_id}"), collection_id,
+        filter_name="all", q="", sort=None, direction=None,
+    ).body.decode()
+    assert "S1 · Part 2" in detail_html
+    assert "Fyzické členění: <strong>2 části média</strong>" in detail_html
+    assert "Fyzické členění: 2 části média" in collection_html
+    assert "Část média 1/2" in detail_html
+    assert "Část média 2/2" in detail_html
+    assert "MP1" not in detail_html
+    assert f'action="/videos/{first_id}/media-part"' in detail_html
+    assert f'action="/videos/{second_id}/media-part"' in detail_html
+    assert f'action="/videos/{duplicate_id}/media-part"' in detail_html
+    assert "více aktivních primárních videí" not in detail_html
+    duplicate_block = detail_html.split("Segment A copy.mkv", 1)[1]
+    assert "Část média 1/2" in duplicate_block
+
+    for invalid in ("0", "-1", "not-a-number"):
+        with pytest.raises(HTTPException) as exc_info:
+            media_endpoint(
+                first_id, media_part_number=invalid, filter_name="all", q="",
+                sort="", direction="", detail_sort="", detail_direction="",
+            )
+        assert exc_info.value.status_code == 400
+        assert "kladné celé číslo" in exc_info.value.detail
+
+    response = media_endpoint(
+        first_id, media_part_number="2", filter_name="all", q="", sort="",
+        direction="", detail_sort="", detail_direction="",
+    )
+    assert response.status_code == 303
+    conflict_html = endpoints["/titles/{catalog_title_id}"](
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+    ).body.decode()
+    assert "Číslo části média 2 používá více aktivních primárních videí" in conflict_html
+
+    response = media_endpoint(
+        first_id, media_part_number="", filter_name="all", q="", sort="",
+        direction="", detail_sort="", detail_direction="",
+    )
+    assert response.status_code == 303
+    cleared_html = endpoints["/titles/{catalog_title_id}"](
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+    ).body.decode()
+    assert "Část média 2/2" not in cleared_html
+    assert "Část média 2" in cleared_html
+
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        title = session.get(CatalogTitle, title_id)
+        first = session.get(Video, first_id)
+        second = session.get(Video, second_id)
+        duplicate = session.get(Video, duplicate_id)
+        assert first.media_part_number is None
+        assert second.media_part_number == 2
+        assert duplicate.media_part_number == 1
+        assert (
+            title.metadata_record.metadata_provider,
+            title.metadata_record.metadata_external_id,
+            title.metadata_record.display_title,
+        ) == metadata_identity
+        assert (
+            collection.hierarchy_status, collection.hierarchy_note,
+            title.part_type, title.part_number, title.part_number_manual,
+            title.season_number, title.season_number_manual, title.numbering_mode,
+            first.season_episode_number, second.season_episode_number,
+        ) == hierarchy_before
 
 
 def test_episode_table_uses_metadata_title_and_safe_empty_subtitle_fallback():

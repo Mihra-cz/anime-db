@@ -73,6 +73,10 @@ from .metadata.candidates import (
     LOW_SCORE_THRESHOLD, batch_search_candidates, decode_match_reasons, search_and_store_candidates,
     set_candidate_rejected,
 )
+from .media_parts import (
+    MEDIA_PART_NUMBER_ERROR, media_part_label, media_part_ordinal_warning,
+    media_part_sequence_warning, media_part_summary_label, set_media_part_number,
+)
 from .metadata.service import (
     MetadataConflictError, MetadataLockedError, confirm_anilist_candidate,
     default_metadata_search_query, normalize_metadata_search_query, refresh_title_metadata,
@@ -163,6 +167,9 @@ templates.env.globals.update(
     detect_episode_number=detect_episode_number,
     part_type_choices=PART_TYPE_CHOICES,
     video_content_type_choices=VIDEO_CONTENT_TYPE_CHOICES,
+    media_part_label=media_part_label,
+    media_part_ordinal_warning=media_part_ordinal_warning,
+    media_part_summary_label=media_part_summary_label,
 )
 METADATA_STATUS_LABELS = {
     "unlinked": "Bez metadat", "candidates_available": "Čeká na potvrzení",
@@ -753,6 +760,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         numbering_message: str | None = None,
         show_metadata_candidates: bool = False,
         metadata_query: str | None = None,
+        media_part_message: str | None = None,
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
@@ -866,6 +874,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 default_metadata_search_query(catalog_title) if catalog_title else ""
             ),
             "videos": videos,
+            "title_media_videos": title_candidates,
+            "media_part_summary": media_part_summary_label(title_candidates),
+            "media_part_sequence_warning": media_part_sequence_warning(
+                title_candidates
+            ),
+            "media_part_message": media_part_message,
             "title_is_empty": bool(catalog_title and not title_candidates),
             "title_owned_metadata_count": (
                 bool(catalog_title.metadata_record)
@@ -945,13 +959,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         numbering_message: str | None = None,
         show_metadata_candidates: bool = False,
         metadata_query: str | None = None,
+        media_part_message: str | None = None,
     ):
         return series_detail(
             request, filter_name, catalog_title_id, None, q, sort, direction,
             video_sort, video_direction, message, metadata_error, metadata_warning, show_rejected, pending_external_id,
             require_conflict_confirmation, require_locked_confirmation,
             sequence_start, numbering_error, numbering_message,
-            show_metadata_candidates, metadata_query,
+            show_metadata_candidates, metadata_query, media_part_message,
         )
 
     @app.get("/collections/{collection_id}", response_class=HTMLResponse)
@@ -2268,6 +2283,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             metadata_return_url(
                 filter_name, video.catalog_title_id, q, sort, direction,
                 detail_sort, detail_direction,
+            ).replace("#metadata", f"#video-{video_id}"),
+        )
+
+    @app.post("/videos/{video_id}/media-part")
+    def update_video_media_part(
+        video_id: int, media_part_number: str = Form(""),
+        filter_name: str = Form("all"), q: str = Form(""),
+        sort: str = Form(""), direction: str = Form(""),
+        detail_sort: str = Form(""), detail_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=400, detail="Neplatný filtr")
+        with sessions() as session:
+            video = session.get(Video, video_id)
+            if video is None or video.catalog_title_id is None:
+                raise HTTPException(status_code=404, detail="Video nebylo nalezeno")
+            try:
+                raw_value = media_part_number.strip()
+                try:
+                    value = int(raw_value) if raw_value else None
+                except ValueError as exc:
+                    raise ValueError(MEDIA_PART_NUMBER_ERROR) from exc
+                set_media_part_number(video, value)
+                catalog_title_id = video.catalog_title_id
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = (
+            f"Část média {value} byla uložena."
+            if value is not None else "Část média byla z videa odstraněna."
+        )
+        return local_redirect_response(
+            metadata_return_url(
+                filter_name, catalog_title_id, q, sort, direction,
+                detail_sort, detail_direction, media_part_message=message,
             ).replace("#metadata", f"#video-{video_id}"),
         )
 

@@ -2710,9 +2710,43 @@ snapshot a neinterpretuje heuristicky historická nejednoznačná data.
 Roadmapa V6 používá bez Partu filename `S01E01` a při skutečném Partu
 `S01P01E01` / `S01P02E01`. Part folders na NASu nejsou cílově povinné; například
 obě řady mohou fyzicky ležet přímo v `Anime/Season 1/`. Fyzické přejmenování ani
-přesun není součástí této změny. Vícesouborový film s fyzickými segmenty P1/P2
-je jiný budoucí problém na úrovni `Video` (pravděpodobně samostatný media-part
-koncept), nikoli hierarchy Part.
+přesun není součástí této změny. Vícesouborové fyzické médium řeší samostatný
+video-level koncept popsaný níže, nikoli hierarchy Part.
+
+---
+
+## 6.40 Video Media Part
+
+`Hierarchy Part` a `Media Part` jsou nezávislé koncepty. Hierarchy Part je
+logická část anime, samostatný `CatalogTitle` a může mít vlastní metadata.
+`Video.media_part_number` je nullable autoritativní ordinal fyzického segmentu
+jednoho logického CatalogTitle / jedné metadata identity. Jeden film ve dvou
+souborech proto zůstává jedním `CatalogTitle(type=film)` a jeho videa mohou mít
+`media_part_number=1` a `2`.
+
+Hodnota se nyní nastavuje, mění nebo maže ručně na detailu CatalogTitle v poli
+**Část média**. Musí být kladné celé číslo. Operace nemění season number,
+hierarchy `part_number`, episode numbering, hierarchy status/note ani metadata
+vazbu. Nullable SQLite sloupec `videos.media_part_number INTEGER NULL` přidává
+malá idempotentní migrace; existující videa zůstávají `NULL` a žádné historické
+hodnoty se neodhadují.
+
+Display helper dynamicky počítá pouze aktivní primární videa stejného
+CatalogTitle. Přesná souvislá množina 1..N pro N >= 2 se zobrazuje jako
+`Část média X/N` a u titulu jako `N částí média`. Samotné MP1 nebo neúplná sada
+MP1+MP3 zobrazí pouze jednotlivé ordinaly bez zavádějícího `/N`. Confirmed
+secondary duplicate kopie jsou z počtu i konfliktů vyřazeny. Dvě aktivní
+primární videa se stejným ordinalem dostanou lokální neblokující diagnostiku;
+Media Part nikdy nevytváří hierarchy review reason.
+
+Scanner `media_part_number` neodvozuje ani nepřepisuje. Rescan zachovává ruční
+hodnotu a nové video vždy začíná s `NULL`, i když filename obsahuje `P1`, `P2`,
+`CD1`, `Disc1` nebo `MP01`. Budoucí import může tyto tokeny v bezpečném kontextu
+použít pouze jako kandidátní heuristiku s preview a explicitním potvrzením.
+
+Roadmapa filename rozlišuje hierarchy identitu `S01P02E03` od fyzického
+segmentu `MP01`; případná kombinace je `S01P02E03-MP01`. Fyzické přejmenování,
+přesuny ani automatická přestavba existujících titulů nejsou implementované.
 
 ---
 

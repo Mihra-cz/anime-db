@@ -71,6 +71,37 @@ def test_part_number_manual_migration_is_idempotent_and_preserves_automatic_valu
         assert title.part_number_manual is None
 
 
+def test_media_part_number_migration_is_idempotent_and_does_not_infer_values(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'media-part-migration.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Video(
+            relative_path="Anime/Movie/Movie P1.mkv", root_folder="Anime",
+            filename="Movie P1.mkv", size=1, mtime_ns=1,
+        ))
+        session.commit()
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE videos DROP COLUMN media_part_number"))
+
+    migrate_schema(engine)
+    migrate_schema(engine)
+
+    columns = [column["name"] for column in inspect(engine).get_columns("videos")]
+    assert columns.count("media_part_number") == 1
+    with Session(engine) as session:
+        item = session.scalar(select(Video))
+        assert item.media_part_number is None
+        item.media_part_number = 2
+        session.commit()
+
+    migrate_schema(engine)
+    migrate_schema(engine)
+    with Session(engine) as session:
+        assert session.scalar(select(Video.media_part_number)) == 2
+
+
 def test_startup_sync_preserves_nested_parent_season_for_part(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'nested-part-sync.db'}")
     Base.metadata.create_all(engine)
@@ -149,6 +180,9 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
     assert [
         column["name"] for column in inspect(engine).get_columns("videos")
     ].count("duplicate_status_manual") == 1
+    assert [
+        column["name"] for column in inspect(engine).get_columns("videos")
+    ].count("media_part_number") == 1
 
     with Session(engine) as session:
         assert session.scalar(select(Video.file_type)) == "ncop"
@@ -162,6 +196,7 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
             987, 654, 123.5, "h265", 1280, 720,
         )
         assert video.content_type_manual is None
+        assert video.media_part_number is None
         assert video.duplicate_status_manual is None
         assert video.duplicate_of_video_id is None
         assert video.duplicate_primary_missing is False

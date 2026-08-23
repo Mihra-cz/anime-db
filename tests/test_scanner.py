@@ -189,6 +189,38 @@ def test_scan_preserves_manual_episode_override(tmp_path: Path, monkeypatch):
         assert video.episode_number_source == "manual"
 
 
+def test_scan_preserves_media_part_and_never_infers_it_from_filename(
+    tmp_path: Path, monkeypatch,
+):
+    folder = tmp_path / "Movie"
+    folder.mkdir()
+    first_path = folder / "Movie P1.mkv"
+    first_path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        first = session.scalar(select(Video))
+        assert first.media_part_number is None
+        first.media_part_number = 1
+        session.commit()
+
+        first_path.write_bytes(b"changed")
+        (folder / "Movie P2.mkv").write_bytes(b"video")
+        (folder / "Movie MP01.mkv").write_bytes(b"video")
+        scan_library(session, tmp_path)
+
+        videos = {
+            item.filename: item for item in session.scalars(select(Video)).all()
+        }
+        assert videos["Movie P1.mkv"].media_part_number == 1
+        assert videos["Movie P2.mkv"].media_part_number is None
+        assert videos["Movie MP01.mkv"].media_part_number is None
+
+
 def test_scan_preserves_manual_hierarchy_values(tmp_path: Path, monkeypatch):
     video_path = tmp_path / "OVERLORD" / "Overlord (L15)" / "Episode 01.mkv"
     video_path.parent.mkdir(parents=True)

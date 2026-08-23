@@ -53,6 +53,7 @@ def migrate_schema(engine) -> None:
             ("episode_number_manual_override", "INTEGER NULL"),
             ("episode_number_verified_at", "DATETIME NULL"),
             ("content_type_manual", "VARCHAR NULL"),
+            ("media_part_number", "INTEGER NULL"),
             ("duplicate_status_manual", "VARCHAR NULL"),
             ("duplicate_of_video_id", "INTEGER NULL REFERENCES videos(id) ON DELETE SET NULL"),
             ("duplicate_primary_missing", "BOOLEAN NOT NULL DEFAULT 0"),
