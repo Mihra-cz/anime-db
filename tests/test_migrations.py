@@ -33,6 +33,65 @@ def test_startup_sync_applies_shared_direct_root_season_one_inference(tmp_path):
         assert collection.hierarchy_verified_at is None
 
 
+def test_part_number_manual_migration_is_idempotent_and_preserves_automatic_value(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'part-manual-migration.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Part 2",
+            normalized_local_title="part 2",
+            relative_root_path="Anime/Show/Part 2", part_type="part",
+            season_number=1, part_number=2, season_label="S1",
+        )
+        session.add(Video(
+            relative_path="Anime/Show/Part 2/E01.mkv", root_folder="Anime",
+            filename="E01.mkv", size=1, mtime_ns=1, catalog_title=title,
+            catalog_collection=collection,
+        ))
+        session.commit()
+    with engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE catalog_titles DROP COLUMN part_number_manual"
+        ))
+
+    migrate_schema(engine)
+    migrate_schema(engine)
+
+    columns = [column["name"] for column in inspect(engine).get_columns("catalog_titles")]
+    assert columns.count("part_number_manual") == 1
+    with Session(engine) as session:
+        title = session.scalar(select(CatalogTitle))
+        assert title.part_number == 2
+        assert title.part_number_manual is None
+
+
+def test_startup_sync_preserves_nested_parent_season_for_part(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'nested-part-sync.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Video(
+            relative_path="Anime/Show/Season 1/Part 2/E01.mkv",
+            root_folder="Anime", filename="E01.mkv", size=1, mtime_ns=1,
+        ))
+        session.commit()
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        title = session.scalar(select(CatalogTitle))
+        assert title.part_type == "part"
+        assert title.season_number == 1
+        assert title.part_number == 2
+        assert title.season_label == "S1"
+        assert title.part_number_manual is None
+
+
 def test_migrates_existing_database_and_backfills_values(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
     with engine.begin() as connection:

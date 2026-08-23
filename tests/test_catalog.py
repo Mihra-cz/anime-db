@@ -307,6 +307,44 @@ def test_catalog_title_series_label_uses_effective_hierarchy_values():
     assert catalog_title_series_label(title) == "S2"
 
 
+@pytest.mark.parametrize(("season", "part", "expected"), [
+    (1, None, "S1"),
+    (2, None, "S2"),
+    (1, 1, "S1 · Part 1"),
+    (1, 2, "S1 · Part 2"),
+    (2, 1, "S2 · Part 1"),
+    (None, 2, "Part 2"),
+])
+def test_catalog_title_series_label_combines_effective_season_and_part(
+    season, part, expected,
+):
+    title = CatalogTitle(
+        local_title="Part", normalized_local_title="part",
+        relative_root_path="Anime/Show/Part", part_type=(
+            "part" if part is not None else "season"
+        ), season_number=season, part_number=part,
+    )
+
+    assert catalog_title_series_label(title) == expected
+
+
+def test_effective_part_number_uses_manual_value_only_for_manual_snapshot():
+    title = CatalogTitle(
+        local_title="Part 2", normalized_local_title="part 2",
+        relative_root_path="Anime/Show/Part 2", part_type="part",
+        season_number=1, part_number=2,
+    )
+    assert title.effective_part_number == 2
+
+    title.part_type_manual = "part"
+    title.season_number_manual = 1
+    title.part_number_manual = 3
+    title.hierarchy_manual_override = True
+
+    assert title.effective_part_number == 3
+    assert catalog_title_series_label(title) == "S1 · Part 3"
+
+
 def test_root_videos_use_workflow_group_instead_of_fake_dot_collection():
     pseudo_collection = CatalogCollection(
         id=1, local_title="Knihovna", normalized_local_title="knihovna",

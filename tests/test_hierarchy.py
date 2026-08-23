@@ -72,13 +72,57 @@ def test_video_directly_in_anime_root_has_single_unseasoned_title():
 
 @pytest.mark.parametrize(("folder", "number"), [
     ("1st Season", 1), ("2nd Season", 2), ("Third Season", 3),
-    ("Part 2", 2), ("Cour 1", 1), ("S01", 1),
+    ("S01", 1),
 ])
-def test_supported_numbered_part_names(folder, number):
+def test_supported_numbered_season_names(folder, number):
     path = f"Anime/Show/{folder}/E01.mkv"
     identity = derive_library_hierarchy([path])[path]
     assert identity.title.season_number == number
     assert identity.title.original_folder_name == folder
+
+
+@pytest.mark.parametrize(("folder", "part_type", "number"), [
+    ("Part 1", "part", 1), ("Part 2", "part", 2), ("Cour 1", "cour", 1),
+])
+def test_part_and_legacy_cour_ordinals_do_not_become_season_numbers(
+    folder, part_type, number,
+):
+    path = f"Anime/Show/{folder}/E01.mkv"
+
+    title = derive_library_hierarchy([path])[path].title
+
+    assert title.part_type == part_type
+    assert title.season_number is None
+    assert title.part_number == number
+
+
+@pytest.mark.parametrize(("folder", "season", "part"), [
+    ("Season 1 Part 1", 1, 1),
+    ("Season 1 Part 2", 1, 2),
+    ("Season 2 Part 1", 2, 1),
+])
+def test_combined_season_and_part_name_preserves_both_axes(folder, season, part):
+    path = f"Anime/Show/{folder}/E01.mkv"
+
+    title = derive_library_hierarchy([path])[path].title
+
+    assert title.part_type == "part"
+    assert title.season_number == season
+    assert title.part_number == part
+    assert title.season_label == f"S{season}"
+
+
+def test_nested_part_inherits_parent_season_scope():
+    path = "Anime/Show/Season 1/Part 2/E01.mkv"
+
+    identity = derive_library_hierarchy([path])[path]
+
+    assert identity.collection.relative_root_path == "Anime/Show"
+    assert identity.title.relative_root_path == "Anime/Show/Season 1/Part 2"
+    assert identity.title.part_type == "part"
+    assert identity.title.season_number == 1
+    assert identity.title.part_number == 2
+    assert identity.title.season_label == "S1"
 
 
 def test_season_folders_share_one_anime_collection():

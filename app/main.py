@@ -55,7 +55,8 @@ from .hierarchy_review import (
     delete_empty_collection, delete_empty_collections, delete_empty_local_title,
     definitions_as_json, definitions_to_json, parse_manual_definitions,
     confirm_effective_collection_hierarchy,
-    manual_hierarchy_resolves_ambiguity, merge_title_into, move_videos_to_title,
+    catalog_title_hierarchy_is_verified, manual_hierarchy_resolves_ambiguity,
+    manual_hierarchy_snapshot_issue, merge_title_into, move_videos_to_title,
     move_titles_to_collection, record_grouping_decision,
     parse_simple_definitions,
     refresh_collection_state,
@@ -155,6 +156,8 @@ templates = Jinja2Templates(
 templates.env.globals.update(
     catalog_title_display_title=catalog_title_display_title,
     catalog_title_series_label=catalog_title_series_label,
+    catalog_title_hierarchy_is_verified=catalog_title_hierarchy_is_verified,
+    manual_hierarchy_snapshot_issue=manual_hierarchy_snapshot_issue,
     subtitle_track_display=subtitle_track_display,
     manual_hardsub_state=manual_hardsub_state,
     detect_episode_number=detect_episode_number,
@@ -1526,10 +1529,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Neplatný výběr videí.") from exc
         with sessions() as session:
             try:
+                raw_season = str(form.get("season_number") or "").strip()
+                raw_part = str(form.get("part_number") or "").strip()
                 title = separate_nonstandard_videos(
                     session, collection_id, video_ids,
                     local_title=str(form.get("local_title") or ""),
                     part_type=str(form.get("part_type") or ""),
+                    season_number=int(raw_season) if raw_season else None,
+                    part_number=int(raw_part) if raw_part else None,
                 )
                 session.commit()
                 title_id = title.id
@@ -1574,12 +1581,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     message = "Videa byla logicky přesunuta do existující části."
                 elif operation == "create":
                     raw_season = str(form.get("season_number") or "").strip()
+                    raw_part = str(form.get("part_number") or "").strip()
                     create_title_from_videos(
                         session, collection_id, video_ids,
                         local_title=str(form.get("local_title") or ""),
                         part_type=str(form.get("part_type") or ""),
                         season_number=int(raw_season) if raw_season else None,
                         season_label=str(form.get("season_label") or ""),
+                        part_number=int(raw_part) if raw_part else None,
                     )
                     message = "Byla vytvořena nová logická část a vybraná videa do ní přesunuta."
                 else:
@@ -1806,6 +1815,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def hierarchy_review_confirm_part(
         collection_id: int, part_type_manual: str = Form(...),
         season_number_manual: str = Form(""), season_label_manual: str = Form(""),
+        part_number_manual: str = Form(""),
         confirm_part: bool = Form(False),
     ):
         if not confirm_part:
@@ -1824,16 +1834,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 season_number = (
                     int(season_number_manual) if season_number_manual.strip() else None
                 )
+                part_number = (
+                    int(part_number_manual) if part_number_manual.strip() else None
+                )
                 title = apply_single_title_confirmation(
                     collection, part_type=part_type_manual,
                     season_number=season_number, season_label=season_label_manual,
+                    part_number=part_number,
                 )
                 session.commit()
                 verified = collection.hierarchy_status == "verified"
-                confirmed_label = (
-                    title.effective_season_label
-                    or title.effective_part_type.capitalize()
-                )
+                confirmed_label = catalog_title_series_label(title)
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1849,6 +1860,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def update_title_hierarchy(
         collection_id: int, catalog_title_id: int,
         season_number_manual: str = Form(""), season_label_manual: str = Form(""),
+        part_number_manual: str = Form(""),
         part_type_manual: str = Form(""), sort_order_manual: str = Form(""),
         hierarchy_verified: bool = Form(False), filter_name: str = Form("all"),
         q: str = Form(""), sort: str = Form(""), direction: str = Form(""),
@@ -1860,11 +1872,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=404, detail="Část kolekce nebyla nalezena")
             try:
                 number = int(season_number_manual) if season_number_manual.strip() else None
+                part_number = (
+                    int(part_number_manual) if part_number_manual.strip() else None
+                )
                 order = int(sort_order_manual) if sort_order_manual.strip() else None
                 set_manual_title_hierarchy(
                     title, season_number=number, season_label=season_label_manual,
                     part_type=part_type_manual, sort_order=order,
-                    hierarchy_verified=hierarchy_verified,
+                    hierarchy_verified=hierarchy_verified, part_number=part_number,
                 )
                 session.commit()
             except ValueError as exc:

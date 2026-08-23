@@ -594,6 +594,7 @@ Vedle stabilní lokální identity a metadata polí jsou implementována zejmén
 
 ```text
 season_number_manual
+part_number_manual
 season_label_manual
 part_type_manual
 sort_order_manual
@@ -608,6 +609,8 @@ numbering_mode
 
 Ruční sezóna, typ, pořadí a pravidla přiřazení mají přednost před automatickou
 detekcí. Sken ani opravný nástroj ručně ověřenou hierarchii nepřepisují.
+`effective_part_number` používá stejnou prioritu manual → automatic jako season
+number. Season scope a pořadí Partu jsou dvě nezávislé hodnoty.
 
 ### `Video`
 
@@ -1358,7 +1361,7 @@ právě jeden `CatalogTitle` a všechna její zobrazená videa jsou k tomuto tit
 jednoznačně přiřazena, odkaz vede přímo na `/titles/{id}`. Collection s více
 částmi nebo neúplným přiřazením vede na `/collections/{id}`. Toto pravidlo je
 pouze prezentační a nemění databázovou hierarchii. Vytváření dalších
-Season/Part/Cour, Film/OVA/Special částí, jejich rozdělování, pořadí a přesuny
+Season/Part, Film/OVA/Special částí, jejich rozdělování, pořadí a přesuny
 videí nadále patří do **Hierarchy Review**.
 
 Změna nevyžadovala databázovou migraci, neupravuje produkční data a nemění
@@ -2490,9 +2493,11 @@ autoritativní vůči scanneru, startup sync i hierarchy rebuild. Operace neměn
 `Video.content_type_manual`, episode numbering, metadata, collection identity,
 filename ani `relative_path`.
 
-Part-level typy mají jeden uspořádaný zdroj `PART_TYPE_CHOICES` a validační
-množinu `PART_TYPES`: Season, Part, Cour, Film, OVA, Special, Preview, Recap,
-Bonus, Other a Title. Používá je detail collection, oba hierarchy formuláře,
+Uživatelské title-level typy mají jeden uspořádaný zdroj `PART_TYPE_CHOICES`:
+Season, Part, Film, OVA, Special, Preview, Recap, Bonus a Other. Legacy Cour je
+nadále backendově čitelný přes validační `PART_TYPES`, ale není nabízen pro nový
+autoritativní vstup; generický Title je pouze technický fallback. Seznam používá
+detail collection, oba hierarchy formuláře,
 jednoduchá definice ručního rozdělení a oba selecty **Oddělit do nové části**.
 Backend vytváření nové části přijímá stejnou množinu. Samostatný
 `VIDEO_CONTENT_TYPE_CHOICES` zůstává omezený na Recap, Preview, Special, OVA,
@@ -2670,6 +2675,44 @@ authoritative confirmation workflow a odkaz na existující ruční split. Poče
 epizod nikdy sám nevytváří ani neurčuje hranici sezóny.
 
 Změna nevyžaduje DB schema migraci a nemění fyzické soubory ani adresáře.
+
+---
+
+## 6.39 Season + volitelný Part
+
+Season je primární strukturální osa anime. Part je volitelné logické členění
+uvnitř Season a obě osy se ukládají samostatně. `Season 1 Part 2` má
+`part_type=part`, `season_number=1`, `part_number=2` a zobrazuje se jako
+`S1 · Part 2`; samostatné `Part 2` bez známého season scope má
+`season_number=NULL`, nikoli 2. Vnořená cesta `Season 1/Part 2` dědí season
+scope z parentu. `Part 2 != Season 2` platí v parseru, scanneru, startup sync,
+rebuildu, numbering i manual/effective vrstvě.
+
+Každý Part je samostatný `CatalogTitle` a může mít vlastní metadata identitu.
+Jeden `CatalogTitle` nadále nemá dvě hlavní metadata identity. Automatické pole
+`part_number` doplňuje nullable `part_number_manual` a effective čtení používá
+manual hodnotu před automatickou. Explicitní potvrzení jedné části i celé
+collection snapshotuje také Part ordinal. Manual override chrání scanner,
+startup sync i rebuild stejně jako u season number.
+
+Běžné hierarchy formuláře a ruční split zobrazují pro `season` číslo a označení
+sezóny; pro `part` samostatné **Číslo sezóny** a **Číslo Part**. Backend stejné
+kombinace validuje a autoritativní Part bez čísla Part odmítne. Centrální
+structural label skládá effective hodnoty (`S1`, `S1 · Part 1`,
+`S1 · Part 2`, `Part 2`). Legacy `part_type=cour` zůstává čitelný a backendově
+kompatibilní pro staré záznamy, ale Cour není nová hlavní uživatelská volba ani
+nemá nové číslo či inference.
+
+SQLite migrace pouze idempotentně přidává
+`CatalogTitle.part_number_manual INTEGER NULL`. Nemění existující automatic `part_number`, nevytváří manual
+snapshot a neinterpretuje heuristicky historická nejednoznačná data.
+
+Roadmapa V6 používá bez Partu filename `S01E01` a při skutečném Partu
+`S01P01E01` / `S01P02E01`. Part folders na NASu nejsou cílově povinné; například
+obě řady mohou fyzicky ležet přímo v `Anime/Season 1/`. Fyzické přejmenování ani
+přesun není součástí této změny. Vícesouborový film s fyzickými segmenty P1/P2
+je jiný budoucí problém na úrovni `Video` (pravděpodobně samostatný media-part
+koncept), nikoli hierarchy Part.
 
 ---
 

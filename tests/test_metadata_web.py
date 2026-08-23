@@ -1735,7 +1735,7 @@ def test_hierarchy_review_offers_existing_confirmation_and_split_for_over_24(
 
     response = endpoints["/hierarchy-review/{collection_id}/confirm-part"](
         collection_id, part_type_manual="season", season_number_manual="1",
-        season_label_manual="S1", confirm_part=True,
+        season_label_manual="S1", part_number_manual="", confirm_part=True,
     )
     assert response.status_code == 303
     with web_app.state.sessions() as session:
@@ -1764,7 +1764,8 @@ def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_pat
         )
         title = CatalogTitle(
             collection=collection, local_title="Show", normalized_local_title="show",
-            relative_root_path="Anime/Show", part_type="title",
+            relative_root_path="Anime/Show", part_type="part",
+            season_number=1, part_number=2, season_label="S1",
         )
         Video(
             relative_path="Anime/Show/Show 00.mkv", root_folder="Anime",
@@ -1811,14 +1812,17 @@ def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_pat
     disabled_save = (
         'class="manual-hierarchy-save" type="submit" disabled'
     )
-    enable_on_concrete_type = (
-        "onchange=\"this.form.querySelector('.manual-hierarchy-save').disabled "
-        "= !this.value\""
-    )
     assert disabled_save in collection_html
     assert disabled_save in review_html
-    assert enable_on_concrete_type in collection_html
-    assert enable_on_concrete_type in review_html
+    assert 'src="/static/hierarchy_fields.js"' in collection_html
+    assert 'src="/static/hierarchy_fields.js"' in review_html
+    assert 'name="part_number_manual"' in collection_html
+    assert 'name="part_number_manual"' in review_html
+    assert "Číslo sezóny" in collection_html
+    assert "Číslo Part" in collection_html
+    assert "Cour" not in collection_html
+    assert "S1 · Part 2" in collection_html
+    assert "S1 · Part 2" in review_html
     assert 'name="return_to" value="hierarchy_review"' in review_html
     assert "Typ celé části" in review_html
     assert "Klasifikace vybraných videí" in review_html
@@ -1981,6 +1985,7 @@ def test_isekai_quartet_movie_can_be_marked_as_film_from_hierarchy_review(tmp_pa
     response = endpoint(
         collection_id, movie_id,
         season_number_manual="", season_label_manual="",
+        part_number_manual="",
         part_type_manual="film", sort_order_manual="",
         hierarchy_verified=True, filter_name="all", q="", sort="", direction="",
         return_to="hierarchy_review",
@@ -2068,6 +2073,10 @@ def _render_hierarchy_review(
             if automatic_season_number is not None else None
         ),
         hierarchy_verified_at=utc_now() if verified else None,
+        hierarchy_manual_override=verified,
+        part_type_manual="season" if verified else None,
+        season_number_manual=1 if verified else None,
+        season_label_manual="S1" if verified else None,
     )
     detection = detect_episode_number(filename)
     is_standard = detection.is_standard
@@ -2161,6 +2170,103 @@ def test_collection_and_title_verification_texts_are_distinct():
     assert "Doporučené zařazení:" not in rendered
 
 
+def test_historical_incomplete_part_snapshot_is_not_shown_as_verified(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'historical-part-snapshot.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    historical_timestamp = utc_now()
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Genjitsu Shugi Yuusha no Oukoku Saikenki (L21-Z22)",
+            normalized_local_title=(
+                "genjitsu shugi yuusha no oukoku saikenki l21 z22"
+            ),
+            relative_root_path=(
+                "Anime/Genjitsu Shugi Yuusha no Oukoku Saikenki (L21-Z22)"
+            ),
+            hierarchy_status="verified",
+            hierarchy_verified_at=historical_timestamp,
+        )
+        titles = []
+        for ordinal, raw_type in ((1, "title"), (2, "migration_review")):
+            title = CatalogTitle(
+                collection=collection,
+                local_title=f"Part {ordinal}",
+                normalized_local_title=f"part {ordinal}",
+                relative_root_path=(
+                    f"{collection.relative_root_path}/Part {ordinal}"
+                ),
+                part_type=raw_type,
+                part_number=ordinal,
+                part_type_manual="part",
+                season_number_manual=1,
+                season_label_manual=f"Part {ordinal}",
+                part_number_manual=None,
+                sort_order_manual=ordinal,
+                hierarchy_manual_override=True,
+                hierarchy_verified_at=historical_timestamp,
+            )
+            Video(
+                relative_path=(
+                    f"{title.relative_root_path}/Genjitsu - 01.mkv"
+                ),
+                root_folder="Anime", filename="Genjitsu - 01.mkv",
+                size=1, mtime_ns=ordinal,
+                catalog_title=title, catalog_collection=collection,
+            )
+            titles.append(title)
+        session.add(collection)
+        refresh_collection_state(collection)
+        session.commit()
+        collection_id = collection.id
+        title_ids = [title.id for title in titles]
+
+    endpoints = {
+        route.path: route.endpoint
+        for route in web_app.routes if hasattr(route, "endpoint")
+    }
+    review_html = endpoints["/hierarchy-review/{collection_id}"](
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    assert "stav <strong>review_required</strong>" in review_html
+    assert "Část typu Part nemá bezpečně určené číslo Part." in review_html
+    for ordinal, title_id in zip((1, 2), title_ids, strict=True):
+        card = review_html.split(
+            f'id="title-{title_id}"', 1,
+        )[1].split("</article>", 1)[0]
+        assert f"S1 · Part {ordinal}" in card
+        assert "Historické ruční zařazení není úplné." in card
+        assert "Pro typ Part potvrďte číslo Part." in card
+        assert f"Automaticky rozpoznané číslo Part: {ordinal}." in card
+        assert '<span class="verified">Zařazení ověřeno</span>' not in card
+        assert not re.search(
+            r'name="hierarchy_verified"[^>]*\schecked(?:\s|>)', card,
+        )
+        assert 'name="part_number_manual" value=""' in card
+
+    title_detail_html = endpoints["/titles/{catalog_title_id}"](
+        web_request(web_app, f"/titles/{title_ids[1]}"), title_ids[1],
+    ).body.decode()
+    assert "S1 · Part 2" in title_detail_html
+
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        assert collection.hierarchy_status == "review_required"
+        for ordinal, title_id in zip((1, 2), title_ids, strict=True):
+            title = session.get(CatalogTitle, title_id)
+            assert title.part_number == ordinal
+            assert title.part_number_manual is None
+            assert title.hierarchy_manual_override is True
+            assert title.hierarchy_verified_at == historical_timestamp.replace(
+                tzinfo=None,
+            )
+
+
 def test_choyoyu_recommendation_is_read_only_and_uses_existing_summary(tmp_path):
     search_title = (
         "Choujin Koukousei-tachi wa Isekai demo Yoyuu de Ikinuku you desu!"
@@ -2239,7 +2345,7 @@ def test_choyoyu_recommendation_is_read_only_and_uses_existing_summary(tmp_path)
     }
     response = endpoints["/hierarchy-review/{collection_id}/confirm-part"](
         collection_id, part_type_manual="season", season_number_manual="1",
-        season_label_manual="S1", confirm_part=True,
+        season_label_manual="S1", part_number_manual="", confirm_part=True,
     )
     assert response.status_code == 303
 
@@ -2321,7 +2427,7 @@ def test_season_two_confirmation_clears_period_hint_reason_and_renders_verified(
     assert "Doporučené zařazení: Season 1 (S1)" in proposal_rendered
     response = endpoints["/hierarchy-review/{collection_id}/confirm-part"](
         collection_id, part_type_manual="season", season_number_manual="2",
-        season_label_manual="", confirm_part=True,
+        season_label_manual="", part_number_manual="", confirm_part=True,
     )
 
     assert response.status_code == 303
@@ -2355,7 +2461,7 @@ def test_season_two_confirmation_clears_period_hint_reason_and_renders_verified(
     assert PERIOD_HINT_REVIEW_REASON not in rendered
     assert '<option value="verified" selected>Hierarchie ověřena</option>' in rendered
     assert "Lokální část: <strong>Asobi Asobase (L18)</strong>" in rendered
-    assert "označení: <strong>S2</strong>" in rendered
+    assert "strukturální identita: <strong>S2</strong>" in rendered
     assert "typ: <strong>season</strong>" in rendered
     assert "<dt>Fyzických videí</dt><dd>12</dd>" in rendered
     assert "<dt>Logických standardních epizod</dt><dd>12</dd>" in rendered

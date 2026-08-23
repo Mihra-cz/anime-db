@@ -6,7 +6,6 @@ from __future__ import annotations
 PART_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
     ("season", "Sezóna"),
     ("part", "Part"),
-    ("cour", "Cour"),
     ("film", "Film"),
     ("ova", "OVA"),
     ("special", "Special"),
@@ -15,8 +14,10 @@ PART_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
     ("bonus", "Bonus"),
     ("other", "Other"),
 )
-PART_TYPES = frozenset(value for value, _ in PART_TYPE_CHOICES)
-PART_TYPE_LABELS = dict(PART_TYPE_CHOICES)
+# ``cour`` remains accepted for persisted legacy rows and old technical JSON,
+# but it is not offered as a new user-facing hierarchy choice.
+PART_TYPES = frozenset({*(value for value, _ in PART_TYPE_CHOICES), "cour"})
+PART_TYPE_LABELS = {**dict(PART_TYPE_CHOICES), "cour": "Cour"}
 # ``title`` remains readable as a legacy/technical inference fallback, but new
 # authoritative hierarchy input must always choose a concrete structural type.
 TECHNICAL_PART_TYPES = frozenset({*PART_TYPES, "title"})

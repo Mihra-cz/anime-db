@@ -6,14 +6,19 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.catalog import catalog_title_display_title, video_matches_filter
+from app.catalog import (
+    catalog_title_display_title, catalog_title_series_label, video_matches_filter,
+)
 from app.hierarchy_review import (
     CONFIRMED_DUPLICATES_REVIEW_REASON, FILENAME_SEASON_CONFLICT_REVIEW_REASON,
-    PERIOD_HINT_REVIEW_REASON, UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON,
+    MISSING_PART_NUMBER_REVIEW_REASON, PERIOD_HINT_REVIEW_REASON,
+    UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON,
     ManualTitleDefinition, apply_manual_split,
     apply_single_title_confirmation,
     classify_videos_in_place, clear_confirmed_duplicate_videos,
     collection_requires_review, confirm_duplicate_groups, confirm_duplicate_videos,
+    confirm_effective_collection_hierarchy,
+    catalog_title_hierarchy_is_verified, manual_hierarchy_snapshot_issue,
     create_title_from_videos,
     delete_empty_local_title, extract_local_period_hint, merge_title_into,
     move_videos_to_title, parse_manual_definitions, parse_simple_definitions,
@@ -80,11 +85,11 @@ def seeded_collection(count: int = 26):
 def definitions(first_title_id: int):
     return parse_manual_definitions(f"""[
       {{"title_id": {first_title_id}, "local_title": "Part 1", "season_number_manual": 1,
-       "season_label_manual": "S1", "part_number": 1, "part_type_manual": "part",
+       "season_label_manual": "S1", "part_number_manual": 1, "part_type_manual": "part",
        "episode_start": 1, "episode_end": 13, "episode_start_offset": 0,
        "numbering_mode": "absolute", "sort_order": 1}},
-      {{"local_title": "Part 2", "season_number_manual": 2,
-       "season_label_manual": "S2", "part_number": 2, "part_type_manual": "part",
+      {{"local_title": "Part 2", "season_number_manual": 1,
+       "season_label_manual": "S1", "part_number_manual": 2, "part_type_manual": "part",
        "episode_start": 14, "episode_end": 26, "episode_start_offset": 13,
        "numbering_mode": "absolute", "sort_order": 2}}
     ]""")
@@ -463,6 +468,107 @@ def test_confirmed_season_can_keep_number_and_label_unspecified():
     assert collection.hierarchy_status == "verified"
 
 
+def test_single_title_confirmation_snapshots_season_scope_and_part_ordinal():
+    collection, title = simple_collection(part_type="season")
+    title.season_number = 1
+    title.season_label = "S1"
+
+    apply_single_title_confirmation(
+        collection, part_type="part", season_number=1, season_label=None,
+        part_number=2,
+    )
+
+    assert title.part_type_manual == "part"
+    assert title.season_number_manual == 1
+    assert title.part_number_manual == 2
+    assert title.season_label_manual == "S1"
+    assert title.hierarchy_manual_override is True
+    assert title.effective_season_number == 1
+    assert title.effective_part_number == 2
+
+
+def test_collection_confirmation_snapshots_part_ordinal_as_manual_authority():
+    collection, title = simple_collection(part_type="part", status="automatic")
+    title.season_number = 1
+    title.part_number = 2
+    title.season_label = "S1"
+
+    confirm_effective_collection_hierarchy(collection)
+
+    assert title.part_type_manual == "part"
+    assert title.season_number_manual == 1
+    assert title.part_number_manual == 2
+    assert title.season_label_manual == "S1"
+    assert title.hierarchy_manual_override is True
+
+
+def test_manual_part_requires_ordinal_and_stores_season_and_part_independently():
+    collection, title = simple_collection(part_type="season", status="automatic")
+
+    with pytest.raises(ValueError, match="číslo Part"):
+        set_manual_title_hierarchy(
+            title, season_number=1, season_label="S1", part_type="part",
+            sort_order=1, hierarchy_verified=True,
+        )
+
+    set_manual_title_hierarchy(
+        title, season_number=1, season_label=None, part_type="part",
+        part_number=2, sort_order=1, hierarchy_verified=True,
+    )
+
+    assert title.season_number_manual == 1
+    assert title.part_number_manual == 2
+    assert title.season_label_manual == "S1"
+    assert collection.hierarchy_status == "verified"
+
+
+def test_part_without_ordinal_remains_review_required():
+    collection, title = simple_collection(part_type="part", status="automatic")
+    title.season_number = 1
+    title.season_label = "S1"
+
+    refresh_collection_state(collection)
+
+    assert collection.hierarchy_status == "review_required"
+    assert collection.hierarchy_note == MISSING_PART_NUMBER_REVIEW_REASON
+
+
+def test_historical_incomplete_part_snapshot_is_not_currently_verified():
+    collection, title = simple_collection(part_type="title", status="verified")
+    historical_timestamp = utc_now()
+    title.part_number = 2
+    title.part_type_manual = "part"
+    title.season_number_manual = 1
+    title.season_label_manual = "Part 2"
+    title.part_number_manual = None
+    title.hierarchy_manual_override = True
+    title.hierarchy_verified_at = historical_timestamp
+
+    refresh_collection_state(collection)
+
+    assert collection.hierarchy_status == "review_required"
+    assert collection.hierarchy_note == MISSING_PART_NUMBER_REVIEW_REASON
+    assert catalog_title_hierarchy_is_verified(title) is False
+    assert manual_hierarchy_snapshot_issue(title) == (
+        "Pro typ Part potvrďte číslo Part."
+    )
+    assert title.effective_season_number == 1
+    assert title.effective_part_number == 2
+    assert catalog_title_series_label(title) == "S1 · Part 2"
+    assert title.part_number_manual is None
+    assert title.hierarchy_manual_override is True
+    assert title.hierarchy_verified_at == historical_timestamp
+
+    set_manual_title_hierarchy(
+        title, part_type="part", season_number=1, part_number=2,
+        season_label=None, sort_order=1, hierarchy_verified=True,
+    )
+
+    assert title.part_number_manual == 2
+    assert catalog_title_hierarchy_is_verified(title) is True
+    assert collection.hierarchy_status == "verified"
+
+
 @pytest.mark.parametrize(("season_number", "season_label", "sort_order", "verified"), [
     (2, "S2", 1, False),
     (2, "S2", 1, True),
@@ -780,7 +886,7 @@ def test_simple_definition_form_uses_existing_backend_semantics():
         {
             "title_id": "1", "local_title": "Part 1",
             "season_number_manual": "1", "season_label_manual": "S1",
-            "part_number": "1", "part_type_manual": "part",
+            "part_number_manual": "1", "part_type_manual": "part",
             "episode_start": "1", "episode_end": "12",
             "episode_start_offset": "0", "numbering_mode": "absolute",
             "sort_order": "1", "filename_pattern": "", "video_ids": "1, 2 3",
@@ -795,7 +901,7 @@ def test_simple_definition_form_uses_existing_backend_semantics():
     assert len(parsed) == 1
     assert parsed[0] == ManualTitleDefinition(
         title_id=1, local_title="Part 1", manual_display_title=None,
-        season_number_manual=1, season_label_manual="S1", part_number=1,
+        season_number_manual=1, season_label_manual="S1", part_number_manual=1,
         part_type_manual="part", episode_start=1, episode_end=12,
         episode_start_offset=0, numbering_mode="absolute", sort_order=1,
         filename_pattern=None, video_ids=(1, 2, 3),
@@ -811,6 +917,9 @@ def test_manual_split_creates_two_titles_and_assigns_ranges():
         assert not preview.unmatched_video_ids
         titles = session.scalars(select(CatalogTitle).order_by(CatalogTitle.sort_order_manual)).all()
         assert [title.local_title for title in titles] == ["Part 1", "Part 2"]
+        assert [title.season_number_manual for title in titles] == [1, 1]
+        assert [title.part_number_manual for title in titles] == [1, 2]
+        assert [title.effective_part_number for title in titles] == [1, 2]
         assert [len(title.videos) for title in titles] == [13, 13]
         assert titles[1].videos[0].season_episode_number == 1
         collection = session.get(CatalogCollection, collection_id)
@@ -849,14 +958,14 @@ def test_individual_video_selection_and_filename_rule_are_previewed():
         videos = list(session.get(CatalogCollection, collection_id).videos)
         selected = ManualTitleDefinition(
             title_id=title_id, local_title="Vybrané", manual_display_title=None,
-            season_number_manual=None, season_label_manual=None, part_number=None,
+            season_number_manual=None, season_label_manual=None, part_number_manual=None,
             part_type_manual="special", episode_start=None, episode_end=None,
             episode_start_offset=None, numbering_mode="unknown", sort_order=1,
             video_ids=(videos[0].id,),
         )
         pattern = ManualTitleDefinition(
             title_id=None, local_title="Podle názvu", manual_display_title=None,
-            season_number_manual=None, season_label_manual=None, part_number=None,
+            season_number_manual=None, season_label_manual=None, part_number_manual=None,
             part_type_manual="special", episode_start=None, episode_end=None,
             episode_start_offset=None, numbering_mode="unknown", sort_order=2,
             filename_pattern=r"Episode 02\.mkv$",
@@ -1636,6 +1745,7 @@ def test_create_title_from_videos_accepts_all_part_types_without_inventing_video
             created.append(create_title_from_videos(
                 session, collection.id, [video.id], local_title=label,
                 part_type=part_type,
+                part_number=1 if part_type == "part" else None,
             ))
 
         assert [title.effective_part_type for title in created] == [

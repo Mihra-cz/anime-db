@@ -74,6 +74,7 @@ def migrate_schema(engine) -> None:
             ("numbering_verified_at", "DATETIME NULL"),
             ("hierarchy_manual_override", "BOOLEAN NOT NULL DEFAULT 0"),
             ("season_number_manual", "INTEGER NULL"),
+            ("part_number_manual", "INTEGER NULL"),
             ("season_label_manual", "VARCHAR NULL"),
             ("part_type_manual", "VARCHAR NULL"),
             ("sort_order_manual", "INTEGER NULL"),
@@ -193,12 +194,10 @@ def migrate_schema(engine) -> None:
             if not title.hierarchy_manual_override:
                 title.part_type = part.part_type
                 title.season_number = part.season_number
+                title.part_number = part.part_number
                 title.season_label = part.season_label
                 title.original_folder_name = part.original_folder_name
                 title.sort_order = part.sort_order
-                title.part_number = (
-                    part.season_number if part.part_type in {"part", "cour"} else None
-                )
             used_titles.add(title)
 
         videos_by_collection: dict[int, list[Video]] = {}
@@ -285,6 +284,7 @@ def migrate_schema(engine) -> None:
                         or title.numbering_manual
                         or title.numbering_verified_at is not None
                         or title.season_number_manual is not None
+                        or title.part_number_manual is not None
                         or title.season_label_manual
                         or title.part_type_manual
                         or title.sort_order_manual is not None

@@ -60,12 +60,15 @@ FILENAME_SEASON_CONFLICT_REVIEW_REASON = (
 UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON = (
     "Explicitně označený doplňkový obsah nemá bezpečně určené canonical číslování."
 )
+MISSING_PART_NUMBER_REVIEW_REASON = (
+    "Část typu Part nemá bezpečně určené číslo Part."
+)
 SUPPLEMENTAL_PART_TYPES = {"film", "ova", "special", "preview", "recap", "bonus", "other"}
 MANUAL_DUPLICATE_STATUSES = {"suspected"}
 ALLOWED_NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
 SIMPLE_DEFINITION_FIELDS = (
     "title_id", "local_title", "manual_display_title", "season_number_manual",
-    "season_label_manual", "part_number", "part_type_manual", "episode_start",
+    "season_label_manual", "part_number_manual", "part_type_manual", "episode_start",
     "episode_end", "episode_start_offset", "numbering_mode", "sort_order",
     "filename_pattern", "video_ids",
 )
@@ -78,7 +81,7 @@ class ManualTitleDefinition:
     manual_display_title: str | None
     season_number_manual: int | None
     season_label_manual: str | None
-    part_number: int | None
+    part_number_manual: int | None
     part_type_manual: str | None
     episode_start: int | None
     episode_end: int | None
@@ -689,11 +692,49 @@ def extract_local_period_hint(local_title: str) -> str | None:
     return matches[-1].upper() if matches else None
 
 
+def structural_hierarchy_issue(
+    part_type: str | None, season_number: int | None, part_number: int | None,
+) -> str | None:
+    """Return the shared validation issue for one concrete structural identity."""
+    if part_type not in PART_TYPES:
+        return "Pro ruční zařazení zvolte konkrétní typ části."
+    if season_number is not None and season_number <= 0:
+        return "Číslo sezóny musí být kladné."
+    if part_number is not None and part_number <= 0:
+        return "Číslo Part musí být kladné."
+    if part_type == "part" and part_number is None:
+        return "Pro typ Part potvrďte číslo Part."
+    if part_type == "season" and part_number is not None:
+        return "Samostatná sezóna nesmí mít číslo Part."
+    if part_type not in {"part", "cour"} and part_number is not None:
+        return "Číslo Part lze uložit pouze pro typ Part."
+    return None
+
+
+def manual_hierarchy_snapshot_issue(title: CatalogTitle) -> str | None:
+    """Validate persisted manual authority without modifying historical data."""
+    if not title.hierarchy_manual_override:
+        return "Chybí autoritativní ruční hierarchy override."
+    return structural_hierarchy_issue(
+        title.part_type_manual,
+        title.season_number_manual,
+        title.part_number_manual,
+    )
+
+
+def manual_hierarchy_snapshot_is_complete(title: CatalogTitle) -> bool:
+    return manual_hierarchy_snapshot_issue(title) is None
+
+
+def catalog_title_hierarchy_is_verified(title: CatalogTitle) -> bool:
+    """Treat a complete authoritative manual snapshot as current verification."""
+    return manual_hierarchy_snapshot_is_complete(title)
+
+
 def manual_hierarchy_resolves_ambiguity(collection: CatalogCollection) -> bool:
     """Rozliší potvrzenou strukturu od pouhého obecného statusu verified."""
     return bool(collection.titles) and all(
-        title.hierarchy_manual_override
-        and title.part_type_manual in PART_TYPES
+        catalog_title_hierarchy_is_verified(title)
         for title in collection.titles
     )
 
@@ -708,8 +749,14 @@ def confirm_effective_collection_hierarchy(collection: CatalogCollection) -> Non
         )
     now = utc_now()
     for title in collection.titles:
+        _validate_structural_numbers(
+            title.effective_part_type,
+            title.effective_season_number,
+            title.effective_part_number,
+        )
         title.part_type_manual = title.effective_part_type
         title.season_number_manual = title.effective_season_number
+        title.part_number_manual = title.effective_part_number
         title.season_label_manual = title.effective_season_label
         title.sort_order_manual = title.effective_sort_order
         title.hierarchy_manual_override = True
@@ -772,6 +819,19 @@ def collection_requires_review(collection: CatalogCollection, videos: list[Video
         return LONG_FLAT_SEQUENCE_REVIEW_REASON
     if any(title.effective_part_type == "title" for title in collection.titles):
         return GENERIC_TITLE_REVIEW_REASON
+    if any(
+        (
+            title.part_type_manual == "part"
+            and title.part_number_manual is None
+        )
+        or (
+            title.part_type_manual is None
+            and title.effective_part_type == "part"
+            and title.effective_part_number is None
+        )
+        for title in collection.titles
+    ):
+        return MISSING_PART_NUMBER_REVIEW_REASON
     return None
 
 
@@ -822,6 +882,7 @@ def single_title_confirmation_suggestion(
 def apply_single_title_confirmation(
     collection: CatalogCollection, *, part_type: str,
     season_number: int | None, season_label: str | None,
+    part_number: int | None = None,
 ) -> CatalogTitle:
     suggestion = single_title_confirmation_suggestion(collection)
     if suggestion is None:
@@ -829,17 +890,19 @@ def apply_single_title_confirmation(
     normalized_type = part_type.strip().casefold()
     if normalized_type not in PART_TYPES:
         raise ValueError("Neplatný typ části.")
-    if season_number is not None and season_number <= 0:
-        raise ValueError("Číslo sezóny musí být kladné.")
+    _validate_structural_numbers(normalized_type, season_number, part_number)
     label = (season_label or "").strip()[:50] or None
-    if normalized_type == "season":
+    if normalized_type in {"season", "part"}:
         if season_number is not None and label is None:
             label = f"S{season_number}"
+        if normalized_type == "part" and season_number is None:
+            label = None
     else:
         season_number = None
         label = None
     title = suggestion.title
     title.season_number_manual = season_number
+    title.part_number_manual = part_number if normalized_type in {"part", "cour"} else None
     title.season_label_manual = label
     title.part_type_manual = normalized_type
     title.hierarchy_manual_override = True
@@ -848,15 +911,21 @@ def apply_single_title_confirmation(
     return title
 
 
+def _validate_structural_numbers(
+    part_type: str, season_number: int | None, part_number: int | None,
+) -> None:
+    if issue := structural_hierarchy_issue(part_type, season_number, part_number):
+        raise ValueError(issue)
+
+
 def set_manual_title_hierarchy(
     title: CatalogTitle, *, season_number: int | None, season_label: str | None,
     part_type: str | None, sort_order: int | None, hierarchy_verified: bool,
+    part_number: int | None = None,
 ) -> CatalogTitle:
     """Apply the authoritative CatalogTitle hierarchy override used by admin UIs."""
     normalized_label = (season_label or "").strip() or None
     normalized_type = (part_type or "").strip().casefold() or None
-    if season_number is not None and season_number <= 0:
-        raise ValueError("Pořadí sezóny musí být kladné číslo.")
     if sort_order is not None and sort_order < 0:
         raise ValueError("Pořadí části nesmí být záporné.")
     if normalized_label and len(normalized_label) > 50:
@@ -865,7 +934,7 @@ def set_manual_title_hierarchy(
         raise ValueError("Neplatný typ části.")
     manual_values_without_type = any(
         value is not None
-        for value in (season_number, normalized_label, sort_order)
+        for value in (season_number, normalized_label, part_number, sort_order)
     )
     if normalized_type is None and (
         manual_values_without_type or hierarchy_verified
@@ -875,19 +944,55 @@ def set_manual_title_hierarchy(
         )
     has_manual_input = any(
         value is not None
-        for value in (season_number, normalized_label, normalized_type, sort_order)
+        for value in (
+            season_number, normalized_label, part_number, normalized_type, sort_order,
+        )
     )
     if has_manual_input and not hierarchy_verified:
         raise ValueError("Ruční hierarchii je nutné potvrdit jako ověřenou.")
     if hierarchy_verified:
         effective_number = title.effective_season_number
+        effective_part_number = title.effective_part_number
         effective_label = title.effective_season_label
         effective_order = title.effective_sort_order
         snapshot_type = normalized_type
-        title.season_number_manual = (
+        snapshot_season_number = (
             season_number if season_number is not None else effective_number
         )
-        title.season_label_manual = normalized_label or effective_label
+        snapshot_part_number = (
+            part_number
+            if part_number is not None
+            else title.part_number_manual
+            if snapshot_type == "part"
+            else effective_part_number
+        )
+        if snapshot_type not in {"part", "cour"}:
+            snapshot_part_number = None
+        _validate_structural_numbers(
+            snapshot_type, snapshot_season_number, snapshot_part_number,
+        )
+        title.season_number_manual = snapshot_season_number
+        title.part_number_manual = snapshot_part_number
+        if snapshot_type == "part":
+            title.season_label_manual = (
+                normalized_label
+                or (
+                    effective_label
+                    if effective_number == snapshot_season_number else None
+                )
+                or f"S{snapshot_season_number}"
+            ) if snapshot_season_number is not None else None
+        elif snapshot_type == "season":
+            title.season_label_manual = (
+                normalized_label
+                or (
+                    f"S{snapshot_season_number}"
+                    if snapshot_season_number is not None else None
+                )
+                or effective_label
+            )
+        else:
+            title.season_label_manual = normalized_label or effective_label
         title.part_type_manual = snapshot_type
         title.sort_order_manual = (
             sort_order if sort_order is not None else effective_order
@@ -896,6 +1001,7 @@ def set_manual_title_hierarchy(
         title.hierarchy_verified_at = utc_now()
     else:
         title.season_number_manual = None
+        title.part_number_manual = None
         title.season_label_manual = None
         title.part_type_manual = None
         title.sort_order_manual = None
@@ -922,10 +1028,14 @@ def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
             raise ValueError(f"Část {position} nemá lokální název.")
         integer_fields = {}
         for field in (
-            "title_id", "season_number_manual", "part_number", "episode_start",
+            "title_id", "season_number_manual", "part_number_manual", "episode_start",
             "episode_end", "episode_start_offset", "sort_order",
         ):
             raw_value = value.get(field)
+            if field == "part_number_manual" and raw_value in (None, ""):
+                # Read old exported technical JSON, but all new output uses the
+                # explicit manual field name.
+                raw_value = value.get("part_number")
             try:
                 integer_fields[field] = None if raw_value in (None, "") else int(raw_value)
             except (TypeError, ValueError) as exc:
@@ -938,6 +1048,18 @@ def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
         part_type = str(value.get("part_type_manual") or "").strip().casefold() or None
         if part_type and part_type not in PART_TYPES:
             raise ValueError(f"Část {position} má neplatný typ.")
+        if part_type is not None:
+            try:
+                _validate_structural_numbers(
+                    part_type, integer_fields["season_number_manual"],
+                    integer_fields["part_number_manual"],
+                )
+            except ValueError as exc:
+                raise ValueError(f"Část {position}: {exc}") from exc
+        elif integer_fields["part_number_manual"] is not None:
+            raise ValueError(
+                f"Část {position}: číslo Part vyžaduje konkrétní typ Part."
+            )
         mode = str(value.get("numbering_mode") or "unknown").strip().casefold()
         if mode not in ALLOWED_NUMBERING_MODES:
             raise ValueError(f"Část {position} má neplatný režim číslování.")
@@ -953,7 +1075,8 @@ def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
             manual_display_title=_optional_text(value.get("manual_display_title"), 200),
             season_number_manual=integer_fields["season_number_manual"],
             season_label_manual=_optional_text(value.get("season_label_manual"), 50),
-            part_number=integer_fields["part_number"], part_type_manual=part_type,
+            part_number_manual=integer_fields["part_number_manual"],
+            part_type_manual=part_type,
             episode_start=start, episode_end=end,
             episode_start_offset=integer_fields["episode_start_offset"],
             numbering_mode=mode, sort_order=integer_fields["sort_order"] or position,
@@ -969,6 +1092,8 @@ def parse_simple_definitions(
     values = []
     for row in rows:
         value = {field: str(row.get(field) or "").strip() for field in SIMPLE_DEFINITION_FIELDS}
+        if not value["part_number_manual"] and row.get("part_number"):
+            value["part_number_manual"] = str(row.get("part_number") or "").strip()
         is_blank_new_row = (
             not value["title_id"]
             and not value["local_title"]
@@ -998,7 +1123,7 @@ def simple_definition_rows(collection: CatalogCollection) -> list[dict[str, str 
             "manual_display_title": title.manual_display_title,
             "season_number_manual": title.season_number_manual,
             "season_label_manual": title.season_label_manual,
-            "part_number": title.part_number,
+            "part_number_manual": title.part_number_manual,
             "part_type_manual": title.part_type_manual,
             "episode_start": title.episode_start,
             "episode_end": title.episode_end,
@@ -1061,7 +1186,8 @@ def definition_from_title(title: CatalogTitle) -> ManualTitleDefinition:
         title_id=title.id, local_title=title.local_title,
         manual_display_title=title.manual_display_title,
         season_number_manual=title.season_number_manual,
-        season_label_manual=title.season_label_manual, part_number=title.part_number,
+        season_label_manual=title.season_label_manual,
+        part_number_manual=title.part_number_manual,
         part_type_manual=title.part_type_manual, episode_start=title.episode_start,
         episode_end=title.episode_end, episode_start_offset=title.episode_start_offset,
         numbering_mode=title.numbering_mode, sort_order=title.effective_sort_order,
@@ -1232,7 +1358,7 @@ def move_videos_to_title(
 def create_title_from_videos(
     session: Session, collection_id: int, video_ids: list[int], *,
     local_title: str, part_type: str, season_number: int | None = None,
-    season_label: str | None = None,
+    season_label: str | None = None, part_number: int | None = None,
 ) -> CatalogTitle:
     name = local_title.strip()[:200]
     normalized_type = part_type.strip().casefold()
@@ -1240,11 +1366,12 @@ def create_title_from_videos(
         raise ValueError("Nová část musí mít název.")
     if normalized_type not in PART_TYPES:
         raise ValueError("Neplatný typ části.")
-    if season_number is not None and season_number <= 0:
-        raise ValueError("Číslo související sezóny musí být kladné.")
+    _validate_structural_numbers(normalized_type, season_number, part_number)
     normalized_label = (season_label or "").strip()[:50] or (
         f"S{season_number}" if season_number is not None else None
     )
+    if normalized_type == "part" and season_number is None:
+        normalized_label = None
     collection = _load_collection_for_assignment(session, collection_id)
     selected = _selected_videos(collection, video_ids)
     position = max((title.effective_sort_order for title in collection.titles), default=0) + 1
@@ -1258,7 +1385,9 @@ def create_title_from_videos(
     title = CatalogTitle(
         collection=collection, local_title=name, normalized_local_title=normalize_title(name),
         relative_root_path=virtual_path, part_type_manual=normalized_type,
-        season_number_manual=season_number, season_label_manual=normalized_label,
+        season_number_manual=season_number, part_number_manual=(
+            part_number if normalized_type in {"part", "cour"} else None
+        ), season_label_manual=normalized_label,
         sort_order_manual=position, hierarchy_manual_override=True,
         hierarchy_verified_at=utc_now(), numbering_mode="unknown",
     )
@@ -1344,7 +1473,8 @@ def delete_empty_local_title(
 
 def separate_nonstandard_videos(
     session: Session, collection_id: int, video_ids: list[int], *,
-    local_title: str, part_type: str,
+    local_title: str, part_type: str, season_number: int | None = None,
+    part_number: int | None = None,
 ) -> CatalogTitle:
     """Logicky oddělí vybraná nestandardní videa bez změny jejich cesty."""
     collection = _load_collection_for_assignment(session, collection_id)
@@ -1352,7 +1482,8 @@ def separate_nonstandard_videos(
     if any(not effective_video_numbering(video).is_nonstandard for video in selected):
         raise ValueError("Oddělit lze touto akcí pouze rozpoznaný nestandardní obsah.")
     return create_title_from_videos(
-        session, collection_id, video_ids, local_title=local_title, part_type=part_type
+        session, collection_id, video_ids, local_title=local_title,
+        part_type=part_type, season_number=season_number, part_number=part_number,
     )
 
 
@@ -1379,6 +1510,9 @@ def apply_manual_split(
         existing_effective_number = (
             title.effective_season_number if title is not None else None
         )
+        existing_effective_part_number = (
+            title.effective_part_number if title is not None else None
+        )
         existing_effective_label = (
             title.effective_season_label if title is not None else None
         )
@@ -1402,14 +1536,44 @@ def apply_manual_split(
         title.local_title = definition.local_title
         title.normalized_local_title = normalize_title(definition.local_title)
         title.manual_display_title = definition.manual_display_title
-        title.season_number_manual = (
+        snapshot_season_number = (
             definition.season_number_manual
             if definition.season_number_manual is not None else existing_effective_number
         )
-        title.season_label_manual = (
-            definition.season_label_manual or existing_effective_label
+        snapshot_part_number = (
+            definition.part_number_manual
+            if definition.part_number_manual is not None
+            else existing_effective_part_number
         )
-        title.part_number = definition.part_number
+        if concrete_type not in {"part", "cour"}:
+            snapshot_part_number = None
+        _validate_structural_numbers(
+            concrete_type, snapshot_season_number, snapshot_part_number,
+        )
+        title.season_number_manual = snapshot_season_number
+        title.part_number_manual = snapshot_part_number
+        if concrete_type == "part":
+            title.season_label_manual = (
+                definition.season_label_manual
+                or (
+                    existing_effective_label
+                    if existing_effective_number == snapshot_season_number else None
+                )
+                or f"S{snapshot_season_number}"
+            ) if snapshot_season_number is not None else None
+        elif concrete_type == "season":
+            title.season_label_manual = (
+                definition.season_label_manual
+                or (
+                    f"S{snapshot_season_number}"
+                    if snapshot_season_number is not None else None
+                )
+                or existing_effective_label
+            )
+        else:
+            title.season_label_manual = (
+                definition.season_label_manual or existing_effective_label
+            )
         title.part_type_manual = concrete_type
         title.episode_start = definition.episode_start
         title.episode_end = definition.episode_end
@@ -1449,7 +1613,8 @@ def definitions_as_json(collection: CatalogCollection) -> str:
             "manual_display_title": title.manual_display_title,
             "season_number_manual": title.season_number_manual,
             "season_label_manual": title.season_label_manual,
-            "part_number": title.part_number, "part_type_manual": title.part_type_manual,
+            "part_number_manual": title.part_number_manual,
+            "part_type_manual": title.part_type_manual,
             "episode_start": title.episode_start, "episode_end": title.episode_end,
             "episode_start_offset": title.episode_start_offset,
             "numbering_mode": title.numbering_mode, "sort_order": title.effective_sort_order,

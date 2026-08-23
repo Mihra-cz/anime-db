@@ -321,13 +321,32 @@ def catalog_collection_display_title(
 
 def catalog_title_series_label(title: CatalogTitle) -> str:
     """Vrátí popisek části výhradně z hierarchie CatalogTitle."""
-    if title.effective_season_label:
-        return title.effective_season_label
-    if title.effective_part_type == "season" and title.effective_season_number is not None:
-        return f"S{title.effective_season_number}"
-    if title.effective_part_type in {"part", "cour"} and title.part_number is not None:
-        prefix = "Part" if title.effective_part_type == "part" else "Cour"
-        return f"{prefix} {title.part_number}"
+    part_type = title.effective_part_type
+    if part_type == "part":
+        # Part identity is composed from two independent numeric axes.  A
+        # legacy season_label_manual such as "Part 2" must not masquerade as
+        # the season scope.
+        season_label = (
+            f"S{title.effective_season_number}"
+            if title.effective_season_number is not None else None
+        )
+        part_label = (
+            f"Part {title.effective_part_number}"
+            if title.effective_part_number is not None else None
+        )
+        return " · ".join(
+            value for value in (season_label, part_label) if value
+        ) or "—"
+    season_label = title.effective_season_label or (
+        f"S{title.effective_season_number}"
+        if title.effective_season_number is not None else None
+    )
+    if part_type == "season":
+        return season_label or "—"
+    if part_type == "cour" and title.effective_part_number is not None:
+        return f"Cour {title.effective_part_number}"
+    if season_label:
+        return season_label
     return {
         "film": "Film", "ova": "OVA", "special": "Special",
         "preview": "Preview", "recap": "Recap", "bonus": "Bonus",

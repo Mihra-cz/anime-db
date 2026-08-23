@@ -302,14 +302,16 @@ def recalculate_title_numbering(
     ]
     numeric_values = [value for value in effective_values if value is not None]
     explicit_offset = title.episode_start_offset
-    effective_part_number = (
-        title.season_number_manual
-        if title.season_number_manual is not None
-        else title.part_number or title.season_number
+    structural_sequence_number = (
+        title.effective_part_number
+        if title.effective_part_type in {"part", "cour"}
+        else title.effective_season_number
     )
     inferred_offset = (
         known_preceding_episodes
-        if explicit_offset is None and effective_part_number and effective_part_number > 1
+        if explicit_offset is None
+        and structural_sequence_number
+        and structural_sequence_number > 1
         else None
     )
     offset = explicit_offset if explicit_offset is not None else inferred_offset
@@ -342,14 +344,14 @@ def recalculate_title_numbering(
         elif title.numbering_mode == "season_local":
             season = effective
             absolute = effective + offset if offset is not None else (
-                effective if (effective_part_number or 1) == 1 else None
+                effective if (structural_sequence_number or 1) == 1 else None
             )
         elif offset is not None:
             season = effective - offset if local_is_absolute else effective
             absolute = effective if local_is_absolute else effective + offset
         else:
             season = effective
-            absolute = effective if (effective_part_number or 1) == 1 else None
+            absolute = effective if (structural_sequence_number or 1) == 1 else None
         video.season_episode_number = season if season and season > 0 else None
         video.absolute_episode_number = absolute if absolute and absolute > 0 else None
         video.external_episode_number = video.season_episode_number if has_external else None
@@ -368,8 +370,9 @@ def recalculate_collection_numbering(
     for title in sorted(
         collection.titles,
         key=lambda value: (
+            value.effective_season_number or 0,
+            value.effective_part_number or 0,
             value.effective_sort_order,
-            value.part_number or value.effective_season_number or 0,
         ),
     ):
         known = preceding if preceding_known and preceding else None

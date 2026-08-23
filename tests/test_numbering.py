@@ -24,7 +24,7 @@ def part(number=2, offset=None, mode="unknown", external=False):
     title = CatalogTitle(
         id=10, local_title=f"Part {number}", normalized_local_title=f"part {number}",
         relative_root_path=f"Anime/Show/Part {number}", part_type="part",
-        part_number=number, season_number=number, episode_start_offset=offset,
+        part_number=number, season_number=1, episode_start_offset=offset,
         numbering_mode=mode,
     )
     if external:
@@ -60,6 +60,17 @@ def test_part_two_without_known_offset_does_not_guess_absolute_numbers():
     title, items = part(), videos(1, 13)
     recalculate_title_numbering(title, items)
     assert all(item.absolute_episode_number is None for item in items)
+
+
+def test_season_one_part_two_keeps_season_scope_and_part_ordinal_separate():
+    title, items = part(2), videos(1, 1)
+
+    recalculate_title_numbering(title, items)
+
+    assert title.effective_season_number == 1
+    assert title.effective_part_number == 2
+    assert items[0].season_episode_number == 1
+    assert items[0].absolute_episode_number is None
 
 
 def test_external_part_two_numbers_follow_season_numbers():

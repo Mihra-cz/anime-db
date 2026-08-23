@@ -123,6 +123,7 @@ class CatalogTitle(Base):
     numbering_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     hierarchy_manual_override: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     season_number_manual: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    part_number_manual: Mapped[int | None] = mapped_column(Integer, nullable=True)
     season_label_manual: Mapped[str | None] = mapped_column(String, nullable=True)
     part_type_manual: Mapped[str | None] = mapped_column(String, nullable=True)
     sort_order_manual: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -159,6 +160,13 @@ class CatalogTitle(Base):
         if self.hierarchy_manual_override and self.part_type_manual is not None:
             return self.season_label_manual
         return self.season_label_manual or self.season_label
+
+    @property
+    def effective_part_number(self) -> int | None:
+        return (
+            self.part_number_manual
+            if self.part_number_manual is not None else self.part_number
+        )
 
     @property
     def effective_part_type(self) -> str:

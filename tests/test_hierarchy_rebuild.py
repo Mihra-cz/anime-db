@@ -94,8 +94,9 @@ def test_manual_hierarchy_fields_have_priority_and_survive_rebuild():
     with Session(engine) as session:
         title = session.scalar(select(CatalogTitle).where(CatalogTitle.local_title == "OVERLORD II"))
         title.season_number_manual = 2
+        title.part_number_manual = 1
         title.season_label_manual = "S2"
-        title.part_type_manual = "season"
+        title.part_type_manual = "part"
         title.sort_order_manual = 20
         title.hierarchy_manual_override = True
         session.commit()
@@ -105,9 +106,41 @@ def test_manual_hierarchy_fields_have_priority_and_survive_rebuild():
 
         assert title.effective_season_number == 2
         assert title.effective_season_label == "S2"
-        assert title.effective_part_type == "season"
+        assert title.effective_part_type == "part"
+        assert title.effective_part_number == 1
         assert title.effective_sort_order == 20
         assert title.season_number_manual == 2
+        assert title.part_number_manual == 1
+
+
+def test_rebuild_preserves_nested_parent_season_and_part_ordinal():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Wrong", normalized_local_title="wrong",
+            relative_root_path="Anime/Show/Season 1/Part 2",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Wrong", normalized_local_title="wrong",
+            relative_root_path="Anime/Show/Season 1/Part 2", part_type="title",
+        )
+        Video(
+            relative_path="Anime/Show/Season 1/Part 2/E01.mkv",
+            root_folder="Anime", filename="E01.mkv", size=1, mtime_ns=1,
+            catalog_title=title, catalog_collection=collection,
+        )
+        session.add(collection)
+        session.commit()
+
+        changes = rebuild_hierarchy(session, apply=True)
+        session.refresh(title)
+
+        assert len(changes) == 1
+        assert title.part_type == "part"
+        assert title.season_number == 1
+        assert title.part_number == 2
+        assert title.season_label == "S1"
 
 
 def test_rebuild_uses_shared_direct_root_season_one_inference():

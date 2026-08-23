@@ -68,6 +68,7 @@ pytest
 - Překročení timeoutu `ffprobe` označí pouze daný soubor jako chybu; jeho předchozí databázový záznam zůstane zachovaný.
 - Dostupnost knihovny se kontroluje před skenem, průběžně a znovu před mazací fází. Výpadek vyvolá rollback celého skenu.
 - Logická hierarchie používá `CatalogCollection -> CatalogTitle -> Video`: collection je hlavní anime, title je season, film, OVA nebo doplňková část.
+- Season je primární strukturální osa. Part je volitelné členění uvnitř Season a používá samostatné `season_number` a `part_number`; `Part 2` proto nikdy neznamená `Season 2`. Každý Part je samostatný `CatalogTitle`, může mít vlastní metadata a zobrazuje se například jako `S1 · Part 2`.
 - Generický `CatalogTitle.part_type=title` je pouze technický fallback během inference, nikoli konečný strukturální typ. Bez bezpečně určeného konkrétního typu zůstává collection v `review_required`; `title` se nenabízí jako nová ruční autoritativní volba.
 - Souvislá direct-root řada nejméně dvou standardních epizod od E1 bez mezer a nevyřešených duplicit se interpretuje jako automatic Season 1 (`season`, `1`, `S1`). Automatic inference nikdy nezapisuje manual hierarchy pole ani ověřovací timestamp a manual override má vždy přednost.
 - Status `automatic` znamená bezpečnou automatickou hierarchii bez aktivního problému. `verified` vyžaduje konkrétní ruční hierarchy snapshot; pouhé odstranění posledního review reasonu vede na `automatic`, ne na `verified`.
@@ -78,7 +79,7 @@ pytest
 - Potvrzené hierarchy označení (`Season 1`, `S1`, `Season 2`, …) se mechanicky nepřidává do výchozího metadata search dotazu. Běžný skutečný lokální titul zůstává zachován; u čistě strukturálního názvu části se použije známý název konkrétního titulu z metadat, případně čistý název collection.
 - Statistiky homepage počítají anime díla podle aktivních `CatalogCollection`, filmy podle hierarchy typu `film` a fyzická videa rozdělují na běžné epizody, filmy a bonusový/ostatní obsah bez dvojího započtení filmů. Karta Filmů otevírá odpovídající katalogový filtr nad stejnou hierarchy definicí; Anime titulů zůstává neklikací souhrn.
 - Hierarchy Review umí bez přesunu souborů vytvořit hlavní collection, přesunout do ní celé CatalogTitle a později rozhodnutí změnit. Ruční assignment má před scannerem přednost.
-- Každý současný `CatalogTitle` lze přímo v Hierarchy Review autoritativně klasifikovat jako Season, Part, Cour, Film, OVA, Special, Preview, Recap, Bonus nebo Other. Stejný potvrzený POST workflow a stejný centrální seznam konkrétních typů používá detail collection; `Film` je part-level typ a nepřidává se do video-level `content_type_manual`.
+- Každý současný `CatalogTitle` lze přímo v Hierarchy Review autoritativně klasifikovat jako Season, Part, Film, OVA, Special, Preview, Recap, Bonus nebo Other. Pro Part se zvlášť ukládá season scope a pořadí Partu. Legacy `cour` zůstává čitelný kvůli kompatibilitě, ale není nabízen jako nová hlavní uživatelská jednotka. `Film` je title-level typ a nepřidává se do video-level `content_type_manual`.
 - Nejasná příbuznost collections se pouze navrhne ke kontrole. Volba „Ponechat samostatně“ je persistentní pro konkrétní stav návrhu.
 - Collection merge neřeší fyzické duplicity; ty zůstávají ve vlastním duplicate workflow.
 - Ruční podezření na duplicitu se ukládá samostatně jako `videos.duplicate_status_manual='suspected'`. Výchozí `NULL` znamená pouze, že uživatel video ručně neoznačil; není to potvrzení, že soubor duplicitou není.
@@ -88,7 +89,8 @@ pytest
 - Tokenově ohraničené názvy `S01E01-Title`, `S1E2 Title` nebo `S02E12 - Title` zachovávají season hint i číslo epizody. Explicitní `[SP]` za `SxxExx` má před standardním číslem přednost: video je Special, původní číslo zůstává pouze filename hintem a canonical číslo se bez ručního nebo externího podkladu nevymýšlí.
 - Rozpor automaticky rozpoznané season složky a `Sxx` ve filename přepne collection do `review_required`; ručně potvrzená hierarchy zůstává autoritativní.
 - Hierarchy Review pro explicitní supplementary video uvnitř Season nabídne **Doporučené oddělení**. Akce **Použít doporučení** pouze v prohlížeči předvyplní stávající **Správu zařazení**; změna se uloží až jejím autoritativním potvrzením a neurčené canonical číslo se automaticky nedoplňuje.
-- **Správa zařazení jednotlivých videí** zachovává samostatnou video-level klasifikaci Recap, Preview, Special, OVA, Bonus a Other. Workflow **Oddělit do nové části** používá plný konkrétní part-level seznam; při typu Film/Season/Part/Cour nevytváří nepodporovanou video-level hodnotu.
+- **Správa zařazení jednotlivých videí** zachovává samostatnou video-level klasifikaci Recap, Preview, Special, OVA, Bonus a Other. Workflow **Oddělit do nové části** používá konkrétní title-level seznam; při typu Film/Season/Part nevytváří nepodporovanou video-level hodnotu.
+- Roadmapa V6 počítá bez Partu s `S01E01` a s existujícím Partem s `S01P01E01` / `S01P02E01`. Part složky na NASu nejsou cílově povinné a fyzické přejmenování se nyní neprovádí. Vícesouborový film s fyzickými segmenty P1/P2 je jiný budoucí problém na úrovni `Video`, nikoli hierarchy Part.
 - Aktivní grouping a review používají stejný effective numbering stav jako horní souhrn. Například raw `00` bez ručního čísla zůstává nestandardní, ale po autoritativním override E01 se zobrazuje mezi standardními epizodami a původní filename detekce už nevytváří aktivní warning.
 - Prázdný `CatalogTitle` s `hierarchy_manual_override` je zároveň konkrétní persistentní položkou ručního rozdělení. UI jej proto odstraňuje explicitní akcí **Odstranit část i z ručního rozdělení** podle stabilního title ID; startup sync současně zahazuje pouze nepoužitý automatický title odvozený z fyzické cesty, pokud všechna videa autoritativně převzal manual split.
 - Duplicate identita doplňků zahrnuje subtype i bezpečně známý season/name context. Hierarchy Review umí jednotlivé video bez změny cesty přesunout do nové nebo existující OVA/Special/NC části.
@@ -97,7 +99,7 @@ pytest
 
 ## Aktualizace databáze
 
-Při startu aplikace proběhne idempotentní migrace SQLite: chybějící sloupce pro normalizovaný jazyk, typ videa a samostatné ruční podezření na duplicitu se doplní a existující záznamy se přepočítají. Existující videa dostanou pro `duplicate_status_manual` hodnotu `NULL`; žádné se automaticky neoznačí jako `suspected`. Stávající raw metadata jazyka se zachovají. Před větší aktualizací lze pro jistotu zazálohovat `data/anime.db`; ruční smazání databáze není pro tuto verzi nutné.
+Při startu aplikace proběhne idempotentní migrace SQLite: mimo jiné doplní nullable `CatalogTitle.part_number_manual`. Existující automatické `part_number` nemění a nevytváří z nich ruční autoritu; nové manual pole zůstane u starých záznamů `NULL`. Ruční smazání databáze není pro tuto verzi nutné.
 
 ## Licence
 

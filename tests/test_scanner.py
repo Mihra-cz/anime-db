@@ -215,6 +215,80 @@ def test_scan_preserves_manual_hierarchy_values(tmp_path: Path, monkeypatch):
         assert title.sort_order_manual == 10
 
 
+def test_scan_preserves_season_scope_and_part_ordinal_for_nested_part(
+    tmp_path: Path, monkeypatch,
+):
+    video_path = tmp_path / "Show" / "Season 1" / "Part 2" / "Episode 01.mkv"
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        title = session.scalar(select(CatalogTitle))
+
+        assert title.part_type == "part"
+        assert title.season_number == 1
+        assert title.part_number == 2
+        assert title.season_label == "S1"
+        assert title.effective_season_number == 1
+        assert title.effective_part_number == 2
+
+
+def test_scan_keeps_two_parts_as_two_catalog_titles_with_one_season_scope(
+    tmp_path: Path, monkeypatch,
+):
+    for part_number in (1, 2):
+        video_path = (
+            tmp_path / "Show" / "Season 1" / f"Part {part_number}" / "Episode 01.mkv"
+        )
+        video_path.parent.mkdir(parents=True)
+        video_path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        titles = session.scalars(select(CatalogTitle).order_by(CatalogTitle.part_number)).all()
+
+        assert len(titles) == 2
+        assert [title.part_type for title in titles] == ["part", "part"]
+        assert [title.season_number for title in titles] == [1, 1]
+        assert [title.part_number for title in titles] == [1, 2]
+        assert len({title.id for title in titles}) == 2
+
+
+def test_scan_does_not_overwrite_manual_part_snapshot(tmp_path: Path, monkeypatch):
+    video_path = tmp_path / "Show" / "Season 1" / "Part 2" / "Episode 01.mkv"
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        title = session.scalar(select(CatalogTitle))
+        title.part_type_manual = "part"
+        title.season_number_manual = 3
+        title.part_number_manual = 4
+        title.season_label_manual = "S3"
+        title.hierarchy_manual_override = True
+        session.commit()
+
+        scan_library(session, tmp_path)
+        session.refresh(title)
+
+        assert title.part_type_manual == "part"
+        assert title.season_number_manual == 3
+        assert title.part_number_manual == 4
+        assert title.effective_season_number == 3
+        assert title.effective_part_number == 4
+
+
 def test_scan_keeps_ova_beside_season_episode_out_of_standard_numbering(
     tmp_path: Path, monkeypatch,
 ):

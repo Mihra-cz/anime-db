@@ -44,6 +44,7 @@ def rebuild_hierarchy(session: Session, *, apply: bool = False) -> list[Hierarch
         inferred = infer_automatic_structural_values(
             part_type=target.part_type,
             season_number=target.season_number,
+            part_number=target.part_number,
             season_label=target.season_label,
             is_direct_root=(
                 target.relative_root_path == identity.collection.relative_root_path
@@ -54,8 +55,14 @@ def rebuild_hierarchy(session: Session, *, apply: bool = False) -> list[Hierarch
             target,
             part_type=inferred.part_type,
             season_number=inferred.season_number,
+            part_number=inferred.part_number,
             season_label=inferred.season_label,
-            sort_order=(inferred.season_number or target.sort_order),
+            sort_order=(
+                inferred.season_number * 1000 + inferred.part_number
+                if inferred.season_number is not None
+                and inferred.part_number is not None
+                else inferred.part_number or inferred.season_number or target.sort_order
+            ),
             detection_reason=(
                 inferred.reason
                 if inferred.reason.startswith("direct_root_")
@@ -67,8 +74,12 @@ def rebuild_hierarchy(session: Session, *, apply: bool = False) -> list[Hierarch
             or title.collection.relative_root_path != identity.collection.relative_root_path
         )
         if not collection_changed and (
-            title.season_number, title.season_label, title.part_type
-        ) == (target.season_number, target.season_label, target.part_type):
+            title.season_number, title.part_number, title.season_label,
+            title.part_type,
+        ) == (
+            target.season_number, target.part_number, target.season_label,
+            target.part_type,
+        ):
             continue
         changes.append(HierarchyChange(
             title.id, target.original_folder_name or title.local_title,
@@ -88,13 +99,11 @@ def rebuild_hierarchy(session: Session, *, apply: bool = False) -> list[Hierarch
                 collections[collection.relative_root_path] = collection
             title.collection = collection
             title.season_number = target.season_number
+            title.part_number = target.part_number
             title.season_label = target.season_label
             title.part_type = target.part_type
             title.original_folder_name = target.original_folder_name
             title.sort_order = target.sort_order
-            title.part_number = (
-                target.season_number if target.part_type in {"part", "cour"} else None
-            )
     if apply:
         session.commit()
     else:

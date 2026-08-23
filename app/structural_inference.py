@@ -39,6 +39,7 @@ class DirectRootEpisodeProfile:
 class AutomaticStructuralValues:
     part_type: str
     season_number: int | None
+    part_number: int | None
     season_label: str | None
     reason: str
 
@@ -80,21 +81,23 @@ def direct_root_episode_profile(videos: list[Video]) -> DirectRootEpisodeProfile
 
 
 def infer_automatic_structural_values(
-    *, part_type: str, season_number: int | None, season_label: str | None,
+    *, part_type: str, season_number: int | None, part_number: int | None,
+    season_label: str | None,
     is_direct_root: bool, videos: list[Video],
 ) -> AutomaticStructuralValues:
     """Return automatic structural fields without creating manual authority."""
     if not is_direct_root or part_type not in {"title", "season"}:
         return AutomaticStructuralValues(
-            part_type, season_number, season_label, "explicit_structural_type"
+            part_type, season_number, part_number, season_label,
+            "explicit_structural_type",
         )
     profile = direct_root_episode_profile(videos)
     if profile.supports_automatic_season_one:
         return AutomaticStructuralValues(
-            "season", 1, "S1", "direct_root_contiguous_episode_sequence"
+            "season", 1, None, "S1", "direct_root_contiguous_episode_sequence"
         )
     return AutomaticStructuralValues(
-        "title", None, None, "direct_root_without_safe_episode_sequence"
+        "title", None, None, None, "direct_root_without_safe_episode_sequence"
     )
 
 
@@ -109,15 +112,24 @@ def apply_automatic_structural_inference(
         values = infer_automatic_structural_values(
             part_type=title.part_type or "title",
             season_number=title.season_number,
+            part_number=title.part_number,
             season_label=title.season_label,
             is_direct_root=is_direct_root_title(title),
             videos=list(title.videos),
         )
-        current = (title.part_type, title.season_number, title.season_label)
-        inferred = (values.part_type, values.season_number, values.season_label)
+        current = (
+            title.part_type, title.season_number, title.part_number,
+            title.season_label,
+        )
+        inferred = (
+            values.part_type, values.season_number, values.part_number,
+            values.season_label,
+        )
         if current != inferred:
-            title.part_type, title.season_number, title.season_label = inferred
-            title.part_number = None
+            (
+                title.part_type, title.season_number, title.part_number,
+                title.season_label,
+            ) = inferred
             changed = True
     return changed
 

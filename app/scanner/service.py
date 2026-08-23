@@ -381,13 +381,10 @@ def _scan_library(
         if not catalog_title.hierarchy_manual_override:
             catalog_title.part_type = title_data.part_type
             catalog_title.season_number = title_data.season_number
+            catalog_title.part_number = title_data.part_number
             catalog_title.season_label = title_data.season_label
             catalog_title.original_folder_name = title_data.original_folder_name
             catalog_title.sort_order = title_data.sort_order
-            catalog_title.part_number = (
-                title_data.season_number
-                if title_data.part_type in {"part", "cour"} else None
-            )
         video.catalog_title = catalog_title
     session.flush()
     videos_by_collection_path: dict[str, list[Video]] = {}
