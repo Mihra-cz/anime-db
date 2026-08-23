@@ -5,7 +5,7 @@ from enum import StrEnum
 import re
 
 from .catalog import derive_episode_number
-from .models import CatalogCollection, CatalogTitle, Video
+from .models import CatalogCollection, CatalogTitle, ManualSplitRuleVideo, Video
 from .numbering import effective_video_numbering, is_nonprimary_duplicate_video
 
 
@@ -185,6 +185,22 @@ def _requires_rule_assignment(
     return True
 
 
+def _rule_targets_current_assignment(
+    rule: ManualSplitRule,
+    video: Video,
+) -> bool:
+    target = rule.catalog_title
+    if target is None:
+        return False
+    if video.catalog_title is target:
+        return True
+    return (
+        target.id is not None
+        and video.catalog_title_id is not None
+        and target.id == video.catalog_title_id
+    )
+
+
 def evaluate_manual_split_assignment(
     videos: list[Video],
     definitions: list[ManualTitleDefinition],
@@ -193,6 +209,26 @@ def evaluate_manual_split_assignment(
 ) -> ManualSplitEvaluationResult:
     """Evaluate every rule for every video before returning any assignment."""
     persisted_targets = catalog_titles is not None
+    referenced_title_ids = [
+        definition.title_id
+        for definition in definitions
+        if definition.title_id is not None
+    ]
+    if len(referenced_title_ids) != len(set(referenced_title_ids)):
+        raise ValueError("Každá existující část smí být v pravidlech uvedena pouze jednou.")
+    if not persisted_targets:
+        available_video_ids = {
+            video.id for video in videos if video.id is not None
+        }
+        requested_video_ids = {
+            video_id
+            for definition in definitions
+            for video_id in definition.video_ids
+        }
+        if requested_video_ids - available_video_ids:
+            raise ValueError(
+                "Ruční rozdělení odkazuje na cizí nebo neexistující video."
+            )
     targets = catalog_titles if catalog_titles is not None else [None] * len(definitions)
     if len(targets) != len(definitions):
         raise ValueError("Počet cílů ručního rozdělení neodpovídá počtu pravidel.")
@@ -205,6 +241,12 @@ def evaluate_manual_split_assignment(
         if rule.definition.filename_pattern else None
         for rule in rules
     )
+    has_any_selector = any(
+        rule.definition.video_ids
+        or rule.definition.episode_start is not None
+        or pattern is not None
+        for rule, pattern in zip(rules, patterns)
+    )
     decisions: list[ManualSplitVideoDecision] = []
     for video in videos:
         number = _manual_split_number(video)
@@ -213,10 +255,6 @@ def evaluate_manual_split_assignment(
             for rule, pattern in zip(rules, patterns)
             if (
                 video.id in rule.definition.video_ids
-                or (
-                    rule.catalog_title is not None
-                    and video.catalog_title is rule.catalog_title
-                )
                 or (
                     rule.definition.episode_start is not None
                     and number is not None
@@ -227,7 +265,32 @@ def evaluate_manual_split_assignment(
                 or bool(pattern and pattern.search(video.filename))
             )
         )
-        if len(matching_rules) == 1:
+        current_target_rule = next(
+            (
+                rule for rule in rules
+                if persisted_targets and _rule_targets_current_assignment(rule, video)
+            ),
+            None,
+        )
+        has_explicit_match = any(
+            video.id in rule.definition.video_ids for rule in matching_rules
+        )
+        if (
+            current_target_rule is not None
+            and current_target_rule not in matching_rules
+            and not has_explicit_match
+            and len(matching_rules) <= 1
+        ):
+            # Staré DB neuchovávaly explicitní selection odděleně od assignmentu.
+            # Nevysvětlitelný současný assignment proto konzervativně zachováme,
+            # ale nevydáváme jej za rule match ani novou ruční autoritu.
+            kind = ManualSplitDecisionKind.NOT_REQUIRED
+            matching_rules = ()
+        elif not has_any_selector:
+            # Samotný obecný hierarchy override není manual-split membership
+            # authority ani důvod vyžadovat pokrytí videí pravidly.
+            kind = ManualSplitDecisionKind.NOT_REQUIRED
+        elif len(matching_rules) == 1:
             kind = ManualSplitDecisionKind.UNIQUE
         elif len(matching_rules) > 1:
             kind = ManualSplitDecisionKind.CONFLICT
@@ -258,7 +321,53 @@ def definition_from_title(title: CatalogTitle) -> ManualTitleDefinition:
         numbering_mode=title.numbering_mode,
         sort_order=title.effective_sort_order,
         filename_pattern=title.episode_filename_pattern,
-        video_ids=tuple(video.id for video in title.videos if video.id is not None),
+        video_ids=tuple(sorted(
+            link.video_id for link in title.manual_split_rule_videos
+        )),
+    )
+
+
+def synchronize_manual_split_authority(
+    definitions: list[ManualTitleDefinition],
+    catalog_titles: list[CatalogTitle],
+    videos: list[Video],
+) -> None:
+    """Replace explicit rule memberships without changing resulting assignments."""
+    if len(catalog_titles) != len(definitions):
+        raise ValueError("Počet cílů ručního rozdělení neodpovídá počtu pravidel.")
+    videos_by_id = {
+        video.id: video for video in videos if video.id is not None
+    }
+    requested_ids = {
+        video_id
+        for definition in definitions
+        for video_id in definition.video_ids
+    }
+    unknown_ids = requested_ids - videos_by_id.keys()
+    if unknown_ids:
+        raise ValueError(
+            "Ruční rozdělení odkazuje na cizí nebo neexistující video."
+        )
+
+    for definition, title in zip(definitions, catalog_titles):
+        desired_ids = set(definition.video_ids)
+        existing = {
+            link.video_id: link for link in title.manual_split_rule_videos
+        }
+        for video_id in existing.keys() - desired_ids:
+            title.manual_split_rule_videos.remove(existing[video_id])
+        for video_id in desired_ids - existing.keys():
+            title.manual_split_rule_videos.append(ManualSplitRuleVideo(
+                video=videos_by_id[video_id],
+            ))
+
+
+def has_persisted_manual_split_selector(title: CatalogTitle) -> bool:
+    return bool(
+        title.manual_split_rule_videos
+        or title.episode_start is not None
+        or title.episode_end is not None
+        or title.episode_filename_pattern
     )
 
 

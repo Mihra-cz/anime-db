@@ -1,14 +1,16 @@
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.catalog import (
     catalog_title_display_title, catalog_title_series_label, video_matches_filter,
 )
+from app.hierarchy_evaluation import HierarchyIssueCode, evaluate_collection_hierarchy
 from app.hierarchy_review import (
     CONFIRMED_DUPLICATES_REVIEW_REASON, FILENAME_SEASON_CONFLICT_REVIEW_REASON,
     MISSING_PART_NUMBER_REVIEW_REASON, PERIOD_HINT_REVIEW_REASON,
@@ -22,7 +24,8 @@ from app.hierarchy_review import (
     create_title_from_videos,
     delete_empty_local_title, extract_local_period_hint, merge_title_into,
     move_videos_to_title, parse_manual_definitions, parse_simple_definitions,
-    preview_assignments, refresh_collection_state, separate_nonstandard_videos,
+    definitions_as_json, preview_assignments, refresh_collection_state,
+    separate_nonstandard_videos,
     set_manual_duplicate_status, set_manual_title_hierarchy,
     simple_definition_rows,
     single_title_confirmation_suggestion,
@@ -32,7 +35,7 @@ from app.hierarchy_review import (
 from app.hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPES
 from app.models import (
     Artwork, CatalogCollection, CatalogTitle, ExternalTitleLink, InternalSubtitle,
-    MetadataCandidate, TitleMetadata, Video, utc_now,
+    ManualSplitRuleVideo, MetadataCandidate, TitleMetadata, Video, utc_now,
 )
 from app.migrations import migrate_schema
 from app.numbering import (
@@ -93,6 +96,35 @@ def definitions(first_title_id: int):
        "episode_start": 14, "episode_end": 26, "episode_start_offset": 13,
        "numbering_mode": "absolute", "sort_order": 2}}
     ]""")
+
+
+def explicit_definition(
+    title_id: int,
+    video_ids: tuple[int, ...],
+) -> ManualTitleDefinition:
+    return ManualTitleDefinition(
+        title_id=title_id,
+        local_title="Season 1",
+        manual_display_title=None,
+        season_number_manual=1,
+        season_label_manual="S1",
+        part_number_manual=None,
+        part_type_manual="season",
+        episode_start=None,
+        episode_end=None,
+        episode_start_offset=None,
+        numbering_mode="season_local",
+        sort_order=1,
+        filename_pattern=None,
+        video_ids=video_ids,
+    )
+
+
+def manual_split_authority_pairs(session: Session) -> set[tuple[int, int]]:
+    return {
+        (row.catalog_title_id, row.video_id)
+        for row in session.scalars(select(ManualSplitRuleVideo)).all()
+    }
 
 
 def simple_collection(*, part_type="title", status="review_required", with_video=True):
@@ -697,9 +729,16 @@ def test_nonblocking_period_hint_collection_reopens_for_new_scan_problem(
         scan_library(session, tmp_path)
         unknown = session.scalar(select(Video).where(Video.filename == unknown_path.name))
         assert collection.hierarchy_status == "review_required"
-        assert collection.hierarchy_note == (
-            "Video, které vyžaduje ruční rozdělení, neodpovídá žádnému pravidlu."
-        )
+        assert collection.hierarchy_note == "Nové nebo nezařazené video vyžaduje kontrolu."
+        issue_codes = {
+            issue.code for issue in evaluate_collection_hierarchy(
+                collection,
+                list(collection.videos),
+                include_legacy_fallback=False,
+            ).issues
+        }
+        assert HierarchyIssueCode.UNASSIGNED_VIDEO in issue_codes
+        assert HierarchyIssueCode.MANUAL_SPLIT_UNMATCHED not in issue_codes
         assert unknown.catalog_title_id is None
 
         move_videos_to_title(session, collection_id, [unknown.id], title_id)
@@ -974,6 +1013,225 @@ def test_individual_video_selection_and_filename_rule_are_previewed():
         )
         preview = preview_assignments(videos, [selected, pattern])
         assert preview.assignments == {videos[0].id: 0, videos[1].id: 1}
+
+
+def test_manual_split_edit_and_remove_synchronize_explicit_authority_exactly():
+    engine, collection_id, title_id = seeded_collection(3)
+    with Session(engine) as session:
+        videos = session.scalars(select(Video).order_by(Video.id)).all()
+        first_ids = (videos[0].id, videos[1].id)
+        apply_manual_split(
+            session,
+            collection_id,
+            [explicit_definition(title_id, first_ids)],
+        )
+        session.flush()
+        assert manual_split_authority_pairs(session) == {
+            (title_id, videos[0].id),
+            (title_id, videos[1].id),
+        }
+
+        edited_ids = (videos[1].id, videos[2].id)
+        apply_manual_split(
+            session,
+            collection_id,
+            [explicit_definition(title_id, edited_ids)],
+        )
+        session.flush()
+        assert manual_split_authority_pairs(session) == {
+            (title_id, videos[1].id),
+            (title_id, videos[2].id),
+        }
+        assert videos[0].catalog_title_id is None
+
+        apply_manual_split(
+            session,
+            collection_id,
+            [explicit_definition(title_id, (videos[2].id,))],
+        )
+        remaining_video_id = videos[2].id
+        session.commit()
+
+    with Session(engine) as session:
+        assert manual_split_authority_pairs(session) == {
+            (title_id, remaining_video_id),
+        }
+        stored = session.scalars(select(Video).order_by(Video.id)).all()
+        assert [video.catalog_title_id for video in stored] == [None, None, title_id]
+
+
+def test_manual_split_forms_serialize_authority_without_assignment_backfill():
+    engine, collection_id, title_id = seeded_collection(3)
+    with Session(engine) as session:
+        title = session.get(CatalogTitle, title_id)
+        videos = session.scalars(select(Video).order_by(Video.id)).all()
+        explicitly_selected = videos[2]
+        explicitly_selected.catalog_title = None
+        title.hierarchy_manual_override = True
+        title.part_type_manual = "season"
+        title.season_number_manual = 1
+        title.manual_split_rule_videos.append(ManualSplitRuleVideo(
+            video=explicitly_selected,
+        ))
+        session.commit()
+        selected_id = explicitly_selected.id
+        automatic_assignment_ids = {videos[0].id, videos[1].id}
+
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, collection_id)
+        title = session.get(CatalogTitle, title_id)
+        assert {video.id for video in title.videos} == automatic_assignment_ids
+
+        rows = simple_definition_rows(collection)
+        serialized = json.loads(definitions_as_json(collection))
+
+        assert rows[0]["video_ids"] == str(selected_id)
+        assert serialized[0]["video_ids"] == [selected_id]
+        assert automatic_assignment_ids.isdisjoint(serialized[0]["video_ids"])
+
+
+def test_manual_split_preview_and_apply_reject_omitted_active_authority_target():
+    engine, collection_id, title_id = seeded_collection(1)
+    with Session(engine) as session:
+        video = session.scalar(select(Video))
+        apply_manual_split(
+            session,
+            collection_id,
+            [explicit_definition(title_id, (video.id,))],
+        )
+        session.commit()
+        replacement = replace(
+            explicit_definition(title_id, (video.id,)),
+            title_id=None,
+            local_title="Replacement",
+        )
+        collection = session.get(CatalogCollection, collection_id)
+
+        with pytest.raises(ValueError, match="nelze z definice vynechat"):
+            preview_assignments(
+                list(collection.videos),
+                [replacement],
+                collection=collection,
+            )
+        with pytest.raises(ValueError, match="nelze z definice vynechat"):
+            apply_manual_split(session, collection_id, [replacement])
+
+        assert manual_split_authority_pairs(session) == {(title_id, video.id)}
+        assert video.catalog_title_id == title_id
+
+
+def test_manual_split_rejects_duplicate_target_and_foreign_explicit_video():
+    engine, collection_id, title_id = seeded_collection(1)
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, collection_id)
+        video = session.scalar(select(Video))
+        duplicate_target = [
+            explicit_definition(title_id, (video.id,)),
+            replace(
+                explicit_definition(title_id, (video.id,)),
+                local_title="Duplicate target",
+                sort_order=2,
+            ),
+        ]
+        with pytest.raises(ValueError, match="pouze jednou"):
+            preview_assignments(list(collection.videos), duplicate_target)
+        with pytest.raises(ValueError, match="pouze jednou"):
+            apply_manual_split(session, collection_id, duplicate_target)
+
+        foreign_video = replace(
+            explicit_definition(title_id, (video.id,)),
+            video_ids=(video.id + 10_000,),
+        )
+        with pytest.raises(ValueError, match="cizí nebo neexistující video"):
+            preview_assignments(list(collection.videos), [foreign_video])
+        with pytest.raises(ValueError, match="cizí nebo neexistující video"):
+            apply_manual_split(session, collection_id, [foreign_video])
+
+        assert manual_split_authority_pairs(session) == set()
+        assert video.catalog_title_id == title_id
+
+
+def test_deleting_video_removes_all_manual_split_authority_without_orphans():
+    engine, collection_id, first_title_id = seeded_collection(1)
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, collection_id)
+        video = session.scalar(select(Video))
+        second = CatalogTitle(
+            collection=collection,
+            local_title="Season 2",
+            normalized_local_title="season 2",
+            relative_root_path=f"{collection.relative_root_path}/.catalog-part-2",
+            hierarchy_manual_override=True,
+            part_type_manual="season",
+            season_number_manual=2,
+        )
+        session.add(second)
+        session.flush()
+        session.add_all([
+            ManualSplitRuleVideo(
+                catalog_title_id=first_title_id,
+                video_id=video.id,
+            ),
+            ManualSplitRuleVideo(catalog_title_id=second.id, video_id=video.id),
+        ])
+        session.commit()
+        second_title_id = second.id
+        video_id = video.id
+
+        session.delete(video)
+        session.commit()
+
+        assert session.get(Video, video_id) is None
+        assert session.get(CatalogTitle, first_title_id) is not None
+        assert session.get(CatalogTitle, second_title_id) is not None
+        assert manual_split_authority_pairs(session) == set()
+        assert list(session.execute(text("PRAGMA foreign_key_check"))) == []
+
+
+def test_safe_title_delete_removes_only_its_manual_split_authority():
+    engine, collection_id, removed_title_id = seeded_collection(1)
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, collection_id)
+        removed = session.get(CatalogTitle, removed_title_id)
+        video = session.scalar(select(Video))
+        video.catalog_title = None
+        removed.hierarchy_manual_override = True
+        removed.part_type_manual = "season"
+        removed.season_number_manual = 1
+        keeper = CatalogTitle(
+            collection=collection,
+            local_title="Season 2",
+            normalized_local_title="season 2",
+            relative_root_path=f"{collection.relative_root_path}/.catalog-part-2",
+            hierarchy_manual_override=True,
+            part_type_manual="season",
+            season_number_manual=2,
+        )
+        session.add(keeper)
+        session.flush()
+        session.add_all([
+            ManualSplitRuleVideo(
+                catalog_title_id=removed_title_id,
+                video_id=video.id,
+            ),
+            ManualSplitRuleVideo(catalog_title_id=keeper.id, video_id=video.id),
+        ])
+        session.commit()
+        keeper_id, video_id = keeper.id, video.id
+
+        delete_empty_local_title(
+            session,
+            collection_id,
+            removed_title_id,
+            remove_from_manual_split=True,
+        )
+        session.commit()
+
+        assert session.get(CatalogTitle, removed_title_id) is None
+        assert session.get(CatalogTitle, keeper_id) is not None
+        assert session.get(Video, video_id) is not None
+        assert manual_split_authority_pairs(session) == {(keeper_id, video_id)}
+        assert list(session.execute(text("PRAGMA foreign_key_check"))) == []
 
 
 def test_external_link_is_only_a_hint_and_does_not_split_collection():

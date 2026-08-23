@@ -67,6 +67,9 @@ class Video(Base):
     )
     catalog_title: Mapped[CatalogTitle | None] = relationship(back_populates="videos")
     catalog_collection: Mapped[CatalogCollection | None] = relationship(back_populates="videos")
+    manual_split_rule_videos: Mapped[list[ManualSplitRuleVideo]] = relationship(
+        back_populates="video", cascade="all, delete-orphan",
+    )
 
 
 METADATA_STATUSES = (
@@ -141,6 +144,9 @@ class CatalogTitle(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     videos: Mapped[list[Video]] = relationship(back_populates="catalog_title")
     collection: Mapped[CatalogCollection | None] = relationship(back_populates="titles")
+    manual_split_rule_videos: Mapped[list[ManualSplitRuleVideo]] = relationship(
+        back_populates="catalog_title", cascade="all, delete-orphan",
+    )
     external_links: Mapped[list[ExternalTitleLink]] = relationship(cascade="all, delete-orphan")
     metadata_record: Mapped[TitleMetadata | None] = relationship(cascade="all, delete-orphan")
     metadata_candidates: Mapped[list[MetadataCandidate]] = relationship(cascade="all, delete-orphan")
@@ -180,6 +186,25 @@ class CatalogTitle(Base):
         if self.season_number_manual is not None:
             return self.season_number_manual
         return self.sort_order
+
+
+class ManualSplitRuleVideo(Base):
+    """Explicit manual-split membership, independent of resulting assignment."""
+
+    __tablename__ = "manual_split_rule_videos"
+
+    catalog_title_id: Mapped[int] = mapped_column(
+        ForeignKey("catalog_titles.id", ondelete="CASCADE"), primary_key=True,
+    )
+    video_id: Mapped[int] = mapped_column(
+        ForeignKey("videos.id", ondelete="CASCADE"), primary_key=True,
+    )
+    catalog_title: Mapped[CatalogTitle] = relationship(
+        back_populates="manual_split_rule_videos",
+    )
+    video: Mapped[Video] = relationship(back_populates="manual_split_rule_videos")
+
+    __table_args__ = (Index("ix_manual_split_rule_videos_video_id", "video_id"),)
 
 
 class CollectionGroupingDecision(Base):

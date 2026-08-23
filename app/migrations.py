@@ -121,6 +121,10 @@ def migrate_schema(engine) -> None:
             "CREATE INDEX IF NOT EXISTS ix_catalog_collections_hierarchy_status "
             "ON catalog_collections(hierarchy_status)"
         ))
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_manual_split_rule_videos_video_id "
+            "ON manual_split_rule_videos(video_id)"
+        ))
 
     with Session(engine) as session:
         for video in session.scalars(select(Video)):

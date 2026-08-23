@@ -25,7 +25,7 @@ from app.manual_split import (
     evaluate_persisted_manual_split,
 )
 from app.migrations import migrate_schema
-from app.models import CatalogCollection, CatalogTitle, Video
+from app.models import CatalogCollection, CatalogTitle, ManualSplitRuleVideo, Video
 from app.scanner import scan_library
 
 
@@ -55,6 +55,7 @@ def _definition(
     sort_order: int,
     season: int = 1,
     pattern: str | None = None,
+    video_ids: tuple[int, ...] = (),
 ) -> ManualTitleDefinition:
     return ManualTitleDefinition(
         title_id=title_id,
@@ -70,6 +71,7 @@ def _definition(
         numbering_mode="season_local",
         sort_order=sort_order,
         filename_pattern=pattern,
+        video_ids=video_ids,
     )
 
 
@@ -121,6 +123,14 @@ def _snapshot(collection: CatalogCollection) -> dict[str, object]:
         "status": collection.hierarchy_status,
         "evaluated_status": evaluation.status,
         "manual_issues": manual_issues,
+        "manual_decisions": _decision_signature(
+            evaluate_persisted_manual_split(collection, videos)
+        ),
+        "authority": tuple(sorted(
+            (title.local_title, link.video.filename)
+            for title in collection.titles
+            for link in title.manual_split_rule_videos
+        )),
         "all_codes": tuple(sorted(issue.code.value for issue in evaluation.issues)),
         "numbering": tuple(sorted(
             (
@@ -191,6 +201,78 @@ def _run_lifecycle(
         fresh_scan,
         runtime_after_scan,
         startup,
+        runtime_after_startup,
+    ), preview_signature
+
+
+def _run_explicit_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    definitions_factory,
+    *,
+    confirm_conflicts: bool = False,
+) -> tuple[tuple[dict[str, object], ...], tuple[tuple[object, ...], ...]]:
+    library = tmp_path / "library"
+    _write_library(library, ("E01.mkv",))
+    monkeypatch.setattr(
+        "app.scanner.service.probe_video",
+        lambda *_args, **_kwargs: PROBE_RESULT,
+    )
+    engine = create_engine(f"sqlite:///{tmp_path / 'explicit-manual-split.db'}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, library)
+        collection = _load_collection(session)
+        assert all(
+            not title.manual_split_rule_videos for title in collection.titles
+        )
+        definitions = definitions_factory(collection, collection.videos[0])
+        preview = preview_assignments(list(collection.videos), definitions)
+        preview_signature = _decision_signature(preview)
+        applied = apply_manual_split(
+            session,
+            collection.id,
+            definitions,
+            confirm_conflicts=confirm_conflicts,
+        )
+        assert _decision_signature(applied) == preview_signature
+        session.flush()
+        after_apply = _snapshot(collection)
+        session.commit()
+
+    with Session(engine) as session:
+        collection = _load_collection(session)
+        after_reload = _snapshot(collection)
+        refresh_collection_state(collection)
+        session.flush()
+        runtime_after_reload = _snapshot(collection)
+        session.commit()
+
+        scan_library(session, library)
+        collection = _load_collection(session)
+        after_scan = _snapshot(collection)
+        refresh_collection_state(collection)
+        session.flush()
+        runtime_after_scan = _snapshot(collection)
+        session.commit()
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        collection = _load_collection(session)
+        after_startup = _snapshot(collection)
+        refresh_collection_state(collection)
+        session.flush()
+        runtime_after_startup = _snapshot(collection)
+
+    return (
+        after_apply,
+        after_reload,
+        runtime_after_reload,
+        after_scan,
+        runtime_after_scan,
+        after_startup,
         runtime_after_startup,
     ), preview_signature
 
@@ -298,6 +380,297 @@ def test_manual_split_unmatched_has_video_scope_and_full_lifecycle_parity(
         ("manual_split_unmatched", "video", ("E01.mkv",), ()),
     )
     assert "legacy_unlocalized_review_state" not in snapshot["all_codes"]
+
+
+def test_explicit_unique_authority_survives_apply_reload_scan_startup_and_runtime(
+    tmp_path,
+    monkeypatch,
+):
+    def definitions(collection, video):
+        video.media_part_number = 2
+        return [
+            _definition(
+                title_id=collection.titles[0].id,
+                name="Explicit target",
+                start=None,
+                end=None,
+                sort_order=1,
+                video_ids=(video.id,),
+            ),
+        ]
+
+    snapshots, preview_signature = _run_explicit_lifecycle(
+        tmp_path,
+        monkeypatch,
+        definitions,
+    )
+
+    expected_decision = (("E01.mkv", "unique", (0,)),)
+    assert preview_signature == expected_decision
+    for snapshot in snapshots:
+        assert snapshot["assignment"] == (("E01.mkv", "Explicit target"),)
+        assert snapshot["manual_decisions"] == expected_decision
+        assert snapshot["authority"] == (("Explicit target", "E01.mkv"),)
+        assert snapshot["manual_issues"] == ()
+        assert snapshot["status"] == snapshot["evaluated_status"] == "verified"
+        assert snapshot["numbering"] == (("E01.mkv", 1, 1, 1, 2),)
+
+
+def test_two_explicit_authorities_keep_conflict_with_null_assignment_across_lifecycle(
+    tmp_path,
+    monkeypatch,
+):
+    def definitions(collection, video):
+        return [
+            _definition(
+                title_id=collection.titles[0].id,
+                name="Explicit A",
+                start=None,
+                end=None,
+                sort_order=1,
+                video_ids=(video.id,),
+            ),
+            _definition(
+                title_id=None,
+                name="Explicit B",
+                start=None,
+                end=None,
+                sort_order=2,
+                season=2,
+                video_ids=(video.id,),
+            ),
+        ]
+
+    snapshots, preview_signature = _run_explicit_lifecycle(
+        tmp_path,
+        monkeypatch,
+        definitions,
+        confirm_conflicts=True,
+    )
+
+    expected_decision = (("E01.mkv", "conflict", (0, 1)),)
+    expected_issue = (
+        (
+            "manual_split_conflict",
+            "video",
+            ("E01.mkv",),
+            ("Explicit A", "Explicit B"),
+        ),
+    )
+    expected_authority = (
+        ("Explicit A", "E01.mkv"),
+        ("Explicit B", "E01.mkv"),
+    )
+    assert preview_signature == expected_decision
+    for snapshot in snapshots:
+        assert snapshot["assignment"] == (("E01.mkv", None),)
+        assert snapshot["manual_decisions"] == expected_decision
+        assert snapshot["authority"] == expected_authority
+        assert snapshot["manual_issues"] == expected_issue
+        assert snapshot["status"] == snapshot["evaluated_status"] == "conflict"
+        assert "legacy_unlocalized_review_state" not in snapshot["all_codes"]
+
+
+def test_explicit_and_range_authorities_do_not_degrade_to_unique_range_after_reload(
+    tmp_path,
+    monkeypatch,
+):
+    def definitions(collection, video):
+        return [
+            _definition(
+                title_id=collection.titles[0].id,
+                name="Explicit A",
+                start=None,
+                end=None,
+                sort_order=1,
+                video_ids=(video.id,),
+            ),
+            _definition(
+                title_id=None,
+                name="Range B",
+                start=1,
+                end=12,
+                sort_order=2,
+                season=2,
+            ),
+        ]
+
+    snapshots, preview_signature = _run_explicit_lifecycle(
+        tmp_path,
+        monkeypatch,
+        definitions,
+        confirm_conflicts=True,
+    )
+
+    expected_decision = (("E01.mkv", "conflict", (0, 1)),)
+    assert preview_signature == expected_decision
+    for snapshot in snapshots:
+        assert snapshot["assignment"] == (("E01.mkv", None),)
+        assert snapshot["manual_decisions"] == expected_decision
+        assert snapshot["authority"] == (("Explicit A", "E01.mkv"),)
+        assert snapshot["manual_issues"] == (
+            (
+                "manual_split_conflict",
+                "video",
+                ("E01.mkv",),
+                ("Explicit A", "Range B"),
+            ),
+        )
+        assert snapshot["status"] == snapshot["evaluated_status"] == "conflict"
+        assert "legacy_unlocalized_review_state" not in snapshot["all_codes"]
+
+
+def test_persisted_explicit_authority_overrides_stale_result_assignment():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show",
+            normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        titles = [
+            CatalogTitle(
+                collection=collection,
+                local_title=name,
+                normalized_local_title=name.casefold(),
+                relative_root_path=f"Anime/Show/.catalog-part-{index}",
+                hierarchy_manual_override=True,
+                part_type_manual="season",
+                season_number_manual=index,
+                sort_order_manual=index,
+            )
+            for index, name in enumerate(("Stale A", "Explicit B", "Explicit C"), 1)
+        ]
+        video = Video(
+            relative_path="Anime/Show/E01.mkv",
+            root_folder="Anime",
+            filename="E01.mkv",
+            size=1,
+            mtime_ns=1,
+            catalog_collection=collection,
+            catalog_title=titles[0],
+        )
+        session.add(video)
+        session.flush()
+        titles[1].manual_split_rule_videos.append(ManualSplitRuleVideo(video=video))
+        session.flush()
+
+        unique = evaluate_persisted_manual_split(collection, [video]).decisions[0]
+        assert unique.kind == ManualSplitDecisionKind.UNIQUE
+        assert unique.target_catalog_title is titles[1]
+
+        titles[2].manual_split_rule_videos.append(ManualSplitRuleVideo(video=video))
+        session.flush()
+        conflict = evaluate_persisted_manual_split(collection, [video]).decisions[0]
+        assert conflict.kind == ManualSplitDecisionKind.CONFLICT
+        assert conflict.matching_catalog_titles == (titles[1], titles[2])
+
+
+def test_legacy_assignment_does_not_hide_reproducible_range_conflict():
+    collection = CatalogCollection(
+        id=1,
+        local_title="Show",
+        normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    stale = CatalogTitle(
+        id=1,
+        collection=collection,
+        local_title="Legacy assignment",
+        normalized_local_title="legacy assignment",
+        relative_root_path="Anime/Show/.catalog-part-1",
+        hierarchy_manual_override=True,
+        part_type_manual="season",
+        season_number_manual=1,
+        sort_order_manual=1,
+    )
+    ranges = [
+        CatalogTitle(
+            id=index,
+            collection=collection,
+            local_title=name,
+            normalized_local_title=name.casefold(),
+            relative_root_path=f"Anime/Show/.catalog-part-{index}",
+            hierarchy_manual_override=True,
+            part_type_manual="season",
+            season_number_manual=index,
+            episode_start=1,
+            episode_end=12,
+            sort_order_manual=index,
+        )
+        for index, name in ((2, "Range B"), (3, "Range C"))
+    ]
+    video = Video(
+        id=1,
+        relative_path="Anime/Show/E01.mkv",
+        root_folder="Anime",
+        filename="E01.mkv",
+        size=1,
+        mtime_ns=1,
+        catalog_collection=collection,
+        catalog_title=stale,
+    )
+
+    decision = evaluate_persisted_manual_split(collection, [video]).decisions[0]
+
+    assert decision.kind == ManualSplitDecisionKind.CONFLICT
+    assert decision.matching_catalog_titles == tuple(ranges)
+    evaluation = evaluate_collection_hierarchy(
+        collection,
+        [video],
+        include_legacy_fallback=False,
+    )
+    assert evaluation.status == "conflict"
+    assert [
+        issue.related_catalog_titles
+        for issue in evaluation.issues
+        if issue.code == HierarchyIssueCode.MANUAL_SPLIT_CONFLICT
+    ] == [tuple(ranges)]
+
+
+def test_scanner_does_not_create_authority_for_new_video(tmp_path, monkeypatch):
+    library = tmp_path / "library"
+    _write_library(library, ("E01.mkv",))
+    monkeypatch.setattr(
+        "app.scanner.service.probe_video",
+        lambda *_args, **_kwargs: PROBE_RESULT,
+    )
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        scan_library(session, library)
+        collection = _load_collection(session)
+        first = collection.videos[0]
+        apply_manual_split(
+            session,
+            collection.id,
+            [
+                _definition(
+                    title_id=collection.titles[0].id,
+                    name="Explicit target",
+                    start=None,
+                    end=None,
+                    sort_order=1,
+                    video_ids=(first.id,),
+                )
+            ],
+        )
+        session.commit()
+
+        (library / "Anime" / "Show" / "E02.mkv").write_bytes(b"video")
+        scan_library(session, library)
+        collection = _load_collection(session)
+        videos = {video.filename: video for video in collection.videos}
+        authority = {
+            (link.catalog_title.local_title, link.video.filename)
+            for title in collection.titles
+            for link in title.manual_split_rule_videos
+        }
+
+        assert authority == {("Explicit target", "E01.mkv")}
+        assert videos["E02.mkv"].catalog_title_id is None
+        assert videos["E02.mkv"].manual_split_rule_videos == []
 
 
 def test_startup_clears_first_match_assignment_for_conflicting_rules(
@@ -467,6 +840,9 @@ def test_supplementary_and_confirmed_secondary_are_not_false_unmatched(
             for name in ("Special 01.mkv", "NCOP 01.mkv", "NCED 01.mkv")
         )
         apply_manual_split(session, collection.id, definitions)
+        assert all(
+            not title.manual_split_rule_videos for title in collection.titles
+        )
         session.commit()
         scan_library(session, library)
         collection = _load_collection(session)

@@ -1049,6 +1049,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+                selectinload(CatalogCollection.titles).selectinload(
+                    CatalogTitle.manual_split_rule_videos
+                ),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_candidates),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.artwork),
                 selectinload(CatalogCollection.videos).selectinload(Video.audio_tracks),
@@ -1433,11 +1436,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             definitions = parse_manual_definitions(definitions_json)
             with sessions() as session:
                 collection = session.scalar(select(CatalogCollection).options(
+                    selectinload(CatalogCollection.titles).selectinload(
+                        CatalogTitle.manual_split_rule_videos
+                    ),
                     selectinload(CatalogCollection.videos)
                 ).where(CatalogCollection.id == collection_id))
                 if collection is None:
                     raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
-                preview = preview_assignments(collection.videos, definitions)
+                preview = preview_assignments(
+                    collection.videos,
+                    definitions,
+                    collection=collection,
+                )
             return hierarchy_review_context(
                 request, collection_id, definitions_json, preview
             )
@@ -1465,11 +1475,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             definitions_json = definitions_to_json(definitions)
             with sessions() as session:
                 collection = session.scalar(select(CatalogCollection).options(
+                    selectinload(CatalogCollection.titles).selectinload(
+                        CatalogTitle.manual_split_rule_videos
+                    ),
                     selectinload(CatalogCollection.videos)
                 ).where(CatalogCollection.id == collection_id))
                 if collection is None:
                     raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
-                preview = preview_assignments(collection.videos, definitions)
+                preview = preview_assignments(
+                    collection.videos,
+                    definitions,
+                    collection=collection,
+                )
             return hierarchy_review_context(
                 request, collection_id, definitions_json, preview,
                 simple_rows=simple_rows,

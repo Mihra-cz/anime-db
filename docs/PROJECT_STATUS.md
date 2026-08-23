@@ -2439,12 +2439,14 @@ cesty a NAS se nemění.
 
 ## 6.33 Trvalé odstranění prázdné ručně definované části
 
-„Jednoduchá definice ručního rozdělení“ nemá samostatnou tabulku ani uložený
-JSON. Každá persistentní položka je přímo konkrétní `CatalogTitle` s
-`hierarchy_manual_override=True`; její stabilní identitou je `CatalogTitle.id`
-a pravidla jsou uložena v jeho `episode_start`, `episode_end`,
-`episode_filename_pattern`, manual season/type/sort a numbering polích. Formulář
-tyto stejné řádky pouze serializuje.
+„Jednoduchá definice ručního rozdělení“ nemá samostatný JSON ani samostatný
+rule objekt. Každá persistentní cílová položka je přímo konkrétní `CatalogTitle`
+s `hierarchy_manual_override=True`; její stabilní identitou je
+`CatalogTitle.id` a range/pattern pravidla jsou uložena v jeho `episode_start`,
+`episode_end`, `episode_filename_pattern`, manual season/type/sort a numbering
+polích. Od Commitu 4A se pouze explicitní video membership ukládá nezávisle v
+association `manual_split_rule_videos`, jak popisuje část 6.44. Formulář
+serializuje title i tuto persistentní authority.
 
 Zdroj znovuvytváření byl v pořadí startup synchronizace. `migrate_schema()`
 nejprve odvodil automatický title pro každou fyzickou hierarchy cestu, následně
@@ -2811,7 +2813,8 @@ nad tímto automatickým path kontextem přednost.
 
 Na další samostatné kroky zůstává:
 
-- Commit 4: skutečný kompletní hierarchy rebuild,
+- Commit 4A: persistence explicitní manual-split authority,
+- Commit 4B: skutečný kompletní hierarchy rebuild,
 - Commit 5: sjednocení move/manual-authority write paths,
 - Commit 6: parserové `S01E05.5` a související Season/Part numbering edge cases.
 
@@ -2867,10 +2870,73 @@ first-match chyby, multiple issues, manual Season i Season+Part snapshoty,
 incomplete historický snapshot, confirmed duplicates, supplementary obsah a
 zachování `Video.media_part_number`.
 
-Změna nepřidává DB pole ani migraci a nemění NAS. Pro další samostatné hierarchy
-kroky zůstává úplný rebuild, sjednocení obecných move/manual-authority write
-paths a parser/numbering edge cases včetně `S01E05.5`, `S01E14.5v2` a
-Season/Part absolute-numbering offsetu.
+Samotný Commit 3 nepřidal DB pole ani migraci. Následující Commit 4A doplňuje
+samostatnou persistence explicitních video selections, protože resulting
+assignment nemůže bezpečně sloužit jako jejich authority. Pro další samostatné
+hierarchy kroky zůstává úplný rebuild, sjednocení obecných
+move/manual-authority write paths a parser/numbering edge cases včetně
+`S01E05.5`, `S01E14.5v2` a Season/Part absolute-numbering offsetu.
+
+---
+
+## 6.44 Persistentní manual split authority
+
+Explicitní manual-split selection a výsledný assignment jsou nyní dvě různé
+business identity. `Video.catalog_title_id` nadále znamená pouze aktuální
+výsledné zařazení. Explicitní vazba rule target `CatalogTitle` ↔ `Video` se
+ukládá v association tabulce `manual_split_rule_videos` s composite primárním
+klíčem `(catalog_title_id, video_id)`. Oba foreign keys mají `ON DELETE CASCADE`
+a opačný lookup podporuje index na `video_id`. Stejné video tak může být
+autoritativním kandidátem více titles současně.
+
+To opravuje původní ztrátu informace při konfliktu. Pokud explicitní rule A i B
+vyberou Video V, evaluator vrátí `manual_split_conflict`, výsledný
+`Video.catalog_title_id` zůstane `NULL`, ale association A↔V i B↔V přežijí
+apply, reload, scanner, startup sync a runtime refresh. Stejně zůstává conflict
+stabilní při kombinaci explicitního A a range pravidla B; po reloadu se
+nesmí změnit na unique range match. Unique explicitní selection ukládá
+association i výsledný assignment k jedinému targetu.
+
+Preview nadále vyhodnocuje navržené transientní `video_ids` bez zápisu. Apply
+použije stejný structured decision, po vytvoření nebo nalezení target titles
+přesným set-diffem synchronizuje potvrzené authority vazby, aplikuje výsledné
+assignmenty a pokračuje stávajícím shared hierarchy finalizerem. Editace
+selection vazby nahrazuje, nehromadí; odebrané páry se smažou. JSON i jednoduchý
+formulář čtou `video_ids` z association, nikdy z `title.videos`.
+
+Evaluator už nepovažuje current `Video.catalog_title_id` za rule match.
+Persisted explicitní IDs čte výhradně z nové association; range a filename
+pattern zůstávají beze změny. Scanner, startup a runtime jsou pouze čtenáři této
+authority. Nevytvářejí ji z automatic assignmentu a nemažou ji při
+conflict/unmatched; při skutečném smazání Video nebo explicitně povoleném
+smazání prázdného target title se association uklidí spolu s rodičem.
+
+Migrace je zpětně kompatibilní a idempotentní. Vytvoří pouze novou tabulku a
+index, existující `Video.catalog_title_id` nemění a neprovádí žádný heuristický
+backfill. Dvě historické příčiny stejného assignmentu — automatic zařazení a
+explicitní selection — stará DB nerozlišuje, proto se žádná z nich automaticky
+nepovýší na novou autoritu. Historický current assignment bez dokazatelného
+selectoru se bez reprodukovatelného multi-rule konfliktu v persisted evaluatoru
+konzervativně zachová jako `not_required`, nikoli jako falešný unique match.
+Dva nebo více skutečných range/pattern matchů tato legacy ochrana nepotlačí a
+zůstanou `manual_split_conflict`; nezařazené video se nadále řídí dosavadní
+manual-split coverage semantikou a společnou diagnostics vrstvou.
+
+Již ztracené pre-4A kandidáty nelze zpětně obnovit. Pokud starý conflict před
+migrací vynuloval resulting assignment a žádné jiné persistentní pole původní
+explicitní selection nedokazuje, nová prázdná association nemá z čeho konflikt
+rekonstruovat. Commit 4A tento historický stav záměrně neodhaduje; přesná
+authority vznikne až novým explicitním potvrzením uživatele. Commit 4B proto
+může deterministicky rebuildovat nové a znovu potvrzené rules, ale nesmí tvrdit,
+že umí zpětně dopočítat již chybějící pre-4A rozhodnutí.
+
+Stable issues `manual_split_conflict` a `manual_split_unmatched`, conflict status
+precedence, multiple-issue diagnostika, complete/incomplete manual hierarchy
+snapshoty, duplicate a supplementary semantika i `Video.media_part_number`
+zůstávají beze změny. Produkční hierarchy rebuild nebyl v Commitu 4A rozšířen.
+Úplný reconciliation rebuild pokračuje až jako Commit 4B nad touto novou
+persistentní informací; obecné move/manual-authority write paths zůstávají pro
+Commit 5.
 
 ---
 

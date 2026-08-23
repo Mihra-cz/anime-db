@@ -43,10 +43,14 @@ from .manual_split import (
     ManualTitleDefinition,
     apply_manual_split_decisions,
     compile_manual_split_pattern,
+    definition_from_title,
     evaluate_manual_split_assignment,
+    has_persisted_manual_split_selector,
+    synchronize_manual_split_authority,
 )
 from .models import (
-    CatalogCollection, CatalogTitle, CollectionGroupingDecision, Video, utc_now,
+    CatalogCollection, CatalogTitle, CollectionGroupingDecision,
+    ManualSplitRuleVideo, Video, utc_now,
 )
 from .numbering import (
     clear_duplicate_group, effective_video_numbering,
@@ -1216,6 +1220,7 @@ def parse_simple_definitions(
 def simple_definition_rows(collection: CatalogCollection) -> list[dict[str, str | int | None]]:
     rows = []
     for title in sorted(collection.titles, key=lambda item: item.effective_sort_order):
+        definition = definition_from_title(title)
         rows.append({
             "title_id": title.id,
             "local_title": title.local_title,
@@ -1230,7 +1235,7 @@ def simple_definition_rows(collection: CatalogCollection) -> list[dict[str, str 
             "numbering_mode": title.numbering_mode,
             "sort_order": title.effective_sort_order,
             "filename_pattern": title.episode_filename_pattern,
-            "video_ids": "",
+            "video_ids": ", ".join(map(str, definition.video_ids)),
         })
     rows.append({field: "" for field in SIMPLE_DEFINITION_FIELDS})
     return rows
@@ -1240,9 +1245,43 @@ def _optional_text(value, limit: int) -> str | None:
     return str(value or "").strip()[:limit] or None
 
 
+def _validate_manual_split_definition_targets(
+    collection: CatalogCollection,
+    definitions: list[ManualTitleDefinition],
+) -> None:
+    existing_ids = {
+        title.id for title in collection.titles if title.id is not None
+    }
+    referenced_ids = {
+        definition.title_id
+        for definition in definitions
+        if definition.title_id is not None
+    }
+    if referenced_ids - existing_ids:
+        raise ValueError("Definice odkazuje na cizí nebo neexistující část.")
+    omitted_active_ids = {
+        title.id
+        for title in collection.titles
+        if title.id is not None
+        and title.hierarchy_manual_override
+        and has_persisted_manual_split_selector(title)
+        and title.id not in referenced_ids
+    }
+    if omitted_active_ids:
+        raise ValueError(
+            "Aktivní část ručního rozdělení nelze z definice vynechat; "
+            "odstraňte ji samostatnou potvrzenou akcí."
+        )
+
+
 def preview_assignments(
-    videos: list[Video], definitions: list[ManualTitleDefinition]
+    videos: list[Video],
+    definitions: list[ManualTitleDefinition],
+    *,
+    collection: CatalogCollection | None = None,
 ) -> AssignmentPreview:
+    if collection is not None:
+        _validate_manual_split_definition_targets(collection, definitions)
     return evaluate_manual_split_assignment(videos, definitions)
 
 
@@ -1474,9 +1513,8 @@ def delete_empty_local_title(
         raise ValueError(
             "Část už není prázdná; obsahuje video a nebyla odstraněna."
         )
-    # Všechny čtyři vztahy jsou vlastněné CatalogTitle přes delete-orphan a jejich
-    # FK mají ON DELETE CASCADE. Explicitní vyprázdnění udrží chování stejné i
-    # tam, kde SQLite foreign_keys není zapnuté.
+    # Vlastněné vztahy mají ON DELETE CASCADE. Explicitní vyprázdnění udrží
+    # chování stejné i tam, kde SQLite foreign_keys není zapnuté.
     title.external_links.clear()
     title.metadata_candidates.clear()
     title.artwork.clear()
@@ -1490,6 +1528,9 @@ def delete_empty_local_title(
         raise ValueError(
             "Část už není prázdná; mezitím do ní přibylo video a nebyla odstraněna."
         )
+    session.execute(delete(ManualSplitRuleVideo).where(
+        ManualSplitRuleVideo.catalog_title_id == title_id
+    ))
     session.flush()
     collection = session.get(CatalogCollection, collection_id)
     if collection is not None:
@@ -1519,11 +1560,18 @@ def apply_manual_split(
     *, confirm_conflicts: bool = False,
 ) -> AssignmentPreview:
     collection = session.scalar(select(CatalogCollection).options(
-        selectinload(CatalogCollection.titles), selectinload(CatalogCollection.videos),
+        selectinload(CatalogCollection.titles).selectinload(
+            CatalogTitle.manual_split_rule_videos
+        ),
+        selectinload(CatalogCollection.videos),
     ).where(CatalogCollection.id == collection_id))
     if collection is None:
         raise ValueError("Kolekce nebyla nalezena.")
-    preview = preview_assignments(collection.videos, definitions)
+    preview = preview_assignments(
+        collection.videos,
+        definitions,
+        collection=collection,
+    )
     if preview.conflicts and not confirm_conflicts:
         raise ValueError("Rozsahy nebo pravidla se překrývají; je nutné explicitní potvrzení.")
     existing = {title.id: title for title in collection.titles}
@@ -1612,6 +1660,12 @@ def apply_manual_split(
         title.hierarchy_verified_at = now
         resolved.append(title)
     session.flush()
+    synchronize_manual_split_authority(
+        definitions,
+        resolved,
+        list(collection.videos),
+    )
+    session.flush()
     apply_manual_split_decisions(
         preview,
         collection,
@@ -1623,22 +1677,13 @@ def apply_manual_split(
 
 
 def definitions_as_json(collection: CatalogCollection) -> str:
-    values = []
-    for title in sorted(collection.titles, key=lambda item: item.effective_sort_order):
-        values.append({
-            "title_id": title.id, "local_title": title.local_title,
-            "manual_display_title": title.manual_display_title,
-            "season_number_manual": title.season_number_manual,
-            "season_label_manual": title.season_label_manual,
-            "part_number_manual": title.part_number_manual,
-            "part_type_manual": title.part_type_manual,
-            "episode_start": title.episode_start, "episode_end": title.episode_end,
-            "episode_start_offset": title.episode_start_offset,
-            "numbering_mode": title.numbering_mode, "sort_order": title.effective_sort_order,
-            "filename_pattern": title.episode_filename_pattern,
-            "video_ids": [],
-        })
-    return json.dumps(values, ensure_ascii=False, indent=2)
+    return definitions_to_json([
+        definition_from_title(title)
+        for title in sorted(
+            collection.titles,
+            key=lambda item: item.effective_sort_order,
+        )
+    ])
 
 
 def definitions_to_json(definitions: list[ManualTitleDefinition]) -> str:

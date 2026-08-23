@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.orm import Session
 
@@ -5,7 +7,7 @@ from app.migrations import migrate_schema
 from app.database import Base
 from app.models import (
     CatalogCollection, CatalogTitle, CollectionGroupingDecision, ExternalTitleLink, InternalSubtitle,
-    TitleMetadata, Video,
+    ManualSplitRuleVideo, TitleMetadata, Video,
 )
 
 
@@ -100,6 +102,184 @@ def test_media_part_number_migration_is_idempotent_and_does_not_infer_values(
     migrate_schema(engine)
     with Session(engine) as session:
         assert session.scalar(select(Video.media_part_number)) == 2
+
+
+def test_manual_split_authority_migration_is_idempotent_and_does_not_backfill_assignment(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'manual-split-authority.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show",
+            normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        title = CatalogTitle(
+            collection=collection,
+            local_title="Show",
+            normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        video = Video(
+            relative_path="Anime/Show/E01.mkv",
+            root_folder="Anime",
+            filename="E01.mkv",
+            size=1,
+            mtime_ns=1,
+            catalog_title=title,
+            catalog_collection=collection,
+        )
+        session.add(video)
+        session.commit()
+        video_id = video.id
+        title_id = title.id
+
+    # Simuluje DB z checkpointu před Commit 4A. Výsledný assignment už existuje,
+    # ale samostatná manual-split authority tabulka ještě ne.
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE manual_split_rule_videos"))
+
+    migrate_schema(engine)
+
+    inspector = inspect(engine)
+    assert inspector.get_table_names().count("manual_split_rule_videos") == 1
+    assert inspector.get_pk_constraint("manual_split_rule_videos")[
+        "constrained_columns"
+    ] == ["catalog_title_id", "video_id"]
+    foreign_keys = {
+        constraint["constrained_columns"][0]: constraint
+        for constraint in inspector.get_foreign_keys("manual_split_rule_videos")
+    }
+    assert {
+        column: (
+            constraint["referred_table"],
+            constraint["referred_columns"],
+            constraint["options"].get("ondelete"),
+        )
+        for column, constraint in foreign_keys.items()
+    } == {
+        "catalog_title_id": ("catalog_titles", ["id"], "CASCADE"),
+        "video_id": ("videos", ["id"], "CASCADE"),
+    }
+    assert any(
+        index["name"] == "ix_manual_split_rule_videos_video_id"
+        and index["column_names"] == ["video_id"]
+        and not index["unique"]
+        for index in inspector.get_indexes("manual_split_rule_videos")
+    )
+
+    with Session(engine) as session:
+        video = session.get(Video, video_id)
+        assert video.catalog_title_id == title_id
+        assert session.scalar(
+            select(func.count()).select_from(ManualSplitRuleVideo)
+        ) == 0
+        assert list(session.execute(text("PRAGMA foreign_key_check"))) == []
+
+    migrate_schema(engine)
+
+    assert inspect(engine).get_table_names().count("manual_split_rule_videos") == 1
+    with Session(engine) as session:
+        video = session.get(Video, video_id)
+        assert video.catalog_title_id == title_id
+        assert session.scalar(
+            select(func.count()).select_from(ManualSplitRuleVideo)
+        ) == 0
+
+
+def test_manual_split_authority_migration_preserves_historical_manual_snapshot(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'manual-snapshot-authority.db'}")
+    Base.metadata.create_all(engine)
+    verified_at = datetime(2024, 1, 2, 3, 4, 5)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show",
+            normalized_local_title="show",
+            relative_root_path="Anime/Show",
+            hierarchy_status="verified",
+            hierarchy_verified_at=verified_at,
+        )
+        title = CatalogTitle(
+            collection=collection,
+            local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Show",
+            hierarchy_manual_override=True,
+            part_type_manual="season",
+            season_number_manual=1,
+            season_label_manual="S1",
+            part_number_manual=None,
+            sort_order_manual=7,
+            hierarchy_verified_at=verified_at,
+            episode_start=None,
+            episode_end=None,
+            episode_start_offset=None,
+            numbering_mode="season_local",
+            numbering_manual=True,
+        )
+        video = Video(
+            relative_path="Anime/Show/E01.mkv",
+            root_folder="Anime",
+            filename="E01.mkv",
+            size=1,
+            mtime_ns=1,
+            catalog_title=title,
+            catalog_collection=collection,
+        )
+        session.add(video)
+        session.commit()
+        collection_id = collection.id
+        title_id = title.id
+        video_id = video.id
+
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE manual_split_rule_videos"))
+
+    expected_title_snapshot = (
+        True,
+        "season",
+        1,
+        "S1",
+        None,
+        7,
+        verified_at,
+        None,
+        None,
+        None,
+        "season_local",
+        True,
+    )
+
+    for _ in range(2):
+        migrate_schema(engine)
+        with Session(engine) as session:
+            collection = session.get(CatalogCollection, collection_id)
+            title = session.get(CatalogTitle, title_id)
+            video = session.get(Video, video_id)
+            assert (
+                title.hierarchy_manual_override,
+                title.part_type_manual,
+                title.season_number_manual,
+                title.season_label_manual,
+                title.part_number_manual,
+                title.sort_order_manual,
+                title.hierarchy_verified_at,
+                title.episode_start,
+                title.episode_end,
+                title.episode_start_offset,
+                title.numbering_mode,
+                title.numbering_manual,
+            ) == expected_title_snapshot
+            assert collection.hierarchy_status == "verified"
+            assert collection.hierarchy_verified_at == verified_at
+            assert video.catalog_title_id == title_id
+            assert video.catalog_collection_id == collection_id
+            assert session.scalar(
+                select(func.count()).select_from(ManualSplitRuleVideo)
+            ) == 0
 
 
 def test_startup_sync_preserves_nested_parent_season_for_part(tmp_path):
