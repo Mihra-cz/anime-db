@@ -135,7 +135,7 @@ def apply_automatic_structural_inference(
 
 
 def automatic_flat_sequence_notice(
-    title: CatalogTitle,
+    title: CatalogTitle, videos: list[Video] | None = None,
 ) -> str | None:
     """Return a derived non-blocking notice; it is intentionally not persisted."""
     if (
@@ -144,7 +144,9 @@ def automatic_flat_sequence_notice(
         or title.effective_part_type not in {"title", "season"}
     ):
         return None
-    profile = direct_root_episode_profile(list(title.videos))
+    profile = direct_root_episode_profile(
+        list(title.videos) if videos is None else videos
+    )
     if (
         profile.contiguous_from_one
         and 15 <= profile.standard_count <= 24
@@ -155,12 +157,16 @@ def automatic_flat_sequence_notice(
     return None
 
 
-def has_long_flat_sequence_requiring_review(title: CatalogTitle) -> bool:
+def has_long_flat_sequence_requiring_review(
+    title: CatalogTitle, videos: list[Video] | None = None,
+) -> bool:
     if (
         title.hierarchy_manual_override
         or not is_direct_root_title(title)
         or title.effective_part_type not in {"title", "season"}
     ):
         return False
-    profile = direct_root_episode_profile(list(title.videos))
+    profile = direct_root_episode_profile(
+        list(title.videos) if videos is None else videos
+    )
     return profile.contiguous_from_one and profile.standard_count > 24

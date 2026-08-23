@@ -12,23 +12,41 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .catalog import GENERIC_ROOTS, detect_episode_number, derive_episode_number, normalize_title
-from .hierarchy import derive_library_hierarchy, parse_explicit_part
+from .hierarchy import parse_explicit_part
+from .hierarchy_evaluation import (
+    CONFIRMED_DUPLICATES_REVIEW_REASON,
+    FILENAME_SEASON_CONFLICT_REVIEW_REASON,
+    MISSING_DUPLICATE_PRIMARY_REVIEW_REASON,
+    MISSING_PART_NUMBER_REVIEW_REASON,
+    NONSTANDARD_NUMBERING_REVIEW_REASON,
+    NUMBERING_REVIEW_SUMMARY,
+    UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON,
+    HierarchyEvaluationResult,
+    HierarchyIssue,
+    HierarchyIssueScope,
+    apply_hierarchy_evaluation,
+    catalog_title_hierarchy_is_verified,
+    evaluate_collection_hierarchy,
+    hierarchy_primary_note,
+    manual_hierarchy_resolves_ambiguity,
+    manual_hierarchy_snapshot_is_complete,
+    manual_hierarchy_snapshot_issue,
+    structural_hierarchy_issue,
+)
 from .hierarchy_types import PART_TYPE_LABELS, PART_TYPES, VIDEO_CONTENT_TYPES
 from .models import (
     CatalogCollection, CatalogTitle, CollectionGroupingDecision, Video, utc_now,
 )
 from .numbering import (
-    clear_duplicate_group, collection_requires_numbering_review,
-    confirmed_duplicate_groups, effective_video_numbering,
-    is_confirmed_duplicate, is_nonprimary_duplicate_video,
+    clear_duplicate_group, effective_video_numbering,
     recalculate_collection_numbering, set_duplicate_group_primary,
-    summarize_title_numbering, supplementary_context_map,
-    unresolved_duplicate_groups, video_numbering_identity,
+    supplementary_context_map, video_numbering_identity,
 )
 from .structural_inference import (
-    GENERIC_TITLE_REVIEW_REASON, LONG_FLAT_SEQUENCE_REVIEW_REASON,
-    apply_automatic_structural_inference, automatic_flat_sequence_notice,
-    direct_root_episode_profile, has_long_flat_sequence_requiring_review,
+    GENERIC_TITLE_REVIEW_REASON,
+    LONG_FLAT_SEQUENCE_REVIEW_REASON,
+    apply_automatic_structural_inference,
+    direct_root_episode_profile,
 )
 
 
@@ -41,12 +59,6 @@ PERIOD_HINT = re.compile(
 PERIOD_HINT_REVIEW_REASON = (
     "Interní časový rozsah neurčuje bezpečně hranice sezón nebo částí."
 )
-CONFIRMED_DUPLICATES_REVIEW_REASON = (
-    "Potvrzené duplicitní soubory vyžadují vyřešení."
-)
-MISSING_DUPLICATE_PRIMARY_REVIEW_REASON = (
-    "Primární video potvrzené duplicity chybí; vztah vyžaduje novou ruční kontrolu."
-)
 PROBABLE_GROUPING_REVIEW_REASON = (
     "Část s vlastním názvem byla seskupena podle společného fyzického parentu a "
     "příbuzného názvu; vztah vyžaduje ruční potvrzení."
@@ -55,30 +67,6 @@ SUPPLEMENTARY_CONTEXT_REVIEW_REASON = (
     "Doplňková část zachovává kontext vlastního child názvu, ale související "
     "season vyžaduje ruční potvrzení."
 )
-FILENAME_SEASON_CONFLICT_REVIEW_REASON = (
-    "Season ve filename je v konfliktu s automaticky odvozenou season složkou."
-)
-UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON = (
-    "Explicitně označený doplňkový obsah nemá bezpečně určené canonical číslování."
-)
-MISSING_PART_NUMBER_REVIEW_REASON = (
-    "Část typu Part nemá bezpečně určené číslo Part."
-)
-NONSTANDARD_NUMBERING_REVIEW_REASON = (
-    "Nestandardní číslování vyžaduje ruční zařazení."
-)
-NUMBERING_REVIEW_SUMMARY = (
-    "Číslování nebo nezařazený obsah stále vyžaduje kontrolu."
-)
-UNASSIGNED_VIDEO_REVIEW_NOTES = {
-    "Nové nezařazené video.",
-    "Nové nebo nezařazené video.",
-    "Nové nebo nezařazené video vyžaduje kontrolu.",
-}
-MANUAL_SPLIT_CONFLICT_NOTES = {
-    "Konflikt překrývajících se pravidel.",
-    "Video odpovídá více ručním částem.",
-}
 SUPPLEMENTAL_PART_TYPES = {"film", "ova", "special", "preview", "recap", "bonus", "other"}
 MANUAL_DUPLICATE_STATUSES = {"suspected"}
 ALLOWED_NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
@@ -117,15 +105,34 @@ class AssignmentPreview:
 
 @dataclass(frozen=True)
 class HierarchyReviewIssue:
-    """One dynamically derived review diagnostic with its natural UI scope."""
+    """Presentation metadata for one authoritative structured issue."""
 
-    code: str
-    message: str
-    scope: str
-    blocking: bool
-    catalog_title: CatalogTitle | None = None
-    videos: tuple[Video, ...] = ()
+    issue: HierarchyIssue
     anchor_id: str = "hierarchy-collection-issues"
+
+    @property
+    def code(self) -> str:
+        return self.issue.code.value
+
+    @property
+    def message(self) -> str:
+        return self.issue.message
+
+    @property
+    def scope(self) -> str:
+        return self.issue.scope.value
+
+    @property
+    def blocking(self) -> bool:
+        return self.issue.blocking
+
+    @property
+    def catalog_title(self) -> CatalogTitle | None:
+        return self.issue.catalog_title
+
+    @property
+    def videos(self) -> tuple[Video, ...]:
+        return self.issue.videos
 
     @property
     def title_id(self) -> int | None:
@@ -140,6 +147,7 @@ class HierarchyReviewIssue:
 class HierarchyReviewDiagnostics:
     """Read model shared by Hierarchy Review summaries and object cards."""
 
+    evaluation: HierarchyEvaluationResult
     issues: tuple[HierarchyReviewIssue, ...]
     collection_issues: tuple[HierarchyReviewIssue, ...]
     title_issues: Mapping[int, tuple[HierarchyReviewIssue, ...]]
@@ -829,53 +837,6 @@ def extract_local_period_hint(local_title: str) -> str | None:
     return matches[-1].upper() if matches else None
 
 
-def structural_hierarchy_issue(
-    part_type: str | None, season_number: int | None, part_number: int | None,
-) -> str | None:
-    """Return the shared validation issue for one concrete structural identity."""
-    if part_type not in PART_TYPES:
-        return "Pro ruční zařazení zvolte konkrétní typ části."
-    if season_number is not None and season_number <= 0:
-        return "Číslo sezóny musí být kladné."
-    if part_number is not None and part_number <= 0:
-        return "Číslo Part musí být kladné."
-    if part_type == "part" and part_number is None:
-        return "Pro typ Part potvrďte číslo Part."
-    if part_type == "season" and part_number is not None:
-        return "Samostatná sezóna nesmí mít číslo Part."
-    if part_type not in {"part", "cour"} and part_number is not None:
-        return "Číslo Part lze uložit pouze pro typ Part."
-    return None
-
-
-def manual_hierarchy_snapshot_issue(title: CatalogTitle) -> str | None:
-    """Validate persisted manual authority without modifying historical data."""
-    if not title.hierarchy_manual_override:
-        return "Chybí autoritativní ruční hierarchy override."
-    return structural_hierarchy_issue(
-        title.part_type_manual,
-        title.season_number_manual,
-        title.part_number_manual,
-    )
-
-
-def manual_hierarchy_snapshot_is_complete(title: CatalogTitle) -> bool:
-    return manual_hierarchy_snapshot_issue(title) is None
-
-
-def catalog_title_hierarchy_is_verified(title: CatalogTitle) -> bool:
-    """Treat a complete authoritative manual snapshot as current verification."""
-    return manual_hierarchy_snapshot_is_complete(title)
-
-
-def manual_hierarchy_resolves_ambiguity(collection: CatalogCollection) -> bool:
-    """Rozliší potvrzenou strukturu od pouhého obecného statusu verified."""
-    return bool(collection.titles) and all(
-        catalog_title_hierarchy_is_verified(title)
-        for title in collection.titles
-    )
-
-
 def confirm_effective_collection_hierarchy(collection: CatalogCollection) -> None:
     """Persist the current concrete effective hierarchy as manual authority."""
     if not collection.titles:
@@ -916,60 +877,21 @@ def resolve_collection_hierarchy_status(
         collection.hierarchy_verified_at = None
 
 
-def _filename_season_conflicts_with_title(video: Video) -> bool:
-    detection = detect_episode_number(video.filename)
-    title = video.catalog_title
-    return bool(
-        detection.season_hint is not None
-        and title is not None
-        and title.effective_season_number is not None
-        and detection.season_hint != title.effective_season_number
-        and not title.hierarchy_manual_override
-    )
-
-
-def _has_unnumbered_explicit_supplementary(video: Video) -> bool:
-    detection = detect_episode_number(video.filename)
-    return bool(
-        detection.is_supplementary
-        and detection.supplementary_number is None
-        and video.episode_number_manual_override is None
-    )
-
-
 def collection_requires_review(collection: CatalogCollection, videos: list[Video]) -> str | None:
-    if any(_filename_season_conflicts_with_title(video) for video in videos):
-        return FILENAME_SEASON_CONFLICT_REVIEW_REASON
-    if any(_has_unnumbered_explicit_supplementary(video) for video in videos):
-        return UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON
-    states = [effective_video_numbering(video) for video in videos]
-    nonstandard = [
-        state.detection.display_value for state in states if state.is_nonstandard
-    ]
-    if nonstandard:
-        return NONSTANDARD_NUMBERING_REVIEW_REASON
-    if any(video.duplicate_primary_missing for video in videos):
-        return MISSING_DUPLICATE_PRIMARY_REVIEW_REASON
-    if any(is_confirmed_duplicate(video) for video in videos):
-        return CONFIRMED_DUPLICATES_REVIEW_REASON
-    if any(has_long_flat_sequence_requiring_review(title) for title in collection.titles):
-        return LONG_FLAT_SEQUENCE_REVIEW_REASON
-    if any(title.effective_part_type == "title" for title in collection.titles):
-        return GENERIC_TITLE_REVIEW_REASON
-    if any(
-        (
-            title.part_type_manual == "part"
-            and title.part_number_manual is None
-        )
-        or (
-            title.part_type_manual is None
-            and title.effective_part_type == "part"
-            and title.effective_part_number is None
-        )
-        for title in collection.titles
-    ):
-        return MISSING_PART_NUMBER_REVIEW_REASON
-    return None
+    """Compatibility adapter for scanner/startup until lifecycle Commit 2.
+
+    These callers intentionally keep their current pre-numbering order. They use
+    the shared issue identities, but omit final-numbering rules that their current
+    lifecycle cannot evaluate authoritatively yet.
+    """
+    result = evaluate_collection_hierarchy(
+        collection,
+        videos,
+        include_legacy_fallback=False,
+        include_unassigned=False,
+        include_complete_numbering=False,
+    )
+    return hierarchy_primary_note(result.issues, summarize_numbering=False)
 
 
 def _hierarchy_issue_anchor(
@@ -984,408 +906,41 @@ def _hierarchy_issue_anchor(
     return "hierarchy-collection-issues"
 
 
-def _common_catalog_title(videos: tuple[Video, ...]) -> CatalogTitle | None:
-    titles = {
-        video.catalog_title
-        for video in videos
-        if video.catalog_title is not None
-    }
-    return next(iter(titles)) if len(titles) == 1 else None
-
-
 def hierarchy_review_diagnostics(
-    collection: CatalogCollection, videos: list[Video],
+    collection: CatalogCollection,
+    videos: list[Video],
+    evaluation: HierarchyEvaluationResult | None = None,
 ) -> HierarchyReviewDiagnostics:
-    """Derive every current review issue without relying on first-reason notes.
-
-    The persisted ``hierarchy_note`` remains a status summary. Concrete numbering,
-    structural and duplicate problems are reconstructed from current objects so a
-    caller can render them next to the affected CatalogTitle or Video. Notes whose
-    original object cannot safely be reconstructed stay at collection scope.
-    """
-    titles = list(collection.titles)
-    all_videos = list(videos)
-    titles_by_id = {
-        title.id: title for title in titles if title.id is not None
-    }
-    videos_by_title: dict[int, list[Video]] = {
-        title.id: [] for title in titles if title.id is not None
-    }
-    transient_title_videos: dict[int, list[Video]] = {}
-
-    def video_title(video: Video) -> CatalogTitle | None:
-        if video.catalog_title is not None:
-            return video.catalog_title
-        if video.catalog_title_id is not None:
-            return titles_by_id.get(video.catalog_title_id)
-        return None
-
-    for video in all_videos:
-        title = video_title(video)
-        if title is None:
-            continue
-        if title.id is not None:
-            videos_by_title.setdefault(title.id, []).append(video)
-        else:
-            transient_title_videos.setdefault(id(title), []).append(video)
-
-    issues: list[HierarchyReviewIssue] = []
+    """Group authoritative structured issues for templates and anchors only."""
+    evaluation = evaluation or evaluate_collection_hierarchy(collection, videos)
+    issues = [
+        HierarchyReviewIssue(
+            issue=issue,
+            anchor_id=_hierarchy_issue_anchor(
+                issue.code.value,
+                title=issue.catalog_title,
+                videos=issue.videos,
+            ),
+        )
+        for issue in evaluation.issues
+    ]
     collection_issues: list[HierarchyReviewIssue] = []
     title_issues: dict[int, list[HierarchyReviewIssue]] = {}
     video_issues: dict[int, list[HierarchyReviewIssue]] = {}
-
-    def add_issue(
-        code: str, message: str, scope: str, *, blocking: bool,
-        title: CatalogTitle | None = None,
-        target_videos: tuple[Video, ...] = (),
-    ) -> HierarchyReviewIssue:
-        issue = HierarchyReviewIssue(
-            code=code,
-            message=message,
-            scope=scope,
-            blocking=blocking,
-            catalog_title=title,
-            videos=target_videos,
-            anchor_id=_hierarchy_issue_anchor(
-                code, title=title, videos=target_videos,
-            ),
-        )
-        issues.append(issue)
-        if scope == "collection":
+    for issue in issues:
+        if issue.scope == HierarchyIssueScope.COLLECTION.value:
             collection_issues.append(issue)
-        elif scope == "catalog_title" and title is not None and title.id is not None:
-            title_issues.setdefault(title.id, []).append(issue)
-        elif scope == "video":
-            for video in target_videos:
-                if video.id is not None:
-                    video_issues.setdefault(video.id, []).append(issue)
-        return issue
-
-    # Video-local parser and assignment problems. Confirmed secondary copies are
-    # still represented by their duplicate diagnostic, not counted again as a
-    # missing/nonstandard canonical episode.
-    for video in all_videos:
-        title = video_title(video)
-        target = (video,)
-        if title is None:
-            add_issue(
-                "unassigned_video",
-                "Video není přiřazeno ke konkrétní části.",
-                "video", blocking=True, target_videos=target,
-            )
-        if _filename_season_conflicts_with_title(video):
-            detection = detect_episode_number(video.filename)
-            add_issue(
-                "filename_season_conflict",
-                (
-                    f"Filename navrhuje S{detection.season_hint}, ale část je "
-                    f"automaticky zařazena jako S{title.effective_season_number}. "
-                    f"{FILENAME_SEASON_CONFLICT_REVIEW_REASON}"
-                ),
-                "video", blocking=True, title=title, target_videos=target,
-            )
-        if _has_unnumbered_explicit_supplementary(video):
-            add_issue(
-                "unnumbered_supplementary",
-                UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON,
-                "video", blocking=True, title=title, target_videos=target,
-            )
-        if video.duplicate_primary_missing:
-            add_issue(
-                "missing_duplicate_primary",
-                MISSING_DUPLICATE_PRIMARY_REVIEW_REASON,
-                "video", blocking=True, title=title, target_videos=target,
-            )
-
-    for title in titles:
-        title_videos = (
-            videos_by_title.get(title.id, [])
-            if title.id is not None
-            else transient_title_videos.get(id(title), [])
-        )
-        summary = summarize_title_numbering(title_videos, title)
-
-        if not summary.supplemental:
-            for video in title_videos:
-                if is_nonprimary_duplicate_video(video):
-                    continue
-                state = effective_video_numbering(video, title)
-                if state.is_nonstandard:
-                    add_issue(
-                        "nonstandard_numbering",
-                        (
-                            f"Detekovaná hodnota {state.detection.display_value} je "
-                            f"nestandardní. {NONSTANDARD_NUMBERING_REVIEW_REASON}"
-                        ),
-                        "video", blocking=True, title=title,
-                        target_videos=(video,),
-                    )
-                elif state.is_unknown:
-                    add_issue(
-                        "unknown_numbering",
-                        "Číslo epizody nelze bezpečně určit.",
-                        "video", blocking=True, title=title,
-                        target_videos=(video,),
-                    )
-                elif state.is_standard and state.season_episode_number is None:
-                    add_issue(
-                        "missing_canonical_number",
-                        "Standardní epizoda nemá určené canonical číslo.",
-                        "video", blocking=True, title=title,
-                        target_videos=(video,),
-                    )
-
-            if summary.gaps:
-                missing = ", ".join(f"E{number}" for number in summary.gaps)
-                add_issue(
-                    "numbering_gaps",
-                    f"V canonical řadě chybí {missing}.",
-                    "catalog_title", blocking=True, title=title,
-                )
-
-            represented_duplicate_numbers: set[int] = set()
-            for group in unresolved_duplicate_groups(title_videos):
-                group_title = _common_catalog_title(group.videos) or title
-                represented_duplicate_numbers.add(group.episode_number)
-                add_issue(
-                    "unresolved_duplicate_number",
-                    (
-                        "Více videí má stejné nepotvrzené canonical číslo "
-                        f"{group.display_label}."
-                    ),
-                    "video", blocking=True, title=group_title,
-                    target_videos=group.videos,
-                )
-            unresolved_without_group = tuple(
-                number for number in summary.duplicate_numbers
-                if number not in represented_duplicate_numbers
-            )
-            if unresolved_without_group:
-                labels = ", ".join(
-                    f"E{number}" for number in unresolved_without_group
-                )
-                add_issue(
-                    "unresolved_duplicate_numbers",
-                    f"Více videí sdílí nepotvrzená canonical čísla {labels}.",
-                    "catalog_title", blocking=True, title=title,
-                )
-
-        if has_long_flat_sequence_requiring_review(title):
-            profile = direct_root_episode_profile(title_videos)
-            episode_range = (
-                f"E{profile.episode_min}–E{profile.episode_max}"
-                if profile.episode_min is not None and profile.episode_max is not None
-                else "neznámý rozsah"
-            )
-            add_issue(
-                "long_flat_sequence",
-                (
-                    f"Neobvykle dlouhá souvislá řada: {episode_range}. "
-                    "Ověřte, zda nejde o více sezón nebo částí."
-                ),
-                "catalog_title", blocking=True, title=title,
-            )
-        elif notice := automatic_flat_sequence_notice(title):
-            add_issue(
-                "long_flat_sequence_notice",
-                notice,
-                "catalog_title", blocking=False, title=title,
-            )
-
-        if title.effective_part_type == "title":
-            add_issue(
-                "generic_structural_type",
-                GENERIC_TITLE_REVIEW_REASON,
-                "catalog_title", blocking=True, title=title,
-            )
-
-        missing_part_number = (
-            title.part_type_manual == "part"
-            and title.part_number_manual is None
-        ) or (
-            title.part_type_manual is None
-            and title.effective_part_type == "part"
-            and title.effective_part_number is None
-        )
-        if missing_part_number:
-            add_issue(
-                "missing_part_number",
-                MISSING_PART_NUMBER_REVIEW_REASON,
-                "catalog_title", blocking=True, title=title,
-            )
-
-        if (
-            title.hierarchy_manual_override
-            or title.hierarchy_verified_at is not None
-        ) and (snapshot_issue := manual_hierarchy_snapshot_issue(title)):
-            add_issue(
-                "incomplete_manual_snapshot",
-                f"Historické ruční zařazení není úplné. {snapshot_issue}",
-                "catalog_title", blocking=False, title=title,
-            )
-
-    # Confirmed duplicate groups are deliberately separate from unresolved
-    # duplicate-number groups. A secondary copy neither creates another episode
-    # nor another gap, but the confirmed group remains an explicit review item.
-    represented_confirmed_ids: set[int] = set()
-    for group in confirmed_duplicate_groups(all_videos):
-        represented_confirmed_ids.update(
-            video.id for video in group.videos if video.id is not None
-        )
-        group_title = _common_catalog_title(group.videos)
-        add_issue(
-            "confirmed_duplicate_group",
-            CONFIRMED_DUPLICATES_REVIEW_REASON,
-            "video", blocking=True, title=group_title,
-            target_videos=group.videos,
-        )
-    for video in all_videos:
-        if (
-            is_confirmed_duplicate(video)
-            and video.id not in represented_confirmed_ids
+        elif (
+            issue.scope == HierarchyIssueScope.CATALOG_TITLE.value
+            and issue.title_id is not None
         ):
-            add_issue(
-                "confirmed_duplicate",
-                CONFIRMED_DUPLICATES_REVIEW_REASON,
-                "video", blocking=True, title=video_title(video),
-                target_videos=(video,),
-            )
-
-    note = (collection.hierarchy_note or "").strip()
-    localized_persisted_notes: set[str] = set()
-
-    # Scanner/startup contextual provenance is not stored per title. When its
-    # persisted reason is still active, re-run the same read-only path parser;
-    # localize only if the current paths reproduce the original trigger.
-    contextual_detection_reason = {
-        PROBABLE_GROUPING_REVIEW_REASON: "related_named_child",
-        SUPPLEMENTARY_CONTEXT_REVIEW_REASON: "supplementary_named_child",
-    }.get(note)
-    if contextual_detection_reason and all_videos:
-        derived = derive_library_hierarchy([
-            video.relative_path for video in all_videos
-        ])
-        contextual_by_title: dict[int, tuple[CatalogTitle, list[Video]]] = {}
-        contextual_orphans: list[Video] = []
-        for video in all_videos:
-            identity = derived.get(video.relative_path)
-            title = video_title(video)
-            if (
-                identity is None
-                or identity.title.detection_reason != contextual_detection_reason
-                or title is not None and title.hierarchy_manual_override
-            ):
-                continue
-            if title is None:
-                contextual_orphans.append(video)
-            else:
-                contextual_by_title.setdefault(id(title), (title, []))[1].append(video)
-        for title, trigger_videos in contextual_by_title.values():
-            add_issue(
-                "probable_collection_grouping"
-                if contextual_detection_reason == "related_named_child"
-                else "supplementary_context",
-                note,
-                "catalog_title",
-                blocking=True,
-                title=title,
-                target_videos=tuple(trigger_videos),
-            )
-        for video in contextual_orphans:
-            add_issue(
-                "probable_collection_grouping"
-                if contextual_detection_reason == "related_named_child"
-                else "supplementary_context",
-                note,
-                "video",
-                blocking=True,
-                target_videos=(video,),
-            )
-        if contextual_by_title or contextual_orphans:
-            localized_persisted_notes.add(note)
-
-    # A persisted manual-split conflict can still be mapped to exact videos if
-    # the current authoritative definitions reproduce it. Otherwise it remains
-    # a relationship-level collection issue below.
-    if collection.hierarchy_status == "conflict" and note in MANUAL_SPLIT_CONFLICT_NOTES:
-        split_titles = sorted(
-            manual_split_titles(collection),
-            key=lambda title: title.effective_sort_order,
-        )
-        if split_titles:
-            definitions = [definition_from_title(title) for title in split_titles]
-            split_preview = preview_assignments(all_videos, definitions)
-            videos_by_id = {
-                video.id: video for video in all_videos if video.id is not None
-            }
-            for video_id, definition_indexes in split_preview.conflicts.items():
-                video = videos_by_id.get(video_id)
-                if video is None:
-                    continue
-                targets = ", ".join(
-                    definitions[index].local_title for index in definition_indexes
-                )
-                add_issue(
-                    "manual_split_conflict",
-                    (
-                        "Video odpovídá více ručním pravidlům"
-                        f" ({targets}). Upravte definici rozdělení a znovu "
-                        "zobrazte náhled."
-                    ),
-                    "video",
-                    blocking=True,
-                    title=video_title(video),
-                    target_videos=(video,),
-                )
-            if split_preview.conflicts:
-                localized_persisted_notes.add(note)
-
-    localized_summary_notes = {
-        FILENAME_SEASON_CONFLICT_REVIEW_REASON,
-        UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON,
-        NONSTANDARD_NUMBERING_REVIEW_REASON,
-        MISSING_DUPLICATE_PRIMARY_REVIEW_REASON,
-        CONFIRMED_DUPLICATES_REVIEW_REASON,
-        LONG_FLAT_SEQUENCE_REVIEW_REASON,
-        GENERIC_TITLE_REVIEW_REASON,
-        MISSING_PART_NUMBER_REVIEW_REASON,
-        NUMBERING_REVIEW_SUMMARY,
-        PERIOD_HINT_REVIEW_REASON,
-        *UNASSIGNED_VIDEO_REVIEW_NOTES,
-    }
-    if (
-        collection.hierarchy_status in {"review_required", "conflict"}
-        and note
-        and note not in localized_summary_notes | localized_persisted_notes
-    ):
-        code = {
-            PROBABLE_GROUPING_REVIEW_REASON: "probable_collection_grouping",
-            SUPPLEMENTARY_CONTEXT_REVIEW_REASON: "supplementary_context",
-        }.get(note, "persisted_collection_reason")
-        add_issue(
-            code, note, "collection", blocking=True,
-        )
-    elif (
-        collection.hierarchy_status == "conflict"
-        and not collection_issues
-        and note not in localized_persisted_notes
-    ):
-        add_issue(
-            "collection_conflict",
-            note or "Collection obsahuje konflikt, který nelze přiřadit jedné části.",
-            "collection", blocking=True,
-        )
-    elif (
-        collection.hierarchy_status == "review_required"
-        and not any(issue.blocking for issue in issues)
-    ):
-        add_issue(
-            "unlocalized_review_state",
-            note or "Collection vyžaduje kontrolu bez lokalizovatelného důvodu.",
-            "collection", blocking=True,
-        )
+            title_issues.setdefault(issue.title_id, []).append(issue)
+        elif issue.scope == HierarchyIssueScope.VIDEO.value:
+            for video_id in issue.video_ids:
+                video_issues.setdefault(video_id, []).append(issue)
 
     return HierarchyReviewDiagnostics(
+        evaluation=evaluation,
         issues=tuple(issues),
         collection_issues=tuple(collection_issues),
         title_issues={
@@ -1801,19 +1356,14 @@ def refresh_collection_state(
                 for title in collection.titles
             },
         )
-    has_unassigned = any(
-        video.catalog_title is None and video.catalog_title_id is None
-        for video in collection.videos
+    evaluation = evaluate_collection_hierarchy(
+        collection,
+        list(collection.videos),
+        # Runtime refresh explicitly recalculates the current state. Historical
+        # fallback is a read-side safety net, not a persistent active trigger.
+        include_legacy_fallback=False,
     )
-    has_numbering_problem = collection_requires_numbering_review(collection)
-    hierarchy_reason = collection_requires_review(collection, list(collection.videos))
-    if has_unassigned:
-        note = "Nové nebo nezařazené video vyžaduje kontrolu."
-    elif has_numbering_problem:
-        note = "Číslování nebo nezařazený obsah stále vyžaduje kontrolu."
-    else:
-        note = hierarchy_reason
-    resolve_collection_hierarchy_status(collection, note)
+    apply_hierarchy_evaluation(collection, evaluation)
 
 
 def classify_videos_in_place(

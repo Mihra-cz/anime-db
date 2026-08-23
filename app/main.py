@@ -47,6 +47,7 @@ from .catalog import (
 from .config import Settings, get_settings
 from .database import Base, make_engine, make_session_factory
 from .migrations import migrate_schema
+from .hierarchy_evaluation import HierarchyIssueCode
 from .hierarchy_review import (
     PERIOD_HINT_REVIEW_REASON, SIMPLE_DEFINITION_FIELDS,
     apply_manual_split, apply_single_title_confirmation,
@@ -1124,7 +1125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         + len(title.artwork)
                     ),
                     "long_flat_review": any(
-                        issue.code == "long_flat_sequence"
+                        issue.code == HierarchyIssueCode.LONG_FLAT_SERIES.value
                         for issue in title_card_issues
                     ),
                     "diagnostic_issues": title_card_issues,

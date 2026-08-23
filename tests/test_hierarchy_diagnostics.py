@@ -158,7 +158,7 @@ def test_unnumbered_supplementary_is_localized_to_its_video():
     diagnostics = hierarchy_review_diagnostics(collection, [video])
 
     issues = diagnostics.for_video(video)
-    assert [issue.code for issue in issues] == ["unnumbered_supplementary"]
+    assert [issue.code for issue in issues] == ["supplementary_without_number"]
     assert issues[0].blocking
 
 
@@ -176,11 +176,11 @@ def test_numbering_gap_and_unknown_are_localized_to_title_and_video():
     diagnostics = hierarchy_review_diagnostics(collection, [first, third, unknown])
 
     assert any(
-        issue.code == "numbering_gaps" and "E2" in issue.message
+        issue.code == "numbering_gap" and "E2" in issue.message
         for issue in diagnostics.for_title(title)
     )
     assert [issue.code for issue in diagnostics.for_video(unknown)] == [
-        "unknown_numbering"
+        "unknown_or_missing_numbering"
     ]
     assert diagnostics.for_video(first) == ()
     assert diagnostics.for_video(third) == ()
@@ -203,7 +203,7 @@ def test_unresolved_and_confirmed_duplicate_groups_stay_video_scoped():
 
     unresolved_issue = next(
         issue for issue in unresolved_diagnostics.issues
-        if issue.code == "unresolved_duplicate_number"
+        if issue.code == "canonical_duplicate"
     )
     assert unresolved_issue.scope == "video"
     assert unresolved_issue.videos == tuple(unresolved)
@@ -226,12 +226,12 @@ def test_unresolved_and_confirmed_duplicate_groups_stay_video_scoped():
 
     confirmed_issue = next(
         issue for issue in confirmed_diagnostics.issues
-        if issue.code == "confirmed_duplicate_group"
+        if issue.code == "confirmed_duplicate"
     )
     assert confirmed_issue.scope == "video"
     assert set(confirmed_issue.videos) == {primary, duplicate}
     assert not any(
-        issue.code == "unresolved_duplicate_number"
+        issue.code == "canonical_duplicate"
         for issue in confirmed_diagnostics.issues
     )
 
@@ -247,7 +247,7 @@ def test_missing_duplicate_primary_is_localized_to_secondary_video():
     diagnostics = hierarchy_review_diagnostics(collection, [video])
 
     assert any(
-        issue.code == "missing_duplicate_primary"
+        issue.code == "duplicate_primary_missing"
         for issue in diagnostics.for_video(video)
     )
 
@@ -282,7 +282,9 @@ def test_stale_known_summary_remains_visible_as_collection_fallback():
     diagnostics = hierarchy_review_diagnostics(collection, [video])
 
     assert diagnostics.blocking_count == 1
-    assert diagnostics.collection_issues[0].code == "unlocalized_review_state"
+    assert diagnostics.collection_issues[0].code == (
+        "legacy_unlocalized_review_state"
+    )
     assert diagnostics.collection_issues[0].message == GENERIC_TITLE_REVIEW_REASON
 
 
@@ -311,7 +313,7 @@ def test_multiple_reasons_are_kept_in_their_own_scopes():
     assert diagnostics.affected_video_ids == (2,)
 
 
-def test_persisted_parser_context_is_localized_when_current_paths_reproduce_it():
+def test_persisted_parser_context_is_not_recreated_as_transient_business_issue():
     collection = _collection(note=PROBABLE_GROUPING_REVIEW_REASON)
     collection.relative_root_path = "Anime/High School DxD (Z12-J18)"
     title = _title(
@@ -327,16 +329,18 @@ def test_persisted_parser_context_is_localized_when_current_paths_reproduce_it()
 
     diagnostics = hierarchy_review_diagnostics(collection, [video])
 
-    contextual = [
-        issue for issue in diagnostics.for_title(title)
-        if issue.code == "probable_collection_grouping"
+    assert [issue.code for issue in diagnostics.for_title(title)] == [
+        "generic_structural_type"
     ]
-    assert len(contextual) == 1
-    assert contextual[0].videos == (video,)
+    assert diagnostics.for_video(video) == ()
     assert diagnostics.collection_issues == ()
+    assert not any(
+        issue.code == "probable_collection_grouping"
+        for issue in diagnostics.issues
+    )
 
 
-def test_persisted_manual_split_conflict_is_localized_to_matching_video():
+def test_persisted_manual_split_conflict_remains_explicit_legacy_fallback():
     collection = _collection(
         status="conflict", note="Konflikt překrývajících se pravidel.",
     )
@@ -374,13 +378,12 @@ def test_persisted_manual_split_conflict_is_localized_to_matching_video():
 
     diagnostics = hierarchy_review_diagnostics(collection, [video])
 
-    conflicts = [
-        issue for issue in diagnostics.for_video(video)
-        if issue.code == "manual_split_conflict"
-    ]
-    assert len(conflicts) == 1
-    assert "Part 1, Part 2" in conflicts[0].message
-    assert diagnostics.collection_issues == ()
+    assert diagnostics.for_video(video) == ()
+    assert len(diagnostics.collection_issues) == 1
+    issue = diagnostics.collection_issues[0]
+    assert issue.code == "legacy_unlocalized_review_state"
+    assert issue.message == "Konflikt překrývajících se pravidel."
+    assert diagnostics.evaluation.status == "conflict"
 
 
 @pytest.mark.parametrize("verified", [False, True])
