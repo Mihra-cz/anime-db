@@ -2775,6 +2775,52 @@ collection ani `hierarchy_note` nemění.
 
 ---
 
+## 6.42 Sdílené hierarchy evaluation a lifecycle scanneru/startupu
+
+Hierarchy status i lokalizovaná diagnostika vycházejí z jednoho strukturovaného
+evaluation modelu se stabilními reason codes, explicitním scope a vazbou na
+konkrétní `CatalogTitle` nebo `Video`. `hierarchy_note` zůstává pouze odvozený
+uživatelský souhrn a legacy fallback; text poznámky není business identita
+problému.
+
+Fresh scanner a startup hierarchy synchronizace nyní ukládají finální stav až
+v tomto pořadí:
+
+```text
+assignment
+→ všechny výsledné CatalogTitle včetně zachovaných legacy titulů
+→ automatic structural inference
+→ finální přepočet numberingu
+→ shared structured hierarchy evaluation
+→ hierarchy_status + hierarchy_note
+→ commit
+```
+
+Tím se gap, canonical duplicate, unknown numbering, long-flat gate i soft warning
+vyhodnotí ze stejného finálního numberingu jako při runtime refreshi. Ruční
+manual-split conflict/unmatched větev zůstává do samostatného lifecycle kroku
+bezpečně uzamčená ve svém dosavadním stavu; tento díl ji nereinterpretuje.
+
+Provenance `related_named_child` a `supplementary_named_child` se nepersistuje do
+nového DB pole. Jediný společný helper ji deterministicky znovu odvodí z
+uložených `Video.relative_path` pomocí stejného hierarchy parseru jako assignment
+a přijme ji pouze tehdy, pokud parserem odvozené collection/title paths stále
+odpovídají současnému automatickému přiřazení. Scanner, startup i runtime refresh
+proto zachovají stejný stable issue code a scope; manual hierarchy override má
+nad tímto automatickým path kontextem přednost.
+
+Na další samostatné kroky zůstává:
+
+- Commit 3: úplný lifecycle manual split konfliktů a unmatched videí,
+- Commit 4: skutečný kompletní hierarchy rebuild,
+- Commit 5: sjednocení move/manual-authority write paths,
+- Commit 6: parserové `S01E05.5` a související Season/Part numbering edge cases.
+
+Schema se kvůli structured issues ani path provenance nemění. Scanner ani
+startup nadále neodvozují, nemažou ani nepřepisují `Video.media_part_number`.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

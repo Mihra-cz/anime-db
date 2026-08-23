@@ -313,7 +313,7 @@ def test_multiple_reasons_are_kept_in_their_own_scopes():
     assert diagnostics.affected_video_ids == (2,)
 
 
-def test_persisted_parser_context_is_not_recreated_as_transient_business_issue():
+def test_named_child_context_is_recreated_as_structured_title_issue():
     collection = _collection(note=PROBABLE_GROUPING_REVIEW_REASON)
     collection.relative_root_path = "Anime/High School DxD (Z12-J18)"
     title = _title(
@@ -330,14 +330,14 @@ def test_persisted_parser_context_is_not_recreated_as_transient_business_issue()
     diagnostics = hierarchy_review_diagnostics(collection, [video])
 
     assert [issue.code for issue in diagnostics.for_title(title)] == [
-        "generic_structural_type"
+        "related_named_child",
+        "generic_structural_type",
     ]
     assert diagnostics.for_video(video) == ()
     assert diagnostics.collection_issues == ()
-    assert not any(
-        issue.code == "probable_collection_grouping"
-        for issue in diagnostics.issues
-    )
+    contextual = diagnostics.for_title(title)[0]
+    assert contextual.scope == "catalog_title"
+    assert contextual.message == PROBABLE_GROUPING_REVIEW_REASON
 
 
 def test_persisted_manual_split_conflict_remains_explicit_legacy_fallback():

@@ -5,18 +5,26 @@ from enum import StrEnum
 
 from .catalog import detect_episode_number
 from .hierarchy_types import PART_TYPES
+from .hierarchy_provenance import (
+    RELATED_NAMED_CHILD_REVIEW_REASON,
+    SUPPLEMENTARY_NAMED_CHILD_REVIEW_REASON,
+    NamedChildProvenanceKind,
+    derive_collection_path_provenance,
+)
 from .models import CatalogCollection, CatalogTitle, Video, utc_now
 from .numbering import (
     confirmed_duplicate_groups,
     effective_video_numbering,
     is_confirmed_duplicate,
     is_nonprimary_duplicate_video,
+    recalculate_collection_numbering,
     summarize_title_numbering,
     unresolved_duplicate_groups,
 )
 from .structural_inference import (
     GENERIC_TITLE_REVIEW_REASON,
     LONG_FLAT_SEQUENCE_REVIEW_REASON,
+    apply_automatic_structural_inference,
     automatic_flat_sequence_notice,
     direct_root_episode_profile,
     has_long_flat_sequence_requiring_review,
@@ -64,6 +72,8 @@ class HierarchyIssueCode(StrEnum):
     GENERIC_STRUCTURAL_TYPE = "generic_structural_type"
     MISSING_PART_NUMBER = "missing_part_number"
     INCOMPLETE_MANUAL_SNAPSHOT = "incomplete_manual_snapshot"
+    RELATED_NAMED_CHILD = "related_named_child"
+    SUPPLEMENTARY_NAMED_CHILD = "supplementary_named_child"
     LEGACY_UNLOCALIZED_REVIEW_STATE = "legacy_unlocalized_review_state"
 
 
@@ -247,6 +257,11 @@ def hierarchy_primary_note(
         (HierarchyIssueCode.DUPLICATE_PRIMARY_MISSING, MISSING_DUPLICATE_PRIMARY_REVIEW_REASON),
         (HierarchyIssueCode.CONFIRMED_DUPLICATE, CONFIRMED_DUPLICATES_REVIEW_REASON),
         (HierarchyIssueCode.LONG_FLAT_SERIES, LONG_FLAT_SEQUENCE_REVIEW_REASON),
+        (HierarchyIssueCode.RELATED_NAMED_CHILD, RELATED_NAMED_CHILD_REVIEW_REASON),
+        (
+            HierarchyIssueCode.SUPPLEMENTARY_NAMED_CHILD,
+            SUPPLEMENTARY_NAMED_CHILD_REVIEW_REASON,
+        ),
         (HierarchyIssueCode.GENERIC_STRUCTURAL_TYPE, GENERIC_TITLE_REVIEW_REASON),
         (HierarchyIssueCode.MISSING_PART_NUMBER, MISSING_PART_NUMBER_REVIEW_REASON),
     )
@@ -284,6 +299,10 @@ def evaluate_collection_hierarchy(
             transient_title_videos.setdefault(id(title), []).append(video)
 
     issues: list[HierarchyIssue] = []
+    path_provenance = derive_collection_path_provenance(collection, all_videos)
+    provenance_by_title: dict[int, list[NamedChildProvenanceKind]] = {}
+    for item in path_provenance:
+        provenance_by_title.setdefault(id(item.catalog_title), []).append(item.kind)
 
     def add_issue(
         code: HierarchyIssueCode,
@@ -458,6 +477,27 @@ def evaluate_collection_hierarchy(
                 title=title,
             )
 
+        for provenance_kind in provenance_by_title.get(id(title), []):
+            if provenance_kind == NamedChildProvenanceKind.RELATED_NAMED_CHILD:
+                add_issue(
+                    HierarchyIssueCode.RELATED_NAMED_CHILD,
+                    RELATED_NAMED_CHILD_REVIEW_REASON,
+                    HierarchyIssueScope.CATALOG_TITLE,
+                    blocking=True,
+                    title=title,
+                )
+            elif (
+                provenance_kind
+                == NamedChildProvenanceKind.SUPPLEMENTARY_NAMED_CHILD
+            ):
+                add_issue(
+                    HierarchyIssueCode.SUPPLEMENTARY_NAMED_CHILD,
+                    SUPPLEMENTARY_NAMED_CHILD_REVIEW_REASON,
+                    HierarchyIssueScope.CATALOG_TITLE,
+                    blocking=True,
+                    title=title,
+                )
+
         if title.effective_part_type == "title":
             add_issue(
                 HierarchyIssueCode.GENERIC_STRUCTURAL_TYPE,
@@ -558,3 +598,34 @@ def apply_hierarchy_evaluation(
         )
     else:
         collection.hierarchy_verified_at = None
+
+
+def finalize_collection_hierarchy(
+    collection: CatalogCollection,
+    videos: list[Video] | None = None,
+    *,
+    recalculate: bool = True,
+    include_legacy_fallback: bool = False,
+) -> HierarchyEvaluationResult:
+    """Run the authoritative post-assignment structural/numbering evaluation."""
+    all_videos = list(collection.videos if videos is None else videos)
+    apply_automatic_structural_inference(collection)
+    if recalculate:
+        recalculate_collection_numbering(
+            collection,
+            {
+                title.id: [
+                    video for video in all_videos
+                    if video.catalog_title is title
+                    or video.catalog_title_id == title.id
+                ]
+                for title in collection.titles
+            },
+        )
+    result = evaluate_collection_hierarchy(
+        collection,
+        all_videos,
+        include_legacy_fallback=include_legacy_fallback,
+    )
+    apply_hierarchy_evaluation(collection, result)
+    return result

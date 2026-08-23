@@ -13,19 +13,15 @@ from app.catalog import (
     classify_video, is_root_video, meaningful_root_collection, normalize_language, normalize_title,
 )
 from app.hierarchy import derive_library_hierarchy
+from app.hierarchy_evaluation import finalize_collection_hierarchy
 from app.hierarchy_review import (
-    PROBABLE_GROUPING_REVIEW_REASON,
-    SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
-    collection_requires_review, definition_from_title, extract_local_period_hint,
-    manual_split_titles, preview_assignments, resolve_collection_hierarchy_status,
+    definition_from_title, extract_local_period_hint,
+    manual_split_titles, preview_assignments,
 )
 from app.models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, Video,
 )
 from app.numbering import recalculate_collection_numbering
-from app.structural_inference import (
-    GENERIC_TITLE_REVIEW_REASON, apply_automatic_structural_inference,
-)
 from app.probe import ProbeError, probe_video
 from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, subtitle_matches
 
@@ -393,6 +389,7 @@ def _scan_library(
             videos_by_collection_path.setdefault(
                 video.catalog_collection.relative_root_path, []
             ).append(video)
+    manual_split_status_locked: set[int] = set()
     for path, collection_videos in videos_by_collection_path.items():
         collection = collections[path]
         collection.local_period_hint = extract_local_period_hint(collection.local_title)
@@ -420,49 +417,35 @@ def _scan_library(
                 collection.hierarchy_status = "conflict"
                 collection.hierarchy_note = "Video odpovídá více ručním částem."
                 collection.hierarchy_verified_at = None
+                manual_split_status_locked.add(collection.id)
             elif unresolved_ids:
                 collection.hierarchy_status = "review_required"
                 collection.hierarchy_note = "Nové nezařazené video."
                 collection.hierarchy_verified_at = None
-            else:
-                reason = collection_requires_review(collection, collection_videos)
-                resolve_collection_hierarchy_status(collection, reason)
+                manual_split_status_locked.add(collection.id)
             continue
-        apply_automatic_structural_inference(collection)
-        probable_named_grouping = any(
-            hierarchy[video.relative_path].title.detection_reason == "related_named_child"
-            and (
-                video.catalog_title is None
-                or not video.catalog_title.hierarchy_manual_override
-            )
-            for video in collection_videos
-        )
-        supplementary_context_review = any(
-            hierarchy[video.relative_path].title.detection_reason
-            == "supplementary_named_child"
-            and (
-                video.catalog_title is None
-                or not video.catalog_title.hierarchy_manual_override
-            )
-            for video in collection_videos
-        )
-        reason = collection_requires_review(collection, collection_videos)
-        contextual_reason = (
-            PROBABLE_GROUPING_REVIEW_REASON if probable_named_grouping else
-            SUPPLEMENTARY_CONTEXT_REVIEW_REASON if supplementary_context_review else None
-        )
-        if reason in {None, GENERIC_TITLE_REVIEW_REASON} and contextual_reason:
-            reason = contextual_reason
-        resolve_collection_hierarchy_status(collection, reason)
     session.flush()
     videos_by_title: dict[int, list[Video]] = {}
+    videos_by_collection_id: dict[int, list[Video]] = {}
     for video in current_videos:
-        videos_by_title.setdefault(video.catalog_title_id, []).append(video)
+        if video.catalog_title_id is not None:
+            videos_by_title.setdefault(video.catalog_title_id, []).append(video)
+        if video.catalog_collection_id is not None:
+            videos_by_collection_id.setdefault(
+                video.catalog_collection_id, []
+            ).append(video)
     session.expire_all()
     for collection in session.scalars(select(CatalogCollection).options(
         selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record)
     )).all():
-        recalculate_collection_numbering(collection, videos_by_title)
+        collection_videos = videos_by_collection_id.get(collection.id)
+        if collection_videos is None:
+            recalculate_collection_numbering(collection, videos_by_title)
+            continue
+        if collection.id in manual_split_status_locked:
+            recalculate_collection_numbering(collection, videos_by_title)
+            continue
+        finalize_collection_hierarchy(collection, collection_videos)
     session.commit()
     logger.info("Sken dokončen: found=%d created=%d updated=%d unchanged=%d removed=%d errors=%d",
                 result.found, result.created, result.updated, result.unchanged, result.removed, result.errors)

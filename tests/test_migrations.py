@@ -419,6 +419,63 @@ def test_ambiguous_legacy_metadata_is_preserved_for_review(tmp_path):
         assert session.scalar(select(func.count()).select_from(Video)) == 2
 
 
+def test_startup_final_evaluation_sees_preserved_legacy_title(
+    tmp_path,
+    monkeypatch,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-timing.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        legacy = CatalogTitle(
+            local_title="Legacy Show",
+            normalized_local_title="legacy show",
+            relative_root_path="Anime/Show",
+            metadata_status="linked_manual",
+        )
+        session.add(legacy)
+        session.flush()
+        session.add_all([
+            Video(
+                relative_path=f"Anime/Show/Season {number}/E01.mkv",
+                root_folder="Anime",
+                filename="E01.mkv",
+                size=number,
+                mtime_ns=number,
+                catalog_title_id=legacy.id,
+            )
+            for number in (1, 2)
+        ])
+        session.add(TitleMetadata(
+            catalog_title_id=legacy.id,
+            display_title="Remote Show",
+            metadata_provider="anilist",
+            metadata_external_id="legacy-123",
+        ))
+        session.commit()
+
+    from app import migrations as migrations_module
+
+    observed_part_types: list[tuple[str, ...]] = []
+    original_finalize = migrations_module.finalize_collection_hierarchy
+
+    def record_final_titles(collection, videos, **kwargs):
+        observed_part_types.append(tuple(sorted(
+            title.part_type for title in collection.titles
+        )))
+        return original_finalize(collection, videos, **kwargs)
+
+    monkeypatch.setattr(
+        migrations_module,
+        "finalize_collection_hierarchy",
+        record_final_titles,
+    )
+
+    migrate_schema(engine)
+
+    assert observed_part_types
+    assert any("migration_review" in values for values in observed_part_types)
+
+
 def test_migration_preserves_3098_videos_hardsubs_subtitles_and_manual_hierarchy(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'production-shape.db'}")
     Base.metadata.create_all(engine)

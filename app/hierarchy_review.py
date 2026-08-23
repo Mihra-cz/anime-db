@@ -24,9 +24,9 @@ from .hierarchy_evaluation import (
     HierarchyEvaluationResult,
     HierarchyIssue,
     HierarchyIssueScope,
-    apply_hierarchy_evaluation,
     catalog_title_hierarchy_is_verified,
     evaluate_collection_hierarchy,
+    finalize_collection_hierarchy,
     hierarchy_primary_note,
     manual_hierarchy_resolves_ambiguity,
     manual_hierarchy_snapshot_is_complete,
@@ -34,6 +34,10 @@ from .hierarchy_evaluation import (
     structural_hierarchy_issue,
 )
 from .hierarchy_types import PART_TYPE_LABELS, PART_TYPES, VIDEO_CONTENT_TYPES
+from .hierarchy_provenance import (
+    RELATED_NAMED_CHILD_REVIEW_REASON as PROBABLE_GROUPING_REVIEW_REASON,
+    SUPPLEMENTARY_NAMED_CHILD_REVIEW_REASON as SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
+)
 from .models import (
     CatalogCollection, CatalogTitle, CollectionGroupingDecision, Video, utc_now,
 )
@@ -45,7 +49,6 @@ from .numbering import (
 from .structural_inference import (
     GENERIC_TITLE_REVIEW_REASON,
     LONG_FLAT_SEQUENCE_REVIEW_REASON,
-    apply_automatic_structural_inference,
     direct_root_episode_profile,
 )
 
@@ -58,14 +61,6 @@ PERIOD_HINT = re.compile(
 # formuláři. collection_requires_review už legacy časový hint jako důvod nevrací.
 PERIOD_HINT_REVIEW_REASON = (
     "Interní časový rozsah neurčuje bezpečně hranice sezón nebo částí."
-)
-PROBABLE_GROUPING_REVIEW_REASON = (
-    "Část s vlastním názvem byla seskupena podle společného fyzického parentu a "
-    "příbuzného názvu; vztah vyžaduje ruční potvrzení."
-)
-SUPPLEMENTARY_CONTEXT_REVIEW_REASON = (
-    "Doplňková část zachovává kontext vlastního child názvu, ale související "
-    "season vyžaduje ruční potvrzení."
 )
 SUPPLEMENTAL_PART_TYPES = {"film", "ova", "special", "preview", "recap", "bonus", "other"}
 MANUAL_DUPLICATE_STATUSES = {"suspected"}
@@ -1344,26 +1339,12 @@ def _selected_videos(collection: CatalogCollection, video_ids: list[int]) -> lis
 def refresh_collection_state(
     collection: CatalogCollection, *, recalculate: bool = True,
 ) -> None:
-    apply_automatic_structural_inference(collection)
-    if recalculate:
-        recalculate_collection_numbering(
-            collection,
-            {
-                title.id: [
-                    video for video in collection.videos
-                    if video.catalog_title is title or video.catalog_title_id == title.id
-                ]
-                for title in collection.titles
-            },
-        )
-    evaluation = evaluate_collection_hierarchy(
+    finalize_collection_hierarchy(
         collection,
         list(collection.videos),
-        # Runtime refresh explicitly recalculates the current state. Historical
-        # fallback is a read-side safety net, not a persistent active trigger.
+        recalculate=recalculate,
         include_legacy_fallback=False,
     )
-    apply_hierarchy_evaluation(collection, evaluation)
 
 
 def classify_videos_in_place(
