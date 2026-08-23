@@ -16,7 +16,9 @@ from .hierarchy_review import extract_local_period_hint
 from .manual_split import (
     apply_manual_split_decisions,
     evaluate_persisted_manual_split,
+    historical_manual_split_ambiguities,
     manual_split_titles,
+    persisted_manual_split_authority_collections,
 )
 from .models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
@@ -144,6 +146,8 @@ def migrate_schema(engine) -> None:
             collection.relative_root_path: collection
             for collection in session.scalars(select(CatalogCollection)).all()
         }
+        created_automatic_titles: set[CatalogTitle] = set()
+        created_automatic_collections: set[CatalogCollection] = set()
         identities_by_title_path = {
             identity.title.relative_root_path: identity
             for identity in hierarchy.values()
@@ -180,6 +184,7 @@ def migrate_schema(engine) -> None:
                 session.add(collection)
                 session.flush()
                 collections[collection.relative_root_path] = collection
+                created_automatic_collections.add(collection)
             title = titles.get(part.relative_root_path)
             if title is None:
                 title = CatalogTitle(
@@ -190,6 +195,7 @@ def migrate_schema(engine) -> None:
                 session.add(title)
                 session.flush()
                 titles[part.relative_root_path] = title
+                created_automatic_titles.add(title)
             title.catalog_collection_id = collection.id
             title.local_title = part.local_title
             title.normalized_local_title = normalize_title(part.local_title)
@@ -203,7 +209,37 @@ def migrate_schema(engine) -> None:
             used_titles.add(title)
 
         videos_by_collection: dict[int, list[Video]] = {}
+        protected_collection_ids: set[int] = set()
         for video in videos:
+            authority_collections = persisted_manual_split_authority_collections(video)
+            if video.manual_split_rule_videos:
+                authority_is_valid = (
+                    len(authority_collections) == 1
+                    and all(
+                        link.catalog_title is not None
+                        and link.catalog_title.hierarchy_manual_override
+                        and link.catalog_title.collection is authority_collections[0]
+                        for link in video.manual_split_rule_videos
+                    )
+                )
+                if authority_is_valid:
+                    collection = authority_collections[0]
+                    video.catalog_collection_id = collection.id
+                    videos_by_collection.setdefault(collection.id, []).append(video)
+                else:
+                    protected_collection_ids.update(
+                        collection.id
+                        for collection in authority_collections
+                        if collection.id is not None
+                    )
+                    if video.catalog_collection_id is not None:
+                        protected_collection_ids.add(video.catalog_collection_id)
+                    logger.warning(
+                        "Video %s má nekonzistentní persistentní manual-split authority; "
+                        "startup sync jeho hierarchy assignment nemění.",
+                        video.relative_path,
+                    )
+                continue
             if is_root_video(video):
                 assigned_collection = meaningful_root_collection(video) or video.catalog_collection
                 if assigned_collection is not None:
@@ -211,6 +247,20 @@ def migrate_schema(engine) -> None:
                 continue
             identity = hierarchy[video.relative_path]
             automatic_title = titles[identity.title.relative_root_path]
+            legacy_conflict_collection = (
+                video.catalog_collection
+                if video.catalog_title is None
+                and video.catalog_collection is not None
+                and video.catalog_collection.hierarchy_status == "conflict"
+                and manual_split_titles(video.catalog_collection)
+                else None
+            )
+            if legacy_conflict_collection is not None:
+                video.catalog_collection_id = legacy_conflict_collection.id
+                videos_by_collection.setdefault(
+                    legacy_conflict_collection.id, []
+                ).append(video)
+                continue
             title = (
                 video.catalog_title
                 if video.catalog_title is not None
@@ -232,13 +282,18 @@ def migrate_schema(engine) -> None:
                 video.catalog_title_id = title.id
 
         for collection in collections.values():
-            collection.local_period_hint = extract_local_period_hint(collection.local_title)
             collection_videos = videos_by_collection.get(collection.id, [])
+            if not collection_videos:
+                continue
+            collection.local_period_hint = extract_local_period_hint(collection.local_title)
             if manual_split_titles(collection):
                 manual_split = evaluate_persisted_manual_split(
                     collection,
                     collection_videos,
                 )
+                if historical_manual_split_ambiguities(collection, manual_split):
+                    protected_collection_ids.add(collection.id)
+                    continue
                 apply_manual_split_decisions(manual_split, collection)
                 session.flush()
                 assigned_title_ids = {
@@ -279,6 +334,44 @@ def migrate_schema(engine) -> None:
                     titles.pop(title.relative_root_path, None)
                 session.flush()
                 continue
+
+        # Identity derivation precedes global manual-split evaluation.  When
+        # explicit authority redirects every video to another collection, the
+        # just-created physical-path objects are disposable intermediates, not
+        # persistent hierarchy.  Remove only objects created by this startup
+        # run; pre-existing/user-bearing rows remain outside this cleanup.
+        session.flush()
+        assigned_title_ids = {
+            title_id
+            for title_id in session.scalars(
+                select(Video.catalog_title_id).where(
+                    Video.catalog_title_id.is_not(None)
+                )
+            )
+            if title_id is not None
+        }
+        for title in created_automatic_titles:
+            if (
+                title.relative_root_path not in titles
+                or title.id in assigned_title_ids
+                or title.manual_split_rule_videos
+            ):
+                continue
+            session.delete(title)
+            titles.pop(title.relative_root_path, None)
+        session.flush()
+        for collection in created_automatic_collections:
+            has_title = session.scalar(select(CatalogTitle.id).where(
+                CatalogTitle.catalog_collection_id == collection.id
+            )) is not None
+            has_video = session.scalar(select(Video.id).where(
+                Video.catalog_collection_id == collection.id
+            )) is not None
+            if has_title or has_video:
+                continue
+            session.delete(collection)
+            collections.pop(collection.relative_root_path, None)
+        session.flush()
 
         check_sql = " ".join(
             constraint.get("sqltext") or ""
@@ -323,8 +416,11 @@ def migrate_schema(engine) -> None:
         for collection in session.scalars(select(CatalogCollection).options(
             selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record)
         )).all():
+            collection_videos = videos_by_collection_id.get(collection.id, [])
+            if not collection_videos or collection.id in protected_collection_ids:
+                continue
             finalize_collection_hierarchy(
                 collection,
-                videos_by_collection_id.get(collection.id, []),
+                collection_videos,
             )
         session.commit()

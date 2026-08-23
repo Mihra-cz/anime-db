@@ -976,11 +976,14 @@ python -m app.tools.rebuild_hierarchy --dry-run
 python -m app.tools.rebuild_hierarchy --apply
 ```
 
-- `--dry-run` pouze vypíše navrhované změny a nic nezapisuje,
-- `--apply` opravuje jen bezpečně jednoznačně rozpoznané existující části,
-- nástroj nevytváří nové části,
-- nepřesouvá externí vazby ani metadata,
-- nepřepisuje ručně ověřenou hierarchii.
+- `--dry-run` sestaví strukturovaný globální reconciliation plán bez zápisu do DB,
+- `--apply` aplikuje tentýž plán po kontrole, že se zdrojový stav mezitím nezměnil,
+- nástroj vytváří chybějící automatic collections a titles, přepočítává membership,
+  numbering, provenance a hierarchy status stejnými shared pravidly jako scanner,
+- čistě automatické obsolete objekty odstraňuje pouze tehdy, když nenesou žádná
+  uživatelská data ani relevantní vazbu,
+- metadata, explicitní manual-split authority a ručně potvrzenou hierarchii
+  konzervativně zachovává.
 
 ### Hromadná operace
 
@@ -2813,8 +2816,6 @@ nad tímto automatickým path kontextem přednost.
 
 Na další samostatné kroky zůstává:
 
-- Commit 4A: persistence explicitní manual-split authority,
-- Commit 4B: skutečný kompletní hierarchy rebuild,
 - Commit 5: sjednocení move/manual-authority write paths,
 - Commit 6: parserové `S01E05.5` a související Season/Part numbering edge cases.
 
@@ -2934,9 +2935,137 @@ Stable issues `manual_split_conflict` a `manual_split_unmatched`, conflict statu
 precedence, multiple-issue diagnostika, complete/incomplete manual hierarchy
 snapshoty, duplicate a supplementary semantika i `Video.media_part_number`
 zůstávají beze změny. Produkční hierarchy rebuild nebyl v Commitu 4A rozšířen.
-Úplný reconciliation rebuild pokračuje až jako Commit 4B nad touto novou
-persistentní informací; obecné move/manual-authority write paths zůstávají pro
-Commit 5.
+Následující Commit 4B nad touto persistentní informací implementuje úplný
+reconciliation rebuild popsaný v části 6.45; obecné move/manual-authority write
+paths zůstávají pro Commit 5.
+
+---
+
+## 6.45 Globální hierarchy reconciliation / rebuild
+
+Původní opravný nástroj nebyl úplným rebuildem: odvozoval pouze část hierarchy,
+existující `CatalogTitle` hledal převážně podle `relative_root_path`, nevytvářel
+chybějící titles, nepřepočítával globálně video membership a neřešil bezpečný
+cleanup obsolete automatic objektů. Nemohl proto obecně dosáhnout stejného
+logického výsledku jako fresh scan.
+
+Rebuild je nyní dvoufázová reconciliation služba:
+
+```text
+aktuální DB
+→ build_hierarchy_rebuild_plan()
+→ structured dry-run plan
+→ apply_hierarchy_rebuild_plan(tentýž plan)
+→ shared hierarchy finalizer
+```
+
+Plán obsahuje stabilní source fingerprint, create/update/preserve/remove položky
+pro collections a titles, změny obou video assignment vazeb, změny numberingu,
+strukturované hierarchy issues, safety blockery a souhrnné počty. User-facing
+text CLI není zdrojem business rozhodnutí. Apply plán před zápisem znovu porovná
+se zdrojovým stavem a stale plán odmítne. Hard blocker také zastaví celý apply;
+nejistota se nepřeklápí do částečného destruktivního výsledku.
+
+Dry-run pouze čte aktuální stav. Nevytváří ORM rows, nemění assignmenty,
+neaktualizuje timestampy, nevolá rollback cizí transakce a vrací stejný plán,
+který lze následně přímo aplikovat. Apply nevytváří druhou interpretační větev.
+Po prvním úspěšném apply vrací další rebuild nad nezměněnou DB nulový logický
+diff a při nulovém diffu nepřepisuje timestampy.
+
+Automatic část používá přímo společný `derive_library_hierarchy()` scanneru.
+Z něj znovu sestaví grouping collections, identity titles a membership videí,
+včetně direct-root Season 1, explicitních Season, nezávislých Season/Part os,
+named children a supplementary children. Bonus, Extras, Specials, OVA, OP, ED,
+NCOP, NCED, Preview nebo Recap se pouze kvůli názvu child složky nepovyšují na
+novou hlavní collection. Chybějící automatic collection/title se vytvoří a
+existující čistě automatic title se může přejmenovat, přesunout nebo změnit svou
+strukturální identitu, když to současná inference určí jednoznačně.
+
+Každé video dostane výsledný záměr pro collection i title. Apply zapisuje
+redundantní `Video.catalog_collection_id` společně s `Video.catalog_title_id` a
+ověří invariant, že collection přiřazeného title odpovídá přímé collection
+videa. Rebuild nemění `duplicate_of_video_id`, manual suspected stav ani výběr
+primary. Confirmed secondary duplicate se nadále nepočítá jako další standardní
+epizoda a chybějící primary zůstává strukturovaným problémem. Stejně se zachová
+`content_type_manual`, effective supplementary classification a přesná nullable
+hodnota `Video.media_part_number`; Media Part není používán jako hierarchy Part.
+
+Manual split vyhodnocuje společný evaluator nad persistentní M:N authority
+`manual_split_rule_videos`. Výsledný `Video.catalog_title_id` se nikdy nepoužije
+jako zdroj explicitní selection. Unique match přiřadí cílový title, conflict
+nepoužije first match a nechá title assignment prázdný, unmatched se řídí
+stávající coverage semantikou a supplementary nebo confirmed secondary duplicate
+může být `not_required`. Explicit+explicit i explicit+range conflict zachovají
+všechny authority vazby. Rebuild je nevytváří z automatic assignmentu, nemaže je
+při konfliktu a nemění selection bez uživatelské operace.
+
+Explicitní authority zůstává stabilní i tehdy, když fyzická cesta videa ukazuje
+do jiné collection než její target. Scanner a startup sync proto určují manual
+collection z M:N authority ještě před physical parser fallbackem. Unique i
+conflict přežijí scan/startup a další rebuild bez logického diffu; startup po
+redirectu odstraní pouze disposable automatic collection/title, které sám v
+tomtéž běhu předběžně vytvořil a které nezískaly žádný assignment.
+
+Historickou pre-4A authority, která už v databázi nemá association ani jiný
+dokazatelný selector, rebuild nedoplňuje z current membershipu a nehádá původní
+kandidáty. Pokud persisted collection stále nese structured stav `conflict`,
+unassigned video nemá vlastní M:N authority a současná rules už konflikt
+nedokážou reprodukovat, plán vrátí per-video hard blocker
+`historical_pre4a_manual_split_conflict` a current assignment zachová. Ani
+unikátní range/pattern match pak není vydán za důkaz, že ztracený explicitní
+protikandidát neexistoval. Nekonzistentní persistentní authority, například
+association na neaktivní manual-split target, orphan target, targety z více
+collections nebo neplatný persisted pattern/range, se rovněž zveřejní jako
+strukturovaný hard blocker místo automatické opravy.
+
+Complete manual hierarchy snapshot zůstává autoritativní včetně
+`hierarchy_manual_override`, manual Season/Part/type/label/sort fields a
+`hierarchy_verified_at`. Incomplete historický snapshot se nedoplňuje, nevymýšlí
+se mu chybějící hodnota a společná evaluace jej nepovýší na `verified`.
+`CatalogTitle`, který nese manual hierarchy/split authority, manual display title,
+metadata record/link/candidate/artwork/preference/lock nebo ruční numbering
+konfiguraci, se kvůli změně automatic parseru nemaže. Pokud už nemá bezpečnou
+automatic identitu, zůstane zachovaný s review blockerem
+`protected_obsolete_title`.
+
+Stejná conservative compatibility hranice je sdílená se scannerem a startup
+syncem. Historicky neurčitý conflict se proto po rebuildu nerozpadne při dalším
+scanu nebo restartu na physical automatic assignment. Nekonzistentní M:N target
+scanner/startup nepřesměrují odhadem; strukturovaný rebuild plan jej následně
+zveřejní jako hard blocker.
+
+Odstranit lze jen prázdný obsolete title bez manual authority, metadat,
+uživatelských hodnot, numbering konfigurace a dalších relevantních vazeb.
+Collection lze odstranit až poté, co po novém plánu nemá title ani video a sama
+nenese uživatelský stav. Protože současné schema neumí odlišit ručně uložený
+collection review/note od historicky odvozeného textu, non-automatic status nebo
+existující note se konzervativně považují za důvod preservation. Prázdná
+protected collection se nefinalizuje a její status, note, verification timestamp,
+normalizovaný název i period hint zůstávají přesně zachované. Nejasný objekt se
+vždy zachovává/reviewuje. Cleanup probíhá až po přepojení videí a ORM vazby se
+před delete explicitně synchronizují, takže nezůstávají orphan rows.
+
+Po výsledných assignmentech se odvozený numbering přepočítá společným finalizerem
+z fresh filename/manual vstupu. Předem uložený derived numbering proto nemůže
+změnit range manual-split rozhodnutí. Potom se stejným finalizerem provede
+structural inference, finální numbering, deterministická provenance
+`related_named_child` / `supplementary_named_child`, persisted manual-split
+context a structured hierarchy evaluation do `hierarchy_status` a
+`hierarchy_note`. Rebuild nemá vlastní parser, inference, provenance, numbering
+ani status engine.
+
+End-to-end regresní testy porovnávají normalizovaný logický stav dvou nezávislých
+DB nad stejným synthetic filesystemem: DB po fresh scanu a stale DB po rebuildu.
+Porovnávají collections, titles, Season/Part identitu, membership, numbering,
+statusy a structured issues bez databázových ID a technických timestampů. Další
+testy pokrývají no-mutation dry-run, apply přesně téhož planu, druhý zero-diff
+rebuild, manual split lifecycle, ochranu user dat, cleanup a redundantní FK.
+
+Commit 4B nepřidává databázové pole ani migraci a nespouští fyzické operace nad
+knihovnou. Nadále zůstávají mimo tento krok známé parser/numbering problémy
+`S01E05.5`, `S01E14.5v2` a Season/Part absolute-numbering offset. Commit 5 má
+samostatně sjednotit obecné manual move/write paths; rebuild je zde záměrně
+nemění.
 
 ---
 

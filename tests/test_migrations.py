@@ -282,6 +282,92 @@ def test_manual_split_authority_migration_preserves_historical_manual_snapshot(
             ) == 0
 
 
+def test_startup_sync_preserves_empty_ui_review_collection_and_manual_title(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'empty-protected-sync.db'}")
+    Base.metadata.create_all(engine)
+    verified_at = datetime(2024, 2, 3, 4, 5, 6)
+    expected_collection = (
+        "review_required",
+        "UI review note must remain authoritative",
+        verified_at,
+        "user preserved normalized name",
+        "L20-P23",
+    )
+    expected_title = (
+        True,
+        "season",
+        1,
+        None,
+        "S1",
+        1,
+        verified_at,
+    )
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Protected Show (L20-P23)",
+            normalized_local_title=expected_collection[3],
+            relative_root_path="Anime/Protected Show",
+            hierarchy_status=expected_collection[0],
+            hierarchy_note=expected_collection[1],
+            hierarchy_verified_at=verified_at,
+            local_period_hint=expected_collection[4],
+        )
+        title = CatalogTitle(
+            collection=collection,
+            local_title="Manual Season 1",
+            normalized_local_title="manual season one preserved",
+            relative_root_path="Anime/Protected Show/.manual-season-1",
+            part_type="season",
+            season_number=1,
+            season_label="S1",
+            sort_order=1,
+            hierarchy_manual_override=True,
+            part_type_manual="season",
+            season_number_manual=1,
+            part_number_manual=None,
+            season_label_manual="S1",
+            sort_order_manual=1,
+            hierarchy_verified_at=verified_at,
+        )
+        session.add_all([collection, title])
+        session.commit()
+        collection_id, title_id = collection.id, title.id
+
+    observed = []
+    for _ in range(2):
+        migrate_schema(engine)
+        with Session(engine) as session:
+            collection = session.get(CatalogCollection, collection_id)
+            title = session.get(CatalogTitle, title_id)
+            assert collection is not None
+            assert title is not None
+            collection_snapshot = (
+                collection.hierarchy_status,
+                collection.hierarchy_note,
+                collection.hierarchy_verified_at,
+                collection.normalized_local_title,
+                collection.local_period_hint,
+            )
+            title_snapshot = (
+                title.hierarchy_manual_override,
+                title.part_type_manual,
+                title.season_number_manual,
+                title.part_number_manual,
+                title.season_label_manual,
+                title.sort_order_manual,
+                title.hierarchy_verified_at,
+            )
+            assert collection_snapshot == expected_collection
+            assert title_snapshot == expected_title
+            assert title.catalog_collection_id == collection_id
+            assert session.scalar(select(func.count()).select_from(Video)) == 0
+            observed.append((collection_snapshot, title_snapshot))
+
+    assert observed[0] == observed[1]
+
+
 def test_startup_sync_preserves_nested_parent_season_for_part(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'nested-part-sync.db'}")
     Base.metadata.create_all(engine)

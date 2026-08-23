@@ -18,7 +18,9 @@ from app.hierarchy_review import extract_local_period_hint
 from app.manual_split import (
     apply_manual_split_decisions,
     evaluate_persisted_manual_split,
+    historical_manual_split_ambiguities,
     manual_split_titles,
+    persisted_manual_split_authority_collections,
 )
 from app.models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, Video,
@@ -314,7 +316,36 @@ def _scan_library(
         value.relative_root_path: value
         for value in session.scalars(select(CatalogTitle)).all()
     }
+    protected_collection_paths: set[str] = set()
     for video in current_videos:
+        authority_collections = persisted_manual_split_authority_collections(video)
+        if video.manual_split_rule_videos:
+            authority_is_valid = (
+                len(authority_collections) == 1
+                and all(
+                    link.catalog_title is not None
+                    and link.catalog_title.hierarchy_manual_override
+                    and link.catalog_title.collection is authority_collections[0]
+                    for link in video.manual_split_rule_videos
+                )
+            )
+            if authority_is_valid:
+                video.catalog_collection = authority_collections[0]
+            else:
+                protected_collection_paths.update(
+                    collection.relative_root_path
+                    for collection in authority_collections
+                )
+                if video.catalog_collection is not None:
+                    protected_collection_paths.add(
+                        video.catalog_collection.relative_root_path
+                    )
+                logger.warning(
+                    "Video %s má nekonzistentní persistentní manual-split authority; "
+                    "scanner jeho hierarchy assignment nemění.",
+                    video.relative_path,
+                )
+            continue
         if is_root_video(video):
             meaningful_collection = meaningful_root_collection(video)
             if meaningful_collection is None:
@@ -330,6 +361,17 @@ def _scan_library(
             continue
         identity = hierarchy[video.relative_path]
         collection_data, title_data = identity.collection, identity.title
+        legacy_conflict_collection = (
+            video.catalog_collection
+            if video.catalog_title is None
+            and video.catalog_collection is not None
+            and video.catalog_collection.hierarchy_status == "conflict"
+            and manual_split_titles(video.catalog_collection)
+            else None
+        )
+        if legacy_conflict_collection is not None:
+            video.catalog_collection = legacy_conflict_collection
+            continue
         assigned_manual_title = (
             video.catalog_title
             if video.catalog_title is not None
@@ -387,7 +429,7 @@ def _scan_library(
     session.flush()
     videos_by_collection_path: dict[str, list[Video]] = {}
     for video in current_videos:
-        if not is_root_video(video) and video.catalog_collection is not None:
+        if video.catalog_collection is not None:
             videos_by_collection_path.setdefault(
                 video.catalog_collection.relative_root_path, []
             ).append(video)
@@ -399,6 +441,9 @@ def _scan_library(
                 collection,
                 collection_videos,
             )
+            if historical_manual_split_ambiguities(collection, manual_split):
+                protected_collection_paths.add(path)
+                continue
             apply_manual_split_decisions(manual_split, collection)
             continue
     session.flush()
@@ -415,6 +460,8 @@ def _scan_library(
     for collection in session.scalars(select(CatalogCollection).options(
         selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record)
     )).all():
+        if collection.relative_root_path in protected_collection_paths:
+            continue
         collection_videos = videos_by_collection_id.get(collection.id)
         if collection_videos is None:
             recalculate_collection_numbering(collection, videos_by_title)

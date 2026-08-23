@@ -496,11 +496,18 @@ class EffectiveVideoNumbering:
 
 
 def effective_video_numbering(
-    video: Video, title: CatalogTitle | None = None,
+    video: Video,
+    title: CatalogTitle | None = None,
+    *,
+    use_current_title: bool = True,
 ) -> EffectiveVideoNumbering:
     """Sjednotí manual/content/title autoritu nad automatickým filename parserem."""
     detection = detect_episode_number(video.filename)
-    effective_title = title if title is not None else video.catalog_title
+    effective_title = (
+        title
+        if title is not None or not use_current_title
+        else video.catalog_title
+    )
     title_is_supplemental = bool(
         effective_title is not None
         and effective_title.effective_part_type in SUPPLEMENTAL_PART_TYPES

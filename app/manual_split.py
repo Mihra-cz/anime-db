@@ -137,10 +137,12 @@ def compile_manual_split_pattern(pattern: str) -> re.Pattern:
         raise ValueError("Regulární pravidlo není platné.") from exc
 
 
-def _manual_split_number(video: Video) -> int | None:
+def _manual_split_number(
+    video: Video, *, use_fresh_numbering: bool = False,
+) -> int | None:
     if video.episode_number_manual_override is not None:
         return video.episode_number_manual_override
-    if video.local_episode_number is not None:
+    if not use_fresh_numbering and video.local_episode_number is not None:
         return video.local_episode_number
     return derive_episode_number(video.filename)
 
@@ -161,11 +163,15 @@ def _requires_rule_assignment(
     rules: tuple[ManualSplitRule, ...],
     *,
     persisted_targets: bool,
+    use_fresh_numbering: bool,
 ) -> bool:
     """Preserve current authority boundaries for non-episodic/secondary content."""
     if (
         is_nonprimary_duplicate_video(video)
-        or effective_video_numbering(video).is_supplementary
+        or effective_video_numbering(
+            video,
+            use_current_title=not use_fresh_numbering,
+        ).is_supplementary
     ):
         return False
     if persisted_targets and video.catalog_title is not None:
@@ -206,6 +212,7 @@ def evaluate_manual_split_assignment(
     definitions: list[ManualTitleDefinition],
     *,
     catalog_titles: list[CatalogTitle | None] | None = None,
+    use_fresh_numbering: bool = False,
 ) -> ManualSplitEvaluationResult:
     """Evaluate every rule for every video before returning any assignment."""
     persisted_targets = catalog_titles is not None
@@ -249,7 +256,9 @@ def evaluate_manual_split_assignment(
     )
     decisions: list[ManualSplitVideoDecision] = []
     for video in videos:
-        number = _manual_split_number(video)
+        number = _manual_split_number(
+            video, use_fresh_numbering=use_fresh_numbering,
+        )
         matching_rules = tuple(
             rule
             for rule, pattern in zip(rules, patterns)
@@ -298,6 +307,7 @@ def evaluate_manual_split_assignment(
             video,
             rules,
             persisted_targets=persisted_targets,
+            use_fresh_numbering=use_fresh_numbering,
         ):
             kind = ManualSplitDecisionKind.UNMATCHED
         else:
@@ -375,9 +385,33 @@ def manual_split_titles(collection: CatalogCollection) -> list[CatalogTitle]:
     return [title for title in collection.titles if title.hierarchy_manual_override]
 
 
+def persisted_manual_split_authority_collections(
+    video: Video,
+) -> tuple[CatalogCollection, ...]:
+    """Return deterministic collection targets proven by explicit M:N authority."""
+    collections: dict[tuple[str, int | str], CatalogCollection] = {}
+    for link in video.manual_split_rule_videos:
+        title = link.catalog_title
+        collection = title.collection if title is not None else None
+        if collection is None:
+            continue
+        key = (
+            "id", collection.id,
+        ) if collection.id is not None else (
+            "path", collection.relative_root_path,
+        )
+        collections[key] = collection
+    return tuple(sorted(
+        collections.values(),
+        key=lambda collection: (collection.relative_root_path, collection.id or 0),
+    ))
+
+
 def evaluate_persisted_manual_split(
     collection: CatalogCollection,
     videos: list[Video] | None = None,
+    *,
+    use_fresh_numbering: bool = False,
 ) -> ManualSplitEvaluationResult:
     titles = sorted(
         manual_split_titles(collection),
@@ -390,6 +424,29 @@ def evaluate_persisted_manual_split(
         list(collection.videos if videos is None else videos),
         [definition_from_title(title) for title in titles],
         catalog_titles=list(titles),
+        use_fresh_numbering=use_fresh_numbering,
+    )
+
+
+def historical_manual_split_ambiguities(
+    collection: CatalogCollection,
+    result: ManualSplitEvaluationResult,
+) -> tuple[ManualSplitVideoDecision, ...]:
+    """Locate unresolvable pre-authority conflicts without guessing candidates."""
+    if collection.hierarchy_status != "conflict":
+        return ()
+    explicit_video_ids = {
+        video_id
+        for rule in result.rules
+        for video_id in rule.definition.video_ids
+    }
+    return tuple(
+        decision
+        for decision in result.decisions
+        if decision.video.id is not None
+        and decision.video.catalog_title_id is None
+        and decision.video.id not in explicit_video_ids
+        and decision.kind != ManualSplitDecisionKind.CONFLICT
     )
 
 
