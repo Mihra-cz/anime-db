@@ -340,7 +340,7 @@ def test_named_child_context_is_recreated_as_structured_title_issue():
     assert contextual.message == PROBABLE_GROUPING_REVIEW_REASON
 
 
-def test_persisted_manual_split_conflict_remains_explicit_legacy_fallback():
+def test_persisted_manual_split_conflict_is_reproduced_at_video_scope():
     collection = _collection(
         status="conflict", note="Konflikt překrývajících se pravidel.",
     )
@@ -378,11 +378,13 @@ def test_persisted_manual_split_conflict_remains_explicit_legacy_fallback():
 
     diagnostics = hierarchy_review_diagnostics(collection, [video])
 
-    assert diagnostics.for_video(video) == ()
-    assert len(diagnostics.collection_issues) == 1
-    issue = diagnostics.collection_issues[0]
-    assert issue.code == "legacy_unlocalized_review_state"
-    assert issue.message == "Konflikt překrývajících se pravidel."
+    assert len(diagnostics.for_video(video)) == 1
+    assert diagnostics.collection_issues == ()
+    issue = diagnostics.for_video(video)[0]
+    assert issue.code == "manual_split_conflict"
+    assert issue.scope == "video"
+    assert issue.videos == (video,)
+    assert tuple(title.id for title in issue.related_catalog_titles) == (1, 2)
     assert diagnostics.evaluation.status == "conflict"
 
 

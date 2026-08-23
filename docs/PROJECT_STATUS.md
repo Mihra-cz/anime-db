@@ -2,7 +2,7 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 19. srpna 2026
+> **Aktualizováno:** 23. srpna 2026
 > **Aktuální checkpoint:** V5 dokončena – následuje stabilizace hierarchie a ladění UI nad reálnou knihovnou
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
@@ -2811,13 +2811,66 @@ nad tímto automatickým path kontextem přednost.
 
 Na další samostatné kroky zůstává:
 
-- Commit 3: úplný lifecycle manual split konfliktů a unmatched videí,
 - Commit 4: skutečný kompletní hierarchy rebuild,
 - Commit 5: sjednocení move/manual-authority write paths,
 - Commit 6: parserové `S01E05.5` a související Season/Part numbering edge cases.
 
 Schema se kvůli structured issues ani path provenance nemění. Scanner ani
 startup nadále neodvozují, nemažou ani nepřepisují `Video.media_part_number`.
+
+---
+
+## 6.43 Sdílený manual split evaluator a lifecycle konfliktů
+
+Manual split už nemá samostatnou interpretaci rules ve scanneru, startup syncu
+a preview/apply. Čistý evaluator v `app/manual_split.py` nejprve vyhodnotí
+všechna pravidla pro každé relevantní video a vrátí strukturované rules,
+per-video decisions a vazby na cílové `CatalogTitle`. Teprve hotový výsledek se
+aplikuje: jeden match je unique assignment, více matchů je conflict bez
+first-match assignmentu a žádný match je unmatched pouze tam, kde aktivní
+manual split skutečně vyžaduje nové zařazení.
+
+Persisted lifecycle zachovává současnou hranici autority. Video už bezpečně
+přiřazené k jiné části stejné collection se kvůli nesouvisejícímu manual
+override nepovažuje za unmatched. Confirmed secondary duplicate a explicitní
+supplementary obsah bez vlastního matchu jsou `not_required`; pokud je rule
+explicitně vybere nebo odpovídá patternu, používají normální unique/conflict
+rozhodnutí. Běžná automatic collection bez manual split targets nevytváří
+žádný manual split issue.
+
+Shared hierarchy evaluation dynamicky reprodukuje stabilní video-scoped issues
+`manual_split_conflict` a `manual_split_unmatched` přímo z uložených rules,
+assignmentu a videí. Issue nese konkrétní `Video`; conflict navíc strukturovaně
+odkazuje na všechny matched target titles. Aktivní `manual_split_conflict`
+odvozuje collection status `conflict`, zatímco jiné blocking issues nadále
+odvozují `review_required`. Konflikt se nededuplikuje s nezávislým numbering,
+type ani provenance problémem, takže například conflict a `numbering_gap`
+zůstávají současně dostupné v diagnostics. `hierarchy_note` je pouze odvozený
+prezentační souhrn a změna jeho textu nemění code, scope, affected objects,
+assignment ani status.
+
+Scanner a startup aplikují pouze bezpečné unique assignments ze stejného
+evaluatoru a potom vždy pokračují existujícím společným hierarchy finalizerem.
+Startup už před úplným vyhodnocením nepřiřadí unassigned video prvnímu
+path/manual title; konflikt proto končí s `catalog_title_id=NULL`. Runtime
+refresh vyhodnotí persisted rules stejným evaluatorem, takže reprodukovatelný
+conflict/unmatched po scanu ani restartu nedegraduje na
+`legacy_unlocalized_review_state`. Legacy fallback zůstává pouze pro starý
+blocking stav, který současná data a rules skutečně nedokážou lokalizovat.
+
+Preview i apply používají totožný structured result. Apply znovu neinterpretuje
+rules vlastní větví; provede assignmenty z preview-compatible rozhodnutí a stav
+uloží přes současný shared structural/numbering/hierarchy finalizer. Regresní
+scénáře ověřují unique, conflict a unmatched přes fresh scan, runtime refresh,
+startup sync a další runtime refresh, shodu preview/apply, odstranění startup
+first-match chyby, multiple issues, manual Season i Season+Part snapshoty,
+incomplete historický snapshot, confirmed duplicates, supplementary obsah a
+zachování `Video.media_part_number`.
+
+Změna nepřidává DB pole ani migraci a nemění NAS. Pro další samostatné hierarchy
+kroky zůstává úplný rebuild, sjednocení obecných move/manual-authority write
+paths a parser/numbering edge cases včetně `S01E05.5`, `S01E14.5v2` a
+Season/Part absolute-numbering offsetu.
 
 ---
 

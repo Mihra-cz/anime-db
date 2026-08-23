@@ -11,7 +11,7 @@ import re
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from .catalog import GENERIC_ROOTS, detect_episode_number, derive_episode_number, normalize_title
+from .catalog import GENERIC_ROOTS, detect_episode_number, normalize_title
 from .hierarchy import parse_explicit_part
 from .hierarchy_evaluation import (
     CONFIRMED_DUPLICATES_REVIEW_REASON,
@@ -38,12 +38,19 @@ from .hierarchy_provenance import (
     RELATED_NAMED_CHILD_REVIEW_REASON as PROBABLE_GROUPING_REVIEW_REASON,
     SUPPLEMENTARY_NAMED_CHILD_REVIEW_REASON as SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
 )
+from .manual_split import (
+    AssignmentPreview,
+    ManualTitleDefinition,
+    apply_manual_split_decisions,
+    compile_manual_split_pattern,
+    evaluate_manual_split_assignment,
+)
 from .models import (
     CatalogCollection, CatalogTitle, CollectionGroupingDecision, Video, utc_now,
 )
 from .numbering import (
     clear_duplicate_group, effective_video_numbering,
-    recalculate_collection_numbering, set_duplicate_group_primary,
+    set_duplicate_group_primary,
     supplementary_context_map, video_numbering_identity,
 )
 from .structural_inference import (
@@ -71,31 +78,6 @@ SIMPLE_DEFINITION_FIELDS = (
     "episode_end", "episode_start_offset", "numbering_mode", "sort_order",
     "filename_pattern", "video_ids",
 )
-
-
-@dataclass(frozen=True)
-class ManualTitleDefinition:
-    title_id: int | None
-    local_title: str
-    manual_display_title: str | None
-    season_number_manual: int | None
-    season_label_manual: str | None
-    part_number_manual: int | None
-    part_type_manual: str | None
-    episode_start: int | None
-    episode_end: int | None
-    episode_start_offset: int | None
-    numbering_mode: str
-    sort_order: int
-    filename_pattern: str | None = None
-    video_ids: tuple[int, ...] = ()
-
-
-@dataclass(frozen=True)
-class AssignmentPreview:
-    assignments: dict[int, int]
-    unmatched_video_ids: tuple[int, ...]
-    conflicts: dict[int, tuple[int, ...]]
 
 
 @dataclass(frozen=True)
@@ -128,6 +110,10 @@ class HierarchyReviewIssue:
     @property
     def videos(self) -> tuple[Video, ...]:
         return self.issue.videos
+
+    @property
+    def related_catalog_titles(self) -> tuple[CatalogTitle, ...]:
+        return self.issue.related_catalog_titles
 
     @property
     def title_id(self) -> int | None:
@@ -163,6 +149,7 @@ class HierarchyReviewDiagnostics:
             for issue in self.blocking_issues
             for title_id in (
                 issue.title_id,
+                *(title.id for title in issue.related_catalog_titles),
                 *(
                     video.catalog_title_id
                     for video in issue.videos
@@ -1177,7 +1164,7 @@ def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
             raise ValueError(f"Část {position} má neplatný režim číslování.")
         pattern = str(value.get("filename_pattern") or "").strip() or None
         if pattern:
-            _compile_safe_pattern(pattern)
+            compile_manual_split_pattern(pattern)
         try:
             video_ids = tuple(int(item) for item in (value.get("video_ids") or []))
         except (TypeError, ValueError) as exc:
@@ -1253,63 +1240,10 @@ def _optional_text(value, limit: int) -> str | None:
     return str(value or "").strip()[:limit] or None
 
 
-def _compile_safe_pattern(pattern: str) -> re.Pattern:
-    if len(pattern) > 100 or "(?" in pattern or re.search(r"\\[1-9]", pattern):
-        raise ValueError("Regulární pravidlo je příliš složité nebo dlouhé.")
-    try:
-        return re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        raise ValueError("Regulární pravidlo není platné.") from exc
-
-
 def preview_assignments(
     videos: list[Video], definitions: list[ManualTitleDefinition]
 ) -> AssignmentPreview:
-    assignments, conflicts, unmatched = {}, {}, []
-    patterns = [
-        _compile_safe_pattern(definition.filename_pattern)
-        if definition.filename_pattern else None for definition in definitions
-    ]
-    for video in videos:
-        number = video.episode_number_manual_override
-        if number is None:
-            number = video.local_episode_number
-        if number is None:
-            number = derive_episode_number(video.filename)
-        matches = []
-        for index, (definition, pattern) in enumerate(zip(definitions, patterns)):
-            range_match = (
-                definition.episode_start is not None and number is not None
-                and definition.episode_start <= number <= definition.episode_end
-            )
-            if video.id in definition.video_ids or range_match or pattern and pattern.search(video.filename):
-                matches.append(index)
-        if len(matches) == 1:
-            assignments[video.id] = matches[0]
-        elif len(matches) > 1:
-            conflicts[video.id] = tuple(matches)
-        else:
-            unmatched.append(video.id)
-    return AssignmentPreview(assignments, tuple(unmatched), conflicts)
-
-
-def definition_from_title(title: CatalogTitle) -> ManualTitleDefinition:
-    return ManualTitleDefinition(
-        title_id=title.id, local_title=title.local_title,
-        manual_display_title=title.manual_display_title,
-        season_number_manual=title.season_number_manual,
-        season_label_manual=title.season_label_manual,
-        part_number_manual=title.part_number_manual,
-        part_type_manual=title.part_type_manual, episode_start=title.episode_start,
-        episode_end=title.episode_end, episode_start_offset=title.episode_start_offset,
-        numbering_mode=title.numbering_mode, sort_order=title.effective_sort_order,
-        filename_pattern=title.episode_filename_pattern,
-        video_ids=tuple(video.id for video in title.videos),
-    )
-
-
-def manual_split_titles(collection: CatalogCollection) -> list[CatalogTitle]:
-    return [title for title in collection.titles if title.hierarchy_manual_override]
+    return evaluate_manual_split_assignment(videos, definitions)
 
 
 def _load_collection_for_assignment(session: Session, collection_id: int) -> CatalogCollection:
@@ -1678,23 +1612,13 @@ def apply_manual_split(
         title.hierarchy_verified_at = now
         resolved.append(title)
     session.flush()
-    for video in collection.videos:
-        target_index = preview.assignments.get(video.id)
-        video.catalog_title = resolved[target_index] if target_index is not None else None
-        video.catalog_collection = collection
-    recalculate_collection_numbering(
+    apply_manual_split_decisions(
+        preview,
         collection,
-        {title.id: [video for video in collection.videos if video.catalog_title is title]
-         for title in resolved},
+        catalog_titles=resolved,
     )
-    if preview.conflicts:
-        collection.hierarchy_status = "conflict"
-        collection.hierarchy_verified_at = None
-        collection.hierarchy_note = "Konflikt překrývajících se pravidel."
-    elif preview.unmatched_video_ids:
-        resolve_collection_hierarchy_status(collection, "Nové nebo nezařazené video.")
-    else:
-        refresh_collection_state(collection, recalculate=False)
+    session.flush()
+    refresh_collection_state(collection)
     return preview
 
 

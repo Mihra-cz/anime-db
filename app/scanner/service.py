@@ -14,9 +14,11 @@ from app.catalog import (
 )
 from app.hierarchy import derive_library_hierarchy
 from app.hierarchy_evaluation import finalize_collection_hierarchy
-from app.hierarchy_review import (
-    definition_from_title, extract_local_period_hint,
-    manual_split_titles, preview_assignments,
+from app.hierarchy_review import extract_local_period_hint
+from app.manual_split import (
+    apply_manual_split_decisions,
+    evaluate_persisted_manual_split,
+    manual_split_titles,
 )
 from app.models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, Video,
@@ -389,40 +391,15 @@ def _scan_library(
             videos_by_collection_path.setdefault(
                 video.catalog_collection.relative_root_path, []
             ).append(video)
-    manual_split_status_locked: set[int] = set()
     for path, collection_videos in videos_by_collection_path.items():
         collection = collections[path]
         collection.local_period_hint = extract_local_period_hint(collection.local_title)
-        split_titles = sorted(
-            manual_split_titles(collection), key=lambda title: title.effective_sort_order
-        )
-        if split_titles:
-            preview = preview_assignments(
-                collection_videos, [definition_from_title(title) for title in split_titles]
+        if manual_split_titles(collection):
+            manual_split = evaluate_persisted_manual_split(
+                collection,
+                collection_videos,
             )
-            for video in collection_videos:
-                target = preview.assignments.get(video.id)
-                if target is not None:
-                    video.catalog_title = split_titles[target]
-                elif (
-                    video.catalog_title is None
-                    or video.catalog_title.catalog_collection_id != collection.id
-                ):
-                    video.catalog_title = None
-            unresolved_ids = tuple(
-                video.id for video in collection_videos
-                if video.id in preview.unmatched_video_ids and video.catalog_title is None
-            )
-            if preview.conflicts:
-                collection.hierarchy_status = "conflict"
-                collection.hierarchy_note = "Video odpovídá více ručním částem."
-                collection.hierarchy_verified_at = None
-                manual_split_status_locked.add(collection.id)
-            elif unresolved_ids:
-                collection.hierarchy_status = "review_required"
-                collection.hierarchy_note = "Nové nezařazené video."
-                collection.hierarchy_verified_at = None
-                manual_split_status_locked.add(collection.id)
+            apply_manual_split_decisions(manual_split, collection)
             continue
     session.flush()
     videos_by_title: dict[int, list[Video]] = {}
@@ -440,9 +417,6 @@ def _scan_library(
     )).all():
         collection_videos = videos_by_collection_id.get(collection.id)
         if collection_videos is None:
-            recalculate_collection_numbering(collection, videos_by_title)
-            continue
-        if collection.id in manual_split_status_locked:
             recalculate_collection_numbering(collection, videos_by_title)
             continue
         finalize_collection_hierarchy(collection, collection_videos)

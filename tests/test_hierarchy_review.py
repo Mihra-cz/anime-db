@@ -697,7 +697,9 @@ def test_nonblocking_period_hint_collection_reopens_for_new_scan_problem(
         scan_library(session, tmp_path)
         unknown = session.scalar(select(Video).where(Video.filename == unknown_path.name))
         assert collection.hierarchy_status == "review_required"
-        assert collection.hierarchy_note == "Nové nezařazené video."
+        assert collection.hierarchy_note == (
+            "Video, které vyžaduje ruční rozdělení, neodpovídá žádnému pravidlu."
+        )
         assert unknown.catalog_title_id is None
 
         move_videos_to_title(session, collection_id, [unknown.id], title_id)
@@ -1086,7 +1088,9 @@ def test_verified_manual_split_survives_scan_and_new_video_reopens_review(
         collection = session.get(CatalogCollection, collection.id)
         new_video = session.scalar(select(Video).where(Video.filename == "Episode 27.mkv"))
         assert collection.hierarchy_status == "review_required"
-        assert collection.hierarchy_note == "Nové nezařazené video."
+        assert collection.hierarchy_note == (
+            "Video, které vyžaduje ruční rozdělení, neodpovídá žádnému pravidlu."
+        )
         assert new_video.catalog_title_id is None
 
 

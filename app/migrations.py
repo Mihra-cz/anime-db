@@ -12,15 +12,16 @@ from .catalog import (
 from .database import Base
 from .hierarchy import derive_library_hierarchy
 from .hierarchy_evaluation import finalize_collection_hierarchy
-from .hierarchy_review import (
-    definition_from_title, extract_local_period_hint,
-    manual_split_titles, preview_assignments,
+from .hierarchy_review import extract_local_period_hint
+from .manual_split import (
+    apply_manual_split_decisions,
+    evaluate_persisted_manual_split,
+    manual_split_titles,
 )
 from .models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
     InternalSubtitle, TitleMetadata, Video,
 )
-from .numbering import recalculate_collection_numbering
 
 logger = logging.getLogger(__name__)
 
@@ -220,43 +221,21 @@ def migrate_schema(engine) -> None:
             )
             video.catalog_collection_id = collection.id
             videos_by_collection.setdefault(collection.id, []).append(video)
-            if title.hierarchy_manual_override or not manual_split_titles(collection):
+            # Aktivní manual split se musí nejprve vyhodnotit jako celek.
+            # Existující assignment zůstává na videu zachován, ale unassigned
+            # video se nesmí před vyhodnocením připojit k prvnímu path title.
+            if not manual_split_titles(collection):
                 video.catalog_title_id = title.id
 
-        manual_split_status_locked: set[int] = set()
         for collection in collections.values():
             collection.local_period_hint = extract_local_period_hint(collection.local_title)
             collection_videos = videos_by_collection.get(collection.id, [])
-            split_titles = sorted(
-                manual_split_titles(collection), key=lambda title: title.effective_sort_order
-            )
-            if split_titles:
-                preview = preview_assignments(
-                    collection_videos, [definition_from_title(title) for title in split_titles]
+            if manual_split_titles(collection):
+                manual_split = evaluate_persisted_manual_split(
+                    collection,
+                    collection_videos,
                 )
-                for video in collection_videos:
-                    target = preview.assignments.get(video.id)
-                    if target is not None:
-                        video.catalog_title = split_titles[target]
-                    elif (
-                        video.catalog_title is None
-                        or video.catalog_title.catalog_collection_id != collection.id
-                    ):
-                        video.catalog_title = None
-                unresolved_ids = tuple(
-                    video.id for video in collection_videos
-                    if video.id in preview.unmatched_video_ids and video.catalog_title is None
-                )
-                if preview.conflicts:
-                    collection.hierarchy_status = "conflict"
-                    collection.hierarchy_note = "Video odpovídá více ručním částem."
-                    collection.hierarchy_verified_at = None
-                    manual_split_status_locked.add(collection.id)
-                elif unresolved_ids:
-                    collection.hierarchy_status = "review_required"
-                    collection.hierarchy_note = "Nové nezařazené video."
-                    collection.hierarchy_verified_at = None
-                    manual_split_status_locked.add(collection.id)
+                apply_manual_split_decisions(manual_split, collection)
                 session.flush()
                 assigned_title_ids = {
                     video.catalog_title_id for video in collection_videos
@@ -331,11 +310,8 @@ def migrate_schema(engine) -> None:
             legacy.metadata_status = review_status
         session.flush()
         session.expire_all()
-        videos_by_title: dict[int, list[Video]] = {}
         videos_by_collection_id: dict[int, list[Video]] = {}
         for video in session.scalars(select(Video)).all():
-            if video.catalog_title_id:
-                videos_by_title.setdefault(video.catalog_title_id, []).append(video)
             if video.catalog_collection_id:
                 videos_by_collection_id.setdefault(
                     video.catalog_collection_id, []
@@ -343,9 +319,6 @@ def migrate_schema(engine) -> None:
         for collection in session.scalars(select(CatalogCollection).options(
             selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record)
         )).all():
-            if collection.id in manual_split_status_locked:
-                recalculate_collection_numbering(collection, videos_by_title)
-                continue
             finalize_collection_hierarchy(
                 collection,
                 videos_by_collection_id.get(collection.id, []),

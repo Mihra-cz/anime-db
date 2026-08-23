@@ -11,6 +11,10 @@ from .hierarchy_provenance import (
     NamedChildProvenanceKind,
     derive_collection_path_provenance,
 )
+from .manual_split import (
+    ManualSplitDecisionKind,
+    evaluate_persisted_manual_split,
+)
 from .models import CatalogCollection, CatalogTitle, Video, utc_now
 from .numbering import (
     confirmed_duplicate_groups,
@@ -55,9 +59,17 @@ NUMBERING_REVIEW_SUMMARY = (
 UNASSIGNED_VIDEO_REVIEW_REASON = (
     "Nové nebo nezařazené video vyžaduje kontrolu."
 )
+MANUAL_SPLIT_CONFLICT_REVIEW_REASON = (
+    "Video odpovídá více pravidlům ručního rozdělení."
+)
+MANUAL_SPLIT_UNMATCHED_REVIEW_REASON = (
+    "Video, které vyžaduje ruční rozdělení, neodpovídá žádnému pravidlu."
+)
 
 
 class HierarchyIssueCode(StrEnum):
+    MANUAL_SPLIT_CONFLICT = "manual_split_conflict"
+    MANUAL_SPLIT_UNMATCHED = "manual_split_unmatched"
     UNASSIGNED_VIDEO = "unassigned_video"
     FILENAME_SEASON_CONFLICT = "filename_season_conflict"
     SUPPLEMENTARY_WITHOUT_NUMBER = "supplementary_without_number"
@@ -93,6 +105,7 @@ class HierarchyIssue:
     message: str
     catalog_title: CatalogTitle | None = None
     videos: tuple[Video, ...] = ()
+    related_catalog_titles: tuple[CatalogTitle, ...] = ()
 
     @property
     def catalog_title_id(self) -> int | None:
@@ -101,6 +114,13 @@ class HierarchyIssue:
     @property
     def video_ids(self) -> tuple[int, ...]:
         return tuple(video.id for video in self.videos if video.id is not None)
+
+    @property
+    def related_catalog_title_ids(self) -> tuple[int, ...]:
+        return tuple(
+            title.id for title in self.related_catalog_titles
+            if title.id is not None
+        )
 
 
 @dataclass(frozen=True)
@@ -216,6 +236,11 @@ def derive_hierarchy_status(
 ) -> str:
     blocking = tuple(issue for issue in issues if issue.blocking)
     if blocking:
+        if any(
+            issue.code == HierarchyIssueCode.MANUAL_SPLIT_CONFLICT
+            for issue in blocking
+        ):
+            return "conflict"
         if (
             collection.hierarchy_status == "conflict"
             and all(
@@ -246,6 +271,10 @@ def hierarchy_primary_note(
     """Choose one compatibility summary from codes, never from message matching."""
     blocking = tuple(issue for issue in issues if issue.blocking)
     codes = {issue.code for issue in blocking}
+    if HierarchyIssueCode.MANUAL_SPLIT_CONFLICT in codes:
+        return MANUAL_SPLIT_CONFLICT_REVIEW_REASON
+    if HierarchyIssueCode.MANUAL_SPLIT_UNMATCHED in codes:
+        return MANUAL_SPLIT_UNMATCHED_REVIEW_REASON
     if HierarchyIssueCode.UNASSIGNED_VIDEO in codes:
         return UNASSIGNED_VIDEO_REVIEW_REASON
     if summarize_numbering and codes & _NUMBERING_CODES:
@@ -312,6 +341,7 @@ def evaluate_collection_hierarchy(
         blocking: bool,
         title: CatalogTitle | None = None,
         target_videos: tuple[Video, ...] = (),
+        related_titles: tuple[CatalogTitle, ...] = (),
     ) -> None:
         issues.append(HierarchyIssue(
             code=code,
@@ -320,12 +350,40 @@ def evaluate_collection_hierarchy(
             message=message,
             catalog_title=title,
             videos=target_videos,
+            related_catalog_titles=related_titles,
         ))
+
+    manual_split = evaluate_persisted_manual_split(collection, all_videos)
+    manual_problem_videos: set[Video] = set()
+    for decision in manual_split.decisions:
+        if decision.kind == ManualSplitDecisionKind.CONFLICT:
+            manual_problem_videos.add(decision.video)
+            add_issue(
+                HierarchyIssueCode.MANUAL_SPLIT_CONFLICT,
+                MANUAL_SPLIT_CONFLICT_REVIEW_REASON,
+                HierarchyIssueScope.VIDEO,
+                blocking=True,
+                target_videos=(decision.video,),
+                related_titles=decision.matching_catalog_titles,
+            )
+        elif decision.kind == ManualSplitDecisionKind.UNMATCHED:
+            manual_problem_videos.add(decision.video)
+            add_issue(
+                HierarchyIssueCode.MANUAL_SPLIT_UNMATCHED,
+                MANUAL_SPLIT_UNMATCHED_REVIEW_REASON,
+                HierarchyIssueScope.VIDEO,
+                blocking=True,
+                target_videos=(decision.video,),
+            )
 
     for video in all_videos:
         title = _video_title(video, titles_by_id)
         target = (video,)
-        if include_unassigned and title is None:
+        if (
+            include_unassigned
+            and title is None
+            and video not in manual_problem_videos
+        ):
             add_issue(
                 HierarchyIssueCode.UNASSIGNED_VIDEO,
                 "Video není přiřazeno ke konkrétní části.",
