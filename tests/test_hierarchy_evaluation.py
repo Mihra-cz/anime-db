@@ -8,6 +8,12 @@ from app.hierarchy_evaluation import (
     derive_hierarchy_status,
     evaluate_collection_hierarchy,
 )
+from app.hierarchy_authority import (
+    ManualHierarchyAuthorityState,
+    manual_hierarchy_authority_state,
+    manual_hierarchy_snapshot_requires_preservation,
+    manual_hierarchy_snapshot_uses_legacy_projection,
+)
 from app.hierarchy_review import (
     hierarchy_review_diagnostics,
     refresh_collection_state,
@@ -279,10 +285,19 @@ def test_incomplete_historical_part_is_not_verified_and_is_not_repaired():
     result = evaluate_collection_hierarchy(collection, [])
 
     assert result.status == "review_required"
-    assert HierarchyIssueCode.MISSING_PART_NUMBER in _codes(result)
     assert HierarchyIssueCode.INCOMPLETE_MANUAL_SNAPSHOT in _codes(result)
+    assert next(
+        issue for issue in result.issues
+        if issue.code == HierarchyIssueCode.INCOMPLETE_MANUAL_SNAPSHOT
+    ).blocking is True
     assert title.part_number_manual is None
     assert title.hierarchy_verified_at == timestamp
+    assert manual_hierarchy_snapshot_uses_legacy_projection(title) is True
+    assert (
+        title.effective_part_type,
+        title.effective_season_number,
+        title.effective_part_number,
+    ) == ("part", 1, 2)
 
 
 def test_complete_manual_season_without_problems_is_verified():
@@ -300,6 +315,59 @@ def test_complete_manual_season_without_problems_is_verified():
 
     assert result.blocking_issues == ()
     assert result.status == "verified"
+
+
+def test_inactive_manual_values_are_not_effective_authority():
+    collection = _collection()
+    title = _title(
+        collection,
+        part_type="season",
+        season_number=2,
+        part_type_manual="ova",
+        season_number_manual=9,
+        season_label_manual="stale",
+        sort_order_manual=99,
+        hierarchy_manual_override=False,
+    )
+
+    result = evaluate_collection_hierarchy(collection, [])
+
+    assert manual_hierarchy_authority_state(title) == ManualHierarchyAuthorityState.NONE
+    assert manual_hierarchy_snapshot_uses_legacy_projection(title) is False
+    assert (
+        title.effective_part_type,
+        title.effective_season_number,
+        title.effective_season_label,
+        title.effective_sort_order,
+    ) == ("season", 2, "S2", title.sort_order)
+    assert result.status == "automatic"
+
+
+def test_historical_verification_marker_is_preserved_without_legacy_projection():
+    collection = _collection()
+    title = _title(
+        collection,
+        part_type="season",
+        season_number=2,
+        part_type_manual="ova",
+        season_number_manual=9,
+        hierarchy_manual_override=False,
+        hierarchy_verified_at=utc_now(),
+    )
+
+    result = evaluate_collection_hierarchy(collection, [])
+
+    assert (
+        manual_hierarchy_authority_state(title)
+        == ManualHierarchyAuthorityState.INCOMPLETE
+    )
+    assert manual_hierarchy_snapshot_requires_preservation(title) is True
+    assert manual_hierarchy_snapshot_uses_legacy_projection(title) is False
+    assert (title.effective_part_type, title.effective_season_number) == (
+        "season",
+        2,
+    )
+    assert result.status == "review_required"
 
 
 def test_confirmed_secondary_is_excluded_from_count_but_remains_review_issue():

@@ -2,8 +2,8 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 23. srpna 2026
-> **Aktuální checkpoint:** V5 dokončena – následuje stabilizace hierarchie a ladění UI nad reálnou knihovnou
+> **Aktualizováno:** 24. srpna 2026
+> **Aktuální checkpoint:** Stabilizace hierarchie – Commit 5 sjednotil manual authority a hierarchy write paths
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -2814,10 +2814,9 @@ odpovídají současnému automatickému přiřazení. Scanner, startup i runtim
 proto zachovají stejný stable issue code a scope; manual hierarchy override má
 nad tímto automatickým path kontextem přednost.
 
-Na další samostatné kroky zůstává:
-
-- Commit 5: sjednocení move/manual-authority write paths,
-- Commit 6: parserové `S01E05.5` a související Season/Part numbering edge cases.
+Sjednocení move/manual-authority write paths dokončil Commit 5 popsaný v části
+6.46. Na další samostatný krok zůstávají parserové `S01E05.5` a související
+Season/Part numbering edge cases v Commitu 6.
 
 Schema se kvůli structured issues ani path provenance nemění. Scanner ani
 startup nadále neodvozují, nemažou ani nepřepisují `Video.media_part_number`.
@@ -3014,9 +3013,10 @@ nedokážou reprodukovat, plán vrátí per-video hard blocker
 `historical_pre4a_manual_split_conflict` a current assignment zachová. Ani
 unikátní range/pattern match pak není vydán za důkaz, že ztracený explicitní
 protikandidát neexistoval. Nekonzistentní persistentní authority, například
-association na neaktivní manual-split target, orphan target, targety z více
-collections nebo neplatný persisted pattern/range, se rovněž zveřejní jako
-strukturovaný hard blocker místo automatické opravy.
+orphan target, targety z více collections nebo neplatný persisted pattern/range,
+se zveřejní jako strukturovaný hard blocker místo automatické opravy. Samotný
+M:N selector na title bez manual hierarchy snapshotu není neaktivní: selector
+authority je na strukturální identitě title nezávislá.
 
 Complete manual hierarchy snapshot zůstává autoritativní včetně
 `hierarchy_manual_override`, manual Season/Part/type/label/sort fields a
@@ -3062,10 +3062,129 @@ testy pokrývají no-mutation dry-run, apply přesně téhož planu, druhý zero
 rebuild, manual split lifecycle, ochranu user dat, cleanup a redundantní FK.
 
 Commit 4B nepřidává databázové pole ani migraci a nespouští fyzické operace nad
-knihovnou. Nadále zůstávají mimo tento krok známé parser/numbering problémy
-`S01E05.5`, `S01E14.5v2` a Season/Part absolute-numbering offset. Commit 5 má
-samostatně sjednotit obecné manual move/write paths; rebuild je zde záměrně
-nemění.
+knihovnou. Obecné manual move/write paths následně sjednotil Commit 5 v části
+6.46. Známé parser/numbering problémy `S01E05.5`, `S01E14.5v2` a Season/Part
+absolute-numbering offset zůstávají oddělené pro Commit 6.
+
+---
+
+## 6.46 Sjednocená manual authority a hierarchy write paths
+
+Commit 5 odděluje tři dříve částečně směšované vrstvy:
+
+```text
+manual hierarchy snapshot = explicitní strukturální identita CatalogTitle
+manual-split selector      = range / pattern / explicitní M:N výběr videa
+assignment + status/note   = odvozený výsledný stav
+```
+
+Manual hierarchy snapshot má nyní jedno centrální třístavové vyhodnocení:
+`none`, `incomplete` a `complete`. Complete authority vyžaduje aktivní override a
+strukturálně platný snapshot podle typu; Part například vyžaduje explicitní
+`part_number_manual`. Neaktivní manual hodnoty neovlivňují effective hierarchy.
+Historický incomplete snapshot se zachová beze změny, automaticky se nedoplňuje
+a shared structured evaluation nad ním reprodukuje blocking
+`incomplete_manual_snapshot` a `review_required`. Jeho manual hodnoty nejsou
+effective hierarchy. Nedestruktivní reconciliation ale zachová dosavadní 4B
+membership, automatic pole a numbering projection; tato compatibility hranice
+není complete authority, nemůže vytvořit `verified` a sama nevytváří selector
+ani assignment authority.
+
+Selector authority je na tomto snapshotu nezávislá. Manual-split režim aktivuje
+pouze skutečný range, filename pattern nebo explicitní vazba v
+`manual_split_rule_videos`, nikoli samotný `hierarchy_manual_override`.
+Explicitní výběry se při uživatelských assignment operacích a manual-split
+editaci mění exact set-diffem. Scanner, startup, runtime refresh ani rebuild
+nevytvářejí authority z výsledného `Video.catalog_title_id`. Reset
+strukturálního snapshotu selector nemaže; editace/reset skutečného selectoru
+mění pouze příslušnou selector authority.
+
+Běžné write paths dokončuje malý koordinátor `finalize_hierarchy_write()`. Není
+to další hierarchy engine: po hotové mutaci používá existující persisted
+manual-split evaluator, sjednotí redundantní Video → Title → Collection FK a
+spustí dosavadní shared structural inference, finální numbering,
+deterministickou named-child provenance a structured hierarchy evaluation.
+`hierarchy_status` a `hierarchy_note` se zapisují pouze výsledkem této evaluace.
+Status endpoint proto může `verified` interpretovat jen jako explicitní
+potvrzení kompletního snapshotu; ani tento request nepřepíše skutečný conflict
+nebo jiný blocking issue. Ostatní přímo zadané statusy se jako autorita
+nepersistují.
+
+Opravené write workflows zahrnují potvrzení collection/title hierarchy,
+manual hierarchy edit/reset, přesun title mezi collections, vytvoření hlavní
+collection, přesun videí do existující či nové title, root-video assignment a
+vytvoření root title, manual-split apply/edit, smazání prázdného manual-split
+targetu a všechny title/video/bulk manual-numbering operace. Přesun title
+zachová existující complete i incomplete manual hodnoty, sám override ani
+verification timestamp nevytváří a synchronizuje `Video.catalog_collection_id`
+s novou collection. Selector conflict nelze přesunem rozdělit mezi dvě
+collections; společný přesun všech targetů zachová conflict authority i
+`catalog_title_id=NULL`.
+
+Manual confirmation validuje a připraví všechny snapshoty před jejich aktivací.
+Routes používají jednu session/transaction posloupnost `validate → mutate →
+shared finalize → commit`; při chybě provedou rollback a nevznikne partial
+authority. Manual numbering už nefinalizuje pouze jeden title, ale vždy celou
+dotčenou collection nad novým numberingem. Complete manual hierarchy bez
+selectorů ponechává nová standardní videa ve standardní structural assignment
+větvi; pokud skutečné selectors existují, zůstává v platnosti shared
+unique/conflict/unmatched/not-required semantika včetně supplementary a
+confirmed-secondary duplicate výjimek.
+
+SQLite connection setup nově zapíná `PRAGMA foreign_keys=ON` pro každé SQLite
+spojení vytvořené aplikací standardním SQLAlchemy connect listenerem. Jiné DB
+backendy nedostávají SQLite-specific SQL. Schema ani migrace se nemění.
+Regresní testy ověřují zapnuté FK enforcement, odmítnutí orphan association a
+`ON DELETE CASCADE` cleanup při smazání Video i CatalogTitle; existující
+explicitní ORM cleanup zůstává zachovaný.
+
+Regresní sada dále pokrývá complete/incomplete move, neaktivní manual hodnoty,
+status write bypass, potvrzení s blockerem i bez něj, atomicitu validation
+failure, root workflow a redundantní FK, collection-level manual numbering,
+exact selector add/remove/reset, explicitní a range konflikty, override bez
+selectorů s novým videem, unmatched/supplementary/duplicate chování, lifecycle
+scan/reload/startup/runtime a rebuild dry-run po write operaci. Závěrečná
+projektová sada tohoto checkpointu prošla s výsledkem `660 passed`.
+
+Commit 5 nepřidává schema změnu, nemění duplicate ani Media Part semantiku a
+neprovádí žádnou fyzickou operaci nad knihovnou. Pro Commit 6 zůstávají pouze
+oddělené parser/numbering body `S01E05.5`, `S01E14.5v2`, Season/Part absolute
+numbering offset a dříve vymezené navazující edge cases.
+
+Runtime acceptance nad post-4B testovací DB odhalila, že první implementace
+zaměnila test complete authority za starší nedestruktivní reconciliation guard.
+Scanner, startup a rebuild proto přestaly zachovávat current title i u 60
+complete a 47 incomplete historických manual titulů a všech 107 videí pustily do
+`automatic_path`; projection následně chtěla vytvořit čtyři child collections,
+změnit 17 collections, 13 titles a 66 numbering hodnot. Oprava centrálně
+odděluje `manual_hierarchy_snapshot_is_complete()` od
+`manual_hierarchy_snapshot_requires_preservation()`: první jediná rozhoduje o
+autoritě a `verified`, druhá pouze brání automatické reconciliation zničit
+existující explicitně označené complete/incomplete rozhodnutí. Assignment bez
+takového markeru nadále není authority a nové video bez selectoru používá běžnou
+structural větev.
+
+Pozorovaný nárůst 4B `issues=156` na vadných `issues=203` se skládal z
+`incomplete_manual_snapshot +45`, `related_named_child +7`,
+`supplementary_named_child +3` a `nonstandard_numbering +1`, zatímco kvůli
+nežádoucímu přepočtu současně ubylo `generic_structural_type -7` a
+`missing_part_number -2`. Named-child a numbering rozdíly tedy byly důsledkem
+211 hierarchy mutations, nikoli zamýšleným rozšířením evaluatoru.
+
+Regresní test nyní prochází lifecycle post-4B stavu se společným anime rootem,
+same-base Season/related child, OADs, OVA a Specials přes startup sync a následný
+rebuild. Nevznikne child main collection, redundantní FK a assignmenty zůstanou
+beze změny a následný rebuild má nulový logical diff. Read-only dry-run původní
+historické DB po opravě vrací collections `+0/~16/-0`, titles `+0/~0/-0`,
+assignments `0`, numbering `0`, issues `202` a logical changes `16`: osm změn je
+oprava derived `automatic -> review_required` a osm pouze aktualizuje primární
+note pro collection s blocking historickým incomplete snapshotem. Na
+SQLite-backup kopii startup změnil jen tyto derived status/note hodnoty; počet
+170 collections, 247 titles, 3100 videos i fingerprint membershipu/numberingu
+zůstal shodný a následný dry-run vrátil `+0/~0/-0`, `assignments=0`,
+`numbering=0`, `logical_changes=0`, `issues=202`. Proti 4B sadě 156 blocking
+issues přibylo 45 `incomplete_manual_snapshot`; protože incomplete manual typ už
+není effective, přibyl také jeden `generic_structural_type`.
 
 ---
 

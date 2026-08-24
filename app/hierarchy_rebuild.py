@@ -15,6 +15,7 @@ from .catalog import (
     normalize_title,
 )
 from .hierarchy import CollectionIdentity, HierarchyIdentity, TitleIdentity, derive_library_hierarchy
+from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .hierarchy_evaluation import HierarchyEvaluationResult, finalize_collection_hierarchy
 from .hierarchy_review import extract_local_period_hint
 from .manual_split import (
@@ -594,14 +595,14 @@ def _manual_assignment_candidate(
     current = video.catalog_title
     if (
         current is not None
-        and current.hierarchy_manual_override
+        and manual_hierarchy_snapshot_requires_preservation(current)
         and current.collection is not None
     ):
         return current, ReconciliationReason.MANUAL_CURRENT_ASSIGNMENT
     path_title = titles_by_path.get(identity.title.relative_root_path)
     if (
         path_title is not None
-        and path_title.hierarchy_manual_override
+        and manual_hierarchy_snapshot_requires_preservation(path_title)
         and path_title.collection is not None
         and path_title.collection.relative_root_path
         != identity.collection.relative_root_path
@@ -655,18 +656,6 @@ def _build_assignment_intents(
         title_collection_path = (
             title.collection.relative_root_path if title.collection is not None else None
         )
-        if (
-            has_persisted_manual_split_selector(title)
-            and not title.hierarchy_manual_override
-        ):
-            if title_collection_path is not None:
-                blocked_collection_paths.add(title_collection_path)
-            blockers.append(RebuildBlocker(
-                code="inactive_manual_split_authority",
-                collection_path=title_collection_path,
-                title_path=title.relative_root_path,
-                prevents_apply=True,
-            ))
         for link in title.manual_split_rule_videos:
             if link.video_id not in video_ids:
                 blockers.append(RebuildBlocker(
@@ -943,7 +932,8 @@ def _build_title_specs(
         identity = identities_by_title_path.get(title.relative_root_path)
         automatic_identity = (
             identity.title
-            if identity is not None and not title.hierarchy_manual_override
+            if identity is not None
+            and not manual_hierarchy_snapshot_requires_preservation(title)
             else None
         )
         collection_path = (

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.config import Settings
+from app.hierarchy_evaluation import evaluate_collection_hierarchy
 from app.hierarchy_review import (
     PROBABLE_GROUPING_REVIEW_REASON, CollectionGroupingMetrics,
     collection_grouping_suggestions, create_main_collection,
@@ -16,7 +17,7 @@ from app.migrations import migrate_schema
 from app.main import create_app
 from app.models import (
     CatalogCollection, CatalogTitle, CollectionGroupingDecision,
-    ExternalTitleLink, TitleMetadata, Video,
+    ExternalTitleLink, ManualSplitRuleVideo, TitleMetadata, Video, utc_now,
 )
 from app.numbering import set_duplicate_group_primary
 from app.scanner import scan_library
@@ -157,7 +158,12 @@ def test_manual_reassignment_of_scoped_supplementary_title_remains_authoritative
         session.add(target)
         session.flush()
         title.collection = target
+        title.part_type_manual = title.part_type
+        title.season_number_manual = title.season_number
+        title.part_number_manual = title.part_number
+        title.season_label_manual = title.season_label
         title.hierarchy_manual_override = True
+        title.hierarchy_verified_at = utc_now()
         for video in title.videos:
             video.catalog_collection = target
         session.commit()
@@ -267,6 +273,8 @@ def test_manual_collection_move_preserves_title_video_metadata_and_scan(
         title.season_number_manual = 3
         title.season_label_manual = "S3"
         title.part_type_manual = "season"
+        title.hierarchy_manual_override = True
+        title.hierarchy_verified_at = utc_now()
         session.add(TitleMetadata(
             catalog_title_id=title.id, display_title="High School DxD Born",
             metadata_provider="anilist", metadata_external_id="123",
@@ -290,6 +298,11 @@ def test_manual_collection_move_preserves_title_video_metadata_and_scan(
         }
 
         move_titles_to_collection(session, target.id, [title.id])
+        evaluated = evaluate_collection_hierarchy(target, list(target.videos))
+        assert (target.hierarchy_status, target.hierarchy_note) == (
+            evaluated.status,
+            evaluated.primary_note,
+        )
         session.commit()
         source_id, target_id, title_id = source.id, target.id, title.id
 
@@ -318,6 +331,140 @@ def test_manual_collection_move_preserves_title_video_metadata_and_scan(
         assert title.catalog_collection_id == target_id
         assert all(video.catalog_collection_id == target_id for video in title.videos)
         assert session.scalar(select(func.count()).select_from(Video)) == 2
+
+
+def test_move_without_manual_snapshot_does_not_create_false_authority():
+    _, sessions = _sessions()
+    with sessions() as session:
+        source = CatalogCollection(
+            local_title="Source", normalized_local_title="source",
+            relative_root_path="Anime/Source",
+        )
+        target = CatalogCollection(
+            local_title="Target", normalized_local_title="target",
+            relative_root_path="@manual/target",
+        )
+        title = CatalogTitle(
+            collection=source, local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Source/Season 1",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        video = Video(
+            relative_path="Anime/Source/Season 1/E01.mkv", root_folder="Anime",
+            filename="E01.mkv", size=1, mtime_ns=1,
+            catalog_collection=source, catalog_title=title,
+        )
+        session.add_all([target, video])
+        session.flush()
+
+        move_titles_to_collection(session, target.id, [title.id])
+
+        assert title.hierarchy_manual_override is False
+        assert title.hierarchy_verified_at is None
+        assert video.catalog_collection_id == target.id
+        assert title.catalog_collection_id == target.id
+        assert target.hierarchy_status == "automatic"
+
+
+def test_move_preserves_historical_incomplete_snapshot_for_structured_review():
+    _, sessions = _sessions()
+    timestamp = utc_now()
+    with sessions() as session:
+        source = CatalogCollection(
+            local_title="Source", normalized_local_title="source",
+            relative_root_path="Anime/Source",
+        )
+        target = CatalogCollection(
+            local_title="Target", normalized_local_title="target",
+            relative_root_path="@manual/target",
+        )
+        title = CatalogTitle(
+            collection=source, local_title="Part",
+            normalized_local_title="part", relative_root_path="Anime/Source/Part",
+            part_type="part", season_number=1, part_number=2,
+            part_type_manual="part", season_number_manual=1,
+            part_number_manual=None, hierarchy_manual_override=True,
+            hierarchy_verified_at=timestamp,
+        )
+        video = Video(
+            relative_path="Anime/Source/Part/E01.mkv", root_folder="Anime",
+            filename="E01.mkv", size=1, mtime_ns=1,
+            catalog_collection=source, catalog_title=title,
+        )
+        session.add_all([target, video])
+        session.flush()
+
+        move_titles_to_collection(session, target.id, [title.id])
+
+        assert title.part_type_manual == "part"
+        assert title.part_number_manual is None
+        assert title.hierarchy_manual_override is True
+        assert title.hierarchy_verified_at == timestamp
+        assert title.effective_part_number == 2
+        assert target.hierarchy_status == "review_required"
+        assert target.hierarchy_note.startswith(
+            "Historické ruční zařazení není úplné."
+        )
+        assert video.catalog_collection_id == target.id
+
+
+def test_move_keeps_conflicting_selector_authority_together_and_unassigned():
+    _, sessions = _sessions()
+    with sessions() as session:
+        source = CatalogCollection(
+            local_title="Source", normalized_local_title="source",
+            relative_root_path="Anime/Source",
+        )
+        target = CatalogCollection(
+            local_title="Target", normalized_local_title="target",
+            relative_root_path="@manual/target",
+        )
+        first = CatalogTitle(
+            collection=source, local_title="A", normalized_local_title="a",
+            relative_root_path="Anime/Source/.catalog-part-1",
+            part_type="season", season_number=1,
+        )
+        second = CatalogTitle(
+            collection=source, local_title="B", normalized_local_title="b",
+            relative_root_path="Anime/Source/.catalog-part-2",
+            part_type="season", season_number=2,
+        )
+        video = Video(
+            relative_path="Anime/Source/E01.mkv", root_folder="Anime",
+            filename="E01.mkv", size=1, mtime_ns=1,
+            catalog_collection=source,
+        )
+        session.add_all([
+            target,
+            video,
+            ManualSplitRuleVideo(catalog_title=first, video=video),
+            ManualSplitRuleVideo(catalog_title=second, video=video),
+        ])
+        session.commit()
+
+        with pytest.raises(ValueError, match="selector authority"):
+            move_titles_to_collection(session, target.id, [first.id])
+        session.rollback()
+
+    with sessions() as session:
+        source = session.scalar(select(CatalogCollection).where(
+            CatalogCollection.relative_root_path == "Anime/Source"
+        ))
+        target = session.scalar(select(CatalogCollection).where(
+            CatalogCollection.relative_root_path == "@manual/target"
+        ))
+        titles = list(source.titles)
+        video = source.videos[0]
+        move_titles_to_collection(session, target.id, [title.id for title in titles])
+
+        assert video.catalog_title_id is None
+        assert video.catalog_collection_id == target.id
+        assert {link.catalog_title_id for link in video.manual_split_rule_videos} == {
+            title.id for title in titles
+        }
+        assert all(title.catalog_collection_id == target.id for title in titles)
+        assert target.hierarchy_status == "conflict"
 
 
 def test_deleted_fragment_collection_is_not_recreated_by_following_scan(

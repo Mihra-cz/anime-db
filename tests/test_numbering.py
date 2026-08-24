@@ -392,7 +392,7 @@ def test_classified_fractional_recap_is_resolved_without_entering_completeness()
 def test_numbered_ova_keeps_sequence_outside_standard_completeness():
     title = CatalogTitle(
         local_title="OVA – Serie 2", normalized_local_title="ova serie 2",
-        relative_root_path="Anime/Show/.catalog-part-2", part_type_manual="ova",
+        relative_root_path="Anime/Show/.catalog-part-2", part_type="ova",
     )
     items = [Video(
         id=number, relative_path=f"Anime/Show/Show S2 - OVA P{number}.mkv",

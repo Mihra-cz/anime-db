@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 
+from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .models import CatalogCollection, CatalogTitle, Video
 from .numbering import effective_video_numbering, is_nonprimary_duplicate_video
 
@@ -107,7 +108,7 @@ def apply_automatic_structural_inference(
     """Refresh automatic fields while preserving every manual hierarchy value."""
     changed = False
     for title in collection.titles:
-        if title.hierarchy_manual_override:
+        if manual_hierarchy_snapshot_requires_preservation(title):
             continue
         values = infer_automatic_structural_values(
             part_type=title.part_type or "title",
@@ -139,7 +140,7 @@ def automatic_flat_sequence_notice(
 ) -> str | None:
     """Return a derived non-blocking notice; it is intentionally not persisted."""
     if (
-        title.hierarchy_manual_override
+        manual_hierarchy_snapshot_requires_preservation(title)
         or not is_direct_root_title(title)
         or title.effective_part_type not in {"title", "season"}
     ):
@@ -161,7 +162,7 @@ def has_long_flat_sequence_requiring_review(
     title: CatalogTitle, videos: list[Video] | None = None,
 ) -> bool:
     if (
-        title.hierarchy_manual_override
+        manual_hierarchy_snapshot_requires_preservation(title)
         or not is_direct_root_title(title)
         or title.effective_part_type not in {"title", "season"}
     ):

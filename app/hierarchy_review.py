@@ -13,6 +13,11 @@ from sqlalchemy.orm import Session, selectinload
 
 from .catalog import GENERIC_ROOTS, detect_episode_number, normalize_title
 from .hierarchy import parse_explicit_part
+from .hierarchy_authority import (
+    activate_manual_hierarchy_snapshot,
+    clear_manual_hierarchy_snapshot,
+    structural_hierarchy_issue,
+)
 from .hierarchy_evaluation import (
     CONFIRMED_DUPLICATES_REVIEW_REASON,
     FILENAME_SEASON_CONFLICT_REVIEW_REASON,
@@ -26,12 +31,9 @@ from .hierarchy_evaluation import (
     HierarchyIssueScope,
     catalog_title_hierarchy_is_verified,
     evaluate_collection_hierarchy,
-    finalize_collection_hierarchy,
+    finalize_hierarchy_write,
     hierarchy_primary_note,
-    manual_hierarchy_resolves_ambiguity,
-    manual_hierarchy_snapshot_is_complete,
     manual_hierarchy_snapshot_issue,
-    structural_hierarchy_issue,
 )
 from .hierarchy_types import PART_TYPE_LABELS, PART_TYPES, VIDEO_CONTENT_TYPES
 from .hierarchy_provenance import (
@@ -46,6 +48,7 @@ from .manual_split import (
     definition_from_title,
     evaluate_manual_split_assignment,
     has_persisted_manual_split_selector,
+    replace_explicit_video_selector_authority,
     synchronize_manual_split_authority,
 )
 from .models import (
@@ -687,8 +690,7 @@ def create_main_collection(
     collection = CatalogCollection(
         local_title=name, normalized_local_title=normalize_title(name),
         relative_root_path=_unique_manual_collection_path(session, name),
-        manual_display_title=name, hierarchy_status="verified",
-        hierarchy_verified_at=utc_now(),
+        manual_display_title=name,
     )
     session.add(collection)
     session.flush()
@@ -714,22 +716,31 @@ def move_titles_to_collection(
     if len(titles) != len(selected_ids):
         raise ValueError("Výběr obsahuje cizí nebo neexistující část.")
     sources = {title.collection for title in titles if title.collection is not None}
-    now = utc_now()
+    for title in titles:
+        for link in title.manual_split_rule_videos:
+            resulting_collections = {
+                target
+                if other.catalog_title_id in selected_ids
+                else other.catalog_title.collection
+                for other in link.video.manual_split_rule_videos
+                if other.catalog_title is not None
+            }
+            if len(resulting_collections) > 1 or None in resulting_collections:
+                raise ValueError(
+                    "Část nelze přesunout bez dalších částí, se kterými sdílí "
+                    "explicitní selector authority."
+                )
     for title in titles:
         title.collection = target
-        title.hierarchy_manual_override = True
-        title.hierarchy_verified_at = now
         for video in title.videos:
             video.catalog_collection = target
+        for link in title.manual_split_rule_videos:
+            link.video.catalog_collection = target
     session.flush()
-    for collection in sources | {target}:
+    affected = sources | {target}
+    for collection in affected:
         session.expire(collection, ["titles", "videos"])
-        if not collection.titles and not collection.videos:
-            collection.hierarchy_status = "verified"
-            collection.hierarchy_verified_at = now
-            collection.hierarchy_note = None
-        else:
-            refresh_collection_state(collection)
+    finalize_hierarchy_write(list(affected))
     session.flush()
     return target
 
@@ -831,36 +842,39 @@ def confirm_effective_collection_hierarchy(collection: CatalogCollection) -> Non
         raise ValueError(
             "Hierarchii nelze potvrdit, dokud všechny části nemají konkrétní typ."
         )
-    now = utc_now()
+    snapshots = []
     for title in collection.titles:
         _validate_structural_numbers(
             title.effective_part_type,
             title.effective_season_number,
             title.effective_part_number,
         )
-        title.part_type_manual = title.effective_part_type
-        title.season_number_manual = title.effective_season_number
-        title.part_number_manual = title.effective_part_number
-        title.season_label_manual = title.effective_season_label
-        title.sort_order_manual = title.effective_sort_order
-        title.hierarchy_manual_override = True
-        title.hierarchy_verified_at = now
+        snapshots.append((
+            title,
+            title.effective_part_type,
+            title.effective_season_number,
+            title.effective_part_number,
+            title.effective_season_label,
+            title.effective_sort_order,
+        ))
+    now = utc_now()
+    for title, part_type, season_number, part_number, label, order in snapshots:
+        activate_manual_hierarchy_snapshot(
+            title,
+            part_type=part_type,
+            season_number=season_number,
+            part_number=part_number,
+            season_label=label,
+            sort_order=order,
+            verified_at=now,
+        )
 
 
 def resolve_collection_hierarchy_status(
     collection: CatalogCollection, reason: str | None,
 ) -> None:
-    """Keep problem state separate from explicit human hierarchy authority."""
-    collection.hierarchy_note = reason
-    if reason:
-        collection.hierarchy_status = "review_required"
-        collection.hierarchy_verified_at = None
-    elif manual_hierarchy_resolves_ambiguity(collection):
-        collection.hierarchy_status = "verified"
-        collection.hierarchy_verified_at = collection.hierarchy_verified_at or utc_now()
-    else:
-        collection.hierarchy_status = "automatic"
-        collection.hierarchy_verified_at = None
+    """Compatibility entry point; status and note remain strictly derived."""
+    finalize_hierarchy_write([collection])
 
 
 def collection_requires_review(collection: CatalogCollection, videos: list[Video]) -> str | None:
@@ -1004,12 +1018,15 @@ def apply_single_title_confirmation(
         season_number = None
         label = None
     title = suggestion.title
-    title.season_number_manual = season_number
-    title.part_number_manual = part_number if normalized_type in {"part", "cour"} else None
-    title.season_label_manual = label
-    title.part_type_manual = normalized_type
-    title.hierarchy_manual_override = True
-    title.hierarchy_verified_at = utc_now()
+    activate_manual_hierarchy_snapshot(
+        title,
+        part_type=normalized_type,
+        season_number=season_number,
+        part_number=part_number if normalized_type in {"part", "cour"} else None,
+        season_label=label,
+        sort_order=title.effective_sort_order,
+        verified_at=utc_now(),
+    )
     refresh_collection_state(collection, recalculate=False)
     return title
 
@@ -1054,62 +1071,41 @@ def set_manual_title_hierarchy(
     if has_manual_input and not hierarchy_verified:
         raise ValueError("Ruční hierarchii je nutné potvrdit jako ověřenou.")
     if hierarchy_verified:
-        effective_number = title.effective_season_number
-        effective_part_number = title.effective_part_number
-        effective_label = title.effective_season_label
         effective_order = title.effective_sort_order
         snapshot_type = normalized_type
-        snapshot_season_number = (
-            season_number if season_number is not None else effective_number
-        )
-        snapshot_part_number = (
-            part_number
-            if part_number is not None
-            else title.part_number_manual
-            if snapshot_type == "part"
-            else effective_part_number
-        )
+        snapshot_season_number = season_number
+        snapshot_part_number = part_number
         if snapshot_type not in {"part", "cour"}:
             snapshot_part_number = None
         _validate_structural_numbers(
             snapshot_type, snapshot_season_number, snapshot_part_number,
         )
-        title.season_number_manual = snapshot_season_number
-        title.part_number_manual = snapshot_part_number
         if snapshot_type == "part":
-            title.season_label_manual = (
+            snapshot_label = (
                 normalized_label
-                or (
-                    effective_label
-                    if effective_number == snapshot_season_number else None
-                )
                 or f"S{snapshot_season_number}"
             ) if snapshot_season_number is not None else None
         elif snapshot_type == "season":
-            title.season_label_manual = (
+            snapshot_label = (
                 normalized_label
                 or (
                     f"S{snapshot_season_number}"
                     if snapshot_season_number is not None else None
                 )
-                or effective_label
             )
         else:
-            title.season_label_manual = normalized_label or effective_label
-        title.part_type_manual = snapshot_type
-        title.sort_order_manual = (
-            sort_order if sort_order is not None else effective_order
+            snapshot_label = normalized_label
+        activate_manual_hierarchy_snapshot(
+            title,
+            part_type=snapshot_type,
+            season_number=snapshot_season_number,
+            part_number=snapshot_part_number,
+            season_label=snapshot_label,
+            sort_order=sort_order if sort_order is not None else effective_order,
+            verified_at=utc_now(),
         )
-        title.hierarchy_manual_override = True
-        title.hierarchy_verified_at = utc_now()
     else:
-        title.season_number_manual = None
-        title.part_number_manual = None
-        title.season_label_manual = None
-        title.part_type_manual = None
-        title.sort_order_manual = None
-        title.hierarchy_manual_override = False
-        title.hierarchy_verified_at = None
+        clear_manual_hierarchy_snapshot(title)
     if title.collection is not None:
         refresh_collection_state(title.collection)
     return title
@@ -1159,9 +1155,13 @@ def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
                 )
             except ValueError as exc:
                 raise ValueError(f"Část {position}: {exc}") from exc
-        elif integer_fields["part_number_manual"] is not None:
+        elif any((
+            integer_fields["season_number_manual"] is not None,
+            integer_fields["part_number_manual"] is not None,
+            bool(_optional_text(value.get("season_label_manual"), 50)),
+        )):
             raise ValueError(
-                f"Část {position}: číslo Part vyžaduje konkrétní typ Part."
+                f"Část {position}: ruční hodnoty vyžadují konkrétní typ části."
             )
         mode = str(value.get("numbering_mode") or "unknown").strip().casefold()
         if mode not in ALLOWED_NUMBERING_MODES:
@@ -1263,7 +1263,6 @@ def _validate_manual_split_definition_targets(
         title.id
         for title in collection.titles
         if title.id is not None
-        and title.hierarchy_manual_override
         and has_persisted_manual_split_selector(title)
         and title.id not in referenced_ids
     }
@@ -1312,12 +1311,7 @@ def _selected_videos(collection: CatalogCollection, video_ids: list[int]) -> lis
 def refresh_collection_state(
     collection: CatalogCollection, *, recalculate: bool = True,
 ) -> None:
-    finalize_collection_hierarchy(
-        collection,
-        list(collection.videos),
-        recalculate=recalculate,
-        include_legacy_fallback=False,
-    )
+    finalize_hierarchy_write([collection], recalculate=recalculate)
 
 
 def classify_videos_in_place(
@@ -1414,8 +1408,7 @@ def move_videos_to_title(
             )
         video.catalog_title = target
         video.catalog_collection = collection
-    target.hierarchy_manual_override = True
-    target.hierarchy_verified_at = utc_now()
+    replace_explicit_video_selector_authority(selected, target)
     session.flush()
     refresh_collection_state(collection)
     return target
@@ -1450,15 +1443,20 @@ def create_title_from_videos(
         virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}-{suffix}"
     title = CatalogTitle(
         collection=collection, local_title=name, normalized_local_title=normalize_title(name),
-        relative_root_path=virtual_path, part_type_manual=normalized_type,
-        season_number_manual=season_number, part_number_manual=(
-            part_number if normalized_type in {"part", "cour"} else None
-        ), season_label_manual=normalized_label,
-        sort_order_manual=position, hierarchy_manual_override=True,
-        hierarchy_verified_at=utc_now(), numbering_mode="unknown",
+        relative_root_path=virtual_path, numbering_mode="unknown",
     )
     session.add(title)
     session.flush()
+    activate_manual_hierarchy_snapshot(
+        title,
+        part_type=normalized_type,
+        season_number=season_number,
+        part_number=part_number if normalized_type in {"part", "cour"} else None,
+        season_label=normalized_label,
+        sort_order=position,
+        verified_at=utc_now(),
+    )
+    replace_explicit_video_selector_authority(selected, title)
     for video in selected:
         if normalized_type in VIDEO_CONTENT_TYPES:
             video.content_type_manual = video.content_type_manual or normalized_type
@@ -1500,7 +1498,7 @@ def delete_empty_local_title(
     ))
     if title is None:
         raise ValueError("Část neexistuje v této kolekci.")
-    is_manual_split_entry = title.hierarchy_manual_override
+    is_manual_split_entry = has_persisted_manual_split_selector(title)
     if is_manual_split_entry and not remove_from_manual_split:
         raise ValueError(
             "Část je součástí ruční definice rozdělení; její odstranění z definice "
@@ -1513,8 +1511,7 @@ def delete_empty_local_title(
         raise ValueError(
             "Část už není prázdná; obsahuje video a nebyla odstraněna."
         )
-    # Vlastněné vztahy mají ON DELETE CASCADE. Explicitní vyprázdnění udrží
-    # chování stejné i tam, kde SQLite foreign_keys není zapnuté.
+    # Explicitní vyprázdnění zachovává vlastní aplikační cleanup vedle FK cascade.
     title.external_links.clear()
     title.metadata_candidates.clear()
     title.artwork.clear()
@@ -1581,21 +1578,6 @@ def apply_manual_split(
         title = existing.get(definition.title_id) if definition.title_id else None
         if definition.title_id and title is None:
             raise ValueError("Definice odkazuje na cizí nebo neexistující část.")
-        existing_effective_type = title.effective_part_type if title is not None else None
-        existing_effective_number = (
-            title.effective_season_number if title is not None else None
-        )
-        existing_effective_part_number = (
-            title.effective_part_number if title is not None else None
-        )
-        existing_effective_label = (
-            title.effective_season_label if title is not None else None
-        )
-        concrete_type = definition.part_type_manual or existing_effective_type
-        if concrete_type in {None, "title"}:
-            raise ValueError(
-                f"Část {position} musí mít před potvrzením konkrétní strukturální typ."
-            )
         if title is None:
             virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}"
             suffix = 1
@@ -1611,53 +1593,24 @@ def apply_manual_split(
         title.local_title = definition.local_title
         title.normalized_local_title = normalize_title(definition.local_title)
         title.manual_display_title = definition.manual_display_title
-        snapshot_season_number = (
-            definition.season_number_manual
-            if definition.season_number_manual is not None else existing_effective_number
-        )
-        snapshot_part_number = (
-            definition.part_number_manual
-            if definition.part_number_manual is not None
-            else existing_effective_part_number
-        )
-        if concrete_type not in {"part", "cour"}:
-            snapshot_part_number = None
-        _validate_structural_numbers(
-            concrete_type, snapshot_season_number, snapshot_part_number,
-        )
-        title.season_number_manual = snapshot_season_number
-        title.part_number_manual = snapshot_part_number
-        if concrete_type == "part":
-            title.season_label_manual = (
-                definition.season_label_manual
-                or (
-                    existing_effective_label
-                    if existing_effective_number == snapshot_season_number else None
-                )
-                or f"S{snapshot_season_number}"
-            ) if snapshot_season_number is not None else None
-        elif concrete_type == "season":
-            title.season_label_manual = (
-                definition.season_label_manual
-                or (
-                    f"S{snapshot_season_number}"
-                    if snapshot_season_number is not None else None
-                )
-                or existing_effective_label
+        if definition.part_type_manual is not None:
+            snapshot_part_number = definition.part_number_manual
+            if definition.part_type_manual not in {"part", "cour"}:
+                snapshot_part_number = None
+            activate_manual_hierarchy_snapshot(
+                title,
+                part_type=definition.part_type_manual,
+                season_number=definition.season_number_manual,
+                part_number=snapshot_part_number,
+                season_label=definition.season_label_manual,
+                sort_order=definition.sort_order,
+                verified_at=now,
             )
-        else:
-            title.season_label_manual = (
-                definition.season_label_manual or existing_effective_label
-            )
-        title.part_type_manual = concrete_type
         title.episode_start = definition.episode_start
         title.episode_end = definition.episode_end
         title.episode_start_offset = definition.episode_start_offset
         title.numbering_mode = definition.numbering_mode
-        title.sort_order_manual = definition.sort_order
         title.episode_filename_pattern = definition.filename_pattern
-        title.hierarchy_manual_override = True
-        title.hierarchy_verified_at = now
         resolved.append(title)
     session.flush()
     synchronize_manual_split_authority(

@@ -4,7 +4,14 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from .catalog import detect_episode_number
-from .hierarchy_types import PART_TYPES
+from .hierarchy_authority import (
+    ManualHierarchyAuthorityState,
+    manual_hierarchy_authority_state,
+    manual_hierarchy_snapshot_is_complete,
+    manual_hierarchy_snapshot_issue,
+    manual_hierarchy_snapshot_requires_preservation,
+    structural_hierarchy_issue,
+)
 from .hierarchy_provenance import (
     RELATED_NAMED_CHILD_REVIEW_REASON,
     SUPPLEMENTARY_NAMED_CHILD_REVIEW_REASON,
@@ -13,7 +20,9 @@ from .hierarchy_provenance import (
 )
 from .manual_split import (
     ManualSplitDecisionKind,
+    apply_manual_split_decisions,
     evaluate_persisted_manual_split,
+    manual_split_titles,
 )
 from .models import CatalogCollection, CatalogTitle, Video, utc_now
 from .numbering import (
@@ -140,42 +149,6 @@ class HierarchyEvaluationResult:
         return tuple(issue for issue in self.issues if not issue.blocking)
 
 
-def structural_hierarchy_issue(
-    part_type: str | None,
-    season_number: int | None,
-    part_number: int | None,
-) -> str | None:
-    """Validate one concrete authoritative structural identity."""
-    if part_type not in PART_TYPES:
-        return "Pro ruční zařazení zvolte konkrétní typ části."
-    if season_number is not None and season_number <= 0:
-        return "Číslo sezóny musí být kladné."
-    if part_number is not None and part_number <= 0:
-        return "Číslo Part musí být kladné."
-    if part_type == "part" and part_number is None:
-        return "Pro typ Part potvrďte číslo Part."
-    if part_type == "season" and part_number is not None:
-        return "Samostatná sezóna nesmí mít číslo Part."
-    if part_type not in {"part", "cour"} and part_number is not None:
-        return "Číslo Part lze uložit pouze pro typ Part."
-    return None
-
-
-def manual_hierarchy_snapshot_issue(title: CatalogTitle) -> str | None:
-    """Validate persisted manual authority without repairing historical data."""
-    if not title.hierarchy_manual_override:
-        return "Chybí autoritativní ruční hierarchy override."
-    return structural_hierarchy_issue(
-        title.part_type_manual,
-        title.season_number_manual,
-        title.part_number_manual,
-    )
-
-
-def manual_hierarchy_snapshot_is_complete(title: CatalogTitle) -> bool:
-    return manual_hierarchy_snapshot_issue(title) is None
-
-
 def catalog_title_hierarchy_is_verified(title: CatalogTitle) -> bool:
     return manual_hierarchy_snapshot_is_complete(title)
 
@@ -208,7 +181,7 @@ def _filename_season_conflicts_with_title(
         and title is not None
         and title.effective_season_number is not None
         and detection.season_hint != title.effective_season_number
-        and not title.hierarchy_manual_override
+        and not manual_hierarchy_snapshot_requires_preservation(title)
     )
 
 
@@ -279,6 +252,15 @@ def hierarchy_primary_note(
         return UNASSIGNED_VIDEO_REVIEW_REASON
     if summarize_numbering and codes & _NUMBERING_CODES:
         return NUMBERING_REVIEW_SUMMARY
+    incomplete_snapshot = next(
+        (
+            issue for issue in blocking
+            if issue.code == HierarchyIssueCode.INCOMPLETE_MANUAL_SNAPSHOT
+        ),
+        None,
+    )
+    if incomplete_snapshot is not None:
+        return incomplete_snapshot.message
     priorities = (
         (HierarchyIssueCode.FILENAME_SEASON_CONFLICT, FILENAME_SEASON_CONFLICT_REVIEW_REASON),
         (HierarchyIssueCode.SUPPLEMENTARY_WITHOUT_NUMBER, UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON),
@@ -566,7 +548,8 @@ def evaluate_collection_hierarchy(
             )
 
         missing_part_number = (
-            title.part_type_manual == "part"
+            title.hierarchy_manual_override
+            and title.part_type_manual == "part"
             and title.part_number_manual is None
         ) or (
             title.part_type_manual is None
@@ -583,14 +566,14 @@ def evaluate_collection_hierarchy(
             )
 
         if (
-            title.hierarchy_manual_override
-            or title.hierarchy_verified_at is not None
+            manual_hierarchy_authority_state(title)
+            == ManualHierarchyAuthorityState.INCOMPLETE
         ) and (snapshot_issue := manual_hierarchy_snapshot_issue(title)):
             add_issue(
                 HierarchyIssueCode.INCOMPLETE_MANUAL_SNAPSHOT,
                 f"Historické ruční zařazení není úplné. {snapshot_issue}",
                 HierarchyIssueScope.CATALOG_TITLE,
-                blocking=False,
+                blocking=True,
                 title=title,
             )
 
@@ -687,3 +670,53 @@ def finalize_collection_hierarchy(
     )
     apply_hierarchy_evaluation(collection, result)
     return result
+
+
+def finalize_hierarchy_write(
+    collections: list[CatalogCollection] | tuple[CatalogCollection, ...],
+    *,
+    recalculate: bool = True,
+) -> dict[int, HierarchyEvaluationResult]:
+    """Finish ordinary writes with the existing shared assignment pipeline."""
+    unique: list[CatalogCollection] = []
+    seen: set[tuple[str, int | str]] = set()
+    for collection in collections:
+        key = (
+            ("id", collection.id)
+            if collection.id is not None
+            else ("path", collection.relative_root_path)
+        )
+        if key not in seen:
+            seen.add(key)
+            unique.append(collection)
+
+    for collection in unique:
+        for title in collection.titles:
+            for video in title.videos:
+                video.catalog_collection = collection
+        if manual_split_titles(collection):
+            split = evaluate_persisted_manual_split(
+                collection,
+                list(collection.videos),
+            )
+            apply_manual_split_decisions(split, collection)
+
+    results: dict[int, HierarchyEvaluationResult] = {}
+    for collection in unique:
+        for video in collection.videos:
+            if video.catalog_title is None:
+                continue
+            if video.catalog_title.collection is not collection:
+                raise ValueError(
+                    "Video je přiřazeno k části z jiné collection."
+                )
+            video.catalog_collection = collection
+        result = finalize_collection_hierarchy(
+            collection,
+            list(collection.videos),
+            recalculate=recalculate,
+            include_legacy_fallback=False,
+        )
+        if collection.id is not None:
+            results[collection.id] = result
+    return results

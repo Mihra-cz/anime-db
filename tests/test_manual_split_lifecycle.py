@@ -13,19 +13,24 @@ from app.hierarchy_evaluation import (
     derive_hierarchy_status,
     evaluate_collection_hierarchy,
 )
+from app.hierarchy_rebuild import build_hierarchy_rebuild_plan
 from app.hierarchy_review import (
     ManualTitleDefinition,
     apply_manual_split,
     hierarchy_review_diagnostics,
     preview_assignments,
     refresh_collection_state,
+    set_manual_title_hierarchy,
 )
 from app.manual_split import (
     ManualSplitDecisionKind,
     evaluate_persisted_manual_split,
+    manual_split_titles,
 )
 from app.migrations import migrate_schema
-from app.models import CatalogCollection, CatalogTitle, ManualSplitRuleVideo, Video
+from app.models import (
+    CatalogCollection, CatalogTitle, ManualSplitRuleVideo, Video, utc_now,
+)
 from app.scanner import scan_library
 
 
@@ -559,6 +564,12 @@ def test_persisted_explicit_authority_overrides_stale_result_assignment():
         unique = evaluate_persisted_manual_split(collection, [video]).decisions[0]
         assert unique.kind == ManualSplitDecisionKind.UNIQUE
         assert unique.target_catalog_title is titles[1]
+        video.catalog_title = titles[0]
+        refresh_collection_state(collection)
+        assert video.catalog_title is titles[1]
+        assert [(link.catalog_title_id, link.video_id) for link in video.manual_split_rule_videos] == [
+            (titles[1].id, video.id),
+        ]
 
         titles[2].manual_split_rule_videos.append(ManualSplitRuleVideo(video=video))
         session.flush()
@@ -671,6 +682,182 @@ def test_scanner_does_not_create_authority_for_new_video(tmp_path, monkeypatch):
         assert authority == {("Explicit target", "E01.mkv")}
         assert videos["E02.mkv"].catalog_title_id is None
         assert videos["E02.mkv"].manual_split_rule_videos == []
+
+
+def test_complete_hierarchy_override_without_selectors_keeps_structural_assignment(
+    tmp_path,
+    monkeypatch,
+):
+    library = tmp_path / "library"
+    _write_library(library, ("E01.mkv",))
+    monkeypatch.setattr(
+        "app.scanner.service.probe_video",
+        lambda *_args, **_kwargs: PROBE_RESULT,
+    )
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        scan_library(session, library)
+        collection = _load_collection(session)
+        title = collection.titles[0]
+        title.part_type_manual = "season"
+        title.season_number_manual = 1
+        title.part_number_manual = None
+        title.season_label_manual = "S1"
+        title.sort_order_manual = title.sort_order
+        title.hierarchy_manual_override = True
+        title.hierarchy_verified_at = utc_now()
+        session.commit()
+        title_id = title.id
+
+        (library / "Anime" / "Show" / "E02.mkv").write_bytes(b"video")
+        scan_library(session, library)
+        collection = _load_collection(session)
+        new_video = next(
+            video for video in collection.videos if video.filename == "E02.mkv"
+        )
+
+        assert manual_split_titles(collection) == []
+        assert new_video.catalog_title_id == title_id
+        assert new_video.catalog_collection_id == collection.id
+        assert new_video.manual_split_rule_videos == []
+        assert collection.hierarchy_status == "verified"
+
+
+def test_selector_edit_removes_exact_authority_without_resetting_hierarchy():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Show", part_type="season", season_number=1,
+        )
+        video = Video(
+            relative_path="Anime/Show/E01.mkv", root_folder="Anime",
+            filename="E01.mkv", size=1, mtime_ns=1,
+            catalog_collection=collection, catalog_title=title,
+        )
+        session.add(video)
+        session.commit()
+
+        explicit = _definition(
+            title_id=title.id, name="Season 1", start=None, end=None,
+            sort_order=1, video_ids=(video.id,),
+        )
+        apply_manual_split(session, collection.id, [explicit])
+        session.flush()
+        assert {(link.catalog_title_id, link.video_id) for link in video.manual_split_rule_videos} == {
+            (title.id, video.id),
+        }
+
+        apply_manual_split(
+            session,
+            collection.id,
+            [replace(explicit, video_ids=())],
+        )
+        session.flush()
+
+        assert video.manual_split_rule_videos == []
+        assert title.hierarchy_manual_override is True
+        assert title.part_type_manual == "season"
+
+
+def test_hierarchy_reset_preserves_independent_selector_authority():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Show", part_type="season", season_number=1,
+        )
+        video = Video(
+            relative_path="Anime/Show/E01.mkv", root_folder="Anime",
+            filename="E01.mkv", size=1, mtime_ns=1,
+            catalog_collection=collection, catalog_title=title,
+        )
+        session.add(video)
+        session.commit()
+        apply_manual_split(
+            session,
+            collection.id,
+            [_definition(
+                title_id=title.id, name="Season 1", start=None, end=None,
+                sort_order=1, video_ids=(video.id,),
+            )],
+        )
+
+        set_manual_title_hierarchy(
+            title,
+            season_number=None,
+            season_label=None,
+            part_type=None,
+            sort_order=None,
+            hierarchy_verified=False,
+        )
+        session.flush()
+
+        assert title.hierarchy_manual_override is False
+        assert [(link.catalog_title_id, link.video_id) for link in title.manual_split_rule_videos] == [
+            (title.id, video.id),
+        ]
+        assert evaluate_persisted_manual_split(collection).decisions[0].kind == (
+            ManualSplitDecisionKind.UNIQUE
+        )
+
+
+def test_manual_write_is_stable_in_following_rebuild_dry_run():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Show",
+            normalized_local_title="show", relative_root_path="Anime/Show",
+            part_type="season", season_number=1,
+        )
+        video = Video(
+            relative_path="Anime/Show/E01.mkv", root_folder="Anime",
+            filename="E01.mkv", size=1, mtime_ns=1,
+            catalog_collection=collection, catalog_title=title,
+        )
+        session.add(video)
+        session.commit()
+        apply_manual_split(
+            session,
+            collection.id,
+            [_definition(
+                title_id=title.id, name="Show", start=None, end=None,
+                sort_order=1, video_ids=(video.id,),
+            )],
+        )
+        session.commit()
+
+        plan = build_hierarchy_rebuild_plan(session)
+        assignment = next(
+            item for item in plan.video_assignments if item.video_id == video.id
+        )
+
+        assert assignment.manual_split_kind == "unique"
+        assert assignment.target_collection_path == collection.relative_root_path
+        assert assignment.target_title_path == title.relative_root_path
+        assert assignment.changed is False
+        assert not any(blocker.prevents_apply for blocker in plan.blockers)
+        assert [(link.catalog_title_id, link.video_id) for link in title.manual_split_rule_videos] == [
+            (title.id, video.id),
+        ]
 
 
 def test_startup_clears_first_match_assignment_for_conflicting_rules(

@@ -536,6 +536,7 @@ def test_collection_confirmation_snapshots_part_ordinal_as_manual_authority():
 
 def test_manual_part_requires_ordinal_and_stores_season_and_part_independently():
     collection, title = simple_collection(part_type="season", status="automatic")
+    title.part_number = 2
 
     with pytest.raises(ValueError, match="číslo Part"):
         set_manual_title_hierarchy(
@@ -579,14 +580,17 @@ def test_historical_incomplete_part_snapshot_is_not_currently_verified():
     refresh_collection_state(collection)
 
     assert collection.hierarchy_status == "review_required"
-    assert collection.hierarchy_note == MISSING_PART_NUMBER_REVIEW_REASON
+    assert collection.hierarchy_note.startswith(
+        "Historické ruční zařazení není úplné."
+    )
     assert catalog_title_hierarchy_is_verified(title) is False
     assert manual_hierarchy_snapshot_issue(title) == (
         "Pro typ Part potvrďte číslo Part."
     )
-    assert title.effective_season_number == 1
-    assert title.effective_part_number == 2
-    assert catalog_title_series_label(title) == "S1 · Part 2"
+    assert title.effective_season_number is None
+    assert title.effective_part_number is None
+    assert title.effective_part_type == "title"
+    assert catalog_title_series_label(title) == "—"
     assert title.part_number_manual is None
     assert title.hierarchy_manual_override is True
     assert title.hierarchy_verified_at == historical_timestamp
@@ -665,7 +669,9 @@ def test_refresh_preserves_historical_incomplete_manual_override_for_review():
     assert title.hierarchy_manual_override is True
     assert title.hierarchy_verified_at == verified_at
     assert collection.hierarchy_status == "review_required"
-    assert collection.hierarchy_note == GENERIC_TITLE_REVIEW_REASON
+    assert collection.hierarchy_note.startswith(
+        "Historické ruční zařazení není úplné."
+    )
 
 
 def test_new_unknown_reopens_confirmed_season_and_manual_numbering_resolves_it():
@@ -729,7 +735,10 @@ def test_nonblocking_period_hint_collection_reopens_for_new_scan_problem(
         scan_library(session, tmp_path)
         unknown = session.scalar(select(Video).where(Video.filename == unknown_path.name))
         assert collection.hierarchy_status == "review_required"
-        assert collection.hierarchy_note == "Nové nebo nezařazené video vyžaduje kontrolu."
+        assert collection.hierarchy_note == (
+            "Číslování nebo nezařazený obsah stále vyžaduje kontrolu."
+        )
+        assert unknown.catalog_title_id == title_id
         issue_codes = {
             issue.code for issue in evaluate_collection_hierarchy(
                 collection,
@@ -737,9 +746,10 @@ def test_nonblocking_period_hint_collection_reopens_for_new_scan_problem(
                 include_legacy_fallback=False,
             ).issues
         }
-        assert HierarchyIssueCode.UNASSIGNED_VIDEO in issue_codes
+        assert HierarchyIssueCode.UNKNOWN_OR_MISSING_NUMBERING in issue_codes
+        assert HierarchyIssueCode.UNASSIGNED_VIDEO not in issue_codes
         assert HierarchyIssueCode.MANUAL_SPLIT_UNMATCHED not in issue_codes
-        assert unknown.catalog_title_id is None
+        assert unknown.catalog_title_id == title_id
 
         move_videos_to_title(session, collection_id, [unknown.id], title_id)
         set_video_episode_override(unknown, 13)
@@ -1687,16 +1697,12 @@ def test_manual_split_entry_delete_is_targeted_and_survives_startup_sync():
         assert {title.id for title in collection.titles} == {
             keeper_id, removed_id, other_id,
         }
-        with pytest.raises(ValueError, match="součástí ruční definice"):
-            delete_empty_local_title(session, collection_id, removed_id)
-        assert session.get(CatalogTitle, removed_id) is not None
-
         removed_definition = delete_empty_local_title(
-            session, collection_id, removed_id, remove_from_manual_split=True,
+            session, collection_id, removed_id,
         )
         session.commit()
 
-        assert removed_definition is True
+        assert removed_definition is False
         assert session.get(CatalogTitle, removed_id) is None
         assert {title.id for title in session.get(CatalogCollection, collection_id).titles} == {
             keeper_id, other_id,
@@ -1741,12 +1747,15 @@ def test_nonempty_manual_split_entry_cannot_be_deleted_with_explicit_flag():
             relative_root_path="Anime/Show/.catalog-part-1",
             hierarchy_manual_override=True, part_type_manual="special",
         )
-        Video(
+        video = Video(
             catalog_title=title, catalog_collection=collection,
             relative_path="Anime/Show/SP 01.mkv", root_folder="Anime",
             filename="SP 01.mkv", size=1, mtime_ns=1,
         )
-        session.add(collection)
+        session.add_all([
+            collection,
+            ManualSplitRuleVideo(catalog_title=title, video=video),
+        ])
         session.commit()
 
         with pytest.raises(ValueError, match="už není prázdná; obsahuje video"):

@@ -13,6 +13,7 @@ from app.catalog import (
     classify_video, is_root_video, meaningful_root_collection, normalize_language, normalize_title,
 )
 from app.hierarchy import derive_library_hierarchy
+from app.hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from app.hierarchy_evaluation import finalize_collection_hierarchy
 from app.hierarchy_review import extract_local_period_hint
 from app.manual_split import (
@@ -324,7 +325,6 @@ def _scan_library(
                 len(authority_collections) == 1
                 and all(
                     link.catalog_title is not None
-                    and link.catalog_title.hierarchy_manual_override
                     and link.catalog_title.collection is authority_collections[0]
                     for link in video.manual_split_rule_videos
                 )
@@ -375,7 +375,7 @@ def _scan_library(
         assigned_manual_title = (
             video.catalog_title
             if video.catalog_title is not None
-            and video.catalog_title.hierarchy_manual_override
+            and manual_hierarchy_snapshot_requires_preservation(video.catalog_title)
             and video.catalog_title.collection is not None
             else None
         )
@@ -383,7 +383,7 @@ def _scan_library(
         reassigned_path_title = (
             path_title
             if path_title is not None
-            and path_title.hierarchy_manual_override
+            and manual_hierarchy_snapshot_requires_preservation(path_title)
             and path_title.collection is not None
             and path_title.collection.relative_root_path
             != collection_data.relative_root_path
@@ -418,7 +418,7 @@ def _scan_library(
             session.add(catalog_title)
             titles[catalog_title.relative_root_path] = catalog_title
         catalog_title.collection = collection
-        if not catalog_title.hierarchy_manual_override:
+        if not manual_hierarchy_snapshot_requires_preservation(catalog_title):
             catalog_title.part_type = title_data.part_type
             catalog_title.season_number = title_data.season_number
             catalog_title.part_number = title_data.part_number

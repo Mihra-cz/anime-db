@@ -11,6 +11,7 @@ from .catalog import (
 )
 from .database import Base
 from .hierarchy import derive_library_hierarchy
+from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .hierarchy_evaluation import finalize_collection_hierarchy
 from .hierarchy_review import extract_local_period_hint
 from .manual_split import (
@@ -159,7 +160,9 @@ def migrate_schema(engine) -> None:
             and video.catalog_title is not None
         }
         used_titles.update(
-            title for title in original_titles if title.hierarchy_manual_override
+            title
+            for title in original_titles
+            if manual_hierarchy_snapshot_requires_preservation(title)
         )
         for identity in identities_by_title_path.values():
             if identity.title.relative_root_path == ROOT_FOLDER:
@@ -168,7 +171,7 @@ def migrate_schema(engine) -> None:
             title = titles.get(part.relative_root_path)
             if (
                 title is not None
-                and title.hierarchy_manual_override
+                and manual_hierarchy_snapshot_requires_preservation(title)
                 and title.catalog_collection_id is not None
             ):
                 used_titles.add(title)
@@ -199,7 +202,7 @@ def migrate_schema(engine) -> None:
             title.catalog_collection_id = collection.id
             title.local_title = part.local_title
             title.normalized_local_title = normalize_title(part.local_title)
-            if not title.hierarchy_manual_override:
+            if not manual_hierarchy_snapshot_requires_preservation(title):
                 title.part_type = part.part_type
                 title.season_number = part.season_number
                 title.part_number = part.part_number
@@ -217,7 +220,6 @@ def migrate_schema(engine) -> None:
                     len(authority_collections) == 1
                     and all(
                         link.catalog_title is not None
-                        and link.catalog_title.hierarchy_manual_override
                         and link.catalog_title.collection is authority_collections[0]
                         for link in video.manual_split_rule_videos
                     )
@@ -264,13 +266,16 @@ def migrate_schema(engine) -> None:
             title = (
                 video.catalog_title
                 if video.catalog_title is not None
-                and video.catalog_title.hierarchy_manual_override
+                and manual_hierarchy_snapshot_requires_preservation(
+                    video.catalog_title
+                )
                 and video.catalog_title.collection is not None
                 else automatic_title
             )
             collection = (
                 title.collection
-                if title.hierarchy_manual_override and title.collection is not None
+                if manual_hierarchy_snapshot_requires_preservation(title)
+                and title.collection is not None
                 else collections[identity.collection.relative_root_path]
             )
             video.catalog_collection_id = collection.id

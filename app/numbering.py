@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from .catalog import (
     EpisodeNumberDetection, detect_episode_number, natural_sort_key, normalize_title,
 )
+from .hierarchy_authority import manual_hierarchy_snapshot_uses_legacy_projection
 from .models import CatalogCollection, CatalogTitle, Video
 
 NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
@@ -290,7 +291,8 @@ def recalculate_title_numbering(
     external_linked: bool | None = None,
 ) -> None:
     detections = [detect_episode_number(video.filename) for video in videos]
-    title_is_supplemental = title.effective_part_type in SUPPLEMENTAL_PART_TYPES
+    part_type = _numbering_part_type(title)
+    title_is_supplemental = part_type in SUPPLEMENTAL_PART_TYPES
     detected = [
         item.number if item.is_standard and not title_is_supplemental else None
         for item in detections
@@ -303,9 +305,9 @@ def recalculate_title_numbering(
     numeric_values = [value for value in effective_values if value is not None]
     explicit_offset = title.episode_start_offset
     structural_sequence_number = (
-        title.effective_part_number
-        if title.effective_part_type in {"part", "cour"}
-        else title.effective_season_number
+        _numbering_part_number(title)
+        if part_type in {"part", "cour"}
+        else _numbering_season_number(title)
     )
     inferred_offset = (
         known_preceding_episodes
@@ -370,9 +372,9 @@ def recalculate_collection_numbering(
     for title in sorted(
         collection.titles,
         key=lambda value: (
-            value.effective_season_number or 0,
-            value.effective_part_number or 0,
-            value.effective_sort_order,
+            _numbering_season_number(value) or 0,
+            _numbering_part_number(value) or 0,
+            _numbering_sort_order(value),
         ),
     ):
         known = preceding if preceding_known and preceding else None
@@ -384,6 +386,43 @@ def recalculate_collection_numbering(
             preceding += official_count
         else:
             preceding_known = False
+
+
+def _numbering_part_type(title: CatalogTitle) -> str:
+    if (
+        manual_hierarchy_snapshot_uses_legacy_projection(title)
+        and title.part_type_manual is not None
+    ):
+        return title.part_type_manual
+    return title.effective_part_type
+
+
+def _numbering_season_number(title: CatalogTitle) -> int | None:
+    if manual_hierarchy_snapshot_uses_legacy_projection(title):
+        if title.part_type_manual is not None:
+            return title.season_number_manual
+        if title.season_number_manual is not None:
+            return title.season_number_manual
+    return title.effective_season_number
+
+
+def _numbering_part_number(title: CatalogTitle) -> int | None:
+    if manual_hierarchy_snapshot_uses_legacy_projection(title):
+        return (
+            title.part_number_manual
+            if title.part_number_manual is not None
+            else title.part_number
+        )
+    return title.effective_part_number
+
+
+def _numbering_sort_order(title: CatalogTitle) -> int:
+    if manual_hierarchy_snapshot_uses_legacy_projection(title):
+        if title.sort_order_manual is not None:
+            return title.sort_order_manual
+        if title.season_number_manual is not None:
+            return title.season_number_manual
+    return title.effective_sort_order
 
 
 def set_title_numbering(

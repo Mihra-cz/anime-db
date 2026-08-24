@@ -365,7 +365,10 @@ def synchronize_manual_split_authority(
             link.video_id: link for link in title.manual_split_rule_videos
         }
         for video_id in existing.keys() - desired_ids:
-            title.manual_split_rule_videos.remove(existing[video_id])
+            link = existing[video_id]
+            title.manual_split_rule_videos.remove(link)
+            if link in link.video.manual_split_rule_videos:
+                link.video.manual_split_rule_videos.remove(link)
         for video_id in desired_ids - existing.keys():
             title.manual_split_rule_videos.append(ManualSplitRuleVideo(
                 video=videos_by_id[video_id],
@@ -382,7 +385,34 @@ def has_persisted_manual_split_selector(title: CatalogTitle) -> bool:
 
 
 def manual_split_titles(collection: CatalogCollection) -> list[CatalogTitle]:
-    return [title for title in collection.titles if title.hierarchy_manual_override]
+    return [
+        title for title in collection.titles
+        if has_persisted_manual_split_selector(title)
+    ]
+
+
+def replace_explicit_video_selector_authority(
+    videos: list[Video],
+    target: CatalogTitle | None,
+) -> None:
+    """Persist the exact selector set for an explicit user video decision."""
+    if target is not None and target.id is None:
+        raise ValueError("Cílová část musí být před uložením selectoru persistentní.")
+    target_id = target.id if target is not None else None
+    for video in videos:
+        matching_target = False
+        for link in list(video.manual_split_rule_videos):
+            if target is not None and (
+                link.catalog_title is target
+                or link.catalog_title_id == target_id
+            ):
+                matching_target = True
+                continue
+            video.manual_split_rule_videos.remove(link)
+            if link in link.catalog_title.manual_split_rule_videos:
+                link.catalog_title.manual_split_rule_videos.remove(link)
+        if target is not None and not matching_target:
+            target.manual_split_rule_videos.append(ManualSplitRuleVideo(video=video))
 
 
 def persisted_manual_split_authority_collections(

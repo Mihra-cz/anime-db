@@ -6,6 +6,7 @@ from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, In
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+from .hierarchy_authority import manual_hierarchy_snapshot_is_complete
 
 
 def utc_now() -> datetime:
@@ -158,33 +159,35 @@ class CatalogTitle(Base):
 
     @property
     def effective_season_number(self) -> int | None:
-        if self.hierarchy_manual_override and self.part_type_manual is not None:
+        if manual_hierarchy_snapshot_is_complete(self):
             return self.season_number_manual
-        return self.season_number_manual if self.season_number_manual is not None else self.season_number
+        return self.season_number
 
     @property
     def effective_season_label(self) -> str | None:
-        if self.hierarchy_manual_override and self.part_type_manual is not None:
+        if manual_hierarchy_snapshot_is_complete(self):
             return self.season_label_manual
-        return self.season_label_manual or self.season_label
+        return self.season_label
 
     @property
     def effective_part_number(self) -> int | None:
-        return (
-            self.part_number_manual
-            if self.part_number_manual is not None else self.part_number
-        )
+        if manual_hierarchy_snapshot_is_complete(self):
+            return self.part_number_manual
+        return self.part_number if self.part_type in {"part", "cour"} else None
 
     @property
     def effective_part_type(self) -> str:
-        return self.part_type_manual or self.part_type
+        if manual_hierarchy_snapshot_is_complete(self):
+            return self.part_type_manual
+        return self.part_type
 
     @property
     def effective_sort_order(self) -> int:
-        if self.sort_order_manual is not None:
+        if (
+            manual_hierarchy_snapshot_is_complete(self)
+            and self.sort_order_manual is not None
+        ):
             return self.sort_order_manual
-        if self.season_number_manual is not None:
-            return self.season_number_manual
         return self.sort_order
 
 

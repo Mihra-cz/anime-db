@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from .hierarchy import derive_library_hierarchy
+from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .models import CatalogCollection, CatalogTitle, Video
 
 
@@ -66,7 +67,7 @@ def derive_collection_path_provenance(
             title = titles_by_id.get(video.catalog_title_id)
         if (
             title is None
-            or title.hierarchy_manual_override
+            or manual_hierarchy_snapshot_requires_preservation(title)
             or identity.collection.relative_root_path
             != collection.relative_root_path
             or identity.title.relative_root_path != title.relative_root_path

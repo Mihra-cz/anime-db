@@ -298,7 +298,9 @@ def test_catalog_title_series_label_uses_effective_hierarchy_values():
     title = CatalogTitle(
         local_title="Season", normalized_local_title="season",
         relative_root_path="Anime/Show/Season", part_type="season", season_number=1,
-        season_label="S1", season_number_manual=2, season_label_manual="S2",
+        season_label="S1", part_type_manual="season",
+        season_number_manual=2, season_label_manual="S2",
+        hierarchy_manual_override=True,
     )
     assert catalog_title_series_label(title) == "S2"
 

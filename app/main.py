@@ -47,9 +47,10 @@ from .catalog import (
 from .config import Settings, get_settings
 from .database import Base, make_engine, make_session_factory
 from .migrations import migrate_schema
-from .hierarchy_evaluation import HierarchyIssueCode
+from .hierarchy_authority import activate_manual_hierarchy_snapshot
+from .hierarchy_evaluation import HierarchyIssueCode, finalize_hierarchy_write
 from .hierarchy_review import (
-    PERIOD_HINT_REVIEW_REASON, SIMPLE_DEFINITION_FIELDS,
+    SIMPLE_DEFINITION_FIELDS,
     apply_manual_split, apply_single_title_confirmation,
     classify_videos_in_place, clear_confirmed_duplicate_videos,
     collection_grouping_suggestions, create_main_collection,
@@ -57,7 +58,7 @@ from .hierarchy_review import (
     delete_empty_collection, delete_empty_collections, delete_empty_local_title,
     definitions_as_json, definitions_to_json, parse_manual_definitions,
     confirm_effective_collection_hierarchy,
-    catalog_title_hierarchy_is_verified, manual_hierarchy_resolves_ambiguity,
+    catalog_title_hierarchy_is_verified,
     hierarchy_review_diagnostics, manual_hierarchy_snapshot_issue,
     merge_title_into, move_videos_to_title,
     move_titles_to_collection, record_grouping_decision,
@@ -79,6 +80,10 @@ from .metadata.candidates import (
 from .media_parts import (
     MEDIA_PART_NUMBER_ERROR, media_part_label, media_part_ordinal_warning,
     media_part_sequence_warning, media_part_summary_label, set_media_part_number,
+)
+from .manual_split import (
+    has_persisted_manual_split_selector,
+    replace_explicit_video_selector_authority,
 )
 from .metadata.service import (
     MetadataConflictError, MetadataLockedError, confirm_anilist_candidate,
@@ -637,7 +642,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             video = session.get(Video, video_id)
             if video is None or not is_root_video(video):
                 raise HTTPException(status_code=404, detail="Root video nebylo nalezeno")
-            old_title = video.catalog_title
+            old_collection = video.catalog_collection
             target_title = None
             if target_title_id.strip():
                 try:
@@ -655,9 +660,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 video.catalog_title = None
                 video.catalog_collection = None
+            replace_explicit_video_selector_authority(
+                [video], target_title,
+            )
             session.flush()
-            for title in {old_title, target_title} - {None}:
-                recalculate_title_numbering(title, list(title.videos))
+            finalize_hierarchy_write([
+                collection for collection in (
+                    old_collection,
+                    target_title.collection if target_title is not None else None,
+                )
+                if collection is not None
+            ])
             session.commit()
         return local_redirect_response(f"/root-videos#video-{video_id}")
 
@@ -675,7 +688,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             video = session.get(Video, video_id)
             if video is None or not is_root_video(video):
                 raise HTTPException(status_code=404, detail="Root video nebylo nalezeno")
-            old_title = video.catalog_title
+            old_collection = video.catalog_collection
             virtual_root = f"@root/{video.id}"
             collection = session.scalar(select(CatalogCollection).where(
                 CatalogCollection.relative_root_path == virtual_root
@@ -684,8 +697,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 collection = CatalogCollection(
                     local_title=name, normalized_local_title=normalize_title(name),
                     relative_root_path=virtual_root, manual_display_title=name,
-                    hierarchy_status="review_required",
-                    hierarchy_note="Samostatný titul ručně vytvořený pro video v kořeni knihovny.",
                 )
                 session.add(collection)
                 session.flush()
@@ -706,14 +717,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             title.local_title = name
             title.normalized_local_title = normalize_title(name)
             title.manual_display_title = name
-            title.part_type_manual = part_type
-            title.season_label_manual = labels[part_type]
-            title.hierarchy_manual_override = True
+            activate_manual_hierarchy_snapshot(
+                title,
+                part_type=part_type,
+                season_number=None,
+                part_number=None,
+                season_label=labels[part_type],
+                sort_order=title.effective_sort_order,
+                verified_at=utc_now(),
+            )
             video.catalog_collection = collection
             video.catalog_title = title
             session.flush()
-            for affected_title in {old_title, title} - {None}:
-                recalculate_title_numbering(affected_title, list(affected_title.videos))
+            replace_explicit_video_selector_authority([video], title)
+            finalize_hierarchy_write([
+                affected for affected in (old_collection, collection)
+                if affected is not None
+            ])
             session.commit()
         return local_redirect_response(f"/root-videos#video-{video_id}")
 
@@ -1120,7 +1140,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "can_delete": bool(
                         not title.videos
                     ),
-                    "manual_split_definition": title.hierarchy_manual_override,
+                    "manual_split_definition": has_persisted_manual_split_selector(title),
                     "owned_metadata_count": (
                         bool(title.metadata_record)
                         + len(title.external_links)
@@ -1543,7 +1563,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allowed = {"automatic", "review_required", "verified", "conflict", "not_applicable"}
         if hierarchy_status not in allowed:
             raise HTTPException(status_code=400, detail="Neplatný stav hierarchie.")
-        note = hierarchy_note.strip()[:1000] or None
         with sessions() as session:
             collection = session.get(CatalogCollection, collection_id)
             if collection is None:
@@ -1552,18 +1571,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 try:
                     confirm_effective_collection_hierarchy(collection)
                 except ValueError as exc:
+                    session.rollback()
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
-            collection.hierarchy_status = hierarchy_status
-            collection.hierarchy_note = (
-                None
-                if hierarchy_status == "verified"
-                and note == PERIOD_HINT_REVIEW_REASON
-                and manual_hierarchy_resolves_ambiguity(collection)
-                else note
-            )
-            collection.hierarchy_verified_at = (
-                utc_now() if hierarchy_status in {"verified", "not_applicable"} else None
-            )
+            refresh_collection_state(collection)
             session.commit()
         return local_redirect_response(f"/hierarchy-review/{collection_id}")
 
@@ -2277,7 +2287,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 set_title_numbering(
                     title, "unknown" if numbering_mode == "auto" else numbering_mode, offset
                 )
-                recalculate_title_numbering(title, list(title.videos))
+                if title.collection is not None:
+                    refresh_collection_state(title.collection)
+                else:
+                    recalculate_title_numbering(title, list(title.videos))
                 session.commit()
             except ValueError as exc:
                 session.rollback()
@@ -2305,9 +2318,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 value = int(manual_episode_number) if manual_episode_number.strip() else None
                 set_video_episode_override(video, value)
                 title = video.catalog_title
-                recalculate_title_numbering(title, list(title.videos))
                 if title.collection is not None:
-                    refresh_collection_state(title.collection, recalculate=False)
+                    refresh_collection_state(title.collection)
+                else:
+                    recalculate_title_numbering(title, list(title.videos))
                 session.commit()
             except ValueError as exc:
                 session.rollback()
@@ -2379,9 +2393,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     list(title.videos), sequence_start,
                     confirm_manual_conflicts=confirm_manual_conflicts,
                 )
-                recalculate_title_numbering(title, list(title.videos))
                 if title.collection is not None:
-                    refresh_collection_state(title.collection, recalculate=False)
+                    refresh_collection_state(title.collection)
+                else:
+                    recalculate_title_numbering(title, list(title.videos))
                 session.commit()
             except ValueError as exc:
                 session.rollback()

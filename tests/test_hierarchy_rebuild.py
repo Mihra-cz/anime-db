@@ -7,7 +7,9 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app.catalog import normalize_title
 from app.database import Base
+from app.hierarchy_evaluation import finalize_collection_hierarchy
 from app.hierarchy_rebuild import (
     HierarchyPlanBlockedError,
     ReconciliationAction,
@@ -17,6 +19,7 @@ from app.hierarchy_rebuild import (
     rebuild_hierarchy,
 )
 from app.migrations import migrate_schema
+from app.hierarchy_review import extract_local_period_hint
 from app.models import (
     CatalogCollection,
     CatalogTitle,
@@ -633,7 +636,11 @@ def test_manual_hierarchy_snapshot_is_preserved_without_backfill(
             hierarchy_verified_at=timestamp,
         )
         video = _video("Anime/Show/E01.mkv", title=title, collection=collection)
-        session.add_all([collection, video])
+        session.add_all([
+            collection,
+            video,
+            ManualSplitRuleVideo(catalog_title=title, video=video),
+        ])
         session.commit()
         title_id = title.id
 
@@ -660,6 +667,119 @@ def test_manual_hierarchy_snapshot_is_preserved_without_backfill(
         assert stored.collection.hierarchy_status == expected_status
         if not complete:
             assert stored.part_number == 9
+
+
+def test_post_4b_grouping_survives_startup_and_rebuild_with_historical_snapshots(
+    tmp_path,
+):
+    """Startup must not reinterpret protected 4B membership as fresh path grouping."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'post-4b-grouping.db'}")
+    Base.metadata.create_all(engine)
+    root_path = "Anime/Example Saga (A01-A04)"
+    paths = {
+        "season": f"{root_path}/Example Saga (A01)/Example Saga - 01.mkv",
+        "related": f"{root_path}/Example Saga Next (A02)/Example Saga Next - 01.mkv",
+        "oad": f"{root_path}/OADs/Example Saga - OAD 01.mkv",
+        "ova": f"{root_path}/OVA/Example Saga - OVA 01.mkv",
+        "special": f"{root_path}/Specials/Example Saga - Special 01.mkv",
+    }
+
+    with Session(engine) as session:
+        collection = _collection(root_path)
+        collection.normalized_local_title = normalize_title(collection.local_title)
+        collection.local_period_hint = extract_local_period_hint(collection.local_title)
+        titles = {
+            "season": _title(
+                f"{root_path}/Example Saga (A01)",
+                collection,
+                part_type="season",
+                season_number=1,
+                season_label="S1",
+            ),
+            "related": _title(
+                f"{root_path}/.catalog-part-related",
+                collection,
+                "Example Saga Next",
+                part_type="title",
+            ),
+            "oad": _title(
+                f"{root_path}/OADs",
+                collection,
+                "OADs",
+                part_type="ova",
+            ),
+            "ova": _title(
+                f"{root_path}/.catalog-part-ova",
+                collection,
+                "OVA",
+                part_type="ova",
+            ),
+            "special": _title(
+                f"{root_path}/.catalog-part-specials",
+                collection,
+                "Specials",
+                part_type="special",
+            ),
+        }
+        timestamp = utc_now()
+        for title in titles.values():
+            title.hierarchy_manual_override = True
+            title.hierarchy_verified_at = timestamp
+        videos = [
+            _video(
+                path,
+                title=titles[kind],
+                collection=collection,
+                mtime_ns=index,
+                file_type=(
+                    "ova" if kind in {"oad", "ova"}
+                    else "special" if kind == "special"
+                    else "episode"
+                ),
+            )
+            for index, (kind, path) in enumerate(paths.items(), 1)
+        ]
+        session.add_all([collection, *videos])
+        session.flush()
+        finalize_collection_hierarchy(collection, videos)
+        session.commit()
+        expected_assignments = {
+            video.relative_path: video.catalog_title_id for video in videos
+        }
+
+        before_startup = build_hierarchy_rebuild_plan(session)
+        assert before_startup.summary.logical_changes == 0
+        assert before_startup.summary.video_assignments_changed == 0
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        collection_paths = set(session.scalars(
+            select(CatalogCollection.relative_root_path)
+        ))
+        assert collection_paths == {root_path}
+        assert {
+            video.relative_path: video.catalog_title_id
+            for video in session.scalars(select(Video))
+        } == expected_assignments
+        assert all(
+            video.catalog_collection.relative_root_path == root_path
+            and video.catalog_title.collection is video.catalog_collection
+            for video in session.scalars(select(Video))
+        )
+        assert all(
+            title.hierarchy_manual_override
+            and title.hierarchy_verified_at is not None
+            and title.part_type_manual is None
+            for title in session.scalars(select(CatalogTitle))
+        )
+
+        after_startup = build_hierarchy_rebuild_plan(session)
+        assert after_startup.summary.logical_changes == 0
+        assert after_startup.summary.collections_created == 0
+        assert after_startup.summary.titles_created == 0
+        assert after_startup.summary.video_assignments_changed == 0
+        assert after_startup.summary.numbering_changes == 0
 
 
 def test_supplementary_classification_is_preserved_and_not_marked_unmatched():
@@ -903,7 +1023,7 @@ def test_season_one_and_two_reconcile_to_one_collection_and_two_titles():
             assert video.catalog_title.collection is collections[0]
 
 
-def test_explicit_mn_authority_on_non_manual_title_is_hard_blocker():
+def test_explicit_mn_authority_on_non_manual_title_is_independent_authority():
     engine = _engine()
     with Session(engine) as session:
         collection = _collection("Anime/Show")
@@ -917,15 +1037,13 @@ def test_explicit_mn_authority_on_non_manual_title_is_hard_blocker():
         session.commit()
 
         plan = build_hierarchy_rebuild_plan(session)
-        blocker = next(
-            item for item in plan.blockers
-            if item.code == "inactive_manual_split_authority"
+        assert not any(
+            item.code == "inactive_manual_split_authority"
+            for item in plan.blockers
         )
-        assert blocker.prevents_apply is True
-        assert blocker.title_path == inactive_target.relative_root_path
-
-        with pytest.raises(HierarchyPlanBlockedError):
-            apply_hierarchy_rebuild_plan(session, plan)
+        assignment = _assignment(plan, video.relative_path)
+        assert assignment.manual_split_kind == "unique"
+        assert assignment.target_title_path == inactive_target.relative_root_path
 
 
 def test_explicit_authority_can_move_video_across_physical_collection_root():
@@ -1290,7 +1408,7 @@ def test_unrelated_manual_target_in_same_collection_does_not_freeze_stale_title(
 
         plan = build_hierarchy_rebuild_plan(session)
         assignment = _assignment(plan, video.relative_path)
-        assert assignment.manual_split_kind == "not_required"
+        assert assignment.manual_split_kind is None
         assert assignment.reason == ReconciliationReason.AUTOMATIC_PATH
         assert assignment.target_collection_path == "Anime/Show"
         assert assignment.target_title_path == "Anime/Show/Season 2"

@@ -35,7 +35,7 @@ from app.metadata.providers.base import ProviderTitleMetadata
 from app.migrations import migrate_schema
 from app.models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    InternalSubtitle, TitleMetadata, Video, utc_now,
+    InternalSubtitle, ManualSplitRuleVideo, TitleMetadata, Video, utc_now,
 )
 from app.numbering import (
     recalculate_title_numbering, summarize_title_numbering,
@@ -301,7 +301,16 @@ def test_hierarchy_review_distinguishes_manual_split_empty_title_delete(tmp_path
             normalized_local_title="unused automatic",
             relative_root_path="Anime/High School DxD/Unused",
         )
-        session.add(collection)
+        selector_video = Video(
+            relative_path="Anime/High School DxD/NCOP.mkv", root_folder="Anime",
+            filename="NCOP.mkv", size=1, mtime_ns=1,
+            catalog_collection=collection,
+        )
+        session.add_all([
+            collection,
+            selector_video,
+            ManualSplitRuleVideo(catalog_title=manual, video=selector_video),
+        ])
         session.commit()
         collection_id, manual_id, automatic_id = (
             collection.id, manual.id, automatic.id,
@@ -2382,12 +2391,12 @@ def test_historical_incomplete_part_snapshot_is_not_shown_as_verified(tmp_path):
     ).body.decode()
 
     assert "stav <strong>review_required</strong>" in review_html
-    assert "Část typu Part nemá bezpečně určené číslo Part." in review_html
+    assert "Historické ruční zařazení není úplné." in review_html
     for ordinal, title_id in zip((1, 2), title_ids, strict=True):
         card = review_html.split(
             f'id="title-{title_id}"', 1,
         )[1].split("</article>", 1)[0]
-        assert f"S1 · Part {ordinal}" in card
+        assert f"S1 · Part {ordinal}" not in card
         assert "Historické ruční zařazení není úplné." in card
         assert "Pro typ Part potvrďte číslo Part." in card
         assert f"Automaticky rozpoznané číslo Part: {ordinal}." in card
@@ -2400,7 +2409,7 @@ def test_historical_incomplete_part_snapshot_is_not_shown_as_verified(tmp_path):
     title_detail_html = endpoints["/titles/{catalog_title_id}"](
         web_request(web_app, f"/titles/{title_ids[1]}"), title_ids[1],
     ).body.decode()
-    assert "S1 · Part 2" in title_detail_html
+    assert "S1 · Part 2" not in title_detail_html
 
     with web_app.state.sessions() as session:
         collection = session.get(CatalogCollection, collection_id)
@@ -3424,6 +3433,21 @@ def test_root_video_page_lists_files_and_manual_assignment_keeps_physical_paths(
         assert stored_first.catalog_title_id == target_title_id
         assert stored_second.catalog_title.local_title == "Second Movie"
         assert stored_first.catalog_collection_id != stored_second.catalog_collection_id
+        assert stored_first.catalog_collection_id == (
+            stored_first.catalog_title.catalog_collection_id
+        )
+        assert stored_second.catalog_collection_id == (
+            stored_second.catalog_title.catalog_collection_id
+        )
+        assert {
+            link.catalog_title_id for link in stored_first.manual_split_rule_videos
+        } == {stored_first.catalog_title_id}
+        assert {
+            link.catalog_title_id for link in stored_second.manual_split_rule_videos
+        } == {stored_second.catalog_title_id}
+        assert stored_second.catalog_title.hierarchy_manual_override is True
+        assert stored_second.catalog_title.hierarchy_verified_at is not None
+        assert stored_second.catalog_collection.hierarchy_status == "verified"
 
 
 def test_created_root_titles_survive_refresh_restart_and_scan(tmp_path):
