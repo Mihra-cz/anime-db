@@ -10,7 +10,7 @@
 <body>
   <header class="site-header">
     <a class="site-brand" href="/">AnimeDB</a>
-    <nav class="primary-nav" aria-label="Hlavní navigace"><a href="/hierarchy-review">Kontrola hierarchie</a><a href="/metadata-review">Kontrola metadat</a></nav>
+    <nav class="primary-nav" aria-label="Hlavní navigace"><a href="/hierarchy-review">Kontrola hierarchie</a><a href="/metadata-review">Kontrola metadat</a><a href="/media-check">Kontrola médií</a></nav>
     <form class="title-preference" method="post" action="/preferences/title-name"><label>Preferovaný název anime <select name="preference" onchange="this.form.submit()">{% for value, label in title_name_preference_labels|default({'romaji':'Romaji','english':'Anglický','native':'Originální'})|items %}<option value="{{ value }}" {% if title_name_preference|default('romaji') == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><input type="hidden" name="return_to" value="{{ preference_return_to|default('/') }}"><noscript><button type="submit">Použít</button></noscript></form>
     <span class="site-context">read-only katalog knihovny</span>
   </header>

@@ -43,6 +43,7 @@ def migrate_schema(engine) -> None:
             ("manual_hardsub_cs", "BOOLEAN NOT NULL DEFAULT 0"),
             ("manual_hardsub_sk", "BOOLEAN NOT NULL DEFAULT 0"),
             ("manual_hardsub_verified_at", "DATETIME NULL"),
+            ("czsk_availability_manual", "VARCHAR NULL"),
             ("catalog_title_id", "INTEGER NULL REFERENCES catalog_titles(id)"),
             ("catalog_collection_id", "INTEGER NULL REFERENCES catalog_collections(id)"),
             ("local_episode_number", "INTEGER NULL"),

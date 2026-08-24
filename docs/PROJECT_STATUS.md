@@ -3400,6 +3400,90 @@ Cílená media/catalog/migration sada prošla `276 passed`; celý projektový su
 
 ---
 
+## 6.49 Media Check a explicitní CZ/SK workflow
+
+Commit 8 přidává samostatnou stránku `/media-check` a drží tři review oblasti
+oddělené:
+
+```text
+Hierarchy Review → collection / title / Season / Part / numbering
+Metadata Check  → identita titulu a metadata provider
+Media Check     → audio, interní/externí titulky, hardsub a language decisions
+```
+
+Commit-7 `build_video_language_profile()` zůstává factual source of truth se
+subtitle stavy `preferred`, `fallback_internal_en`, `missing` a audio stavy
+`japanese`, `english_only`, `other_known`, `unknown`, `no_audio`. Nový
+`build_media_check_evaluation()` je samostatná workflow/presentation vrstva.
+K factual profilu přidává pouze nullable ruční autoritu
+`Video.czsk_availability_manual = NULL | unavailable`:
+
+```text
+faktické CZ/SK
+→ available bez ohledu na historický manual marker
+
+bez CZ/SK + bez markeru + Internal EN
+→ needs_cs_sk_internal_en (otevřený warning)
+
+bez CZ/SK + bez markeru + bez Internal EN
+→ needs_cs_sk_no_fallback (otevřený error)
+
+bez CZ/SK + unavailable + Internal EN
+→ known_unavailable_internal_en (známý informační stav)
+
+bez CZ/SK + unavailable + bez Internal EN
+→ known_unavailable_no_fallback (známý informační stav)
+```
+
+Marker tedy netvrdí, že překlad nikdy nevznikne, a scanner jej automaticky
+nenastavuje ani nemaže. Později nalezené internal/external CZ/SK nebo explicitní
+CS/SK hardsub vždy vyhrají a video se zobrazí jako hotové; pokud faktická stopa
+znovu zmizí, uložený marker může opět platit. Clear markeru okamžitě vrátí video
+do factual fallback/missing fronty. Partial translation lze řešit výběrem více
+řádků a atomickým bulk set/clear, který mění výhradně tento jeden sloupec.
+
+Media Check používá jeden evaluator pro summary, subtitle/audio filtry i řádky.
+Faceted counts respektují opačnou aktivní osu, takže kombinace například
+`Doplnit CZ/SK + Audio unknown` má shodný počet v kartě a filtru. Search zahrnuje
+collection, CatalogTitle, filename, cestu a episode label. Řazení je
+deterministické podle collection/title/episode/filename, stránka zobrazuje 50
+kompaktních video řádků a na tablet/mobile přepíná přes stávající responsive
+card pattern.
+
+Audio severity zůstává doménově oddělená od subtitle problému: `unknown` je
+review warning, `no_audio` technický error, `english_only` a `other_known` pouze
+informace a `japanese` hotový stav. Hardsub se v hlavní frontě zvýrazňuje jen u
+videí bez běžných CZ/SK; neposouzený hardsub u už přeloženého videa sám backlog
+nevytváří. Hierarchy Review před tímto checkpointem nemělo hardsub confirmation
+formulář, pouze read-only technický údaj pro výběr duplicate primary. Centrální
+hardsub, audio-language a external-subtitle-language controls jsou nyní v Media
+Check; detail CatalogTitle je nadále může zobrazovat jako lokální video detail.
+
+Idempotentní schema compatibility přidává jediný nullable sloupec
+`videos.czsk_availability_manual` bez backfillu. Commit-7 audio/external manual
+language authority ani hardsub persistence se nemění. Scanner/rescan a startup
+marker zachovávají; hierarchy rebuild projection jej kopíruje jako manual media
+data, ale nepoužívá jej pro collection, title, assignment, numbering ani
+`hierarchy_status`.
+
+Historická acceptance proběhla na nové SQLite backup kopii v `/tmp`. Po startupu
+měla 3100 videí a nezměněný factual rozpad: audio `japanese=2729`,
+`english_only=2`, `other_known=16`, `unknown=353`, `no_audio=0`; titulky
+`preferred=2395`, `fallback_internal_en=407`, `missing=298`. Počáteční manual
+unavailable count byl 0 a workflow proto přesně odpovídal `available=2395`,
+`needs_cs_sk_internal_en=407`, `needs_cs_sk_no_fallback=298`. Jeden fallback a
+jeden missing řádek se po bulk set přesunuly do odpovídajících known-unavailable
+stavů; clear fallback řádku jej vrátil do otevřeného Internal EN workflow a
+restart zachoval zbývající marker. Hierarchy fingerprint před/po byl shodný a
+následný rebuild dry-run měl collections/titles/assignments/numbering vše nula a
+`logical_changes=0`.
+
+Cílená media/web/scanner/migration/responsive sada prošla `155 passed`; celý
+projektový suite `716 passed`. Všech 14 Jinja šablon se bezpečně načítá.
+Produkční DB ani NAS nebyly pro write testy použity.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

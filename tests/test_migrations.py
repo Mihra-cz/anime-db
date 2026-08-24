@@ -468,6 +468,9 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
     assert [
         column["name"] for column in inspect(engine).get_columns("videos")
     ].count("media_part_number") == 1
+    assert [
+        column["name"] for column in inspect(engine).get_columns("videos")
+    ].count("czsk_availability_manual") == 1
 
     with Session(engine) as session:
         assert session.scalar(select(Video.file_type)) == "ncop"
@@ -482,6 +485,7 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         )
         assert video.content_type_manual is None
         assert video.media_part_number is None
+        assert video.czsk_availability_manual is None
         assert video.duplicate_status_manual is None
         assert video.duplicate_of_video_id is None
         assert video.duplicate_primary_missing is False
@@ -500,6 +504,7 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         subtitle.manual_language = "cs"
         video.content_type_manual = "recap"
         video.duplicate_status_manual = "suspected"
+        video.czsk_availability_manual = "unavailable"
         session.add(CollectionGroupingDecision(
             suggestion_key="test", state_fingerprint="state", decision="separate",
         ))
@@ -515,6 +520,9 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         column["name"] for column in inspect(engine).get_columns("videos")
     ].count("duplicate_status_manual") == 1
     assert [
+        column["name"] for column in inspect(engine).get_columns("videos")
+    ].count("czsk_availability_manual") == 1
+    assert [
         column["name"] for column in inspect(engine).get_columns("audio_tracks")
     ].count("manual_language") == 1
     assert [
@@ -524,6 +532,7 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         video = session.scalar(select(Video))
         assert video.content_type_manual == "recap"
         assert video.duplicate_status_manual == "suspected"
+        assert video.czsk_availability_manual == "unavailable"
         assert session.scalar(select(CollectionGroupingDecision)).decision == "separate"
         assert session.scalar(select(AudioTrack.manual_language)) == "ja"
         assert session.scalar(select(ExternalSubtitle.manual_language)) == "cs"

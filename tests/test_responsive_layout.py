@@ -17,7 +17,7 @@ def test_all_jinja_templates_load_and_base_declares_responsive_shell():
         templates.env.list_templates(filter_func=lambda name: name.endswith(".html"))
     )
 
-    assert len(names) == 13
+    assert len(names) == 14
     for name in names:
         templates.env.get_template(name)
 
@@ -70,6 +70,17 @@ def test_editable_video_table_uses_its_own_landscape_card_breakpoint():
     assert 'class="responsive-cards episode-table"' in series
     for label in ("Série", "Epizoda", "Délka", "Hardsub", "Typ", "Rozlišení", "Audio"):
         assert f'data-label="{label}"' in series
+
+
+def test_media_check_reuses_landscape_cards_and_stacks_filters_on_mobile():
+    css = STYLE_PATH.read_text(encoding="utf-8")
+    media_check = source("media_check.html")
+
+    assert 'class="responsive-cards episode-table media-check-table"' in media_check
+    assert 'class="media-check-summary"' in media_check
+    assert 'class="panel media-check-filters"' in media_check
+    assert '.media-check-filters { grid-template-columns: 1fr; }' in css
+    assert '.media-control-grid' in css
 
 
 def test_touch_accessible_paths_and_critical_hierarchy_controls_remain_present():

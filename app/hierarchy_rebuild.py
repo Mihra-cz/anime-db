@@ -1115,6 +1115,7 @@ def _clone_video(video: Video) -> Video:
         manual_hardsub_cs=video.manual_hardsub_cs,
         manual_hardsub_sk=video.manual_hardsub_sk,
         manual_hardsub_verified_at=video.manual_hardsub_verified_at,
+        czsk_availability_manual=video.czsk_availability_manual,
         local_episode_number=video.local_episode_number,
         season_episode_number=video.season_episode_number,
         absolute_episode_number=video.absolute_episode_number,

@@ -484,6 +484,7 @@ def test_media_language_overrides_survive_rescan_detected_change_and_startup(
         assert scanned_video.manual_hardsub_cs is False
         assert scanned_video.manual_hardsub_sk is False
         assert scanned_video.manual_hardsub_verified_at is None
+        scanned_video.czsk_availability_manual = "unavailable"
         set_audio_track_manual_language(audio_track, "ja")
         set_external_subtitle_manual_language(subtitle, "cs")
         session.commit()
@@ -502,6 +503,7 @@ def test_media_language_overrides_survive_rescan_detected_change_and_startup(
         assert subtitle.language == "eng"
         assert subtitle.normalized_language == "en"
         assert subtitle.manual_language == "cs"
+        assert video.czsk_availability_manual == "unavailable"
         profile = build_video_language_profile(video)
         assert profile.audio_status == "japanese"
         assert profile.subtitle_status == "preferred"
@@ -514,6 +516,7 @@ def test_media_language_overrides_survive_rescan_detected_change_and_startup(
         audio_track = video.audio_tracks[0]
         assert audio_track.manual_language == "ja"
         assert subtitle.manual_language == "cs"
+        assert video.czsk_availability_manual == "unavailable"
         profile = build_video_language_profile(video)
         assert profile.audio_status == "japanese"
         assert profile.external_subtitle_languages == {"cs"}

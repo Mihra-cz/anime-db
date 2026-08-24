@@ -63,6 +63,7 @@ pytest
 - Češtinu a slovenštinu odhaduje lokální, transparentní heuristikou typických slov a znaků; neurčité texty označí `unknown`.
 - Dynamický `VideoLanguageProfile` sjednocuje effective jazyky audio stop, interní a externí titulky a ruční CZ/SK hardsub. Audio informativně rozlišuje `japanese`, `english_only`, `other_known`, `unknown` a `no_audio`; absence JP sama není chyba. Subtitle výsledek je `preferred`, `fallback_internal_en` nebo `missing` a EN fallback používá výhradně interní EN stream.
 - Detekované jazyky spravuje scanner. Nullable ruční jazyk konkrétní audio stopy nebo externího subtitle má při čtení prioritu a díky stabilní identitě `(video, stream_index)` / `(video, relative_path)` přežije rescan i nový `ffprobe`. Detail titulu umožňuje override nastavit i odstranit.
+- Samostatná stránka **Kontrola médií** (`/media-check`) je kompaktní filtrovatelná pracovní fronta pro audio, titulky a hardsub. Faktický media profil nemění; nullable ruční rozhodnutí „CZ/SK nyní nejsou dostupné“ pouze vyřadí známý nedostatek z otevřeného backlogu. Reálně nalezené interní/externí CZ/SK nebo potvrzený CZ/SK hardsub mají vždy před tímto markerem přednost.
 - Relativní cesta je jedinečná. Nezměněné video znovu nevolá `ffprobe`; velikost nebo čas změny vyvolá aktualizaci. Externí titulky se obnovují při každém skenu.
 - Selhání jednoho souboru se zaloguje a sken pokračuje. Smazané či přesunuté soubory se odstraní pouze z databázového indexu.
 - Překročení timeoutu `ffprobe` označí pouze daný soubor jako chybu; jeho předchozí databázový záznam zůstane zachovaný.
@@ -103,7 +104,7 @@ pytest
 
 ## Aktualizace databáze
 
-Při startu aplikace proběhne idempotentní migrace SQLite: mimo jiné doplní nullable `CatalogTitle.part_number_manual`, `Video.media_part_number`, ruční language override na audio/external subtitle rows a vytvoří association `manual_split_rule_videos` pro explicitní manual-split authority. Existující `Video.catalog_title_id` se do nové association heuristicky nekopíruje, protože starý automatic assignment nelze bezpečně odlišit od historického explicitního výběru. Každé SQLite spojení aplikace zapíná `PRAGMA foreign_keys=ON`, takže association respektuje své foreign keys a `ON DELETE CASCADE`. Existující automatické `part_number` se nemění, `media_part_number` u starých videí zůstane `NULL`, language override je výchozí `NULL` a nic se neodhaduje z filename. Ruční smazání databáze není pro tuto verzi nutné.
+Při startu aplikace proběhne idempotentní migrace SQLite: mimo jiné doplní nullable `CatalogTitle.part_number_manual`, `Video.media_part_number`, `Video.czsk_availability_manual`, ruční language override na audio/external subtitle rows a vytvoří association `manual_split_rule_videos` pro explicitní manual-split authority. Existující `Video.catalog_title_id` se do nové association heuristicky nekopíruje, protože starý automatic assignment nelze bezpečně odlišit od historického explicitního výběru. Každé SQLite spojení aplikace zapíná `PRAGMA foreign_keys=ON`, takže association respektuje své foreign keys a `ON DELETE CASCADE`. Existující automatické `part_number` se nemění, `media_part_number`, CZ/SK workflow marker i language override u starých záznamů zůstávají `NULL` a nic se neodhaduje z filename nebo stáří anime. Ruční smazání databáze není pro tuto verzi nutné.
 
 ## Licence
 

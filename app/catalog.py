@@ -10,7 +10,10 @@ from typing import Literal
 import unicodedata
 
 from .hierarchy_types import VIDEO_CONTENT_TYPE_LABELS
-from .models import AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, Video
+from .models import (
+    AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
+    InternalSubtitle, Video,
+)
 
 LANGUAGE_ALIASES = {
     "cs": "cs", "cze": "cs", "ces": "cs", "czech": "cs", "čeština": "cs",
@@ -418,7 +421,7 @@ def set_external_subtitle_manual_language(
     subtitle.manual_language = _normalize_manual_language(language)
 
 
-def _effective_internal_subtitle_language(track) -> str:
+def effective_internal_subtitle_language(track: InternalSubtitle) -> str:
     return normalize_language(track.normalized_language, track.title)
 
 
@@ -432,7 +435,7 @@ def subtitle_track_display(video: Video) -> list[SubtitleTrackDisplay]:
     ]
     for source, track in tracks:
         effective_language = (
-            _effective_internal_subtitle_language(track)
+            effective_internal_subtitle_language(track)
             if source == "interní"
             else effective_external_subtitle_language(track)
         )
@@ -487,7 +490,7 @@ def manual_hardsub_state(video: Video) -> str:
 
 def _build_subtitle_language_profile(video: Video) -> _SubtitleLanguageProfile:
     internal_languages = frozenset(
-        _effective_internal_subtitle_language(track)
+        effective_internal_subtitle_language(track)
         for track in video.internal_subtitles
     )
     external_languages = frozenset(

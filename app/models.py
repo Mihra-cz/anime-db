@@ -30,6 +30,7 @@ class Video(Base):
     manual_hardsub_cs: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     manual_hardsub_sk: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     manual_hardsub_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    czsk_availability_manual: Mapped[str | None] = mapped_column(String, nullable=True)
     local_episode_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     season_episode_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     absolute_episode_number: Mapped[int | None] = mapped_column(Integer, nullable=True)

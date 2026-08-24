@@ -32,6 +32,7 @@ from .catalog import (
     effective_video_content_display,
     effective_audio_track_language,
     effective_external_subtitle_language,
+    effective_internal_subtitle_language,
     group_videos_by_series,
     has_meaningful_root_assignment,
     is_film_video,
@@ -89,6 +90,12 @@ from .metadata.candidates import (
 from .media_parts import (
     MEDIA_PART_NUMBER_ERROR, media_part_label, media_part_ordinal_warning,
     media_part_sequence_warning, media_part_summary_label, set_media_part_number,
+)
+from .media_check import (
+    AUDIO_FILTER_LABELS, AUDIO_STATUS_LABELS, AUDIO_STATUS_SEVERITY,
+    SUBTITLE_FILTER_LABELS, SUBTITLE_STATUS_LABELS,
+    build_media_check_evaluation, build_media_check_results,
+    set_czsk_availability_manual,
 )
 from .manual_split import (
     has_persisted_manual_split_selector,
@@ -182,6 +189,7 @@ templates.env.globals.update(
     build_video_language_profile=build_video_language_profile,
     detected_audio_track_language=detected_audio_track_language,
     effective_audio_track_language=effective_audio_track_language,
+    effective_internal_subtitle_language=effective_internal_subtitle_language,
     detected_external_subtitle_language=detected_external_subtitle_language,
     effective_external_subtitle_language=effective_external_subtitle_language,
     language_display_label=language_display_label,
@@ -425,6 +433,20 @@ def catalog_state_url(
     if sort:
         parameters.update(sort=sort, direction=direction)
     return f"/catalog/{filter_name}" + (f"?{urlencode(parameters)}" if parameters else "")
+
+
+def media_check_state_url(
+    subtitle_filter: str = "unresolved",
+    audio_filter: str = "all",
+    query: str = "",
+    page: int = 1,
+) -> str:
+    parameters = {"subtitle": subtitle_filter, "audio": audio_filter}
+    if normalized_query := normalize_search_query(query):
+        parameters["q"] = normalized_query
+    if page > 1:
+        parameters["page"] = page
+    return f"/media-check?{urlencode(parameters)}"
 
 
 def series_state_url(
@@ -1312,6 +1334,86 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "empty_collections": empty_collections,
             "message": message,
         })
+
+    @app.get("/media-check", response_class=HTMLResponse)
+    def media_check(
+        request: Request,
+        subtitle: str = "unresolved",
+        audio: str = "all",
+        q: str = "",
+        page: int = 1,
+        message: str | None = None,
+    ):
+        videos = _load_videos(sessions)
+        try:
+            results = build_media_check_results(
+                videos,
+                subtitle_filter=subtitle,
+                audio_filter=audio,
+                query=q,
+                page=page,
+                title_name_preference=get_preferred_title_language(request),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return templates.TemplateResponse(request, "media_check.html", {
+            "results": results,
+            "subtitle_filter_labels": SUBTITLE_FILTER_LABELS,
+            "audio_filter_labels": AUDIO_FILTER_LABELS,
+            "subtitle_status_labels": SUBTITLE_STATUS_LABELS,
+            "audio_status_labels": AUDIO_STATUS_LABELS,
+            "audio_status_severity": AUDIO_STATUS_SEVERITY,
+            "media_check_url": media_check_state_url,
+            "return_to": media_check_state_url(
+                results.subtitle_filter, results.audio_filter,
+                results.query, results.page,
+            ),
+            "message": message,
+        })
+
+    @app.post("/media-check/czsk-availability")
+    async def update_media_check_czsk_availability(request: Request):
+        form = await request.form()
+        action = str(form.get("action") or "").strip().casefold()
+        if action not in {"unavailable", "clear"}:
+            raise HTTPException(status_code=400, detail="Neplatná Media Check akce.")
+        try:
+            selected_ids = tuple(dict.fromkeys(
+                int(value) for value in form.getlist("video_ids")
+            ))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Neplatný výběr videí.") from exc
+        if not selected_ids:
+            raise HTTPException(status_code=400, detail="Vyberte alespoň jedno video.")
+
+        with sessions() as session:
+            videos = list(session.scalars(
+                select(Video).options(
+                    selectinload(Video.audio_tracks),
+                    selectinload(Video.internal_subtitles),
+                    selectinload(Video.external_subtitles),
+                ).where(Video.id.in_(selected_ids)).order_by(Video.id)
+            ).all())
+            if {video.id for video in videos} != set(selected_ids):
+                raise HTTPException(status_code=404, detail="Některé vybrané video neexistuje.")
+            try:
+                if action == "unavailable" and any(
+                    build_media_check_evaluation(video).factual.has_cs_or_sk
+                    for video in videos
+                ):
+                    raise ValueError(
+                        "CZ/SK nelze označit jako nedostupné u videa, které je skutečně obsahuje."
+                    )
+                for video in videos:
+                    set_czsk_availability_manual(
+                        video, "unavailable" if action == "unavailable" else None,
+                    )
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return local_redirect_response(form.get("return_to") or "/media-check")
 
     @app.get("/hierarchy-review/{collection_id}", response_class=HTMLResponse)
     def hierarchy_review_detail(
@@ -2250,6 +2352,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         direction: str = Form(""),
         video_sort: str = Form(""),
         video_direction: str = Form(""),
+        return_to: str = Form(""),
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=400, detail="Neplatný návratový filtr")
@@ -2262,6 +2365,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             session.commit()
+        if isinstance(return_to, str) and return_to:
+            return local_redirect_response(return_to)
         if catalog_title_id or series_path:
             target = hardsub_return_url(
                 filter_name, catalog_title_id or series_path, video_id, q, sort, direction,
@@ -2284,6 +2389,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         direction: str = Form(""),
         video_sort: str = Form(""),
         video_direction: str = Form(""),
+        return_to: str = Form(""),
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=400, detail="Neplatný návratový filtr")
@@ -2298,6 +2404,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if isinstance(return_to, str) and return_to:
+            return local_redirect_response(return_to)
         if catalog_title_id or series_path:
             target = hardsub_return_url(
                 filter_name, catalog_title_id or series_path, video_id, q, sort, direction,
@@ -2320,6 +2428,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         direction: str = Form(""),
         video_sort: str = Form(""),
         video_direction: str = Form(""),
+        return_to: str = Form(""),
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=400, detail="Neplatný návratový filtr")
@@ -2334,6 +2443,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if isinstance(return_to, str) and return_to:
+            return local_redirect_response(return_to)
         if catalog_title_id or series_path:
             target = hardsub_return_url(
                 filter_name, catalog_title_id or series_path, video_id, q, sort, direction,
