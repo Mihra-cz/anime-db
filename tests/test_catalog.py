@@ -662,6 +662,55 @@ def test_fractional_episode_is_detected_without_rounding_to_integer():
     assert classify_video("Anime/Title 14.5.mkv") == "other"
 
 
+@pytest.mark.parametrize(("filename", "number", "fraction", "season"), [
+    ("S01E05.5.mkv", 5, "5", 1),
+    ("S01E14.5v2.mkv", 14, "5", 1),
+])
+def test_fractional_sxxexx_precedes_integer_token_without_losing_season_or_revision(
+    filename, number, fraction, season,
+):
+    detection = detect_episode_number(filename)
+
+    assert detection.kind == "fractional"
+    assert detection.number == number
+    assert detection.fraction == fraction
+    assert detection.display_value == f"{number}.{fraction}"
+    assert str(detection.sortable_episode_value) == f"{number}.{fraction}"
+    assert detection.season_hint == season
+    assert detection.filename_episode_hint == number
+    assert detection.title_candidate is None
+    assert derive_episode_number(filename) is None
+    assert classify_video(f"Anime/Show/{filename}") == "other"
+
+
+@pytest.mark.parametrize(("filename", "kind", "number", "season"), [
+    ("S01E05.mkv", "standard", 5, 1),
+    ("S01E05v2.mkv", "standard", 5, 1),
+    ("01v2.mkv", "standard", 1, None),
+    ("00.mkv", "zero", 0, None),
+])
+def test_revision_and_zero_parser_outputs_remain_stable(
+    filename, kind, number, season,
+):
+    detection = detect_episode_number(filename)
+
+    assert detection.kind == kind
+    assert detection.number == number
+    assert detection.season_hint == season
+    assert detection.fraction is None
+    assert derive_episode_number(filename) == (number if kind == "standard" else None)
+
+
+@pytest.mark.parametrize("filename", [
+    "XS01E05.5.mkv",
+    "S01E05.5v.mkv",
+    "S01E05.5v2extra.mkv",
+])
+def test_fractional_sxxexx_does_not_accept_embedded_or_invalid_revision_tokens(filename):
+    assert detect_episode_number(filename).kind == "unknown"
+    assert derive_episode_number(filename) is None
+
+
 @pytest.mark.parametrize(("filename", "supplementary_type", "number", "display"), [
     ("Title - OVA 01.mkv", "ova", 1, "OVA 01"),
     ("Title - OVA 02.mkv", "ova", 2, "OVA 02"),

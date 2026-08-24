@@ -20,9 +20,13 @@ from app.hierarchy_provenance import (
     RELATED_NAMED_CHILD_REVIEW_REASON,
     SUPPLEMENTARY_NAMED_CHILD_REVIEW_REASON,
 )
+from app.hierarchy_rebuild import (
+    apply_hierarchy_rebuild_plan,
+    build_hierarchy_rebuild_plan,
+)
 from app.hierarchy_review import refresh_collection_state
 from app.migrations import migrate_schema
-from app.models import CatalogCollection, CatalogTitle, Video, utc_now
+from app.models import CatalogCollection, CatalogTitle, TitleMetadata, Video, utc_now
 from app.numbering import summarize_title_numbering
 from app.scanner import scan_library
 
@@ -386,3 +390,117 @@ def test_duplicate_semantics_match_after_scan_and_startup(
         assert HierarchyIssueCode.DUPLICATE_PRIMARY_MISSING in {
             issue.code for issue in evaluation.blocking_issues
         }
+
+
+def _season_part_numbering_snapshot(session: Session) -> dict[str, object]:
+    collection = _load_collection(session)
+    evaluation = evaluate_collection_hierarchy(
+        collection,
+        list(collection.videos),
+        include_legacy_fallback=False,
+    )
+    return {
+        "collection": (
+            collection.relative_root_path,
+            collection.hierarchy_status,
+            collection.hierarchy_note,
+        ),
+        "titles": tuple(sorted(
+            (
+                title.relative_root_path,
+                title.effective_part_type,
+                title.effective_season_number,
+                title.effective_part_number,
+            )
+            for title in collection.titles
+        )),
+        "videos": tuple(sorted(
+            (
+                video.relative_path,
+                video.catalog_title.relative_root_path,
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.episode_number_source,
+                video.media_part_number,
+            )
+            for video in collection.videos
+        )),
+        "issues": tuple(sorted(issue.code.value for issue in evaluation.issues)),
+    }
+
+
+def test_fractional_season_part_numbering_matches_scan_startup_runtime_and_rebuild(
+    tmp_path,
+    monkeypatch,
+):
+    library = tmp_path / "library"
+    relative_paths = [
+        "Anime/Show/Season 1/Part 1/S01E01.mkv",
+        "Anime/Show/Season 1/Part 1/S01E01.5v2.mkv",
+        "Anime/Show/Season 1/Part 1/S01E02.mkv",
+        "Anime/Show/Season 1/Part 2/S01E01.mkv",
+        "Anime/Show/Season 1/Part 2/S01E02.mkv",
+        "Anime/Show/Season 2/Part 1/S02E01.mkv",
+        "Anime/Show/Season 2/Part 1/S02E02.mkv",
+    ]
+    _write_paths(library, relative_paths)
+    monkeypatch.setattr(
+        "app.scanner.service.probe_video",
+        lambda *_args, **_kwargs: PROBE_RESULT,
+    )
+    engine = create_engine(f"sqlite:///{tmp_path / 'season-part-lifecycle.db'}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, library)
+        collection = _load_collection(session)
+        assert len(collection.titles) == 3
+        for title in collection.titles:
+            title.metadata_record = TitleMetadata(
+                catalog_title_id=title.id,
+                display_title=title.local_title,
+                episode_count=2,
+            )
+        refresh_collection_state(collection)
+        session.commit()
+        fresh_scan = _season_part_numbering_snapshot(session)
+        before_startup = build_hierarchy_rebuild_plan(session)
+        assert before_startup.summary.logical_changes == 0
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        startup = _season_part_numbering_snapshot(session)
+        collection = _load_collection(session)
+        refresh_collection_state(collection)
+        session.flush()
+        runtime = _season_part_numbering_snapshot(session)
+
+        first_plan = build_hierarchy_rebuild_plan(session)
+        assert first_plan.summary.logical_changes == 0
+        assert apply_hierarchy_rebuild_plan(session, first_plan).applied is True
+        session.commit()
+
+    with Session(engine) as session:
+        second_plan = build_hierarchy_rebuild_plan(session)
+        rebuilt = _season_part_numbering_snapshot(session)
+
+    assert second_plan.summary.logical_changes == 0
+    assert fresh_scan == startup == runtime == rebuilt
+    absolute_by_path = {
+        row[0]: row[4] for row in rebuilt["videos"]
+    }
+    assert absolute_by_path[
+        "Anime/Show/Season 1/Part 1/S01E01.mkv"
+    ] == 1
+    assert absolute_by_path[
+        "Anime/Show/Season 1/Part 2/S01E01.mkv"
+    ] == 3
+    assert absolute_by_path[
+        "Anime/Show/Season 2/Part 1/S02E01.mkv"
+    ] == 5
+    fractional = next(
+        row for row in rebuilt["videos"] if row[0].endswith("S01E01.5v2.mkv")
+    )
+    assert fractional[2:6] == (None, None, None, "fractional")

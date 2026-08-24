@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 import re
@@ -985,7 +986,13 @@ EXPLICIT_EPISODE = re.compile(
 )
 SXXEXX_TOKEN = re.compile(
     r"(?<![a-z0-9])s0*(?P<season>\d{1,3})[\s._-]*"
-    r"e0*(?P<episode>\d{1,3})(?:v\d+)?(?=$|[^a-z0-9])",
+    r"e0*(?P<episode>\d{1,3})(?!\.\d)(?:v\d+)?(?=$|[^a-z0-9])",
+    re.IGNORECASE,
+)
+SXXEXX_FRACTIONAL_TOKEN = re.compile(
+    r"(?<![a-z0-9])s0*(?P<season>\d{1,3})[\s._-]*"
+    r"e0*(?P<episode>\d{1,3})\.(?P<fraction>\d+)"
+    r"(?:v\d+)?(?=$|[^a-z0-9])",
     re.IGNORECASE,
 )
 SXXEXX_BRACKETED_SUPPLEMENTARY = re.compile(
@@ -1052,6 +1059,15 @@ class EpisodeNumberDetection:
         return self.number if self.is_supplementary else None
 
     @property
+    def sortable_episode_value(self) -> Decimal | None:
+        """Return an exact filename position without making it canonical."""
+        if self.kind == "standard" and self.number is not None:
+            return Decimal(self.number)
+        if self.kind == "fractional" and self.number is not None and self.fraction:
+            return Decimal(f"{self.number}.{self.fraction}")
+        return None
+
+    @property
     def display_value(self) -> str | None:
         if self.kind == "zero":
             return "00"
@@ -1093,6 +1109,17 @@ def detect_episode_number(filename: str) -> EpisodeNumberDetection:
         return EpisodeNumberDetection(
             "supplementary", number, supplementary_type=supplementary_type,
             context_hint=context_hint,
+        )
+    if match := SXXEXX_FRACTIONAL_TOKEN.search(stem):
+        number = int(match.group("episode"))
+        title_candidate = stem[match.end():].lstrip(" -_.").strip() or None
+        return EpisodeNumberDetection(
+            "fractional",
+            number,
+            match.group("fraction"),
+            season_hint=int(match.group("season")),
+            filename_episode_hint=number,
+            title_candidate=title_candidate,
         )
     if match := SXXEXX_TOKEN.search(stem):
         number = int(match.group("episode"))
@@ -1171,12 +1198,14 @@ def video_sort_key(video: Video):
         season_key = (1, 0, "")
     else:
         season_key = (2, 0, season.casefold())
-    episode = derive_episode_number(video.filename)
+    detection = detect_episode_number(video.filename)
+    episode = detection.sortable_episode_value
+    filename_has_episode_position = episode is not None
     return (
-        video.file_type != "episode",
+        not filename_has_episode_position and video.file_type != "episode",
         season_key,
         episode is None,
-        episode if episode is not None else 0,
+        episode if episode is not None else Decimal(0),
         TYPE_ORDER.get(video.file_type, 99),
         video.filename.casefold(),
     )
@@ -1208,10 +1237,10 @@ def sort_title_videos(
 
     def field(video: Video):
         season = derive_season_info(video.relative_path).label or ""
-        episode = derive_episode_number(video.filename)
+        episode = detect_episode_number(video.filename).sortable_episode_value
         fields = {
             "season": natural_sort_key(season),
-            "episode": (episode is None, episode or 0),
+            "episode": (episode is None, episode or Decimal(0)),
             "filename": natural_sort_key(video.filename),
             "type": (TYPE_ORDER.get(video.file_type, 99), natural_sort_key(video.file_type)),
             "resolution": (video.width or 0) * (video.height or 0),

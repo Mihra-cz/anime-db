@@ -3188,6 +3188,109 @@ není effective, přibyl také jeden `generic_structural_type`.
 
 ---
 
+## 6.47 Deterministický fractional a Season/Part numbering
+
+Commit 6 uzavírá parserové a numbering nálezy HIER-07 a HIER-08 bez změny DB
+schema, manual authority modelu z Commitu 5 nebo collection/title derivation
+enginu z Commitu 4B. Audit parseru potvrdil tuto precedence:
+
+```text
+SxxExx [SP]
+→ explicitní supplementary sequence
+→ fractional SxxExx
+→ integer SxxExx
+→ obecné explicitní/trailing fractional
+→ obecné explicitní/trailing integer
+→ čistě číselný bezpečný fallback
+```
+
+Původní `SXXEXX_TOKEN` končil před desetinnou tečkou, protože ji jeho boundary
+považovala za platný nealfanumerický oddělovač. `S01E05.5` se proto chybně
+uložilo jako E5 s title suffixem `5` a `S01E14.5v2` jako E14 se suffixem `5v2`.
+Nové specifické fractional pravidlo běží před integer tokenem a integer regex
+současně odmítá začátek desetinné hodnoty. Oba příklady nyní zachovají
+`season_hint=1`, celé číslo a přesný text fraction; `v2` je pouze plně
+spotřebovaný revision suffix. `derive_episode_number()` je záměrně nevrací jako
+integer canonical epizodu.
+
+Persisted episode pole zůstávají integer. Fractional pozice se reprezentuje
+beze ztráty jako dvojice `number: int` a `fraction: str` v
+`EpisodeNumberDetection`; `local_episode_number`, `season_episode_number`,
+`absolute_episode_number` a `external_episode_number` zůstávají `NULL` a
+`episode_number_source=fractional`. Přesné řazení `5, 5.5, 6` používá pouze
+read-time `Decimal`, nikdy binary float ani nový DB typ. Samotná fractional
+pozice stále není důkaz Recap, OVA nebo jiného supplementary obsahu.
+
+`recalculate_title_numbering()` je nadále jediný zápis parserového inputu do
+derived numbering polí. Ruční episode override má přednost. Bez override se
+však automatic vstup nově potlačí i pro effective video-level
+`content_type_manual`, takže změna standardní epizody na Recap zachová raw
+`local_episode_number`, ale odstraní stale season/absolute/external canonical
+numbering; návrat do automatic klasifikace jej deterministicky obnoví. Fractional ručně klasifikovaný jako Recap zůstává přesně
+fractional filename pozicí a současně effective supplementary. Confirmed
+secondary duplicate zůstává ve fyzické skupině, ale summary/evaluation jej
+nepočítá jako další canonical epizodu. Manual numbering se nepřepisuje.
+
+Absolute numbering už nepoužívá jeden `structural_sequence_number`, který pro
+Part vybral Part ordinal místo Season. Tituly se řadí lexikograficky podle
+samostatných effective os `season_number`, potom `part_number`, pak podle
+autoritativního sort fallbacku a stabilní cesty/ID. Proto je pořadí
+`S1P1 → S1P2 → S2P1`; kombinace `S1 → S2P1 → S2P2 → S3` funguje bez
+persistování umělého Part 0. Standalone `Part 1/2` si ponechává
+`season_number=NULL` a řadí se podle Part osy. `S2P1` už není omylem považováno
+za první strukturální titul jen proto, že jeho Part ordinal je 1.
+
+Známý absolute offset se skládá z oficiálních episode counts všech předchozích
+canonical titulů v tomto pořadí. Supplementary title se do součtu nepočítá a
+chybějící metadata supplementary titulu známou canonical řadu nepřeruší.
+Explicitní `episode_start_offset`, numbering mode i video-level manual override
+zůstávají autoritativní podle dosavadní semantiky. `Video.media_part_number` se
+v hierarchy sortu ani offsetu vůbec nepoužívá.
+
+Lifecycle regresní test staví synthetic knihovnu
+`Season 1/Part 1`, `Season 1/Part 2`, `Season 2/Part 1` včetně
+`S01E01.5v2`. Fresh scan, startup `migrate_schema()`, runtime finalization,
+rebuild dry-run/apply a druhý rebuild mají shodný normalizovaný logický stav;
+druhý rebuild vrací nulový logical diff. Stejný shared parser a numbering volá
+scanner, startup, runtime finalizer i rebuild.
+
+Historická acceptance použila novou SQLite-backup kopii původní
+`anime-rebuild-apply-test-2026-08-24.db`; originální testovací DB zůstala
+nezměněná. Dry-run před startupem vrátil collections `+0/~16/-0`, titles
+`+0/~1/-0`, assignments `0`, numbering `104`, issues `202` a logical changes
+`121`. Šestnáct collection změn jsou již zdokumentované Commit-5 derived
+status/note opravy. Jediný automatic title update je přímý důsledek opravy
+parseru: `Kono Yo ...` má E1–E26 a samostatné E26.5, takže po odstranění falešné
+duplicate E26 dosavadní shared direct-root inference bezpečně vrátí Season 1.
+Membership se tím nemění.
+
+Numbering rozdíl tvoří 46 nově dostupných hierarchy offsetů, které dříve blokoval
+Part ordinal nebo supplementary title bez metadata, 56 oprav offsetu, do něhož
+se dříve započetl supplementary metadata count, jedno odstranění stale E13 po
+ruční klasifikaci Recap a jedna oprava `S01E26.5-SP` z falešného E26 na
+fractional. Collection/title/video počty zůstaly `170/247/3100`; fingerprint
+membershipu, manual hierarchy authority a selector authority byl před a po
+startup shodný. Po startupu následný dry-run vrátil collections `+0/~0/-0`,
+titles `+0/~0/-0`, assignments `0`, numbering `0`, issues `202` a
+`logical_changes=0`.
+
+Projected issue rozpad acceptance DB je: `unknown_or_missing_numbering 93`,
+`incomplete_manual_snapshot 45`, `generic_structural_type 25`,
+`confirmed_duplicate 13`, `nonstandard_numbering 12`, `canonical_duplicate 6`,
+`long_flat_series 4`, `soft_long_flat_series 3`, `missing_part_number 2`,
+`numbering_gap 1` a `supplementary_without_number 1`. Tři soft warnings nejsou
+blocking, proto summary uvádí `issues=202`.
+
+Regresní sada pokrývá `S01E05.5`, `S01E14.5v2`, integer/revision/zero baseline,
+negativní tokeny, exact fractional sort, obě smíšené Season/Part struktury,
+standalone Part, supplementary offset, stale effective content numbering,
+confirmed secondary duplicate, manual numbering a izolaci Media Part. Cílená
+hierarchy/parser/numbering sada prošla `427 passed`; celý projektový suite
+`679 passed`. Commit 6 nemění schema, manual/split authority ani fyzické cesty.
+Produkční `data/anime.db` ani NAS nebyly použity pro write test.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

@@ -293,27 +293,27 @@ def recalculate_title_numbering(
     detections = [detect_episode_number(video.filename) for video in videos]
     part_type = _numbering_part_type(title)
     title_is_supplemental = part_type in SUPPLEMENTAL_PART_TYPES
-    detected = [
-        item.number if item.is_standard and not title_is_supplemental else None
+    local_values = [
+        item.number
+        if item.is_standard and not title_is_supplemental
+        else None
         for item in detections
+    ]
+    automatic_values = [
+        None if video.content_type_manual else local
+        for video, local in zip(videos, local_values)
     ]
     effective_values = [
         video.episode_number_manual_override
         if video.episode_number_manual_override is not None else local
-        for video, local in zip(videos, detected)
+        for video, local in zip(videos, automatic_values)
     ]
     numeric_values = [value for value in effective_values if value is not None]
     explicit_offset = title.episode_start_offset
-    structural_sequence_number = (
-        _numbering_part_number(title)
-        if part_type in {"part", "cour"}
-        else _numbering_season_number(title)
-    )
     inferred_offset = (
         known_preceding_episodes
         if explicit_offset is None
-        and structural_sequence_number
-        and structural_sequence_number > 1
+        and known_preceding_episodes is not None
         else None
     )
     offset = explicit_offset if explicit_offset is not None else inferred_offset
@@ -321,7 +321,7 @@ def recalculate_title_numbering(
     has_external = title.metadata_record is not None if external_linked is None else external_linked
 
     for video, detection, local, effective in zip(
-        videos, detections, detected, effective_values
+        videos, detections, local_values, effective_values
     ):
         video.local_episode_number = local
         if effective is None:
@@ -346,14 +346,14 @@ def recalculate_title_numbering(
         elif title.numbering_mode == "season_local":
             season = effective
             absolute = effective + offset if offset is not None else (
-                effective if (structural_sequence_number or 1) == 1 else None
+                effective if _can_start_absolute_sequence(title) else None
             )
         elif offset is not None:
             season = effective - offset if local_is_absolute else effective
             absolute = effective if local_is_absolute else effective + offset
         else:
             season = effective
-            absolute = effective if (structural_sequence_number or 1) == 1 else None
+            absolute = effective if _can_start_absolute_sequence(title) else None
         video.season_episode_number = season if season and season > 0 else None
         video.absolute_episode_number = absolute if absolute and absolute > 0 else None
         video.external_episode_number = video.season_episode_number if has_external else None
@@ -369,23 +369,59 @@ def recalculate_collection_numbering(
 ) -> None:
     preceding = 0
     preceding_known = True
+    has_preceding_canonical_title = False
     for title in sorted(
         collection.titles,
-        key=lambda value: (
-            _numbering_season_number(value) or 0,
-            _numbering_part_number(value) or 0,
-            _numbering_sort_order(value),
-        ),
+        key=_numbering_title_sort_key,
     ):
-        known = preceding if preceding_known and preceding else None
+        title_is_supplemental = (
+            _numbering_part_type(title) in SUPPLEMENTAL_PART_TYPES
+        )
+        known = (
+            preceding
+            if (
+                not title_is_supplemental
+                and preceding_known
+                and has_preceding_canonical_title
+            )
+            else None
+        )
         recalculate_title_numbering(
             title, videos_by_title.get(title.id, []), known_preceding_episodes=known
         )
+        if title_is_supplemental:
+            continue
+        has_preceding_canonical_title = True
         official_count = title.metadata_record.episode_count if title.metadata_record else None
         if official_count is not None:
             preceding += official_count
         else:
             preceding_known = False
+
+
+def _can_start_absolute_sequence(title: CatalogTitle) -> bool:
+    """Whether one isolated structural identity can safely begin at absolute E1."""
+    season_number = _numbering_season_number(title)
+    part_number = _numbering_part_number(title)
+    part_type = _numbering_part_type(title)
+    if season_number is not None:
+        return season_number == 1 and (
+            part_type not in {"part", "cour"} or part_number in {None, 1}
+        )
+    if part_type in {"part", "cour"} and part_number is not None:
+        return part_number == 1
+    return True
+
+
+def _numbering_title_sort_key(title: CatalogTitle):
+    """Keep Season and Part as separate axes with deterministic fallbacks."""
+    return (
+        _numbering_season_number(title) or 0,
+        _numbering_part_number(title) or 0,
+        _numbering_sort_order(title),
+        title.relative_root_path.casefold(),
+        title.id or 0,
+    )
 
 
 def _numbering_part_type(title: CatalogTitle) -> str:

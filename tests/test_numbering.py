@@ -1,6 +1,6 @@
 import pytest
 
-from app.catalog import detect_episode_number
+from app.catalog import detect_episode_number, sort_title_videos, video_sort_key
 from app.models import CatalogCollection, CatalogTitle, TitleMetadata, Video
 from app.numbering import (
     apply_sequential_numbering, collection_requires_numbering_review,
@@ -215,6 +215,195 @@ def test_unknown_preceding_title_count_prevents_later_inferred_absolute_offset()
     assert items[titles[2].id][0].absolute_episode_number is None
 
 
+def _collection_part(
+    collection, *, identifier, season, part_number, count, part_type="part",
+):
+    label = f"S{season}" if season is not None else f"Part {part_number}"
+    title = CatalogTitle(
+        id=identifier,
+        collection=collection,
+        local_title=label,
+        normalized_local_title=label.casefold(),
+        relative_root_path=f"Anime/Show/{label}-{identifier}",
+        part_type=part_type,
+        season_number=season,
+        part_number=part_number,
+        sort_order=(season or 0) * 1000 + (part_number or 0),
+        numbering_mode="season_local",
+    )
+    title.metadata_record = TitleMetadata(
+        catalog_title_id=identifier,
+        display_title=label,
+        episode_count=count,
+    )
+    title_videos = [
+        Video(
+            id=identifier * 100 + number,
+            relative_path=f"{title.relative_root_path}/E{number:02}.mkv",
+            root_folder="Anime",
+            filename=f"E{number:02}.mkv",
+            size=1,
+            mtime_ns=number,
+            catalog_title=title,
+            catalog_collection=collection,
+        )
+        for number in range(1, count + 1)
+    ]
+    return title, title_videos
+
+
+def test_collection_numbering_orders_s1p1_s1p2_then_s2p1_and_accumulates_offsets():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    s2p1, s2p1_videos = _collection_part(
+        collection, identifier=3, season=2, part_number=1, count=12,
+    )
+    s1p2, s1p2_videos = _collection_part(
+        collection, identifier=2, season=1, part_number=2, count=6,
+    )
+    s1p1, s1p1_videos = _collection_part(
+        collection, identifier=1, season=1, part_number=1, count=6,
+    )
+
+    recalculate_collection_numbering(collection, {
+        s2p1.id: s2p1_videos,
+        s1p2.id: s1p2_videos,
+        s1p1.id: s1p1_videos,
+    })
+
+    assert [video.absolute_episode_number for video in s1p1_videos] == list(range(1, 7))
+    assert [video.absolute_episode_number for video in s1p2_videos] == list(range(7, 13))
+    assert [video.absolute_episode_number for video in s2p1_videos] == list(range(13, 25))
+    assert [video.season_episode_number for video in s2p1_videos] == list(range(1, 13))
+
+
+def test_collection_numbering_supports_seasons_with_and_without_parts():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    s3, s3_videos = _collection_part(
+        collection, identifier=4, season=3, part_number=None, count=2,
+        part_type="season",
+    )
+    s2p2, s2p2_videos = _collection_part(
+        collection, identifier=3, season=2, part_number=2, count=3,
+    )
+    s1, s1_videos = _collection_part(
+        collection, identifier=1, season=1, part_number=None, count=6,
+        part_type="season",
+    )
+    s2p1, s2p1_videos = _collection_part(
+        collection, identifier=2, season=2, part_number=1, count=3,
+    )
+
+    recalculate_collection_numbering(collection, {
+        title.id: items for title, items in (
+            (s3, s3_videos), (s2p2, s2p2_videos),
+            (s1, s1_videos), (s2p1, s2p1_videos),
+        )
+    })
+
+    assert s1_videos[0].absolute_episode_number == 1
+    assert s2p1_videos[0].absolute_episode_number == 7
+    assert s2p2_videos[0].absolute_episode_number == 10
+    assert s3_videos[0].absolute_episode_number == 13
+    assert s1.part_number is None and s3.part_number is None
+
+
+def test_standalone_parts_keep_null_season_and_use_part_order_for_offsets():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    part_two, part_two_videos = _collection_part(
+        collection, identifier=2, season=None, part_number=2, count=2,
+    )
+    part_one, part_one_videos = _collection_part(
+        collection, identifier=1, season=None, part_number=1, count=2,
+    )
+
+    recalculate_collection_numbering(collection, {
+        part_two.id: part_two_videos,
+        part_one.id: part_one_videos,
+    })
+
+    assert part_one.season_number is None and part_two.season_number is None
+    assert part_one_videos[0].absolute_episode_number == 1
+    assert part_two_videos[0].absolute_episode_number == 3
+
+
+def test_isolated_s2p1_does_not_masquerade_as_first_structural_title():
+    title, items = part(1), videos(1, 2)
+    title.season_number = 2
+
+    recalculate_title_numbering(title, items)
+
+    assert [video.season_episode_number for video in items] == [1, 2]
+    assert all(video.absolute_episode_number is None for video in items)
+
+
+def test_supplementary_title_does_not_break_or_increase_canonical_offset():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    s1, s1_videos = _collection_part(
+        collection, identifier=1, season=1, part_number=None, count=2,
+        part_type="season",
+    )
+    ova = CatalogTitle(
+        id=2, collection=collection, local_title="OVA", normalized_local_title="ova",
+        relative_root_path="Anime/Show/OVA", part_type="ova", sort_order=1500,
+    )
+    ova.metadata_record = TitleMetadata(
+        catalog_title_id=ova.id,
+        display_title="OVA",
+        episode_count=5,
+    )
+    ova_video = Video(
+        id=200, relative_path="Anime/Show/OVA/OVA 01.mkv", root_folder="Anime",
+        filename="OVA 01.mkv", size=1, mtime_ns=1,
+        catalog_title=ova, catalog_collection=collection,
+    )
+    s2, s2_videos = _collection_part(
+        collection, identifier=3, season=2, part_number=None, count=2,
+        part_type="season",
+    )
+
+    recalculate_collection_numbering(collection, {
+        s1.id: s1_videos, ova.id: [ova_video], s2.id: s2_videos,
+    })
+
+    assert ova_video.absolute_episode_number is None
+    assert s2_videos[0].absolute_episode_number == 3
+
+
+def test_media_part_number_does_not_affect_hierarchy_part_offsets():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    first, first_videos = _collection_part(
+        collection, identifier=1, season=1, part_number=1, count=2,
+    )
+    second, second_videos = _collection_part(
+        collection, identifier=2, season=1, part_number=2, count=2,
+    )
+    first_videos[0].media_part_number = 9
+    second_videos[0].media_part_number = 1
+
+    recalculate_collection_numbering(collection, {
+        first.id: first_videos, second.id: second_videos,
+    })
+
+    assert first_videos[0].absolute_episode_number == 1
+    assert second_videos[0].absolute_episode_number == 3
+    assert (first.effective_part_number, second.effective_part_number) == (1, 2)
+
+
 def test_verified_collection_with_unknown_numbering_requires_review():
     collection = CatalogCollection(
         local_title="Show", normalized_local_title="show",
@@ -358,6 +547,61 @@ def test_fractional_episode_does_not_create_gap_between_fourteen_and_fifteen():
     assert summary.gaps == ()
 
 
+def test_fractional_episode_position_sorts_exactly_between_adjacent_integers():
+    items = [
+        Video(
+            id=index,
+            relative_path=f"Anime/Show/Season 1/{filename}",
+            root_folder="Anime",
+            filename=filename,
+            size=1,
+            mtime_ns=index,
+            file_type="episode" if ".5" not in filename else "other",
+        )
+        for index, filename in enumerate(
+            ("Show E06.mkv", "Show E05.5.mkv", "Show E05.mkv"), 1
+        )
+    ]
+
+    assert [video.filename for video in sorted(items, key=video_sort_key)] == [
+        "Show E05.mkv", "Show E05.5.mkv", "Show E06.mkv",
+    ]
+    explicitly_sorted, _, _ = sort_title_videos(items, "episode", "asc")
+    assert [video.filename for video in explicitly_sorted] == [
+        "Show E05.mkv", "Show E05.5.mkv", "Show E06.mkv",
+    ]
+
+
+def test_fractional_sxxexx_revision_stays_noncanonical_during_recalculation():
+    title = CatalogTitle(
+        local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1",
+        part_type="season", season_number=1,
+    )
+    video = Video(
+        id=1,
+        relative_path="Anime/Show/Season 1/S01E14.5v2.mkv",
+        root_folder="Anime",
+        filename="S01E14.5v2.mkv",
+        size=1,
+        mtime_ns=1,
+        catalog_title=title,
+    )
+
+    recalculate_title_numbering(title, [video])
+
+    detection = detect_episode_number(video.filename)
+    assert detection.display_value == "14.5"
+    assert detection.season_hint == 1
+    assert (
+        video.local_episode_number,
+        video.season_episode_number,
+        video.absolute_episode_number,
+        video.external_episode_number,
+        video.episode_number_source,
+    ) == (None, None, None, None, "fractional")
+
+
 def test_classified_fractional_recap_is_resolved_without_entering_completeness():
     collection = CatalogCollection(
         local_title="Show", normalized_local_title="show", relative_root_path="Anime/Show",
@@ -387,6 +631,52 @@ def test_classified_fractional_recap_is_resolved_without_entering_completeness()
     assert summary.nonstandard == 0
     assert summary.resolved_supplemental == 1
     assert summary.requires_review is False
+    assert (
+        recap.local_episode_number,
+        recap.season_episode_number,
+        recap.absolute_episode_number,
+        recap.external_episode_number,
+    ) == (None, None, None, None)
+
+
+def test_manual_supplementary_classification_clears_and_restores_derived_numbering():
+    title = CatalogTitle(
+        local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1",
+        part_type="season", season_number=1,
+    )
+    video = Video(
+        id=1,
+        relative_path="Anime/Show/Season 1/Show E05.mkv",
+        root_folder="Anime",
+        filename="Show E05.mkv",
+        size=1,
+        mtime_ns=1,
+        catalog_title=title,
+    )
+
+    recalculate_title_numbering(title, [video])
+    assert (video.local_episode_number, video.season_episode_number) == (5, 5)
+
+    video.content_type_manual = "recap"
+    recalculate_title_numbering(title, [video])
+    assert effective_video_numbering(video, title).is_supplementary
+    assert (
+        video.local_episode_number,
+        video.season_episode_number,
+        video.absolute_episode_number,
+        video.external_episode_number,
+    ) == (5, None, None, None)
+    assert video.episode_number_source == "unknown"
+
+    video.content_type_manual = None
+    recalculate_title_numbering(title, [video])
+    assert effective_video_numbering(video, title).is_standard
+    assert (
+        video.local_episode_number,
+        video.season_episode_number,
+        video.absolute_episode_number,
+    ) == (5, 5, 5)
 
 
 def test_numbered_ova_keeps_sequence_outside_standard_completeness():
