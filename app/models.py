@@ -329,6 +329,7 @@ class AudioTrack(Base):
     stream_index: Mapped[int] = mapped_column(Integer)
     codec: Mapped[str | None] = mapped_column(String, nullable=True)
     language: Mapped[str] = mapped_column(String, default="unknown")
+    manual_language: Mapped[str | None] = mapped_column(String, nullable=True)
     __table_args__ = (UniqueConstraint("video_id", "stream_index"),)
 
 
@@ -352,4 +353,5 @@ class ExternalSubtitle(Base):
     codec: Mapped[str] = mapped_column(String)
     language: Mapped[str] = mapped_column(String, default="unknown")
     normalized_language: Mapped[str] = mapped_column(String, default="unknown", server_default="unknown")
+    manual_language: Mapped[str | None] = mapped_column(String, nullable=True)
     __table_args__ = (UniqueConstraint("video_id", "relative_path"),)

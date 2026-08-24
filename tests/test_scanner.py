@@ -6,12 +6,18 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.catalog import set_manual_hardsub
+from app.catalog import (
+    build_video_language_profile,
+    set_audio_track_manual_language,
+    set_external_subtitle_manual_language,
+    set_manual_hardsub,
+)
 from app.hierarchy_review import (
     MISSING_DUPLICATE_PRIMARY_REVIEW_REASON, SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
     confirm_duplicate_videos, set_manual_duplicate_status,
 )
 from app.models import CatalogCollection, CatalogTitle, ExternalSubtitle, Video
+from app.migrations import migrate_schema
 from app.numbering import unresolved_duplicate_groups
 from app.scanner import LibrarySafetyError, iter_videos, scan_library
 
@@ -446,6 +452,72 @@ def test_updates_language_of_existing_external_subtitle(tmp_path: Path, monkeypa
         assert subtitle.id == subtitle_id
         assert subtitle.language == "sk"
         assert session.scalar(select(func.count()).select_from(ExternalSubtitle)) == 1
+
+
+def test_media_language_overrides_survive_rescan_detected_change_and_startup(
+    tmp_path: Path, monkeypatch,
+):
+    video_path = tmp_path / "Show" / "E01.mkv"
+    video_path.parent.mkdir()
+    video_path.write_bytes(b"video")
+    (video_path.parent / "E01.srt").write_text("subtitle", encoding="utf-8")
+    audio_language = "unknown"
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: {
+        **PROBE_RESULT,
+        "audio": [{"stream_index": 1, "codec": "aac", "language": audio_language}],
+    })
+    detected_language = "unknown"
+    monkeypatch.setattr(
+        "app.scanner.service.read_and_detect", lambda _: detected_language,
+    )
+    engine = create_engine(f"sqlite:///{tmp_path / 'subtitle-lifecycle.db'}")
+    sessions = sessionmaker(engine)
+    Base.metadata.create_all(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        subtitle = session.scalar(select(ExternalSubtitle))
+        scanned_video = session.scalar(select(Video))
+        subtitle_id = subtitle.id
+        audio_track = scanned_video.audio_tracks[0]
+        audio_track_id = audio_track.id
+        assert scanned_video.manual_hardsub_cs is False
+        assert scanned_video.manual_hardsub_sk is False
+        assert scanned_video.manual_hardsub_verified_at is None
+        set_audio_track_manual_language(audio_track, "ja")
+        set_external_subtitle_manual_language(subtitle, "cs")
+        session.commit()
+
+        audio_language = "eng"
+        detected_language = "eng"
+        video_path.write_bytes(b"changed video")
+        scan_library(session, tmp_path)
+        session.commit()
+        subtitle = session.get(ExternalSubtitle, subtitle_id)
+        video = session.scalar(select(Video))
+        audio_track = video.audio_tracks[0]
+        assert audio_track.id == audio_track_id
+        assert audio_track.language == "eng"
+        assert audio_track.manual_language == "ja"
+        assert subtitle.language == "eng"
+        assert subtitle.normalized_language == "en"
+        assert subtitle.manual_language == "cs"
+        profile = build_video_language_profile(video)
+        assert profile.audio_status == "japanese"
+        assert profile.subtitle_status == "preferred"
+
+    migrate_schema(engine)
+
+    with sessions() as session:
+        subtitle = session.get(ExternalSubtitle, subtitle_id)
+        video = session.scalar(select(Video))
+        audio_track = video.audio_tracks[0]
+        assert audio_track.manual_language == "ja"
+        assert subtitle.manual_language == "cs"
+        profile = build_video_language_profile(video)
+        assert profile.audio_status == "japanese"
+        assert profile.external_subtitle_languages == {"cs"}
+        assert profile.subtitle_status == "preferred"
 
 
 def test_preserves_two_external_subtitles_with_same_language(tmp_path: Path, monkeypatch):

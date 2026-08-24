@@ -3291,6 +3291,115 @@ Produkční `data/anime.db` ani NAS nebyly použity pro write test.
 
 ---
 
+## 6.48 Effective audio a subtitle availability
+
+Commit 7 sjednocuje media language stav videa do dynamického
+`build_video_language_profile(video)`. Source data, manual authority a derived
+výsledek jsou oddělené:
+
+```text
+source
+→ ffprobe AudioTrack.language + stream_index
+→ InternalSubtitle detected language/title
+→ ExternalSubtitle detected language + relative_path
+
+manual authority
+→ AudioTrack.manual_language
+→ ExternalSubtitle.manual_language
+→ Video.manual_hardsub_cs/sk + manual_hardsub_verified_at
+
+derived read-model
+→ effective language jednotlivých stop
+→ audio_status
+→ subtitle_status
+```
+
+Jediný `normalize_language()` používá pro hlavní sledované jazyky canonical
+hodnoty `cs`, `sk`, `en` a `ja`; aliasy `cze/ces`, `slo/slk`, `eng` a `jpn`
+končí na stejné hodnotě a `unknown` zůstává neznámé. Jazyk se neodhaduje z
+pořadí stopy, filename videa, země původu ani disposition flags. Ffprobe
+`default`, `forced`, `commentary` a `hearing_impaired` jsou pro základní
+availability pouze technická metadata a žádný z nich nemění jazyk ani
+nevytváří hardsub.
+
+Audio stopa používá effective precedence `manual_language → detected language
+→ unknown`. Před tímto checkpointem scanner při změně media nahrazoval celý
+seznam `AudioTrack`, přestože schema už mělo stabilní unique identitu
+`(video_id, stream_index)`. Scanner nyní provádí exact sync podle stream indexu:
+detekovaný jazyk a codec obnoví, chybějící skutečný stream odstraní, nový přidá
+a manual jazyk existující stopy nepřepíše. Stream index se nepáruje fuzzy a
+přesun autority na jiný index se neodhaduje.
+
+Audio evaluator rozlišuje:
+
+```text
+japanese      → existuje effective ja, i kdyby jiná stopa byla unknown
+english_only  → bez ja/unknown a všechny stopy jsou en
+other_known   → bez ja/unknown a existuje známý non-EN jazyk
+unknown       → bez ja a alespoň jedna stopa je unknown
+no_audio      → ffprobe nevrátil žádnou audio stopu
+```
+
+`english_only` i `other_known` jsou pouze informace o legitimním dabu. Absence
+JP audia není chyba videa a nevstupuje do subtitle problem statusu. `unknown`
+vyžaduje ruční kontrolu a `no_audio` je samostatný technický stav, nikoli
+automaticky EN/other/unknown language.
+
+External subtitle má stabilní unique identitu `(video_id, relative_path)` a
+scanner jej už před změnou aktualizoval na místě. Nové nullable
+`ExternalSubtitle.manual_language` proto bezpečně přežije rescan; detected
+`language`/`normalized_language` se dále obnovují a effective precedence je
+stejná jako u audia. Odstranění override vrátí effective jazyk přesně na
+detekovanou hodnotu. Internal subtitle zatím ruční override nemá a při novém
+probe se nadále regeneruje z ffprobe.
+
+Subtitle evaluator má jedinou precedence:
+
+```text
+preferred             → internal/external effective CS nebo SK,
+                         případně explicitní ruční CS/SK hardsub
+fallback_internal_en  → bez CZ/SK, ale existuje INTERNAL EN
+missing               → bez CZ/SK i bez INTERNAL EN
+```
+
+External EN je zachován jako technická jazyková evidence, ale nikdy nesplní EN
+fallback. Unknown subtitle samo nesplní preferred ani fallback. Dosavadní
+hardsub persistence už bezpečně rozlišuje neposouzeno (`verified_at=NULL`),
+ručně potvrzenou absenci (timestamp + oba příznaky false) a explicitní CS/SK
+hardsub. Scanner ani ffprobe tato pole nemění. Současný model neukládá obecný
+pozitivní „hardsub neznámého jazyka“; preferred proto může ovlivnit pouze
+explicitní `manual_hardsub_cs` nebo `manual_hardsub_sk`, nikdy samotná domněnka
+existence vypáleného textu.
+
+Detail CatalogTitle nyní u každého videa zobrazuje detected/manual/effective
+jazyk audio stop i externích titulků a nabízí jejich nullable override. Audio
+stav a subtitle výsledek jsou dvě oddělené sekce; `Pouze EN dab` ani `Jiný dab`
+se nezobrazují jako chyba chybějících titulků. Existující ruční hardsub ovládání
+zůstalo beze změny.
+
+Idempotentní SQLite kompatibilita přidává pouze dva nullable sloupce:
+`audio_tracks.manual_language` a `external_subtitles.manual_language`. Bez
+backfillu zůstávají `NULL`; detected source data, hardsub, hierarchie, selector
+authority a assignments se nepřepisují. Synthetic lifecycle test ověřuje
+`scan → audio/external manual override → změněný ffprobe/detection → rescan →
+startup/reload` se zachovanými row ID, authority a derived výsledkem.
+
+Historická acceptance použila novou SQLite backup kopii
+`anime-rebuild-apply-test-2026-08-24.db` pouze v `/tmp`. Po startupu měla 3100
+videí: audio `japanese=2729`, `english_only=2`, `other_known=16`, `unknown=353`,
+`no_audio=0`; titulky `preferred=2395`, `fallback_internal_en=407`, `missing=298`
+a jeden detected external `unknown`. Membership fingerprint před/po startupu
+zůstal shodný a následný hierarchy rebuild dry-run měl `logical_changes=0`.
+Rozdíl numbering fingerprintu odpovídá už zdokumentované Commit-6 startup
+normalizaci této původní post-4B DB, nikoli Commitu 7. Na kopii zvolený unknown
+audio/external řádek po manual `ja`/`cs` a dalším startupu zůstal efektivně
+`ja`/`cs` se stavy `japanese`/`preferred`.
+
+Cílená media/catalog/migration sada prošla `276 passed`; celý projektový suite
+`703 passed`. Produkční DB ani NAS nebyly pro write testy použity.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

@@ -44,7 +44,7 @@ def test_normalizes_slovak_variants():
 
 
 def test_uses_english_title_when_language_is_unknown():
-    assert normalize_language("unknown", "English (UK)") == "eng"
+    assert normalize_language("unknown", "English (UK)") == "en"
     assert normalize_language("unknown", "[Isekai]") == "unknown"
 
 

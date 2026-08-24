@@ -6,8 +6,9 @@ from sqlalchemy.orm import Session
 from app.migrations import migrate_schema
 from app.database import Base
 from app.models import (
-    CatalogCollection, CatalogTitle, CollectionGroupingDecision, ExternalTitleLink, InternalSubtitle,
-    ManualSplitRuleVideo, TitleMetadata, Video,
+    AudioTrack, CatalogCollection, CatalogTitle, CollectionGroupingDecision,
+    ExternalSubtitle, ExternalTitleLink, InternalSubtitle, ManualSplitRuleVideo,
+    TitleMetadata, Video,
 )
 
 
@@ -401,6 +402,14 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
             )
         """))
         connection.execute(text("""
+            CREATE TABLE audio_tracks (
+                id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL,
+                stream_index INTEGER NOT NULL, codec VARCHAR,
+                language VARCHAR NOT NULL,
+                UNIQUE(video_id, stream_index)
+            )
+        """))
+        connection.execute(text("""
             CREATE TABLE internal_subtitles (
                 id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL,
                 stream_index INTEGER NOT NULL, codec VARCHAR,
@@ -425,9 +434,19 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
                  123.5, 'h265', 1280, 720)
         """))
         connection.execute(text("""
+            INSERT INTO audio_tracks
+                (id, video_id, stream_index, codec, language)
+            VALUES (1, 1, 1, 'aac', 'unknown')
+        """))
+        connection.execute(text("""
             INSERT INTO internal_subtitles
                 (id, video_id, stream_index, codec, language, title)
             VALUES (1, 1, 2, 'ass', 'unknown', 'English (UK)')
+        """))
+        connection.execute(text("""
+            INSERT INTO external_subtitles
+                (id, video_id, relative_path, codec, language)
+            VALUES (1, 1, 'Show/NCOP.eng.srt', 'srt', 'eng')
         """))
 
     migrate_schema(engine)
@@ -469,8 +488,16 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         assert video.manual_hardsub_cs is False
         assert video.manual_hardsub_sk is False
         assert video.manual_hardsub_verified_at is None
+        audio_track = session.scalar(select(AudioTrack))
+        assert audio_track.language == "unknown"
+        assert audio_track.manual_language is None
+        audio_track.manual_language = "ja"
         assert session.scalar(select(InternalSubtitle.language)) == "unknown"
-        assert session.scalar(select(InternalSubtitle.normalized_language)) == "eng"
+        assert session.scalar(select(InternalSubtitle.normalized_language)) == "en"
+        subtitle = session.scalar(select(ExternalSubtitle))
+        assert subtitle.normalized_language == "en"
+        assert subtitle.manual_language is None
+        subtitle.manual_language = "cs"
         video.content_type_manual = "recap"
         video.duplicate_status_manual = "suspected"
         session.add(CollectionGroupingDecision(
@@ -487,11 +514,19 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
     assert [
         column["name"] for column in inspect(engine).get_columns("videos")
     ].count("duplicate_status_manual") == 1
+    assert [
+        column["name"] for column in inspect(engine).get_columns("audio_tracks")
+    ].count("manual_language") == 1
+    assert [
+        column["name"] for column in inspect(engine).get_columns("external_subtitles")
+    ].count("manual_language") == 1
     with Session(engine) as session:
         video = session.scalar(select(Video))
         assert video.content_type_manual == "recap"
         assert video.duplicate_status_manual == "suspected"
         assert session.scalar(select(CollectionGroupingDecision)).decision == "separate"
+        assert session.scalar(select(AudioTrack.manual_language)) == "ja"
+        assert session.scalar(select(ExternalSubtitle.manual_language)) == "cs"
         assert (
             video.relative_path, video.filename, video.size, video.mtime_ns,
             video.duration, video.video_codec, video.width, video.height,

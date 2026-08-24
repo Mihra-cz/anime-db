@@ -37,6 +37,7 @@ def migrate_schema(engine) -> None:
     # Vytvoří pouze nové tabulky; existující tabulky ani data nemění.
     Base.metadata.create_all(engine)
     additions = {
+        "audio_tracks": [("manual_language", "VARCHAR NULL")],
         "videos": [
             ("file_type", "VARCHAR NOT NULL DEFAULT 'other'"),
             ("manual_hardsub_cs", "BOOLEAN NOT NULL DEFAULT 0"),
@@ -59,7 +60,10 @@ def migrate_schema(engine) -> None:
             ("duplicate_primary_missing", "BOOLEAN NOT NULL DEFAULT 0"),
         ],
         "internal_subtitles": [("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'")],
-        "external_subtitles": [("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'")],
+        "external_subtitles": [
+            ("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'"),
+            ("manual_language", "VARCHAR NULL"),
+        ],
         "title_metadata": [("cover_image_url", "VARCHAR NULL")],
         "catalog_titles": [
             ("catalog_collection_id", "INTEGER NULL REFERENCES catalog_collections(id)"),

@@ -34,7 +34,7 @@ from app.hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPE_CHOICES
 from app.metadata.providers.base import ProviderTitleMetadata
 from app.migrations import migrate_schema
 from app.models import (
-    CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
+    AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
     InternalSubtitle, ManualSplitRuleVideo, TitleMetadata, Video, utc_now,
 )
 from app.numbering import (
@@ -204,6 +204,12 @@ def test_candidate_and_artwork_mutations_are_post_only():
     assert paths["/metadata/batch-search"] == {"POST"}
     assert paths["/titles/{catalog_title_id}/numbering/sequence"] == {"POST"}
     assert paths["/videos/{video_id}/media-part"] == {"POST"}
+    assert paths[
+        "/videos/{video_id}/external-subtitles/{subtitle_id}/language"
+    ] == {"POST"}
+    assert paths[
+        "/videos/{video_id}/audio-tracks/{track_id}/language"
+    ] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/confirm-part"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/simple-preview"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/separate-nonstandard"] == {"POST"}
@@ -2700,12 +2706,18 @@ def test_episode_table_prioritizes_readable_data_and_preserves_editing_and_value
         episode_number_source="manual", episode_number_manual_override=1,
         episode_number_confidence=1.0, episode_number_verified_at=utc_now(),
         manual_hardsub_cs=True, manual_hardsub_verified_at=utc_now(),
+        audio_tracks=[AudioTrack(
+            id=8, stream_index=1, codec="aac", language="unknown",
+            manual_language="ja",
+        )],
         internal_subtitles=[InternalSubtitle(
             stream_index=2, codec="ass", language="cze", normalized_language="cs",
         )],
         external_subtitles=[ExternalSubtitle(
+            id=7,
             relative_path="Anime/Show/Season 1/Title - 01.en.srt",
-            codec="srt", language="eng", normalized_language="eng",
+            codec="srt", language="eng", normalized_language="en",
+            manual_language="sk",
         )],
     )
     status = type("Status", (), {
@@ -2743,7 +2755,16 @@ def test_episode_table_prioritizes_readable_data_and_preserves_editing_and_value
     assert "S1 A4 E1" not in rendered
     assert ">24:10<" in rendered
     assert "CZ (ASS)" in rendered
-    assert "EN (SRT)" in rendered
+    assert "SK (SRT)" in rendered
+    assert "Audio stav: <strong>JP audio</strong>" in rendered
+    assert "detekováno ? · ručně JA · efektivně JA" in rendered
+    assert "CZ/SK titulky: <strong>ano</strong>" in rendered
+    assert "Internal EN fallback: <strong>nepotřebný</strong>" in rendered
+    assert "Výsledek: <strong>CZ/SK</strong>" in rendered
+    assert "Automaticky: EN · efektivně: SK" in rendered
+    assert 'action="/videos/1/external-subtitles/7/language"' in rendered
+    assert 'action="/videos/1/audio-tracks/8/language"' in rendered
+    assert 'name="manual_language"' in rendered
     assert rendered.count("<th>Titulky</th>") == 1
     assert ">Ano<small>CZ</small>" in rendered
     assert "Hardsub potvrzen" in rendered
@@ -2939,7 +2960,8 @@ def test_episode_table_uses_metadata_title_and_safe_empty_subtitle_fallback():
 
     assert '<strong>Metadata Show</strong><small class="technical-filename">OVA.mkv</small>' in rendered
     assert ">OVA<" in rendered
-    assert '<td data-label="Titulky" class="subtitle-list">—</td>' in rendered
+    assert '<td data-label="Titulky" class="subtitle-list">—<small>' in rendered
+    assert rendered.count("Výsledek: <strong>Chybí vhodné titulky</strong>") == 2
     assert '<td data-label="Hardsub" class="compact-column">Ne</td>' in rendered
     assert '<td data-label="Hardsub" class="compact-column">Neznámé</td>' in rendered
     assert "Hardsub nepřítomen" in rendered
@@ -3008,6 +3030,82 @@ def test_existing_manual_video_edits_still_persist_without_changing_hierarchy(tm
             stored_title.season_label,
             stored_title.hierarchy_verified_at,
         ) == original_hierarchy
+
+
+def test_external_subtitle_language_override_web_workflow_sets_and_clears(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'subtitle-language-web.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        video = Video(
+            relative_path="Anime/Show/E01.mkv", root_folder="Anime",
+            filename="E01.mkv", size=1, mtime_ns=1,
+            audio_tracks=[AudioTrack(
+                stream_index=1, codec="aac", language="unknown",
+            )],
+            external_subtitles=[ExternalSubtitle(
+                relative_path="Anime/Show/E01.srt", codec="srt",
+                language="eng", normalized_language="en",
+            )],
+        )
+        session.add(video)
+        session.commit()
+        video_id = video.id
+        audio_track_id = video.audio_tracks[0].id
+        subtitle_id = video.external_subtitles[0].id
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")
+    }
+    audio_endpoint = endpoints[
+        "/videos/{video_id}/audio-tracks/{track_id}/language"
+    ]
+    response = audio_endpoint(
+        video_id, audio_track_id, manual_language="jpn", filter_name="all",
+        series_path="", catalog_title_id=None, q="", sort="", direction="",
+        video_sort="", video_direction="",
+    )
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        assert session.get(AudioTrack, audio_track_id).manual_language == "ja"
+
+    endpoint = endpoints[
+        "/videos/{video_id}/external-subtitles/{subtitle_id}/language"
+    ]
+    response = endpoint(
+        video_id, subtitle_id, manual_language="cze", filter_name="all",
+        series_path="", catalog_title_id=None, q="", sort="", direction="",
+        video_sort="", video_direction="",
+    )
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        assert session.get(ExternalSubtitle, subtitle_id).manual_language == "cs"
+
+    response = endpoint(
+        video_id, subtitle_id, manual_language="", filter_name="all",
+        series_path="", catalog_title_id=None, q="", sort="", direction="",
+        video_sort="", video_direction="",
+    )
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        subtitle = session.get(ExternalSubtitle, subtitle_id)
+        assert subtitle.manual_language is None
+        assert subtitle.normalized_language == "en"
+
+    response = audio_endpoint(
+        video_id, audio_track_id, manual_language="", filter_name="all",
+        series_path="", catalog_title_id=None, q="", sort="", direction="",
+        video_sort="", video_direction="",
+    )
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        track = session.get(AudioTrack, audio_track_id)
+        assert track.manual_language is None
+        assert track.language == "unknown"
 
 
 def test_root_folder_link_has_readable_label_and_no_dead_dot_url():

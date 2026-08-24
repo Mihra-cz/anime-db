@@ -35,6 +35,49 @@ def test_ffprobe_timeout_is_caught_and_timeout_is_explicit(monkeypatch, tmp_path
     assert captured["check"] is False
 
 
+def test_ffprobe_keeps_subtitle_dispositions_technical_and_never_infers_hardsub(
+    monkeypatch, tmp_path,
+):
+    payload = json.dumps({
+        "format": {"duration": "60"},
+        "streams": [
+            {
+                "index": 0, "codec_type": "video", "codec_name": "h264",
+                "width": 1920, "height": 1080,
+            },
+            {
+                "index": 1, "codec_type": "audio", "codec_name": "aac",
+                "tags": {"language": "jpn"}, "disposition": {"default": 1},
+            },
+            {
+                "index": 2, "codec_type": "subtitle", "codec_name": "ass",
+                "tags": {"language": "cze", "title": "Commentary"},
+                "disposition": {
+                    "default": 1, "forced": 1, "comment": 1,
+                    "hearing_impaired": 1,
+                },
+            },
+        ],
+    })
+    monkeypatch.setattr(
+        "app.probe.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=payload, stderr="",
+        ),
+    )
+
+    result = probe_video(tmp_path / "video.mkv")
+
+    assert result["audio"] == [
+        {"stream_index": 1, "codec": "aac", "language": "jpn"}
+    ]
+    assert result["subtitles"] == [{
+        "stream_index": 2, "codec": "ass", "language": "cze",
+        "title": "Commentary",
+    }]
+    assert "hardsub" not in result
+
+
 def test_mediainfo_timeout_is_caught(monkeypatch, tmp_path):
     def timeout(command, **kwargs):
         raise subprocess.TimeoutExpired(command, kwargs["timeout"])

@@ -15,27 +15,36 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from .catalog import (
+    MANUAL_LANGUAGE_CHOICES,
     FILTER_LABELS,
     ROOT_FOLDER,
     ROOT_VIDEO_GROUP_LABEL,
     TITLE_NAME_PREFERENCE_LABELS,
     build_catalog_results,
+    build_video_language_profile,
     catalog_title_display_title,
     catalog_title_series_label,
+    detected_audio_track_language,
     detect_episode_number,
     derive_episode_number,
     derive_season_info,
     determine_parent_series,
     effective_video_content_display,
+    effective_audio_track_language,
+    effective_external_subtitle_language,
     group_videos_by_series,
     has_meaningful_root_assignment,
     is_film_video,
     is_root_video,
     manual_hardsub_state,
+    detected_external_subtitle_language,
+    language_display_label,
     normalize_search_query,
     normalize_title_name_preference,
     normalize_title,
     set_manual_hardsub,
+    set_audio_track_manual_language,
+    set_external_subtitle_manual_language,
     sort_title_videos,
     subtitle_track_display,
     title_videos,
@@ -90,7 +99,10 @@ from .metadata.service import (
     default_metadata_search_query, normalize_metadata_search_query, refresh_title_metadata,
     set_manual_display_title, unlink_title_metadata,
 )
-from .models import CatalogCollection, CatalogTitle, ExternalTitleLink, TitleMetadata, Video, utc_now
+from .models import (
+    AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
+    TitleMetadata, Video, utc_now,
+)
 from .numbering import (
     apply_sequential_numbering,
     confirmed_duplicate_groups, preview_sequential_numbering,
@@ -167,6 +179,13 @@ templates.env.globals.update(
     catalog_title_hierarchy_is_verified=catalog_title_hierarchy_is_verified,
     manual_hierarchy_snapshot_issue=manual_hierarchy_snapshot_issue,
     subtitle_track_display=subtitle_track_display,
+    build_video_language_profile=build_video_language_profile,
+    detected_audio_track_language=detected_audio_track_language,
+    effective_audio_track_language=effective_audio_track_language,
+    detected_external_subtitle_language=detected_external_subtitle_language,
+    effective_external_subtitle_language=effective_external_subtitle_language,
+    language_display_label=language_display_label,
+    manual_language_choices=MANUAL_LANGUAGE_CHOICES,
     manual_hardsub_state=manual_hardsub_state,
     detect_episode_number=detect_episode_number,
     effective_video_content_display=effective_video_content_display,
@@ -2243,6 +2262,78 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             session.commit()
+        if catalog_title_id or series_path:
+            target = hardsub_return_url(
+                filter_name, catalog_title_id or series_path, video_id, q, sort, direction,
+                video_sort, video_direction,
+            )
+        else:
+            target = f"/catalog/{filter_name}"
+        return local_redirect_response(target)
+
+    @app.post("/videos/{video_id}/audio-tracks/{track_id}/language")
+    def update_audio_track_language(
+        video_id: int,
+        track_id: int,
+        manual_language: str = Form(""),
+        filter_name: str = Form(...),
+        series_path: str = Form(""),
+        catalog_title_id: int | None = Form(None),
+        q: str = Form(""),
+        sort: str = Form(""),
+        direction: str = Form(""),
+        video_sort: str = Form(""),
+        video_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=400, detail="Neplatný návratový filtr")
+        with sessions() as session:
+            video = session.get(Video, video_id)
+            track = session.get(AudioTrack, track_id)
+            if video is None or track is None or track.video_id != video.id:
+                raise HTTPException(status_code=404, detail="Audio stopa nebyla nalezena")
+            try:
+                set_audio_track_manual_language(track, manual_language)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if catalog_title_id or series_path:
+            target = hardsub_return_url(
+                filter_name, catalog_title_id or series_path, video_id, q, sort, direction,
+                video_sort, video_direction,
+            )
+        else:
+            target = f"/catalog/{filter_name}"
+        return local_redirect_response(target)
+
+    @app.post("/videos/{video_id}/external-subtitles/{subtitle_id}/language")
+    def update_external_subtitle_language(
+        video_id: int,
+        subtitle_id: int,
+        manual_language: str = Form(""),
+        filter_name: str = Form(...),
+        series_path: str = Form(""),
+        catalog_title_id: int | None = Form(None),
+        q: str = Form(""),
+        sort: str = Form(""),
+        direction: str = Form(""),
+        video_sort: str = Form(""),
+        video_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=400, detail="Neplatný návratový filtr")
+        with sessions() as session:
+            video = session.get(Video, video_id)
+            subtitle = session.get(ExternalSubtitle, subtitle_id)
+            if video is None or subtitle is None or subtitle.video_id != video.id:
+                raise HTTPException(status_code=404, detail="Externí titulky nebyly nalezeny")
+            try:
+                set_external_subtitle_manual_language(subtitle, manual_language)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         if catalog_title_id or series_path:
             target = hardsub_return_url(
                 filter_name, catalog_title_id or series_path, video_id, q, sort, direction,

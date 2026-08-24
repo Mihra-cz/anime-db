@@ -180,6 +180,27 @@ def _sync_external_subtitles(
                 video.external_subtitles.remove(subtitle)
 
 
+def _sync_audio_tracks(
+    session: Session, video: Video, track_data: list[dict]
+) -> None:
+    """Preserve manual authority while refreshing ffprobe data by stream index."""
+    with session.no_autoflush:
+        existing = {track.stream_index: track for track in video.audio_tracks}
+        incoming = {int(track["stream_index"]): track for track in track_data}
+
+        for stream_index, data in incoming.items():
+            track = existing.get(stream_index)
+            if track is None:
+                video.audio_tracks.append(AudioTrack(**data))
+            else:
+                track.codec = data.get("codec")
+                track.language = data.get("language") or "unknown"
+
+        for stream_index, track in existing.items():
+            if stream_index not in incoming:
+                video.audio_tracks.remove(track)
+
+
 def _scan_library(
     session: Session,
     root: Path,
@@ -242,7 +263,7 @@ def _scan_library(
                 video.size, video.mtime_ns = stat.st_size, stat.st_mtime_ns
                 video.duration, video.video_codec = metadata["duration"], metadata["video_codec"]
                 video.width, video.height = metadata["width"], metadata["height"]
-                video.audio_tracks = [AudioTrack(**track) for track in metadata["audio"]]
+                _sync_audio_tracks(session, video, metadata["audio"])
                 video.internal_subtitles = [
                     InternalSubtitle(
                         **track,
