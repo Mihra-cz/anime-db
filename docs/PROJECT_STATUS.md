@@ -3,7 +3,7 @@
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
 > **Aktualizováno:** 25. srpna 2026
-> **Aktuální checkpoint:** Stabilizace hierarchie – supplementary subtype a season context zůstávají oddělené
+> **Aktuální checkpoint:** Oddělení supplementary hierarchy doporučení od metadata-driven splitu
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -3545,6 +3545,71 @@ Startup compatibility synchronization znovu aplikuje classifier a shared
 numbering/evaluation nad existujícími řádky. Po nasazení parserové opravy proto
 pro stale `episode_number_source=unknown` stačí restart aplikace; produkční scan
 ani nové `ffprobe` nejsou potřebné.
+
+---
+
+## 6.52 Metadata-driven split potvrzené lokální části
+
+Odpovědnost Hierarchy Review a Metadata Check je nyní explicitně oddělená.
+Hierarchy Review nadále zobrazuje všechny skutečné `CatalogTitle`, jejich
+strukturální typ, season/Part context, číslování, duplicate stav a skutečné
+hierarchy ambiguity. Per-video helper **Pravděpodobně doplňkový obsah** však už
+nevznikne pouze z OVA/Special/OP/ED/NC markeru, pokud aktuální supplementary
+`CatalogTitle` má kompletní autoritativní manual hierarchy snapshot. Doporučení
+pro explicitní supplementary soubor chybně ponechaný v Season části a nezávislé
+diagnostické kontroly zůstávají zachované.
+
+Rozdělení lokální skupiny podle identity externího titulu patří do Metadata
+Check. Samostatný read-only evaluator vrátí doporučení pouze tehdy, když současně:
+
+1. existuje primární ručně potvrzený `ExternalTitleLink` s `verified_at`,
+2. odpovídající `TitleMetadata` má shodný provider/external ID a kladný
+   `episode_count=N`,
+3. `N` je menší než počet lokálních logických videí; shodný nebo vyšší počet
+   split nevyvolá,
+4. všechna lokální videa tvoří právě jednu úplnou, bezduplicitní číselnou řadu
+   `1..M`,
+5. subset `1..N` i zbytek `N+1..M` jsou neprázdné a jednoznačné,
+6. skupinu nekomplikuje Media Part nebo potvrzená/poškozená duplicate vazba.
+
+Jde o numbering match, nikoli o řazení filename nebo výběr „prvních N souborů“.
+Pokud metadata count ukazuje na menší rozsah, ale některé číslo chybí, je
+duplicitní, subtype se míchají nebo je položka nečíslovaná, Metadata Check ukáže
+nejednoznačnost bez akce. Bez potvrzené metadata identity nevznikne doporučení
+ani ambiguity pouze z parseru. Stejná konzervativní semantika pracuje s OVA,
+Special, Bonus a Film částmi; konkrétní manual hierarchy typ a season/anime
+context se při splitu kopírují, nevymýšlejí.
+
+Detail Metadata Check zobrazuje metadata title, typ a season context, přesný
+seznam přesouvaných videí a přesný seznam zůstávajících videí. Akce
+**Rozdělit podle potvrzených metadat** je POST s povinným explicitním potvrzením
+a před zápisem celý stav znovu vyhodnotí. Teprve potom:
+
+- vytvoří nový virtuální `CatalogTitle` s kompletním manual hierarchy snapshotem,
+- uloží explicitní M:N selector authority pro přesouvaná videa,
+- přesune pouze subset `1..N`, primární potvrzený link, normalizovaný metadata
+  záznam, odpovídající confirmed candidate a artwork,
+- zachová `part_type`, season number/label, automatic `Video.file_type`, manual
+  video classification i fyzické `relative_path`,
+- ponechá původní neprázdný `CatalogTitle` se zbytkem videí a bez vymyšlených
+  metadat pro další Metadata Check,
+- odmítne transakci, pokud by nový selector překryl existující range/pattern
+  manual-split authority.
+
+Persistentní explicitní selector používá stejný lifecycle jako dosavadní ruční
+zařazení. Regresní test ověřuje nový DB session, idempotentní startup sync a
+normální rescan nad dočasnou knihovnou. Žádná databázová migrace ani nový sloupec
+nevznikl. Workflow nemění filename, fyzický soubor ani adresář na NASu a
+neprovádí automatický split.
+
+Automatické ověření 25. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                       # 877 passed
+.venv/bin/python -m compileall -q app tests  # prošlo
+načtení všech Jinja2 šablon               # 14 šablon, prošlo
+git diff --check                          # prošlo
+```
 
 ---
 

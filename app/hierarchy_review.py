@@ -445,9 +445,23 @@ def supplementary_video_suggestion(
     if identity is None:
         return None
     context_label = identity.context_label
+    detected_part_type = {
+        "ova": "ova", "special": "special", "preview": "preview", "recap": "recap",
+    }.get(identity.supplementary_type or "", "bonus")
     current_is_supplementary = bool(
         current and current.effective_part_type in SUPPLEMENTAL_PART_TYPES
     )
+    if (
+        current_is_supplementary
+        and current is not None
+        and catalog_title_hierarchy_is_verified(current)
+        and current.effective_part_type == detected_part_type
+    ):
+        # A complete manual snapshot has already settled the structural home of
+        # this supplementary video.  Filename tokens alone must not reopen an
+        # individual split recommendation; independent hierarchy diagnostics
+        # and duplicate controls remain rendered through their own workflows.
+        return None
     context_already_present = bool(
         current and context_label
         and normalize_title(context_label) in normalize_title(current.local_title)
@@ -456,9 +470,6 @@ def supplementary_video_suggestion(
         not context_label or context_already_present
     ):
         return None
-    part_type = {
-        "ova": "ova", "special": "special", "preview": "preview", "recap": "recap",
-    }.get(identity.supplementary_type or "", "bonus")
     type_label = {
         "ova": "OVA", "special": "Specials", "ncop": "NCOP", "nced": "NCED",
         "op": "OP", "ed": "ED", "preview": "Preview", "recap": "Recap",
@@ -468,7 +479,7 @@ def supplementary_video_suggestion(
     return SupplementaryVideoSuggestion(
         video, identity.supplementary_type or "bonus", identity.number,
         detection.display_value or video.filename, context_label,
-        identity.context_season_number, part_type, proposed_title,
+        identity.context_season_number, detected_part_type, proposed_title,
     )
 
 

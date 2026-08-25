@@ -107,6 +107,7 @@ from .metadata.service import (
     default_metadata_search_query, normalize_metadata_search_query, refresh_title_metadata,
     set_manual_display_title, unlink_title_metadata,
 )
+from .metadata.split import apply_metadata_split, evaluate_metadata_split
 from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
     TitleMetadata, UnresolvedExternalSubtitle, Video, utc_now,
@@ -955,6 +956,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 + len(catalog_title.artwork)
                 if catalog_title else 0
             ),
+            "metadata_split_evaluation": (
+                evaluate_metadata_split(catalog_title) if catalog_title else None
+            ),
             "catalog_title_display_title": catalog_title_display_title,
             "catalog_title_series_label": catalog_title_series_label,
             "subtitle_track_display": subtitle_track_display,
@@ -1646,18 +1650,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     def metadata_review_context(request: Request, status: str = "without", batch_result=None):
-        allowed = {"without", "pending", "manual", "conflict", "missing-artwork", "low-score"}
+        allowed = {
+            "without", "pending", "manual", "conflict", "missing-artwork",
+            "low-score", "split",
+        }
         if status not in allowed:
             raise HTTPException(status_code=404, detail="Neznámý přehled metadat")
         with sessions() as session:
             titles = list(session.scalars(select(CatalogTitle).options(
                 selectinload(CatalogTitle.collection), selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogTitle.metadata_candidates), selectinload(CatalogTitle.artwork),
+                selectinload(CatalogTitle.external_links), selectinload(CatalogTitle.videos),
             ).order_by(CatalogTitle.local_title)).all())
         rows = []
         for title in titles:
             active = [candidate for candidate in title.metadata_candidates if candidate.rejected_at is None]
             best = max((candidate.match_score or 0 for candidate in active), default=None)
+            split_evaluation = evaluate_metadata_split(title) if status == "split" else None
             include = {
                 "without": title.metadata_status in {"unlinked", "unavailable", "error"},
                 "pending": title.metadata_status == "candidates_available",
@@ -1665,10 +1674,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "conflict": title.metadata_status == "conflict",
                 "missing-artwork": title.metadata_status == "linked_manual" and not any(item.is_primary for item in title.artwork),
                 "low-score": any((candidate.match_score or 0) < LOW_SCORE_THRESHOLD for candidate in active),
+                "split": split_evaluation is not None,
             }[status]
             if include:
                 rows.append({"title": title, "candidate_count": len(active), "best_score": best,
-                             "last_search": max((candidate.updated_at for candidate in title.metadata_candidates), default=None)})
+                             "last_search": max((candidate.updated_at for candidate in title.metadata_candidates), default=None),
+                             "split_evaluation": split_evaluation})
         return templates.TemplateResponse(request, "metadata_review.html", {
             "rows": rows, "status": status, "batch_result": batch_result,
             "default_batch_limit": settings.metadata_batch_search_limit,
@@ -2243,6 +2254,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             filter_name, catalog_title_id, q, sort, direction,
             detail_sort, detail_direction, **messages,
         ))
+
+    @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/split")
+    def split_title_by_confirmed_metadata(
+        filter_name: str, catalog_title_id: int,
+        confirm_split: bool = Form(False), q: str = Form(""),
+        sort: str = Form(""), direction: str = Form(""),
+        detail_sort: str = Form(""), detail_direction: str = Form(""),
+    ):
+        if filter_name not in FILTER_LABELS:
+            raise HTTPException(status_code=404, detail="Neznámý filtr")
+        with sessions() as session:
+            try:
+                result = apply_metadata_split(
+                    session, catalog_title_id, confirmed=confirm_split,
+                )
+                session.commit()
+                new_title_id = result.new_title.id
+            except ValueError as exc:
+                session.rollback()
+                return action_redirect(
+                    filter_name, catalog_title_id, q, sort, direction,
+                    detail_sort, detail_direction, metadata_error=str(exc),
+                )
+        return action_redirect(
+            filter_name, new_title_id, q, sort, direction,
+            detail_sort, detail_direction,
+            message=(
+                "Lokální skupina byla rozdělena podle potvrzených metadat; "
+                "fyzické soubory ani cesty se nezměnily."
+            ),
+        )
 
     @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/confirm")
     def confirm_metadata(

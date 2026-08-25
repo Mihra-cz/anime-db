@@ -540,3 +540,23 @@ summary {
   .subtitle-review-actions { align-items: stretch; flex-direction: column; }
   .media-pagination { text-align: center; }
 }
+
+/* Metadata-driven title split --------------------------------------------- */
+.metadata-split-review { border: 1px solid #7c5cff; }
+.metadata-split-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+.metadata-split-columns > div {
+  min-width: 0;
+  padding: .75rem;
+  border: 1px solid #364258;
+  border-radius: 8px;
+  background: #101722;
+}
+.metadata-split-columns h4 { margin-top: 0; }
+.metadata-split-columns li { overflow-wrap: anywhere; }
+@media (max-width: 38.75rem) {
+  .metadata-split-columns { grid-template-columns: 1fr; }
+}
