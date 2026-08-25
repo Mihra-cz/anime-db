@@ -1558,12 +1558,13 @@ def test_move_merge_and_explicit_delete_change_only_logical_assignment():
 
         move_videos_to_title(session, collection_id, [recap_id], season_id)
         assert recap.catalog_title_id == season_id
-        assert recap.content_type_manual == "recap"
+        assert recap.content_type_manual is None
         assert recap.relative_path == paths[recap_id]
 
         merge_title_into(session, collection_id, source_id, season_id)
         session.commit()
         assert session.get(Video, regular_id).catalog_title_id == season_id
+        assert session.get(Video, regular_id).content_type_manual is None
         assert session.get(Video, regular_id).relative_path == paths[regular_id]
         assert session.get(CatalogTitle, source_id) is not None
         assert session.get(CatalogTitle, source_id).videos == []
@@ -1573,6 +1574,106 @@ def test_move_merge_and_explicit_delete_change_only_logical_assignment():
         )
         session.commit()
         assert session.get(CatalogTitle, source_id) is None
+
+
+def test_merge_title_preserves_automatic_op_ed_without_creating_manual_bonus():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Example", normalized_local_title="example",
+            relative_root_path="Anime/Example",
+        )
+        source = CatalogTitle(
+            collection=collection, local_title="NC – Example Season",
+            normalized_local_title="nc example season",
+            relative_root_path="Anime/Example/NC/Example Season",
+            part_type="bonus", season_label="NC",
+        )
+        target = CatalogTitle(
+            collection=collection, local_title="Example Season",
+            normalized_local_title="example season",
+            relative_root_path="Anime/Example/Example Season",
+            part_type="title", hierarchy_manual_override=True,
+            part_type_manual="season", season_number_manual=3,
+            season_label_manual="S3", sort_order_manual=0,
+            hierarchy_verified_at=utc_now(),
+        )
+        videos = [
+            Video(
+                relative_path=f"Anime/Example/NC/Example Season/{filename}",
+                root_folder="Anime", filename=filename, size=1, mtime_ns=1,
+                file_type=file_type, catalog_title=source,
+                catalog_collection=collection,
+            )
+            for filename, file_type in (
+                ("ED.mkv", "ed"),
+                ("OP 01.mkv", "op"),
+                ("OP 02.mkv", "op"),
+            )
+        ]
+        session.add(collection)
+        session.commit()
+        target_hierarchy = (
+            target.hierarchy_manual_override, target.part_type_manual,
+            target.season_number_manual, target.season_label_manual,
+            target.sort_order_manual, target.hierarchy_verified_at,
+        )
+
+        merge_title_into(session, collection.id, source.id, target.id)
+        session.flush()
+
+        assert source.videos == []
+        assert all(video.catalog_title_id == target.id for video in videos)
+        assert [video.file_type for video in videos] == ["ed", "op", "op"]
+        assert all(video.content_type_manual is None for video in videos)
+        numbering = [effective_video_numbering(video) for video in videos]
+        assert [item.classification for item in numbering] == [
+            "supplementary", "supplementary", "supplementary",
+        ]
+        assert [item.supplementary_type for item in numbering] == ["ed", "op", "op"]
+        assert all(item.numbering_input is None for item in numbering)
+        assert (
+            target.hierarchy_manual_override, target.part_type_manual,
+            target.season_number_manual, target.season_label_manual,
+            target.sort_order_manual, target.hierarchy_verified_at,
+        ) == target_hierarchy
+
+
+def test_merge_title_preserves_existing_manual_content_classification():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Example", normalized_local_title="example",
+            relative_root_path="Anime/Example",
+        )
+        source = CatalogTitle(
+            collection=collection, local_title="Extras",
+            normalized_local_title="extras",
+            relative_root_path="Anime/Example/Extras", part_type="bonus",
+        )
+        target = CatalogTitle(
+            collection=collection, local_title="Example Season",
+            normalized_local_title="example season",
+            relative_root_path="Anime/Example/Example Season",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        video = Video(
+            relative_path="Anime/Example/Extras/Explicit choice.mkv",
+            root_folder="Anime", filename="Explicit choice.mkv", size=1, mtime_ns=1,
+            file_type="other", content_type_manual="recap",
+            catalog_title=source, catalog_collection=collection,
+        )
+        session.add(collection)
+        session.commit()
+
+        merge_title_into(session, collection.id, source.id, target.id)
+        session.flush()
+
+        assert video.catalog_title_id == target.id
+        assert video.file_type == "other"
+        assert video.content_type_manual == "recap"
 
 
 def test_any_empty_title_with_owned_metadata_can_be_deleted_without_orphans(tmp_path):

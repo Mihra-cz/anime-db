@@ -1396,18 +1396,6 @@ def move_videos_to_title(
     if target is None:
         raise ValueError("Cílová část neexistuje v této kolekci.")
     for video in selected:
-        source_type = (
-            video.catalog_title.effective_part_type if video.catalog_title is not None else None
-        )
-        detected_type = detect_episode_number(video.filename).supplementary_type
-        target_type = target.effective_part_type
-        if not video.content_type_manual:
-            video.content_type_manual = (
-                target_type if target_type in VIDEO_CONTENT_TYPES else
-                source_type if source_type in VIDEO_CONTENT_TYPES else
-                detected_type if detected_type in VIDEO_CONTENT_TYPES else
-                "bonus" if detected_type else None
-            )
         video.catalog_title = target
         video.catalog_collection = collection
     replace_explicit_video_selector_authority(selected, target)
