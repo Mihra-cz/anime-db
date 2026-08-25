@@ -65,6 +65,11 @@ from .structural_inference import (
     LONG_FLAT_SEQUENCE_REVIEW_REASON,
     direct_root_episode_profile,
 )
+from .title_naming import (
+    generic_catalog_title_local_title,
+    safe_catalog_title_local_title,
+)
+from .title_order import catalog_title_sort_key
 
 
 logger = logging.getLogger(__name__)
@@ -998,7 +1003,7 @@ def confirm_effective_collection_hierarchy(collection: CatalogCollection) -> Non
             title.effective_season_number,
             title.effective_part_number,
             title.effective_season_label,
-            title.effective_sort_order,
+            title.sort_order_manual,
         ))
     now = utc_now()
     for title, part_type, season_number, part_number, label, order in snapshots:
@@ -1167,7 +1172,7 @@ def apply_single_title_confirmation(
         season_number=season_number,
         part_number=part_number if normalized_type in {"part", "cour"} else None,
         season_label=label,
-        sort_order=title.effective_sort_order,
+        sort_order=title.sort_order_manual,
         verified_at=utc_now(),
     )
     refresh_collection_state(collection, recalculate=False)
@@ -1214,7 +1219,6 @@ def set_manual_title_hierarchy(
     if has_manual_input and not hierarchy_verified:
         raise ValueError("Ruční hierarchii je nutné potvrdit jako ověřenou.")
     if hierarchy_verified:
-        effective_order = title.effective_sort_order
         snapshot_type = normalized_type
         snapshot_season_number = season_number
         snapshot_part_number = part_number
@@ -1244,7 +1248,7 @@ def set_manual_title_hierarchy(
             season_number=snapshot_season_number,
             part_number=snapshot_part_number,
             season_label=snapshot_label,
-            sort_order=sort_order if sort_order is not None else effective_order,
+            sort_order=sort_order,
             verified_at=utc_now(),
         )
     else:
@@ -1266,8 +1270,6 @@ def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
         if not isinstance(value, dict):
             raise ValueError(f"Část {position} není objekt.")
         local_title = str(value.get("local_title") or "").strip()[:200]
-        if not local_title:
-            raise ValueError(f"Část {position} nemá lokální název.")
         integer_fields = {}
         for field in (
             "title_id", "season_number_manual", "part_number_manual", "episode_start",
@@ -1316,6 +1318,14 @@ def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
             video_ids = tuple(int(item) for item in (value.get("video_ids") or []))
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Část {position}: video_ids musí být seznam ID.") from exc
+        if not local_title:
+            if integer_fields["title_id"] is not None or part_type is None:
+                raise ValueError(f"Část {position} nemá lokální název.")
+            local_title = generic_catalog_title_local_title(
+                part_type,
+                season_number=integer_fields["season_number_manual"],
+                season_label=_optional_text(value.get("season_label_manual"), 50),
+            )
         definitions.append(ManualTitleDefinition(
             title_id=integer_fields["title_id"], local_title=local_title,
             manual_display_title=_optional_text(value.get("manual_display_title"), 200),
@@ -1325,7 +1335,7 @@ def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
             part_type_manual=part_type,
             episode_start=start, episode_end=end,
             episode_start_offset=integer_fields["episode_start_offset"],
-            numbering_mode=mode, sort_order=integer_fields["sort_order"] or position,
+            numbering_mode=mode, sort_order=integer_fields["sort_order"],
             filename_pattern=pattern,
             video_ids=video_ids,
         ))
@@ -1362,7 +1372,7 @@ def parse_simple_definitions(
 
 def simple_definition_rows(collection: CatalogCollection) -> list[dict[str, str | int | None]]:
     rows = []
-    for title in sorted(collection.titles, key=lambda item: item.effective_sort_order):
+    for title in sorted(collection.titles, key=catalog_title_sort_key):
         definition = definition_from_title(title)
         rows.append({
             "title_id": title.id,
@@ -1376,7 +1386,7 @@ def simple_definition_rows(collection: CatalogCollection) -> list[dict[str, str 
             "episode_end": title.episode_end,
             "episode_start_offset": title.episode_start_offset,
             "numbering_mode": title.numbering_mode,
-            "sort_order": title.effective_sort_order,
+            "sort_order": title.sort_order_manual,
             "filename_pattern": title.episode_filename_pattern,
             "video_ids": ", ".join(map(str, definition.video_ids)),
         })
@@ -1547,13 +1557,10 @@ def move_videos_to_title(
 
 def create_title_from_videos(
     session: Session, collection_id: int, video_ids: list[int], *,
-    local_title: str, part_type: str, season_number: int | None = None,
+    local_title: str = "", part_type: str, season_number: int | None = None,
     season_label: str | None = None, part_number: int | None = None,
 ) -> CatalogTitle:
-    name = local_title.strip()[:200]
     normalized_type = part_type.strip().casefold()
-    if not name:
-        raise ValueError("Nová část musí mít název.")
     if normalized_type not in PART_TYPES:
         raise ValueError("Neplatný typ části.")
     _validate_structural_numbers(normalized_type, season_number, part_number)
@@ -1564,7 +1571,20 @@ def create_title_from_videos(
         normalized_label = None
     collection = _load_collection_for_assignment(session, collection_id)
     selected = _selected_videos(collection, video_ids)
-    position = max((title.effective_sort_order for title in collection.titles), default=0) + 1
+    source_titles = {
+        video.catalog_title for video in selected if video.catalog_title is not None
+    }
+    source_title = source_titles.pop() if len(source_titles) == 1 else None
+    name = safe_catalog_title_local_title(
+        explicit_local_title=local_title,
+        part_type=normalized_type,
+        collection=collection,
+        videos=selected,
+        season_number=season_number,
+        season_label=normalized_label,
+        source_title=source_title,
+    )
+    position = len(collection.titles) + 1
     virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}"
     suffix = 1
     while session.scalar(select(CatalogTitle.id).where(
@@ -1584,7 +1604,7 @@ def create_title_from_videos(
         season_number=season_number,
         part_number=part_number if normalized_type in {"part", "cour"} else None,
         season_label=normalized_label,
-        sort_order=position,
+        sort_order=None,
         verified_at=utc_now(),
     )
     replace_explicit_video_selector_authority(selected, title)
@@ -1763,7 +1783,7 @@ def definitions_as_json(collection: CatalogCollection) -> str:
         definition_from_title(title)
         for title in sorted(
             collection.titles,
-            key=lambda item: item.effective_sort_order,
+            key=catalog_title_sort_key,
         )
     ])
 

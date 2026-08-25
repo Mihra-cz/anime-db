@@ -2,8 +2,8 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 25. srpna 2026
-> **Aktuální checkpoint:** Oddělení supplementary hierarchy doporučení od metadata-driven splitu
+> **Aktualizováno:** 26. srpna 2026
+> **Aktuální checkpoint:** Autoritativní lokální názvy a strukturální pořadí CatalogTitle
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -3606,6 +3606,68 @@ Automatické ověření 25. srpna 2026:
 
 ```bash
 .venv/bin/pytest -q                       # 877 passed
+.venv/bin/python -m compileall -q app tests  # prošlo
+načtení všech Jinja2 šablon               # 14 šablon, prošlo
+git diff --check                          # prošlo
+```
+
+---
+
+## 6.53 Autoritativní local_title a strukturální pořadí
+
+Ručně zadaný `CatalogTitle.local_title` je lokální strukturální identita. Create,
+move, manual split, Metadata Check split, potvrzení metadat, startup sync ani
+scanner jej nesmějí nahradit názvem prvního videa nebo externím canonical
+názvem. Metadata nadále mohou podle existující priority určovat display title,
+ale uložený lokální název zůstává fallbackem a budoucím podkladem pro V6.
+
+Nové logické části používají jeden shared naming resolver. Neprázdný ruční
+vstup má vždy přednost. Bez něj resolver přijme parserový strukturální název jen
+tehdy, když všechny vybrané cesty dokazují stejnou část ve stejné collection;
+například `NC/High School DxD Born/` vede obecně k `NC – High School DxD Born`.
+Čistě strukturální folder label ani první `OP`/`ED` filename se jako identita
+nepoužijí. Poslední fallback je deterministický typ a známý season context,
+například `Special – S3`, případně samotné `Bonus` bez season.
+
+`sort_order_manual` nyní znamená výhradně explicitní uživatelský override.
+Automatické potvrzení současné hierarchy, potvrzení jediné části, create,
+manual split, root-video create ani metadata-driven split už nekopírují
+`effective_sort_order` a nevyrábějí sekvenci podle pořadí kliknutí. Prázdné UI
+pole zůstává `NULL` a je označené jako automatické strukturální řazení.
+
+Běžný detail collection a sdílené title selection používají centrální klíč:
+
+1. explicitní `sort_order_manual`, pokud existuje v kompletním manual snapshotu,
+2. známý season context před anime-level contextem a vzestupné číslo sezóny,
+3. stabilní rank z `PART_TYPE_CHOICES` (Season/Part před supplementary typy),
+4. skutečný `part_number`, pokud existuje,
+5. `local_title`,
+6. stabilní ID pouze jako poslední tie-breaker.
+
+Aktivní read-only audit ukázal automatické `sort_order` hodnoty i 14 nenulových
+`sort_order_manual` hodnot. U virtuálních High School DxD částí byly hodnoty
+1–5 shodné s `.catalog-part-1` až `.catalog-part-5`, což potvrzuje původní
+workflow závislost na pořadí operací. Schema však nemá samostatný provenance
+flag, který by bezpečně odlišil ruční legacy hodnotu od historicky automaticky
+vytvořené. Proto nevznikla migrace ani backfill a všechny existující hodnoty
+zůstávají nedotčené; oprava pouze zabraňuje vzniku dalších falešných override.
+
+Metadata Check split přijímá volitelný explicitní lokální název. Prázdný vstup
+použije stejný bezpečný resolver, nový title má `sort_order_manual=NULL` a
+zachovává season/type/video classification i persistentní selector authority.
+Restart a normální testovací rescan zachovávají local title, membership i
+strukturální pořadí. Hierarchy Review stále renderuje každý skutečný
+`CatalogTitle` samostatně ve stejných kartách; nevzniklo season grouping,
+skrývání ani nový prezentační koncept. Změněn byl pouze popisek order inputu na
+**Ruční pořadí** s vysvětlením automatic režimu.
+
+Změna nepřidává DB sloupec, nemění aktivní `data/anime.db`, neprovádí produkční
+scan a nic nepřejmenovává ani nepřesouvá na NASu.
+
+Automatické ověření 26. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                       # 883 passed
 .venv/bin/python -m compileall -q app tests  # prošlo
 načtení všech Jinja2 šablon               # 14 šablon, prošlo
 git diff --check                          # prošlo

@@ -14,6 +14,7 @@ from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
     InternalSubtitle, Video,
 )
+from .title_order import catalog_title_sort_key
 
 LANGUAGE_ALIASES = {
     "cs": "cs", "cze": "cs", "ces": "cs", "czech": "cs", "čeština": "cs",
@@ -345,12 +346,7 @@ def catalog_collection_display_title(
         candidates[key] = title
     ordered = sorted(
         candidates.values(),
-        key=lambda title: (
-            title.effective_sort_order,
-            title.id is None,
-            title.id or 0,
-            title.local_title.casefold(),
-        ),
+        key=catalog_title_sort_key,
     )
     explicit_titles = [
         (title, explicit)

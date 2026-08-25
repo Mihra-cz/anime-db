@@ -219,6 +219,7 @@ def test_confirmed_metadata_exact_subset_is_read_only_recommendation():
     ]
     assert evaluation.part_type == "special"
     assert evaluation.season_context == "S3"
+    assert evaluation.proposed_local_title == "Special – S3"
     assert [
         (
             video.catalog_title,
@@ -316,7 +317,12 @@ def test_explicit_metadata_split_moves_metadata_and_preserves_hierarchy_and_cont
             apply_metadata_split(session, source_id, confirmed=False)
         assert session.query(CatalogTitle).count() == 1
 
-        result = apply_metadata_split(session, source_id, confirmed=True)
+        result = apply_metadata_split(
+            session,
+            source_id,
+            confirmed=True,
+            local_title="Special – High School DxD Born metadata A",
+        )
         new_id = result.new_title.id
         session.commit()
 
@@ -332,6 +338,9 @@ def test_explicit_metadata_split_moves_metadata_and_preserves_hierarchy_and_cont
         assert new_title.effective_part_type == source.effective_part_type == "special"
         assert new_title.effective_season_number == source.effective_season_number == 3
         assert new_title.effective_season_label == source.effective_season_label == "S3"
+        assert new_title.local_title == "Special – High School DxD Born metadata A"
+        assert source.local_title == "Specials – High School DxD Born"
+        assert new_title.sort_order_manual is None
         assert new_title.hierarchy_manual_override is True
         assert new_title.hierarchy_verified_at is not None
         assert new_title.metadata_locked is True
@@ -407,7 +416,7 @@ def test_metadata_split_survives_startup_sync_and_normal_rescan_without_filesyst
             part_type="special",
             season_number=3,
             season_label="S3",
-            sort_order=source.effective_sort_order,
+            sort_order=None,
             hierarchy_verified=True,
         )
         attach_confirmed_metadata(source, 3)
@@ -432,6 +441,9 @@ def test_metadata_split_survives_startup_sync_and_normal_rescan_without_filesyst
         assert source.metadata_record is None
         assert new_title.effective_part_type == "special"
         assert new_title.effective_season_number == 3
+        assert new_title.local_title == "Special – S3"
+        assert new_title.sort_order_manual is None
+        assert source.sort_order_manual is None
         assert len(session.scalars(select(ManualSplitRuleVideo)).all()) == 3
 
     assert {path: path.read_bytes() for path in paths} == before_bytes
@@ -488,6 +500,7 @@ def test_metadata_check_renders_safe_split_and_hierarchy_review_keeps_all_title_
     assert "typ části <strong>Special</strong>" in detail
     assert "season context <strong>S3</strong>" in detail
     assert "Rozdělit podle potvrzených metadat" in detail
+    assert 'name="local_title" placeholder="Special – S3"' in detail
     assert 'name="confirm_split" value="true" required' in detail
     assert "Rozdělení podle metadat" in metadata_review
     assert "Přesunout 3 · ponechat 3" in metadata_review
@@ -529,7 +542,7 @@ def test_metadata_split_route_is_post_only_and_requires_explicit_confirmation(tm
     assert route.methods == {"POST"}
 
     response = route.endpoint(
-        "all", source_id, confirm_split=False, q="", sort="", direction="",
+        "all", source_id, confirm_split=False, local_title="", q="", sort="", direction="",
         detail_sort="", detail_direction="",
     )
 

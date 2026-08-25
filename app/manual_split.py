@@ -7,6 +7,7 @@ import re
 from .catalog import derive_episode_number
 from .models import CatalogCollection, CatalogTitle, ManualSplitRuleVideo, Video
 from .numbering import effective_video_numbering, is_nonprimary_duplicate_video
+from .title_order import catalog_title_sort_key
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,7 @@ class ManualTitleDefinition:
     episode_end: int | None
     episode_start_offset: int | None
     numbering_mode: str
-    sort_order: int
+    sort_order: int | None
     filename_pattern: str | None = None
     video_ids: tuple[int, ...] = ()
 
@@ -329,7 +330,7 @@ def definition_from_title(title: CatalogTitle) -> ManualTitleDefinition:
         episode_end=title.episode_end,
         episode_start_offset=title.episode_start_offset,
         numbering_mode=title.numbering_mode,
-        sort_order=title.effective_sort_order,
+        sort_order=title.sort_order_manual,
         filename_pattern=title.episode_filename_pattern,
         video_ids=tuple(sorted(
             link.video_id for link in title.manual_split_rule_videos
@@ -445,10 +446,7 @@ def evaluate_persisted_manual_split(
 ) -> ManualSplitEvaluationResult:
     titles = sorted(
         manual_split_titles(collection),
-        key=lambda title: (
-            title.effective_sort_order,
-            title.id if title.id is not None else 0,
-        ),
+        key=catalog_title_sort_key,
     )
     return evaluate_manual_split_assignment(
         list(collection.videos if videos is None else videos),

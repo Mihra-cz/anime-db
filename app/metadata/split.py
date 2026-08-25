@@ -21,6 +21,7 @@ from app.numbering import (
     effective_video_numbering,
     recalculate_title_numbering,
 )
+from app.title_naming import safe_catalog_title_local_title
 
 
 class MetadataSplitStatus(StrEnum):
@@ -77,7 +78,15 @@ class MetadataSplitEvaluation:
 
     @property
     def proposed_local_title(self) -> str:
-        return _metadata_split_local_title(self.title, self.metadata)
+        return safe_catalog_title_local_title(
+            explicit_local_title=None,
+            part_type=self.title.effective_part_type,
+            collection=self.title.collection,
+            videos=self.matching_videos,
+            season_number=self.title.effective_season_number,
+            season_label=self.title.effective_season_label,
+            source_title=self.title,
+        )
 
 
 @dataclass(frozen=True)
@@ -255,16 +264,6 @@ def evaluate_metadata_split(
     )
 
 
-def _metadata_split_local_title(
-    title: CatalogTitle, metadata: TitleMetadata,
-) -> str:
-    type_label = PART_TYPE_LABELS.get(title.effective_part_type, "").strip()
-    metadata_title = metadata.display_title.strip()
-    if not type_label:
-        return metadata_title[:200]
-    return f"{type_label} – {metadata_title}"[:200]
-
-
 def _load_split_source(session: Session, title_id: int) -> CatalogTitle:
     title = session.scalar(select(CatalogTitle).options(
         selectinload(CatalogTitle.videos).selectinload(Video.manual_split_rule_videos),
@@ -333,6 +332,7 @@ def apply_metadata_split(
     title_id: int,
     *,
     confirmed: bool,
+    local_title: str | None = None,
 ) -> MetadataSplitResult:
     """Apply a freshly revalidated metadata split after explicit confirmation."""
     if not confirmed:
@@ -354,7 +354,7 @@ def apply_metadata_split(
         session,
         collection.id,
         [video.id for video in moved],
-        local_title=evaluation.proposed_local_title,
+        local_title=local_title or "",
         part_type=source.effective_part_type,
         season_number=source.effective_season_number,
         season_label=source.effective_season_label,

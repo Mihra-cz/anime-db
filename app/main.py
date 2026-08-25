@@ -108,6 +108,7 @@ from .metadata.service import (
     set_manual_display_title, unlink_title_metadata,
 )
 from .metadata.split import apply_metadata_split, evaluate_metadata_split
+from .title_order import catalog_title_sort_key
 from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
     TitleMetadata, UnresolvedExternalSubtitle, Video, utc_now,
@@ -771,7 +772,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 season_number=None,
                 part_number=None,
                 season_label=labels[part_type],
-                sort_order=title.effective_sort_order,
+                sort_order=None,
                 verified_at=utc_now(),
             )
             video.catalog_collection = collection
@@ -1068,11 +1069,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         for title in sorted(
             collection.titles,
-            key=lambda value: (
-                value.effective_sort_order,
-                value.effective_season_number or 0,
-                value.local_title.casefold(),
-            ),
+            key=catalog_title_sort_key,
         ):
             title_videos_list = videos_by_part.get(title.id, [])
             stats = _empty_stats()
@@ -2258,7 +2255,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/split")
     def split_title_by_confirmed_metadata(
         filter_name: str, catalog_title_id: int,
-        confirm_split: bool = Form(False), q: str = Form(""),
+        confirm_split: bool = Form(False), local_title: str = Form(""),
+        q: str = Form(""),
         sort: str = Form(""), direction: str = Form(""),
         detail_sort: str = Form(""), detail_direction: str = Form(""),
     ):
@@ -2268,6 +2266,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 result = apply_metadata_split(
                     session, catalog_title_id, confirmed=confirm_split,
+                    local_title=local_title,
                 )
                 session.commit()
                 new_title_id = result.new_title.id

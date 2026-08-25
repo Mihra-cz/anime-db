@@ -65,7 +65,7 @@
     <label data-season-number>Číslo sezóny <input type="number" min="1" name="season_number_manual" value="{{ title.season_number_manual if title.season_number_manual is not none else '' }}"></label>
     <label data-season-label>Označení sezóny <input type="text" maxlength="50" name="season_label_manual" value="{{ title.season_label_manual or '' }}" placeholder="S1 / vlastní název"></label>
     <label data-part-number>Číslo Part <input type="number" min="1" name="part_number_manual" value="{{ title.part_number_manual if title.part_number_manual is not none else '' }}"></label>
-    <label>Pořadí <input type="number" min="0" name="sort_order_manual" value="{{ title.sort_order_manual if title.sort_order_manual is not none else '' }}"></label>
+    <label>Ruční pořadí <input type="number" min="0" name="sort_order_manual" value="{{ title.sort_order_manual if title.sort_order_manual is not none else '' }}" placeholder="automatické strukturální řazení"></label>
     <label><input type="checkbox" name="hierarchy_verified" value="true" {% if catalog_title_hierarchy_is_verified(title) %}checked{% endif %}> Zařazení ověřeno</label>
     <input type="hidden" name="return_to" value="hierarchy_review">
     <button class="manual-hierarchy-save" type="submit"{% if not title.part_type_manual %} disabled{% endif %}>Uložit typ celé části</button>
@@ -178,7 +178,7 @@
           <label data-part-number>Číslo Part <input type="number" min="1" name="part_number_manual" value="{{ row.part_number_manual if row.part_number_manual is not none else '' }}"></label>
         </td>
         <td data-label="Pořadí a číslování">
-          <label>Pořadí <input type="number" min="0" name="sort_order" value="{{ row.sort_order if row.sort_order is not none else '' }}"></label>
+          <label>Ruční pořadí <input type="number" min="0" name="sort_order" value="{{ row.sort_order if row.sort_order is not none else '' }}" placeholder="automatické strukturální řazení"></label>
           <label>Offset číslování <input type="number" min="0" name="episode_start_offset" value="{{ row.episode_start_offset if row.episode_start_offset is not none else '' }}"></label>
           <label>Režim číslování <select name="numbering_mode">{% for value, label in [('unknown','automaticky'),('season_local','v rámci sezóny'),('absolute','absolutní'),('mixed','smíšené')] %}<option value="{{ value }}" {% if (row.numbering_mode or 'unknown') == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
         </td>
