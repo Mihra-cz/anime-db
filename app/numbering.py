@@ -11,6 +11,15 @@ from .hierarchy_authority import manual_hierarchy_snapshot_uses_legacy_projectio
 from .models import CatalogCollection, CatalogTitle, Video
 
 NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
+AUTOMATIC_SUPPLEMENTARY_FILE_TYPES = {
+    "ova": "ova",
+    "special": "special",
+    "ncop": "ncop",
+    "nced": "nced",
+    "pv": "preview",
+    "cm": "cm",
+    "menu": "menu",
+}
 
 
 @dataclass(frozen=True)
@@ -87,6 +96,43 @@ def is_nonprimary_duplicate_video(video: Video) -> bool:
 
 
 @dataclass(frozen=True)
+class SupplementaryNumberingHint:
+    """Bezpečný automatický subtype a případné pořadí mimo canonical episodes."""
+
+    supplementary_type: str
+    number: int | None
+
+
+def automatic_supplementary_numbering(
+    video: Video,
+    detection: EpisodeNumberDetection | None = None,
+) -> SupplementaryNumberingHint | None:
+    """Spojí explicitní parser semantics s bezpečným scanner file type.
+
+    Číslo z generic standard detekce je v tomto výsledku pouze supplementary
+    ordinal/hint. Nestandardní structural/fractional/zero význam má před
+    automatickým file type fallbackem přednost.
+    """
+    detection = detection or detect_episode_number(video.filename)
+    if detection.is_supplementary and detection.supplementary_type:
+        return SupplementaryNumberingHint(
+            detection.supplementary_type,
+            detection.supplementary_number,
+        )
+    if detection.is_nonstandard:
+        return None
+    supplementary_type = AUTOMATIC_SUPPLEMENTARY_FILE_TYPES.get(
+        (video.file_type or "").strip().casefold()
+    )
+    if supplementary_type is None or not detection.is_standard:
+        return None
+    return SupplementaryNumberingHint(
+        supplementary_type,
+        detection.number,
+    )
+
+
+@dataclass(frozen=True)
 class VideoNumberingIdentity:
     kind: str
     number: int
@@ -123,7 +169,17 @@ def video_numbering_identity(
     video: Video, *, title_names: dict[str, list[CatalogTitle]] | None = None,
 ) -> VideoNumberingIdentity | None:
     detection = detect_episode_number(video.filename)
-    if detection.is_supplementary and detection.supplementary_number is not None:
+    supplementary = automatic_supplementary_numbering(video, detection)
+    use_supplementary_identity = bool(
+        supplementary is not None
+        and supplementary.number is not None
+        and (
+            detection.is_supplementary
+            or video.episode_number_manual_override is None
+        )
+    )
+    if use_supplementary_identity:
+        assert supplementary is not None and supplementary.number is not None
         title_names = title_names or supplementary_context_map([video])
         hint = normalize_title(detection.context_hint or "")
         matched = title_names.get(hint, []) if hint else []
@@ -183,11 +239,18 @@ def video_numbering_identity(
                 )
                 context_season_number = None
         return VideoNumberingIdentity(
-            "supplementary", detection.supplementary_number,
-            detection.supplementary_type, context_key, context_label,
+            "supplementary", supplementary.number,
+            supplementary.supplementary_type, context_key, context_label,
             context_season_number,
         )
-    if video.season_episode_number is not None and not video.content_type_manual:
+    if (
+        video.season_episode_number is not None
+        and not video.content_type_manual
+        and (
+            supplementary is None
+            or video.episode_number_manual_override is not None
+        )
+    ):
         return VideoNumberingIdentity("standard", video.season_episode_number)
     return None
 
@@ -291,13 +354,17 @@ def recalculate_title_numbering(
     external_linked: bool | None = None,
 ) -> None:
     detections = [detect_episode_number(video.filename) for video in videos]
+    supplementary_hints = [
+        automatic_supplementary_numbering(video, detection)
+        for video, detection in zip(videos, detections)
+    ]
     part_type = _numbering_part_type(title)
     title_is_supplemental = part_type in SUPPLEMENTAL_PART_TYPES
     local_values = [
         item.number
-        if item.is_standard and not title_is_supplemental
+        if item.is_standard and hint is None and not title_is_supplemental
         else None
-        for item in detections
+        for item, hint in zip(detections, supplementary_hints)
     ]
     automatic_values = [
         None if video.content_type_manual else local
@@ -320,24 +387,36 @@ def recalculate_title_numbering(
     local_is_absolute = bool(offset is not None and numeric_values and min(numeric_values) > offset)
     has_external = title.metadata_record is not None if external_linked is None else external_linked
 
-    for video, detection, local, effective in zip(
-        videos, detections, local_values, effective_values
+    for video, detection, supplementary_hint, local, effective in zip(
+        videos, detections, supplementary_hints, local_values, effective_values
     ):
         video.local_episode_number = local
         if effective is None:
             video.season_episode_number = None
             video.absolute_episode_number = None
             video.external_episode_number = None
-            video.episode_number_source = (
-                f"supplementary_{detection.supplementary_type}"
-                if detection.is_supplementary else {
-                "zero": "nonstandard_zero",
-                "fractional": "fractional",
-                "structural_variant": "structural_variant",
+            if detection.is_supplementary:
+                source = f"supplementary_{detection.supplementary_type}"
+            elif supplementary_hint is not None and not title_is_supplemental:
+                source = f"supplementary_{supplementary_hint.supplementary_type}"
+            else:
+                source = {
+                    "zero": "nonstandard_zero",
+                    "fractional": "fractional",
+                    "structural_variant": "structural_variant",
                 }.get(detection.kind, "unknown")
-            )
+            video.episode_number_source = source
             video.episode_number_confidence = (
-                0.95 if detection.is_nonstandard or detection.is_supplementary else None
+                0.95
+                if (
+                    detection.is_nonstandard
+                    or detection.is_supplementary
+                    or (
+                        supplementary_hint is not None
+                        and not title_is_supplemental
+                    )
+                )
+                else None
             )
             continue
         is_manual = video.episode_number_manual_override is not None
@@ -553,6 +632,8 @@ class EffectiveVideoNumbering:
     season_episode_number: int | None
     numbering_input: int | None
     manual_override: bool
+    supplementary_type: str | None
+    supplementary_number: int | None
 
     @property
     def is_standard(self) -> bool:
@@ -588,6 +669,7 @@ def effective_video_numbering(
         effective_title is not None
         and effective_title.effective_part_type in SUPPLEMENTAL_PART_TYPES
     )
+    supplementary_hint = automatic_supplementary_numbering(video, detection)
     if video.content_type_manual or title_is_supplemental:
         classification = "supplementary"
     elif video.episode_number_manual_override is not None:
@@ -596,16 +678,22 @@ def effective_video_numbering(
         classification = "supplementary"
     elif detection.is_nonstandard:
         classification = "nonstandard"
+    elif supplementary_hint is not None:
+        classification = "supplementary"
     elif video.season_episode_number is not None or detection.is_standard:
         classification = "standard"
     else:
         classification = "unknown"
     numbering_input = (
-        video.episode_number_manual_override
-        if video.episode_number_manual_override is not None
-        else video.local_episode_number
-        if video.local_episode_number is not None
-        else detection.number if detection.is_standard else None
+        (
+            video.episode_number_manual_override
+            if video.episode_number_manual_override is not None
+            else video.local_episode_number
+            if video.local_episode_number is not None
+            else detection.number if detection.is_standard else None
+        )
+        if classification == "standard"
+        else None
     )
     return EffectiveVideoNumbering(
         detection=detection,
@@ -613,6 +701,16 @@ def effective_video_numbering(
         season_episode_number=video.season_episode_number,
         numbering_input=numbering_input,
         manual_override=video.episode_number_manual_override is not None,
+        supplementary_type=(
+            supplementary_hint.supplementary_type
+            if classification == "supplementary" and supplementary_hint is not None
+            else None
+        ),
+        supplementary_number=(
+            supplementary_hint.number
+            if classification == "supplementary" and supplementary_hint is not None
+            else None
+        ),
     )
 
 

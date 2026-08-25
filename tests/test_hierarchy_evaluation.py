@@ -211,6 +211,23 @@ def test_two_primary_canonical_episodes_have_one_video_scoped_duplicate_issue():
     assert issues[0].videos == (first, second)
 
 
+def test_classifier_only_ova_with_stale_episode_value_is_not_canonical_duplicate():
+    collection = _collection()
+    title = _title(collection)
+    regular = _video(
+        collection, title, 1, "Title - 01.mkv", episode_number=1,
+        file_type="episode",
+    )
+    ova = _video(
+        collection, title, 2, "Title OVA - 01.mkv", episode_number=1,
+        file_type="ova",
+    )
+
+    result = evaluate_collection_hierarchy(collection, [regular, ova])
+
+    assert HierarchyIssueCode.CANONICAL_DUPLICATE not in _codes(result)
+
+
 def test_fractional_video_has_stable_nonstandard_video_issue():
     collection = _collection()
     title = _title(collection)

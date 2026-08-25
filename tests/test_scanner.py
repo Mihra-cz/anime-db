@@ -334,6 +334,8 @@ def test_scan_keeps_ova_beside_season_episode_out_of_standard_numbering(
     folder.mkdir(parents=True)
     (folder / "High School DxD - 01.mkv").write_bytes(b"episode")
     (folder / "High School DxD - OVA 01.mkv").write_bytes(b"ova")
+    (folder / "High School DxD - 02.mkv").write_bytes(b"episode")
+    (folder / "High School DxD OVA - 02.mkv").write_bytes(b"ova")
     monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -350,6 +352,12 @@ def test_scan_keeps_ova_beside_season_episode_out_of_standard_numbering(
         assert videos["High School DxD - OVA 01.mkv"].episode_number_source == (
             "supplementary_ova"
         )
+        assert videos["High School DxD - 02.mkv"].season_episode_number == 2
+        classifier_only_ova = videos["High School DxD OVA - 02.mkv"]
+        assert classifier_only_ova.file_type == "ova"
+        assert classifier_only_ova.local_episode_number is None
+        assert classifier_only_ova.season_episode_number is None
+        assert classifier_only_ova.episode_number_source == "supplementary_ova"
         assert unresolved_duplicate_groups(list(title.videos)) == ()
 
 
