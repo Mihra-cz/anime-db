@@ -333,6 +333,7 @@ def recalculate_title_numbering(
                 if detection.is_supplementary else {
                 "zero": "nonstandard_zero",
                 "fractional": "fractional",
+                "structural_variant": "structural_variant",
                 }.get(detection.kind, "unknown")
             )
             video.episode_number_confidence = (

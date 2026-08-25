@@ -633,6 +633,97 @@ def test_derives_trailing_hyphen_episode_number(filename, expected):
     assert derive_episode_number(filename) == expected
 
 
+def test_episode_title_suffix_keeps_standard_episode_number():
+    filename = "Overlord - 01 - End and Beginning.mkv"
+
+    detection = detect_episode_number(filename)
+
+    assert detection.kind == "standard"
+    assert detection.number == 1
+    assert detection.title_candidate == "End and Beginning"
+    assert derive_episode_number(filename) == 1
+    assert classify_video(f"Anime/Overlord/{filename}") == "episode"
+
+
+@pytest.mark.parametrize(("filename", "episode", "version_hint"), [
+    ("Kaifuku Jutsushi no Yarinaoshi - 01 (UC).mkv", 1, "UC"),
+    ("Kaifuku Jutsushi no Yarinaoshi - 01 UC.mkv", 1, "UC"),
+    ("Nande Koko ni Sensei ga! - 01 Ver.TV.mp4", 1, "Ver.TV"),
+    ("Tensei shitara Ken Deshita - 01 CZ.mkv", 1, "CZ"),
+    ("Tensei shitara Ken Deshita - 12 CZ END.mkv", 12, "CZ END"),
+])
+def test_explicit_version_suffix_keeps_episode_and_version_hint(
+    filename, episode, version_hint,
+):
+    detection = detect_episode_number(filename)
+
+    assert detection.kind == "standard"
+    assert detection.number == episode
+    assert detection.version_hint == version_hint
+    assert derive_episode_number(filename) == episode
+    assert classify_video(f"Anime/Show/{filename}") == "episode"
+
+
+def test_attached_number_after_title_bang_is_a_conservative_episode_suffix():
+    filename = "Kono Subarashii Sekai ni Shukufuku wo!01.mp4"
+
+    detection = detect_episode_number(filename)
+
+    assert detection.kind == "standard"
+    assert detection.number == 1
+    assert derive_episode_number(filename) == 1
+    assert classify_video(f"Anime/Konosuba/{filename}") == "episode"
+
+
+@pytest.mark.parametrize(("filename", "marker"), [
+    ("Re Zero kara Hajimeru Isekai Seikatsu - 01A.mkv", "A"),
+    ("Re Zero kara Hajimeru Isekai Seikatsu - 01B.mkv", "B"),
+])
+def test_structural_ab_marker_keeps_base_episode_without_becoming_canonical(
+    filename, marker,
+):
+    detection = detect_episode_number(filename)
+
+    assert detection.kind == "structural_variant"
+    assert detection.is_nonstandard
+    assert detection.number == 1
+    assert detection.filename_episode_hint == 1
+    assert detection.structural_marker == marker
+    assert detection.display_value == f"1{marker}"
+    assert derive_episode_number(filename) is None
+    assert classify_video(f"Anime/Re Zero/{filename}") == "other"
+
+
+def test_new_episode_suffixes_do_not_override_supplementary_context():
+    filenames = (
+        "Title - OVA - 01 - Side Story.mkv",
+        "Title - Special - 01 (UC).mkv",
+        "Title - CM - 01 - Commercial.mkv",
+        "Title - Menu - 01 CZ.mkv",
+        "NCOP!01.mp4",
+    )
+
+    assert all(not detect_episode_number(filename).is_standard for filename in filenames)
+
+
+def test_ncop_tv_version_sequence_is_not_degraded_to_ordinary_episode():
+    filename = "Nande Koko ni Sensei ga! - NCOP Ver.TV1.mp4"
+
+    detection = detect_episode_number(filename)
+
+    assert not detection.is_standard
+    assert classify_video(f"Anime/Nande Koko ni Sensei ga/{filename}") == "ncop"
+
+
+@pytest.mark.parametrize("filename", [
+    "Title!1.mkv",
+    "Title!2024.mkv",
+    "Title - 01 WEB.mkv",
+])
+def test_new_suffix_rules_reject_nearby_but_unsupported_generic_forms(filename):
+    assert detect_episode_number(filename).kind == "unknown"
+
+
 @pytest.mark.parametrize(("filename", "expected"), [
     ("Title 01.mkv", 1),
     ("Title 02.mp4", 2),

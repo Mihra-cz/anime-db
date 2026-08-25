@@ -224,6 +224,28 @@ def test_fractional_video_has_stable_nonstandard_video_issue():
     assert result.status == "review_required"
 
 
+def test_structural_episode_variant_is_routed_to_hierarchy_review_with_marker():
+    collection = _collection()
+    title = _title(collection)
+    video = _video(
+        collection,
+        title,
+        1,
+        "Re Zero kara Hajimeru Isekai Seikatsu - 01A.mkv",
+    )
+
+    result = evaluate_collection_hierarchy(collection, [video])
+
+    issue = next(
+        item for item in result.issues
+        if item.code == HierarchyIssueCode.NONSTANDARD_NUMBERING
+    )
+    assert issue.scope == HierarchyIssueScope.VIDEO
+    assert issue.videos == (video,)
+    assert "1A" in issue.message
+    assert result.status == "review_required"
+
+
 def test_unassigned_video_has_stable_video_issue():
     collection = _collection()
     video = _video(collection, None, 1, "Episode 01.mkv", episode_number=1)

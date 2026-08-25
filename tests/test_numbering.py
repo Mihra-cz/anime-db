@@ -547,6 +547,47 @@ def test_fractional_episode_does_not_create_gap_between_fourteen_and_fifteen():
     assert summary.gaps == ()
 
 
+def test_structural_ab_variants_are_routed_to_review_without_canonical_duplicate():
+    title = CatalogTitle(
+        id=1, local_title="Season 1", normalized_local_title="season 1",
+        relative_root_path="Anime/Re Zero/Season 1",
+        part_type="season", season_number=1,
+    )
+    items = [
+        Video(
+            id=index,
+            relative_path=f"Anime/Re Zero/Season 1/{filename}",
+            root_folder="Anime",
+            filename=filename,
+            size=1,
+            mtime_ns=1,
+            catalog_title=title,
+        )
+        for index, filename in enumerate((
+            "Re Zero kara Hajimeru Isekai Seikatsu - 01A.mkv",
+            "Re Zero kara Hajimeru Isekai Seikatsu - 01B.mkv",
+        ), 1)
+    ]
+
+    recalculate_title_numbering(title, items)
+    summary = summarize_title_numbering(items, title)
+
+    assert [detect_episode_number(video.filename).number for video in items] == [1, 1]
+    assert [
+        detect_episode_number(video.filename).filename_episode_hint for video in items
+    ] == [1, 1]
+    assert [
+        detect_episode_number(video.filename).structural_marker for video in items
+    ] == ["A", "B"]
+    assert all(effective_video_numbering(video, title).is_nonstandard for video in items)
+    assert all(video.local_episode_number is None for video in items)
+    assert all(video.season_episode_number is None for video in items)
+    assert {video.episode_number_source for video in items} == {"structural_variant"}
+    assert summary.nonstandard == 2
+    assert summary.requires_review is True
+    assert unresolved_duplicate_groups(items) == ()
+
+
 def test_fractional_episode_position_sorts_exactly_between_adjacent_integers():
     items = [
         Video(

@@ -1086,11 +1086,34 @@ SXXEXX_BRACKETED_SUPPLEMENTARY = re.compile(
 )
 TRAILING_EPISODE = re.compile(r"\s+-\s+0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
 TRAILING_PLAIN_EPISODE = re.compile(r"\s+0*(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
+TRAILING_EPISODE_WITH_TITLE = re.compile(
+    r"^(?P<title>.+?)\s+-\s+(?P<episode>\d{2})"
+    r"\s+-\s+(?P<episode_title>\S(?:.*\S)?)$",
+    re.IGNORECASE,
+)
+TRAILING_EPISODE_WITH_VERSION_HINT = re.compile(
+    r"^(?P<title>.+?)\s+-\s+(?P<episode>\d{2})\s+"
+    r"(?P<version>\(?UC\)?|Ver\.TV|CZ(?:\s+END)?)$",
+    re.IGNORECASE,
+)
+TRAILING_EPISODE_WITH_STRUCTURAL_MARKER = re.compile(
+    r"^(?P<title>.+?)\s+-\s+(?P<episode>\d{2})(?P<marker>[AB])$",
+    re.IGNORECASE,
+)
+ATTACHED_BANG_EPISODE = re.compile(
+    r"^(?P<title>.{2,})!(?P<episode>\d{2})(?:v\d+)?$",
+    re.IGNORECASE,
+)
 SUPPLEMENTARY_SEQUENCE = re.compile(
     r"(?:^|[^a-z0-9])"
     r"(?P<type>NCOP|NCED|OVA|OAD|SPECIALS?|OP|ED|PREVIEWS?|PV|RECAPS?|"
     r"BONUS(?:ES)?|EXTRAS?)"
     r"\s*(?:(?:P|EPISODE|EP|E)\s*)?0*(?P<number>\d{1,3})(?:v\d+)?$",
+    re.IGNORECASE,
+)
+SUPPLEMENTARY_CONTEXT_SUFFIX = re.compile(
+    r"(?:^|[^a-z0-9])(?:NCOP|NCED|OVA|OAD|SPECIALS?|OP|ED|PREVIEWS?|PV|"
+    r"RECAPS?|BONUS(?:ES)?|EXTRAS?|SHORTS?|TRAILERS?|CM|COMMERCIAL|MENU)\s*$",
     re.IGNORECASE,
 )
 BARE_EPISODE = re.compile(r"0\d{1,2}(?:v\d+)?", re.IGNORECASE)
@@ -1124,6 +1147,8 @@ class EpisodeNumberDetection:
     season_hint: int | None = None
     filename_episode_hint: int | None = None
     title_candidate: str | None = None
+    version_hint: str | None = None
+    structural_marker: str | None = None
 
     @property
     def is_standard(self) -> bool:
@@ -1131,7 +1156,7 @@ class EpisodeNumberDetection:
 
     @property
     def is_nonstandard(self) -> bool:
-        return self.kind in {"zero", "fractional"}
+        return self.kind in {"zero", "fractional", "structural_variant"}
 
     @property
     def is_supplementary(self) -> bool:
@@ -1156,6 +1181,12 @@ class EpisodeNumberDetection:
             return "00"
         if self.kind == "fractional" and self.number is not None and self.fraction:
             return f"{self.number}.{self.fraction}"
+        if (
+            self.kind == "structural_variant"
+            and self.number is not None
+            and self.structural_marker
+        ):
+            return f"{self.number}{self.structural_marker}"
         if self.kind == "standard" and self.number is not None:
             return str(self.number)
         if self.is_supplementary and self.number is not None:
@@ -1168,8 +1199,22 @@ class EpisodeNumberDetection:
         return None
 
 
+def _has_supplementary_context(title: str) -> bool:
+    """Do not let new episode suffixes override an explicit content marker."""
+    return SUPPLEMENTARY_CONTEXT_SUFFIX.search(title.rstrip(" -_.")) is not None
+
+
+def _normalized_version_hint(raw: str) -> str:
+    normalized = " ".join(raw.strip().split()).casefold()
+    if normalized.strip("()") == "uc":
+        return "UC"
+    if normalized == "ver.tv":
+        return "Ver.TV"
+    return "CZ END" if normalized == "cz end" else "CZ"
+
+
 def detect_episode_number(filename: str) -> EpisodeNumberDetection:
-    """Bezpečně rozliší standardní, nulové, desetinné a neznámé číslování."""
+    """Bezpečně rozliší standardní, variantní a další nekanonické číslování."""
     stem = PurePosixPath(filename).stem
     if match := SXXEXX_BRACKETED_SUPPLEMENTARY.search(stem):
         title_candidate = match.group("title").lstrip(" -_.").strip() or None
@@ -1219,6 +1264,34 @@ def detect_episode_number(filename: str) -> EpisodeNumberDetection:
             return EpisodeNumberDetection(
                 "fractional", int(match.group(1)), match.group(2)
             )
+    if match := TRAILING_EPISODE_WITH_STRUCTURAL_MARKER.fullmatch(stem):
+        if not _has_supplementary_context(match.group("title")):
+            return EpisodeNumberDetection(
+                "structural_variant",
+                int(match.group("episode")),
+                filename_episode_hint=int(match.group("episode")),
+                structural_marker=match.group("marker").upper(),
+            )
+    if match := TRAILING_EPISODE_WITH_VERSION_HINT.fullmatch(stem):
+        if not _has_supplementary_context(match.group("title")):
+            number = int(match.group("episode"))
+            return EpisodeNumberDetection(
+                "zero" if number == 0 else "standard",
+                number,
+                version_hint=_normalized_version_hint(match.group("version")),
+            )
+    if match := TRAILING_EPISODE_WITH_TITLE.fullmatch(stem):
+        if not _has_supplementary_context(match.group("title")):
+            number = int(match.group("episode"))
+            return EpisodeNumberDetection(
+                "zero" if number == 0 else "standard",
+                number,
+                title_candidate=match.group("episode_title"),
+            )
+    if match := ATTACHED_BANG_EPISODE.fullmatch(stem):
+        if not _has_supplementary_context(match.group("title")):
+            number = int(match.group("episode"))
+            return EpisodeNumberDetection("zero" if number == 0 else "standard", number)
     for pattern in (EXPLICIT_EPISODE, TRAILING_EPISODE, TRAILING_PLAIN_EPISODE):
         if match := pattern.search(stem):
             number = int(match.group(1))
