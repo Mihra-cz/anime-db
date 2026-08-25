@@ -355,4 +355,39 @@ class ExternalSubtitle(Base):
     language: Mapped[str] = mapped_column(String, default="unknown")
     normalized_language: Mapped[str] = mapped_column(String, default="unknown", server_default="unknown")
     manual_language: Mapped[str | None] = mapped_column(String, nullable=True)
-    __table_args__ = (UniqueConstraint("video_id", "relative_path"),)
+    match_method: Mapped[str] = mapped_column(
+        String, default="automatic", server_default="automatic", index=True,
+    )
+    __table_args__ = (
+        UniqueConstraint("relative_path"),
+        CheckConstraint(
+            "match_method IN ('automatic','manual')",
+            name="ck_external_subtitle_match_method",
+        ),
+    )
+
+
+class UnresolvedExternalSubtitle(Base):
+    __tablename__ = "unresolved_external_subtitles"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    relative_path: Mapped[str] = mapped_column(String, unique=True, index=True)
+    filename: Mapped[str] = mapped_column(String)
+    extension: Mapped[str] = mapped_column(String)
+    language: Mapped[str] = mapped_column(String, default="unknown")
+    normalized_language: Mapped[str] = mapped_column(
+        String, default="unknown", server_default="unknown",
+    )
+    status: Mapped[str] = mapped_column(
+        String, default="unresolved", server_default="unresolved", index=True,
+    )
+    rejected_video_ids_json: Mapped[str] = mapped_column(
+        Text, default="[]", server_default="[]",
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now,
+    )
+    __table_args__ = (CheckConstraint(
+        "status IN ('unresolved','confirmed_no_match')",
+        name="ck_unresolved_external_subtitle_status",
+    ),)

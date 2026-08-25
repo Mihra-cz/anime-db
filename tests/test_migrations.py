@@ -8,7 +8,7 @@ from app.database import Base
 from app.models import (
     AudioTrack, CatalogCollection, CatalogTitle, CollectionGroupingDecision,
     ExternalSubtitle, ExternalTitleLink, InternalSubtitle, ManualSplitRuleVideo,
-    TitleMetadata, Video,
+    TitleMetadata, UnresolvedExternalSubtitle, Video,
 )
 
 
@@ -452,6 +452,7 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
     migrate_schema(engine)
 
     assert "collection_grouping_decisions" in inspect(engine).get_table_names()
+    assert "unresolved_external_subtitles" in inspect(engine).get_table_names()
 
     assert [
         column["name"] for column in inspect(engine).get_columns("videos")
@@ -528,6 +529,9 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
     assert [
         column["name"] for column in inspect(engine).get_columns("external_subtitles")
     ].count("manual_language") == 1
+    assert [
+        column["name"] for column in inspect(engine).get_columns("external_subtitles")
+    ].count("match_method") == 1
     with Session(engine) as session:
         video = session.scalar(select(Video))
         assert video.content_type_manual == "recap"
@@ -536,12 +540,25 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         assert session.scalar(select(CollectionGroupingDecision)).decision == "separate"
         assert session.scalar(select(AudioTrack.manual_language)) == "ja"
         assert session.scalar(select(ExternalSubtitle.manual_language)) == "cs"
+        assert session.scalar(select(ExternalSubtitle.match_method)) == "automatic"
+        session.add(UnresolvedExternalSubtitle(
+            relative_path="Show/orphan.ass", filename="orphan.ass",
+            extension=".ass", status="confirmed_no_match",
+        ))
+        session.commit()
         assert (
             video.relative_path, video.filename, video.size, video.mtime_ns,
             video.duration, video.video_codec, video.width, video.height,
         ) == (
             "Show/NCOP.mkv", "NCOP.mkv", 987, 654,
             123.5, "h265", 1280, 720,
+        )
+
+    migrate_schema(engine)
+    with Session(engine) as session:
+        unresolved = session.scalar(select(UnresolvedExternalSubtitle))
+        assert (unresolved.relative_path, unresolved.status) == (
+            "Show/orphan.ass", "confirmed_no_match",
         )
 
 

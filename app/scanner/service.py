@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import defaultdict
 import logging
 import multiprocessing
 import os
@@ -24,11 +25,12 @@ from app.manual_split import (
     persisted_manual_split_authority_collections,
 )
 from app.models import (
-    AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle, Video,
+    AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, InternalSubtitle,
+    UnresolvedExternalSubtitle, Video,
 )
 from app.numbering import recalculate_collection_numbering
 from app.probe import ProbeError, probe_video
-from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, subtitle_matches
+from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, safe_subtitle_matches
 
 logger = logging.getLogger(__name__)
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi"}
@@ -73,6 +75,23 @@ def iter_videos(root: Path):
         for filename in sorted(files):
             path = Path(current) / filename
             if path.suffix.lower() in VIDEO_EXTENSIONS:
+                yield path
+
+
+def iter_external_subtitles(root: Path):
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for current, directories, files in os.walk(
+        root, topdown=True, onerror=raise_walk_error, followlinks=False
+    ):
+        directories[:] = sorted(
+            d for d in directories
+            if d.casefold() not in IGNORED_DIRECTORIES and not d.startswith(".")
+        )
+        for filename in sorted(files):
+            path = Path(current) / filename
+            if path.suffix.lower() in SUBTITLE_EXTENSIONS:
                 yield path
 
 
@@ -140,44 +159,112 @@ def _root_folder(relative: Path) -> str:
     return relative.parts[0] if len(relative.parts) > 1 else "."
 
 
-def _external_subtitles(video_path: Path, library_root: Path) -> list[dict[str, str]]:
-    try:
-        candidates = video_path.parent.iterdir()
-    except OSError:
-        return []
-    result = []
-    for path in candidates:
-        if path.is_file() and path.suffix.lower() in SUBTITLE_EXTENSIONS and subtitle_matches(video_path, path):
-            language = read_and_detect(path)
-            result.append({
-                "relative_path": path.relative_to(library_root).as_posix(),
-                "codec": path.suffix.lower().lstrip("."),
-                "language": language,
-                "normalized_language": normalize_language(language),
-            })
-    return result
-
-
 def _sync_external_subtitles(
-    session: Session, video: Video, subtitle_data: list[dict[str, str]]
+    session: Session, library_root: Path, videos: list[Video]
 ) -> None:
-    """Synchronize the relationship without replacing rows sharing a unique key."""
-    with session.no_autoflush:
-        existing = {subtitle.relative_path: subtitle for subtitle in video.external_subtitles}
-        incoming = {subtitle["relative_path"]: subtitle for subtitle in subtitle_data}
+    """Account for every physical subtitle once while preserving manual authority."""
+    session.flush()
+    video_by_relative = {video.relative_path: video for video in videos}
+    videos_by_parent: dict[Path, list[Path]] = defaultdict(list)
+    for relative_path in video_by_relative:
+        absolute_path = library_root / relative_path
+        videos_by_parent[absolute_path.parent].append(absolute_path)
 
-        for relative_path, data in incoming.items():
-            subtitle = existing.get(relative_path)
-            if subtitle is None:
-                video.external_subtitles.append(ExternalSubtitle(**data))
-            else:
-                subtitle.codec = data["codec"]
-                subtitle.language = data["language"]
-                subtitle.normalized_language = data["normalized_language"]
+    linked_by_path: dict[str, list[ExternalSubtitle]] = defaultdict(list)
+    for subtitle in session.scalars(select(ExternalSubtitle)).all():
+        linked_by_path[subtitle.relative_path].append(subtitle)
+    unresolved_by_path = {
+        subtitle.relative_path: subtitle
+        for subtitle in session.scalars(select(UnresolvedExternalSubtitle)).all()
+    }
 
-        for relative_path, subtitle in existing.items():
-            if relative_path not in incoming:
-                video.external_subtitles.remove(subtitle)
+    physical_paths = list(iter_external_subtitles(library_root))
+    seen = {path.relative_to(library_root).as_posix() for path in physical_paths}
+    for relative_path, rows in linked_by_path.items():
+        if relative_path not in seen:
+            for row in rows:
+                session.delete(row)
+    for relative_path, row in unresolved_by_path.items():
+        if relative_path not in seen:
+            session.delete(row)
+
+    for path in physical_paths:
+        relative_path = path.relative_to(library_root).as_posix()
+        language = read_and_detect(path)
+        data = {
+            "relative_path": relative_path,
+            "filename": path.name,
+            "extension": path.suffix.lower(),
+            "codec": path.suffix.lower().lstrip("."),
+            "language": language,
+            "normalized_language": normalize_language(language),
+        }
+        linked = linked_by_path.get(relative_path, [])
+        manual = [row for row in linked if row.match_method == "manual"]
+        unresolved = unresolved_by_path.get(relative_path)
+
+        if manual:
+            keep = min(manual, key=lambda row: row.id or 0)
+            keep.codec = data["codec"]
+            keep.language = data["language"]
+            keep.normalized_language = data["normalized_language"]
+            for row in linked:
+                if row is not keep:
+                    session.delete(row)
+            if unresolved is not None:
+                session.delete(unresolved)
+            continue
+
+        if unresolved is not None and unresolved.status == "confirmed_no_match":
+            unresolved.filename = data["filename"]
+            unresolved.extension = data["extension"]
+            unresolved.language = data["language"]
+            unresolved.normalized_language = data["normalized_language"]
+            for row in linked:
+                session.delete(row)
+            continue
+
+        match_method, candidates = safe_subtitle_matches(
+            videos_by_parent.get(path.parent, []), path,
+        )
+        if len(candidates) == 1:
+            video = video_by_relative[candidates[0].relative_to(library_root).as_posix()]
+            keep = next((row for row in linked if row.video_id == video.id), None)
+            if keep is None and linked:
+                keep = min(linked, key=lambda row: row.id or 0)
+            if keep is None:
+                keep = ExternalSubtitle(video_id=video.id, relative_path=relative_path)
+                session.add(keep)
+            keep.video_id = video.id
+            keep.codec = data["codec"]
+            keep.language = data["language"]
+            keep.normalized_language = data["normalized_language"]
+            keep.match_method = "automatic"
+            for row in linked:
+                if row is not keep:
+                    session.delete(row)
+            if unresolved is not None:
+                session.delete(unresolved)
+            logger.debug(
+                "Externí titulek %s bezpečně přiřazen (%s) k %s",
+                relative_path, match_method, video.relative_path,
+            )
+            continue
+
+        for row in linked:
+            session.delete(row)
+        if unresolved is None:
+            unresolved = UnresolvedExternalSubtitle(
+                relative_path=relative_path,
+                filename=data["filename"],
+                extension=data["extension"],
+            )
+            session.add(unresolved)
+        unresolved.filename = data["filename"]
+        unresolved.extension = data["extension"]
+        unresolved.language = data["language"]
+        unresolved.normalized_language = data["normalized_language"]
+        unresolved.status = "unresolved"
 
 
 def _sync_audio_tracks(
@@ -275,7 +362,6 @@ def _scan_library(
                     result.created += 1
                 else:
                     result.updated += 1
-            _sync_external_subtitles(session, video, _external_subtitles(path, root))
             last_successful_file = key
         except (OSError, ProbeError, ValueError) as exc:
             result.errors += 1
@@ -329,6 +415,7 @@ def _scan_library(
         video for video in session.scalars(select(Video)).all()
         if video.relative_path in seen
     ]
+    _sync_external_subtitles(session, root, current_videos)
     hierarchy = derive_library_hierarchy([video.relative_path for video in current_videos])
     collections = {
         value.relative_root_path: value

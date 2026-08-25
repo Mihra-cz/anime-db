@@ -16,10 +16,16 @@ from app.hierarchy_review import (
     MISSING_DUPLICATE_PRIMARY_REVIEW_REASON, SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
     confirm_duplicate_videos, set_manual_duplicate_status,
 )
-from app.models import CatalogCollection, CatalogTitle, ExternalSubtitle, Video
+from app.models import (
+    CatalogCollection, CatalogTitle, ExternalSubtitle, UnresolvedExternalSubtitle, Video,
+)
 from app.migrations import migrate_schema
 from app.numbering import effective_video_numbering, unresolved_duplicate_groups
 from app.scanner import LibrarySafetyError, iter_videos, scan_library
+from app.subtitle_review import (
+    confirm_subtitle_no_match, manually_link_subtitle, reopen_subtitle_review,
+    set_subtitle_candidate_rejected,
+)
 
 
 PROBE_RESULT = {
@@ -582,7 +588,7 @@ def test_preserves_two_external_subtitles_with_same_language(tmp_path: Path, mon
     video_path.parent.mkdir()
     video_path.write_bytes(b"video")
     (video_path.parent / "episode.cs.srt").write_text("one", encoding="utf-8")
-    (video_path.parent / "episode.alternative.srt").write_text("two", encoding="utf-8")
+    (video_path.parent / "episode.eng.srt").write_text("two", encoding="utf-8")
     monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: {
         "duration": 60.0, "video_codec": "h264", "width": 1920, "height": 1080,
         "audio": [], "subtitles": [],
@@ -598,6 +604,112 @@ def test_preserves_two_external_subtitles_with_same_language(tmp_path: Path, mon
         assert len(subtitles) == 2
         assert {subtitle.normalized_language for subtitle in subtitles} == {"cs"}
         assert len({subtitle.relative_path for subtitle in subtitles}) == 2
+
+
+def test_scanner_fractional_exact_match_is_single_and_ambiguous_stem_is_unresolved(
+    tmp_path: Path, monkeypatch,
+):
+    show = tmp_path / "Show"
+    show.mkdir()
+    for filename in ("Title - 05.mkv", "Title - 05.5.mkv"):
+        (show / filename).write_bytes(b"video")
+    (show / "Title - 05.5.ass").write_text("subtitle", encoding="utf-8")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        linked = session.scalar(select(ExternalSubtitle))
+        assert linked.relative_path == "Show/Title - 05.5.ass"
+        assert linked.match_method == "automatic"
+        assert session.get(Video, linked.video_id).filename == "Title - 05.5.mkv"
+        assert session.scalar(select(func.count()).select_from(UnresolvedExternalSubtitle)) == 0
+
+    (show / "Title - 05.5.ass").unlink()
+    (show / "Title - 05.ass").write_text("subtitle", encoding="utf-8")
+    (show / "Title - 05.mp4").write_bytes(b"other video")
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        assert session.scalar(select(func.count()).select_from(ExternalSubtitle)) == 0
+        unresolved = session.scalar(select(UnresolvedExternalSubtitle))
+        assert unresolved.relative_path == "Show/Title - 05.ass"
+
+
+def test_unresolved_manual_decisions_and_rejections_survive_rescan(
+    tmp_path: Path, monkeypatch,
+):
+    show = tmp_path / "Show"
+    show.mkdir()
+    (show / "Title - 01.mkv").write_bytes(b"video")
+    subtitle_path = show / "Title - 1.ass"
+    subtitle_path.write_text("subtitle", encoding="utf-8")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        unresolved = session.scalar(select(UnresolvedExternalSubtitle))
+        video = session.scalar(select(Video))
+        set_subtitle_candidate_rejected(unresolved, video.id, True)
+        session.commit()
+        scan_library(session, tmp_path)
+        unresolved = session.scalar(select(UnresolvedExternalSubtitle))
+        assert unresolved.rejected_video_ids_json == f"[{video.id}]"
+        confirm_subtitle_no_match(unresolved)
+        session.commit()
+        scan_library(session, tmp_path)
+        unresolved = session.scalar(select(UnresolvedExternalSubtitle))
+        assert unresolved.status == "confirmed_no_match"
+        assert unresolved.rejected_video_ids_json == f"[{video.id}]"
+
+        reopen_subtitle_review(unresolved)
+        manually_link_subtitle(session, unresolved, video)
+        session.commit()
+        scan_library(session, tmp_path)
+        linked = session.scalar(select(ExternalSubtitle))
+        assert linked.match_method == "manual"
+        assert linked.video_id == video.id
+        assert session.scalar(select(func.count()).select_from(UnresolvedExternalSubtitle)) == 0
+
+        scan_library(session, tmp_path)
+        assert session.scalar(select(func.count()).select_from(ExternalSubtitle)) == 1
+
+        subtitle_path.unlink()
+        scan_library(session, tmp_path)
+        assert session.scalar(select(func.count()).select_from(ExternalSubtitle)) == 0
+
+
+def test_language_suffix_is_automatic_but_release_name_and_true_orphan_are_preserved(
+    tmp_path: Path, monkeypatch,
+):
+    show = tmp_path / "Show"
+    orphan_directory = tmp_path / "Orphan"
+    show.mkdir()
+    orphan_directory.mkdir()
+    (show / "Title - 01.mkv").write_bytes(b"video")
+    (show / "Title - 01.cs.ass").write_text("subtitle", encoding="utf-8")
+    (show / "release-Title-01-cz-tit.ass").write_text("subtitle", encoding="utf-8")
+    (orphan_directory / "Missing OVA.ass").write_text("subtitle", encoding="utf-8")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        linked = list(session.scalars(select(ExternalSubtitle)).all())
+        unresolved = list(session.scalars(
+            select(UnresolvedExternalSubtitle).order_by(
+                UnresolvedExternalSubtitle.relative_path
+            )
+        ).all())
+        assert [(row.relative_path, row.match_method) for row in linked] == [
+            ("Show/Title - 01.cs.ass", "automatic"),
+        ]
+        assert [row.relative_path for row in unresolved] == [
+            "Orphan/Missing OVA.ass", "Show/release-Title-01-cz-tit.ass",
+        ]
 
 
 def test_empty_existing_root_does_not_delete_database_records(tmp_path: Path, monkeypatch):

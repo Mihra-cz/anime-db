@@ -489,6 +489,26 @@ summary {
 .media-track { padding: .5rem 0; border-bottom: 1px solid #293345; }
 .media-track:last-child { border-bottom: 0; }
 .media-track p { margin: 0 0 .5rem; }
+.unresolved-subtitle-list { margin-bottom: 1rem; }
+.unresolved-subtitle-card { padding: 1rem 0; border-top: 1px solid #364258; }
+.unresolved-subtitle-card > header,
+.subtitle-candidate,
+.subtitle-review-actions,
+.subtitle-candidate-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  flex-wrap: wrap;
+}
+.unresolved-subtitle-card header > div,
+.subtitle-candidate > div { min-width: 0; }
+.unresolved-subtitle-card small,
+.subtitle-candidate small { display: block; }
+.subtitle-candidate-list { display: grid; gap: .5rem; margin: .75rem 0; }
+.subtitle-candidate { padding: .65rem; border: 1px solid #364258; border-radius: 8px; }
+.subtitle-candidate-actions form,
+.subtitle-review-actions form { margin: 0; }
 .media-pagination { display: flex; justify-content: center; align-items: center; gap: 1rem; margin: 1.5rem 0; }
 .visually-hidden {
   position: absolute;
@@ -515,5 +535,8 @@ summary {
   .media-check-search { grid-column: 1; }
   .media-check-toolbar { align-items: stretch; }
   .media-check-toolbar form, .media-pagination { flex-direction: column; align-items: stretch; }
+  .unresolved-subtitle-card > header,
+  .subtitle-candidate,
+  .subtitle-review-actions { align-items: stretch; flex-direction: column; }
   .media-pagination { text-align: center; }
 }

@@ -108,7 +108,7 @@ from .metadata.service import (
 )
 from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    TitleMetadata, Video, utc_now,
+    TitleMetadata, UnresolvedExternalSubtitle, Video, utc_now,
 )
 from .numbering import (
     apply_sequential_numbering,
@@ -118,6 +118,11 @@ from .numbering import (
     summarize_title_numbering, unresolved_duplicate_groups,
 )
 from .scanner import LibrarySafetyError, scan_library
+from .subtitle_review import (
+    build_unresolved_subtitle_rows, confirm_subtitle_no_match,
+    manually_link_subtitle, reopen_manual_subtitle_link, reopen_subtitle_review,
+    set_subtitle_candidate_rejected, subtitle_candidates,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -1345,6 +1350,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         message: str | None = None,
     ):
         videos = _load_videos(sessions)
+        with sessions() as session:
+            unresolved_subtitles = list(session.scalars(
+                select(UnresolvedExternalSubtitle).order_by(
+                    UnresolvedExternalSubtitle.relative_path
+                )
+            ).all())
+            unresolved_rows = build_unresolved_subtitle_rows(
+                unresolved_subtitles, videos,
+            )
+            unresolved_subtitle_counts = {
+                "all": len(unresolved_subtitles),
+                "unresolved": sum(
+                    item.status == "unresolved" for item in unresolved_subtitles
+                ),
+                "confirmed_no_match": sum(
+                    item.status == "confirmed_no_match"
+                    for item in unresolved_subtitles
+                ),
+            }
         try:
             results = build_media_check_results(
                 videos,
@@ -1369,7 +1393,91 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 results.query, results.page,
             ),
             "message": message,
+            "unresolved_subtitle_rows": unresolved_rows,
+            "unresolved_subtitle_counts": unresolved_subtitle_counts,
         })
+
+    @app.post("/media-check/external-subtitles/{subtitle_id}/assign")
+    async def assign_unresolved_external_subtitle(request: Request, subtitle_id: int):
+        form = await request.form()
+        try:
+            video_id = int(form.get("video_id"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Neplatný kandidát videa.") from exc
+        videos = _load_videos(sessions)
+        with sessions() as session:
+            subtitle_row = session.get(UnresolvedExternalSubtitle, subtitle_id)
+            if subtitle_row is None:
+                raise HTTPException(status_code=404, detail="Titulek už není v ručním review.")
+            if subtitle_row.status != "unresolved":
+                raise HTTPException(status_code=400, detail="Nejdřív vraťte titulek k řešení.")
+            _, candidates, _ = subtitle_candidates(subtitle_row, videos)
+            if video_id not in {candidate.video.id for candidate in candidates}:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Vybrané video není v omezeném seznamu aktuálních kandidátů.",
+                )
+            video = session.get(Video, video_id)
+            if video is None:
+                raise HTTPException(status_code=404, detail="Vybrané video neexistuje.")
+            try:
+                manually_link_subtitle(session, subtitle_row, video)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return local_redirect_response(form.get("return_to") or "/media-check")
+
+    @app.post("/media-check/external-subtitles/{subtitle_id}/reject/{video_id}")
+    async def reject_external_subtitle_candidate(
+        request: Request, subtitle_id: int, video_id: int,
+    ):
+        form = await request.form()
+        videos = _load_videos(sessions)
+        with sessions() as session:
+            subtitle_row = session.get(UnresolvedExternalSubtitle, subtitle_id)
+            if subtitle_row is None:
+                raise HTTPException(status_code=404, detail="Titulek už není v ručním review.")
+            _, candidates, _ = subtitle_candidates(subtitle_row, videos)
+            if video_id not in {candidate.video.id for candidate in candidates}:
+                raise HTTPException(status_code=400, detail="Kandidát už není aktuálně nabízen.")
+            set_subtitle_candidate_rejected(subtitle_row, video_id, True)
+            session.commit()
+        return local_redirect_response(form.get("return_to") or "/media-check")
+
+    @app.post("/media-check/external-subtitles/{subtitle_id}/decision")
+    async def decide_unresolved_external_subtitle(request: Request, subtitle_id: int):
+        form = await request.form()
+        action = str(form.get("action") or "").strip().casefold()
+        if action not in {"confirm_no_match", "reopen", "clear_rejections"}:
+            raise HTTPException(status_code=400, detail="Neplatná akce titulků.")
+        with sessions() as session:
+            subtitle_row = session.get(UnresolvedExternalSubtitle, subtitle_id)
+            if subtitle_row is None:
+                raise HTTPException(status_code=404, detail="Titulek už není v ručním review.")
+            if action == "confirm_no_match":
+                confirm_subtitle_no_match(subtitle_row)
+            elif action == "reopen":
+                reopen_subtitle_review(subtitle_row)
+            else:
+                subtitle_row.rejected_video_ids_json = "[]"
+            session.commit()
+        return local_redirect_response(form.get("return_to") or "/media-check")
+
+    @app.post("/media-check/external-subtitles/{subtitle_id}/reopen-link")
+    async def reopen_external_subtitle_link(request: Request, subtitle_id: int):
+        form = await request.form()
+        with sessions() as session:
+            subtitle_row = session.get(ExternalSubtitle, subtitle_id)
+            if subtitle_row is None:
+                raise HTTPException(status_code=404, detail="Přiřazení titulku neexistuje.")
+            try:
+                reopen_manual_subtitle_link(session, subtitle_row)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return local_redirect_response(form.get("return_to") or "/media-check")
 
     @app.post("/media-check/czsk-availability")
     async def update_media_check_czsk_availability(request: Request):

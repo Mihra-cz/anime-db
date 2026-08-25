@@ -17,8 +17,9 @@ from app.media_check import (
 )
 from app.models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
-    InternalSubtitle, Video,
+    InternalSubtitle, UnresolvedExternalSubtitle, Video,
 )
+from app.subtitle_review import build_unresolved_subtitle_rows
 
 
 def _video(
@@ -453,3 +454,120 @@ def test_media_check_page_navigation_controls_and_existing_review_pages(tmp_path
         assert build_media_check_evaluation(audio_video).factual.audio_status == "japanese"
         assert build_media_check_evaluation(subtitle_video).subtitle_status == "available"
         assert build_media_check_evaluation(hardsub_video).subtitle_status == "available"
+
+
+def test_unresolved_subtitle_media_check_manual_workflow_is_persistent_and_scoped(tmp_path):
+    web_app, ids, _, _, _ = _media_app(tmp_path)
+    with web_app.state.sessions() as session:
+        unrelated = Video(
+            relative_path="Other/Unrelated.mkv", root_folder="Other",
+            filename="Unrelated.mkv", size=1, mtime_ns=1,
+        )
+        unresolved = UnresolvedExternalSubtitle(
+            relative_path="Anime/Partial Translation/Season 1/E1.ass",
+            filename="E1.ass", extension=".ass", language="cs",
+            normalized_language="cs",
+        )
+        session.add_all([unrelated, unresolved])
+        session.commit()
+        unresolved_id = unresolved.id
+        unrelated_id = unrelated.id
+
+        videos = list(session.scalars(select(Video).order_by(Video.id)))
+        rows = build_unresolved_subtitle_rows([unresolved], videos)
+        assert rows[0].candidate_count == 1
+        assert unrelated_id not in {item.video.id for item in rows[0].candidates}
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")
+    }
+    media = endpoints["/media-check"](
+        _request(web_app, "/media-check"), subtitle="all", audio="all",
+        q="", page=1, message=None,
+    )
+    rendered = media.body.decode()
+    assert "Nepřiřazené externí titulky" in rendered
+    assert "E1.ass" in rendered
+    assert "1 dostupných kandidátů" in rendered
+    unresolved_section = rendered.split("</section>", 1)[0]
+    assert "Unrelated.mkv" not in unresolved_section
+
+    reject_request = _post_request(
+        web_app,
+        f"/media-check/external-subtitles/{unresolved_id}/reject/{ids[1]}",
+        [("return_to", "/media-check")],
+    )
+    asyncio.run(endpoints[
+        "/media-check/external-subtitles/{subtitle_id}/reject/{video_id}"
+    ](reject_request, unresolved_id, ids[1]))
+    with web_app.state.sessions() as session:
+        rejected_subtitle = session.get(UnresolvedExternalSubtitle, unresolved_id)
+        assert rejected_subtitle.rejected_video_ids_json == f"[{ids[1]}]"
+        rows = build_unresolved_subtitle_rows(
+            [rejected_subtitle], list(session.scalars(select(Video)).all()),
+        )
+        assert ids[1] not in {item.video.id for item in rows[0].candidates}
+
+    clear_request = _post_request(
+        web_app, f"/media-check/external-subtitles/{unresolved_id}/decision",
+        [("action", "clear_rejections")],
+    )
+    asyncio.run(endpoints[
+        "/media-check/external-subtitles/{subtitle_id}/decision"
+    ](clear_request, unresolved_id))
+
+    assign_request = _post_request(
+        web_app, f"/media-check/external-subtitles/{unresolved_id}/assign",
+        [("video_id", str(ids[1])), ("return_to", "/media-check")],
+    )
+    asyncio.run(endpoints[
+        "/media-check/external-subtitles/{subtitle_id}/assign"
+    ](assign_request, unresolved_id))
+    with web_app.state.sessions() as session:
+        linked = session.scalar(select(ExternalSubtitle).where(
+            ExternalSubtitle.relative_path.endswith("E1.ass")
+        ))
+        assert (linked.video_id, linked.match_method) == (ids[1], "manual")
+        linked_id = linked.id
+        assert session.get(UnresolvedExternalSubtitle, unresolved_id) is None
+
+    linked_media = endpoints["/media-check"](
+        _request(web_app, "/media-check"), subtitle="all", audio="all",
+        q="", page=1, message=None,
+    ).body.decode()
+    assert "ručně přiřazeno" in linked_media
+
+    reopen_link_request = _post_request(
+        web_app, f"/media-check/external-subtitles/{linked_id}/reopen-link", [],
+    )
+    asyncio.run(endpoints[
+        "/media-check/external-subtitles/{subtitle_id}/reopen-link"
+    ](reopen_link_request, linked_id))
+    with web_app.state.sessions() as session:
+        reopened = session.scalar(select(UnresolvedExternalSubtitle).where(
+            UnresolvedExternalSubtitle.relative_path.endswith("E1.ass")
+        ))
+        reopened_id = reopened.id
+        assert reopened.status == "unresolved"
+
+    confirm_request = _post_request(
+        web_app, f"/media-check/external-subtitles/{reopened_id}/decision",
+        [("action", "confirm_no_match")],
+    )
+    asyncio.run(endpoints[
+        "/media-check/external-subtitles/{subtitle_id}/decision"
+    ](confirm_request, reopened_id))
+    with web_app.state.sessions() as session:
+        assert session.get(
+            UnresolvedExternalSubtitle, reopened_id
+        ).status == "confirmed_no_match"
+
+    reopen_request = _post_request(
+        web_app, f"/media-check/external-subtitles/{reopened_id}/decision",
+        [("action", "reopen")],
+    )
+    asyncio.run(endpoints[
+        "/media-check/external-subtitles/{subtitle_id}/decision"
+    ](reopen_request, reopened_id))
+    with web_app.state.sessions() as session:
+        assert session.get(UnresolvedExternalSubtitle, reopened_id).status == "unresolved"

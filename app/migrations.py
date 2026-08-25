@@ -64,6 +64,7 @@ def migrate_schema(engine) -> None:
         "external_subtitles": [
             ("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'"),
             ("manual_language", "VARCHAR NULL"),
+            ("match_method", "VARCHAR NOT NULL DEFAULT 'automatic'"),
         ],
         "title_metadata": [("cover_image_url", "VARCHAR NULL")],
         "catalog_titles": [
@@ -128,6 +129,10 @@ def migrate_schema(engine) -> None:
         connection.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_catalog_collections_hierarchy_status "
             "ON catalog_collections(hierarchy_status)"
+        ))
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_external_subtitles_match_method "
+            "ON external_subtitles(match_method)"
         ))
         connection.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_manual_split_rule_videos_video_id "

@@ -3484,6 +3484,42 @@ Produkční DB ani NAS nebyly pro write testy použity.
 
 ---
 
+## 6.50 Bezpečné párování a review externích titulků
+
+Externí subtitle discovery je nově jeden globální účetní průchod, nikoli
+nezávislé hledání pro každé video. Automatická vazba vznikne jen při právě jednom
+fyzickém video kandidátovi ve stejném adresáři. Exact filename stem má přednost;
+teprve bez exact kandidáta se přijme explicitně allowlistovaný jazykový suffix.
+Číselné `.5`, revision ani libovolný release token jazykovým suffixem nejsou.
+Fuzzy podobnost, normalizace `1` na `01` ani release-name heuristika automatickou
+vazbu nikdy nevytvářejí.
+
+Každá podporovaná fyzická subtitle cesta je právě v jednom stavu. Bezpečně
+přiřazené soubory zůstávají v `external_subtitles`; jejich `match_method`
+rozlišuje `automatic` a autoritativní `manual`. Soubor bez jednoznačné shody je
+uložen jednou v `unresolved_external_subtitles` se stavem `unresolved` nebo
+`confirmed_no_match`. Globálně unikátní relative path v novém schématu brání
+dvojité vazbě jednoho fyzického souboru. Scanner zachovává manual link,
+confirmed-no-match i uložené odmítnuté candidate ID; opakovaný scan nevytváří
+další řádky. Zmizelý fyzický titulek se odstraní pouze z databázového indexu.
+
+Media Check obsahuje sekci **Nepřiřazené externí titulky**. Candidate pool se
+nejprve omezuje na stejný fyzický adresář, následně na bezpečně známý
+CatalogTitle, CatalogCollection nebo anime root. Similarity a episode hint pouze
+řadí nejvýše dvanáct zobrazených návrhů. Uživatel může konkrétní video ručně
+přiřadit, kandidáta persistentně odmítnout, potvrdit absenci odpovídajícího
+videa nebo rozhodnutí znovu otevřít. Žádná z těchto akcí nemění NAS.
+
+Read-only ověření fyzické knihovny našlo 2383 externích titulků: 2377 má přesně
+jednu exact-stem shodu a 6 zůstává pro ruční rozhodnutí. Čtyři historicky
+ambiguous fractional soubory mají po exact precedence vždy pouze svůj `.5`
+video protějšek. Ambiguous automatic attachments, double-linked fyzické cesty i
+unaccounted soubory jsou nulové. Testovací a migrační scénáře používají pouze
+dočasné knihovny a SQLite databáze; produkční DB ani NAS se nemigrují ani
+nemění.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

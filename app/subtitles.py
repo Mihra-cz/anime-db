@@ -5,16 +5,45 @@ from pathlib import Path
 import re
 
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt"}
+SUBTITLE_LANGUAGE_SUFFIXES = frozenset({
+    "cs", "cze", "ces", "sk", "slk", "slo", "en", "eng",
+    "de", "deu", "ger", "fr", "fra", "fre", "es", "spa",
+    "it", "ita", "ja", "jpn", "ko", "kor", "zh", "zho", "chi",
+    "pl", "pol", "ru", "rus", "uk", "ukr", "pt", "por", "hu", "hun",
+})
 CZ_WORDS = {"aby", "ale", "ano", "budu", "bych", "co", "český", "dobře", "jsem", "jsi", "když", "který", "může", "něco", "není", "protože", "přijde", "tady", "takže", "taky", "tenhle", "vám", "všechno", "žádný"}
 SK_WORDS = {"aby", "ale", "áno", "budem", "by som", "čo", "dobre", "keď", "ktorý", "môže", "niečo", "nie je", "pretože", "príde", "slovenský", "takže", "tiež", "tento", "vám", "všetko", "žiadny"}
 
 
-def subtitle_matches(video: Path, subtitle: Path) -> bool:
+def subtitle_match_kind(video: Path, subtitle: Path) -> str | None:
     if subtitle.suffix.lower() not in SUBTITLE_EXTENSIONS:
-        return False
+        return None
     video_stem = video.stem.casefold()
     subtitle_stem = subtitle.stem.casefold()
-    return subtitle_stem == video_stem or subtitle_stem.startswith(video_stem + ".")
+    if subtitle_stem == video_stem:
+        return "exact"
+    prefix = video_stem + "."
+    if subtitle_stem.startswith(prefix):
+        suffix = subtitle_stem[len(prefix):]
+        if suffix in SUBTITLE_LANGUAGE_SUFFIXES:
+            return "language_suffix"
+    return None
+
+
+def subtitle_matches(video: Path, subtitle: Path) -> bool:
+    return subtitle_match_kind(video, subtitle) is not None
+
+
+def safe_subtitle_matches(videos: list[Path], subtitle: Path) -> tuple[str | None, tuple[Path, ...]]:
+    """Return one rule layer at a time; callers still enforce uniqueness."""
+    exact = tuple(video for video in videos if subtitle_match_kind(video, subtitle) == "exact")
+    if exact:
+        return "exact", exact
+    language = tuple(
+        video for video in videos
+        if subtitle_match_kind(video, subtitle) == "language_suffix"
+    )
+    return ("language_suffix", language) if language else (None, ())
 
 
 def strip_formatting(text: str) -> str:
