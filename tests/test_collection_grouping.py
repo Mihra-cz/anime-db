@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from app.hierarchy_review import (
     collection_grouping_suggestions, create_main_collection,
     delete_empty_collection, delete_empty_collections, delete_empty_local_title,
     move_titles_to_collection, record_grouping_decision,
+    record_manual_collection_merge,
 )
 from app.migrations import migrate_schema
 from app.main import create_app
@@ -516,7 +518,10 @@ def test_deleted_fragment_collection_is_not_recreated_by_following_scan(
 
         suggestion = collection_grouping_suggestions(session)[0]
         assert {item.id for item in suggestion.collections} == {main.id, fragment.id}
-        record_grouping_decision(session, suggestion, "merged")
+        record_grouping_decision(
+            session, suggestion, "merged", target_collection=main,
+            selected_title_ids=[born.id],
+        )
         move_titles_to_collection(session, main.id, [born.id])
         fragment_id = fragment.id
         delete_empty_collection(session, fragment_id)
@@ -535,6 +540,172 @@ def test_deleted_fragment_collection_is_not_recreated_by_following_scan(
         assert session.scalar(select(func.count()).select_from(
             CollectionGroupingDecision
         )) == 1
+
+
+def _high_school_dxd_grouping_files(tmp_path: Path) -> None:
+    paths = (
+        tmp_path / "High School DxD (Z12-J18)" / "High School DxD (Z12)" / "E01.mkv",
+        tmp_path / "High School DxD (Z12-J18)" / "High School DxD Born (J15)" / "E01.mkv",
+    )
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"video")
+
+
+def _populated_collection_paths(session: Session) -> set[str]:
+    return {
+        collection.relative_root_path
+        for collection in session.scalars(select(CatalogCollection)).all()
+        if collection.titles or collection.videos
+    }
+
+
+def test_manual_collection_merge_survives_startup_rescan_and_restart(
+    tmp_path: Path, monkeypatch,
+):
+    _high_school_dxd_grouping_files(tmp_path)
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine(f"sqlite:///{tmp_path / 'grouping-restart.db'}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        suggestion = collection_grouping_suggestions(session)[0]
+        target = session.get(CatalogCollection, suggestion.target_collection_id)
+        selected_title_ids = list(suggestion.title_ids)
+        born = session.scalar(select(CatalogTitle).where(
+            CatalogTitle.local_title == "High School DxD Born (J15)"
+        ))
+        born.hierarchy_manual_override = True
+        born.part_type_manual = "season"
+        born.season_number_manual = 3
+        born.season_label_manual = "S3"
+        born.sort_order_manual = 0
+        born.hierarchy_verified_at = utc_now()
+        authority = (
+            born.part_type_manual, born.season_number_manual,
+            born.season_label_manual, born.hierarchy_manual_override,
+            born.hierarchy_verified_at.replace(tzinfo=None),
+        )
+        move_titles_to_collection(session, target.id, selected_title_ids)
+        record_grouping_decision(
+            session, suggestion, "merged", target_collection=target,
+            selected_title_ids=selected_title_ids,
+        )
+        session.commit()
+        target_path = target.relative_root_path
+        born_id = born.id
+
+    migrate_schema(engine)
+    with Session(engine) as session:
+        born = session.get(CatalogTitle, born_id)
+        assert born.collection.relative_root_path == target_path
+        assert _populated_collection_paths(session) == {target_path}
+        assert (
+            born.part_type_manual, born.season_number_manual,
+            born.season_label_manual, born.hierarchy_manual_override,
+            born.hierarchy_verified_at.replace(tzinfo=None),
+        ) == authority
+        decision = session.scalar(select(CollectionGroupingDecision))
+        assert decision.decision == "merged"
+        assert decision.target_collection_path == target_path
+        assert set(json.loads(decision.selected_title_paths_json)) == {
+            title.relative_root_path for title in session.scalars(select(CatalogTitle))
+        }
+        assert collection_grouping_suggestions(session) == []
+
+        scan_library(session, tmp_path)
+
+    migrate_schema(engine)
+    with Session(engine) as session:
+        born = session.get(CatalogTitle, born_id)
+        assert born.collection.relative_root_path == target_path
+        assert _populated_collection_paths(session) == {target_path}
+        assert (
+            born.part_type_manual, born.season_number_manual,
+            born.season_label_manual, born.hierarchy_manual_override,
+            born.hierarchy_verified_at.replace(tzinfo=None),
+        ) == authority
+        assert collection_grouping_suggestions(session) == []
+
+
+def test_keep_collections_separate_survives_startup_rescan_and_restart(
+    tmp_path: Path, monkeypatch,
+):
+    _high_school_dxd_grouping_files(tmp_path)
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine(f"sqlite:///{tmp_path / 'grouping-separate.db'}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        suggestion = collection_grouping_suggestions(session)[0]
+        original_paths = _populated_collection_paths(session)
+        assert len(original_paths) == 2
+        record_grouping_decision(session, suggestion, "separate")
+        session.commit()
+
+    migrate_schema(engine)
+    with Session(engine) as session:
+        assert _populated_collection_paths(session) == original_paths
+        decision = session.scalar(select(CollectionGroupingDecision))
+        assert decision.decision == "separate"
+        assert decision.target_collection_path is None
+        assert decision.selected_title_paths_json is None
+        assert collection_grouping_suggestions(session) == []
+
+        scan_library(session, tmp_path)
+
+    migrate_schema(engine)
+    with Session(engine) as session:
+        assert _populated_collection_paths(session) == original_paths
+        assert collection_grouping_suggestions(session) == []
+
+
+def test_manual_move_form_recovers_legacy_suppressed_merge_and_persists_restart(
+    tmp_path: Path, monkeypatch,
+):
+    _high_school_dxd_grouping_files(tmp_path)
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine(f"sqlite:///{tmp_path / 'grouping-recovery.db'}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        suggestion = collection_grouping_suggestions(session)[0]
+        target = session.get(CatalogCollection, suggestion.target_collection_id)
+        moved_title = next(
+            title for collection in suggestion.collections for title in collection.titles
+            if title.collection is not target
+        )
+        session.add(CollectionGroupingDecision(
+            suggestion_key=suggestion.key,
+            state_fingerprint=suggestion.state_fingerprint,
+            decision="merged",
+        ))
+        session.commit()
+        assert collection_grouping_suggestions(session) == []
+
+        move_titles_to_collection(session, target.id, [moved_title.id])
+        record_manual_collection_merge(session, target, [moved_title.id])
+        session.commit()
+        target_path = target.relative_root_path
+        moved_title_id = moved_title.id
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        assert session.get(CatalogTitle, moved_title_id).collection.relative_root_path == (
+            target_path
+        )
+        assert _populated_collection_paths(session) == {target_path}
+        decisions = list(session.scalars(select(CollectionGroupingDecision)).all())
+        assert len(decisions) == 2
+        assert any(
+            decision.target_collection_path == target_path
+            and decision.selected_title_paths_json
+            for decision in decisions
+        )
 
 
 def test_multiple_titles_can_move_and_operation_can_be_reversed():

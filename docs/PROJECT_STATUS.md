@@ -2,8 +2,8 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 24. srpna 2026
-> **Aktuální checkpoint:** Stabilizace hierarchie – Commit 5 sjednotil manual authority a hierarchy write paths
+> **Aktualizováno:** 25. srpna 2026
+> **Aktuální checkpoint:** Stabilizace hierarchie – collection grouping authority přežívá startup sync a rescan
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 

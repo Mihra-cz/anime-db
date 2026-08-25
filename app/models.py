@@ -212,13 +212,15 @@ class ManualSplitRuleVideo(Base):
 
 
 class CollectionGroupingDecision(Base):
-    """Persistentní odpověď na konkrétní, stavově verzovaný grouping návrh."""
+    """Persistentní odpověď i manual authority pro collection grouping."""
 
     __tablename__ = "collection_grouping_decisions"
     id: Mapped[int] = mapped_column(primary_key=True)
     suggestion_key: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
     state_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
     decision: Mapped[str] = mapped_column(String, nullable=False)
+    target_collection_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    selected_title_paths_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now

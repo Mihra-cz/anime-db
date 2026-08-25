@@ -16,7 +16,7 @@ from app.catalog import (
 from app.hierarchy import derive_library_hierarchy
 from app.hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from app.hierarchy_evaluation import finalize_collection_hierarchy
-from app.hierarchy_review import extract_local_period_hint
+from app.hierarchy_review import apply_collection_grouping_authority, extract_local_period_hint
 from app.manual_split import (
     apply_manual_split_decisions,
     evaluate_persisted_manual_split,
@@ -555,6 +555,7 @@ def _scan_library(
             apply_manual_split_decisions(manual_split, collection)
             continue
     session.flush()
+    apply_collection_grouping_authority(session)
     videos_by_title: dict[int, list[Video]] = {}
     videos_by_collection_id: dict[int, list[Video]] = {}
     for video in current_videos:

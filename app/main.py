@@ -72,6 +72,7 @@ from .hierarchy_review import (
     hierarchy_review_diagnostics, manual_hierarchy_snapshot_issue,
     merge_title_into, move_videos_to_title,
     move_titles_to_collection, record_grouping_decision,
+    record_manual_collection_merge,
     parse_simple_definitions,
     refresh_collection_state,
     preview_assignments, separate_nonstandard_videos, simple_definition_rows,
@@ -1553,7 +1554,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     session, str(form.get("local_title") or ""), title_ids,
                 )
                 if suggestion is not None:
-                    record_grouping_decision(session, suggestion, "merged")
+                    record_grouping_decision(
+                        session, suggestion, "merged",
+                        target_collection=collection, selected_title_ids=title_ids,
+                    )
+                else:
+                    record_manual_collection_merge(session, collection, title_ids)
                 session.commit()
                 collection_id = collection.id
         except (TypeError, ValueError) as exc:
@@ -1575,9 +1581,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     current_grouping_suggestion(session, suggestion_key)
                     if suggestion_key else None
                 )
-                move_titles_to_collection(session, target_id, title_ids)
+                collection = move_titles_to_collection(session, target_id, title_ids)
                 if suggestion is not None:
-                    record_grouping_decision(session, suggestion, "merged")
+                    record_grouping_decision(
+                        session, suggestion, "merged",
+                        target_collection=collection, selected_title_ids=title_ids,
+                    )
+                else:
+                    record_manual_collection_merge(session, collection, title_ids)
                 session.commit()
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

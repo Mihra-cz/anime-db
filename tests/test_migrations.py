@@ -390,6 +390,43 @@ def test_startup_sync_preserves_nested_parent_season_for_part(tmp_path):
         assert title.part_number_manual is None
 
 
+def test_grouping_authority_columns_are_added_idempotently_to_legacy_table(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-grouping.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE collection_grouping_decisions"))
+        connection.execute(text("""
+            CREATE TABLE collection_grouping_decisions (
+                id INTEGER PRIMARY KEY,
+                suggestion_key VARCHAR NOT NULL UNIQUE,
+                state_fingerprint VARCHAR NOT NULL,
+                decision VARCHAR NOT NULL,
+                created_at DATETIME,
+                updated_at DATETIME
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO collection_grouping_decisions
+                (id, suggestion_key, state_fingerprint, decision)
+            VALUES (1, 'legacy', 'state', 'merged')
+        """))
+
+    migrate_schema(engine)
+    migrate_schema(engine)
+
+    columns = [
+        column["name"]
+        for column in inspect(engine).get_columns("collection_grouping_decisions")
+    ]
+    assert columns.count("target_collection_path") == 1
+    assert columns.count("selected_title_paths_json") == 1
+    with Session(engine) as session:
+        decision = session.get(CollectionGroupingDecision, 1)
+        assert decision.decision == "merged"
+        assert decision.target_collection_path is None
+        assert decision.selected_title_paths_json is None
+
+
 def test_migrates_existing_database_and_backfills_values(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
     with engine.begin() as connection:

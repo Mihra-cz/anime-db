@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 from pathlib import PurePosixPath
 import posixpath
 import re
@@ -65,6 +66,9 @@ from .structural_inference import (
     LONG_FLAT_SEQUENCE_REVIEW_REASON,
     direct_root_episode_profile,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 PERIOD_HINT = re.compile(
@@ -657,7 +661,9 @@ def collection_grouping_suggestions(
 
 
 def record_grouping_decision(
-    session: Session, suggestion: CollectionGroupingSuggestion, decision: str,
+    session: Session, suggestion: CollectionGroupingSuggestion, decision: str, *,
+    target_collection: CatalogCollection | None = None,
+    selected_title_ids: list[int] | None = None,
 ) -> None:
     if decision not in {"separate", "merged"}:
         raise ValueError("Neplatné rozhodnutí o seskupení.")
@@ -669,6 +675,126 @@ def record_grouping_decision(
         session.add(stored)
     stored.state_fingerprint = suggestion.state_fingerprint
     stored.decision = decision
+    if decision == "merged":
+        if target_collection is None or selected_title_ids is None:
+            raise ValueError("Sloučené grouping rozhodnutí vyžaduje cílovou collection a části.")
+        _store_collection_merge_authority(
+            session, stored, target_collection, selected_title_ids,
+        )
+    else:
+        stored.target_collection_path = None
+        stored.selected_title_paths_json = None
+
+
+def _selected_title_paths(session: Session, title_ids: list[int]) -> tuple[str, ...]:
+    selected_ids = {int(value) for value in title_ids}
+    if not selected_ids:
+        raise ValueError("Vyberte alespoň jednu část.")
+    paths = tuple(sorted(session.scalars(select(CatalogTitle.relative_root_path).where(
+        CatalogTitle.id.in_(selected_ids)
+    )).all()))
+    if len(paths) != len(selected_ids):
+        raise ValueError("Výběr obsahuje neexistující část.")
+    return paths
+
+
+def _store_collection_merge_authority(
+    session: Session, decision: CollectionGroupingDecision,
+    target_collection: CatalogCollection, selected_title_ids: list[int],
+) -> None:
+    decision.target_collection_path = target_collection.relative_root_path
+    decision.selected_title_paths_json = json.dumps(
+        _selected_title_paths(session, selected_title_ids),
+        ensure_ascii=False,
+    )
+
+
+def record_manual_collection_merge(
+    session: Session, target_collection: CatalogCollection, title_ids: list[int],
+) -> CollectionGroupingDecision:
+    """Persistuje autoritu i pro obecný move formulář bez grouping proposalu."""
+    title_paths = _selected_title_paths(session, title_ids)
+    key = _digest(["manual-collection-merge", *title_paths])
+    stored = session.scalar(select(CollectionGroupingDecision).where(
+        CollectionGroupingDecision.suggestion_key == key
+    ))
+    if stored is None:
+        stored = CollectionGroupingDecision(suggestion_key=key)
+        session.add(stored)
+    stored.state_fingerprint = _digest([
+        target_collection.relative_root_path, *title_paths,
+    ])
+    stored.decision = "merged"
+    _store_collection_merge_authority(session, stored, target_collection, title_ids)
+    return stored
+
+
+def _stored_title_paths(decision: CollectionGroupingDecision) -> tuple[str, ...]:
+    try:
+        values = json.loads(decision.selected_title_paths_json or "")
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(values, list) or not all(
+        isinstance(value, str) and value for value in values
+    ):
+        return ()
+    return tuple(dict.fromkeys(values))
+
+
+def apply_collection_grouping_authority(session: Session) -> None:
+    """Po automatic reconstruction obnoví poslední explicitní collection membership."""
+    decisions = list(session.scalars(
+        select(CollectionGroupingDecision).order_by(
+            CollectionGroupingDecision.updated_at,
+            CollectionGroupingDecision.id,
+        )
+    ).all())
+    collections = {
+        collection.relative_root_path: collection
+        for collection in session.scalars(select(CatalogCollection)).all()
+    }
+    titles = {
+        title.relative_root_path: title
+        for title in session.scalars(select(CatalogTitle)).all()
+    }
+    for decision in decisions:
+        if decision.decision != "merged":
+            continue
+        title_paths = _stored_title_paths(decision)
+        target = collections.get(decision.target_collection_path or "")
+        if not title_paths or target is None:
+            # Legacy rows only dismissed a proposal and lack enough facts to
+            # reconstruct an authoritative merge safely.
+            continue
+        selected = [titles[path] for path in title_paths if path in titles]
+        if not selected:
+            continue
+        selected_ids = {title.id for title in selected}
+        for title in selected:
+            for link in title.manual_split_rule_videos:
+                resulting_collections = {
+                    target
+                    if other.catalog_title_id in selected_ids
+                    else other.catalog_title.collection
+                    for other in link.video.manual_split_rule_videos
+                    if other.catalog_title is not None
+                }
+                if len(resulting_collections) > 1 or None in resulting_collections:
+                    logger.warning(
+                        "Collection grouping authority %s nelze aplikovat kvůli "
+                        "konfliktní selector authority.", decision.id,
+                    )
+                    selected = []
+                    break
+            if not selected:
+                break
+        for title in selected:
+            title.collection = target
+            for video in title.videos:
+                video.catalog_collection = target
+            for link in title.manual_split_rule_videos:
+                link.video.catalog_collection = target
+    session.flush()
 
 
 def _unique_manual_collection_path(session: Session, name: str) -> str:

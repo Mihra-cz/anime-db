@@ -13,7 +13,7 @@ from .database import Base
 from .hierarchy import derive_library_hierarchy
 from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .hierarchy_evaluation import finalize_collection_hierarchy
-from .hierarchy_review import extract_local_period_hint
+from .hierarchy_review import apply_collection_grouping_authority, extract_local_period_hint
 from .manual_split import (
     apply_manual_split_decisions,
     evaluate_persisted_manual_split,
@@ -95,6 +95,10 @@ def migrate_schema(engine) -> None:
             ("hierarchy_verified_at", "DATETIME NULL"),
             ("hierarchy_note", "TEXT NULL"),
             ("local_period_hint", "VARCHAR NULL"),
+        ],
+        "collection_grouping_decisions": [
+            ("target_collection_path", "VARCHAR NULL"),
+            ("selected_title_paths_json", "TEXT NULL"),
         ],
     }
     with engine.begin() as connection:
@@ -295,6 +299,14 @@ def migrate_schema(engine) -> None:
             # video se nesmí před vyhodnocením připojit k prvnímu path title.
             if not manual_split_titles(collection):
                 video.catalog_title_id = title.id
+
+        apply_collection_grouping_authority(session)
+        videos_by_collection = {}
+        for video in videos:
+            if video.catalog_collection_id is not None:
+                videos_by_collection.setdefault(
+                    video.catalog_collection_id, []
+                ).append(video)
 
         for collection in collections.values():
             collection_videos = videos_by_collection.get(collection.id, [])
