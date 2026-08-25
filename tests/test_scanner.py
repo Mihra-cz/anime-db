@@ -404,7 +404,8 @@ def test_scan_hataraku_sxxexx_and_bracketed_sp_without_touching_files(
         assert special.local_episode_number is None
         assert special.season_episode_number is None
         assert special.episode_number_source == "supplementary_special"
-        assert special.catalog_collection.hierarchy_status == "review_required"
+        assert special.catalog_collection.hierarchy_status == "automatic"
+        assert special.catalog_collection.hierarchy_note is None
         assert [path.read_bytes() for path in [*episode_paths, special_path]] == [
             b"video"
         ] * 14

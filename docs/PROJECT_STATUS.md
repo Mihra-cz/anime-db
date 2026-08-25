@@ -2346,9 +2346,9 @@ původní filename episode hint `14` a title candidate `The Common Cold`.
 `supplementary_number` zůstává `NULL`: číslo 14 se nezapisuje do
 `local_episode_number`, `season_episode_number`, `absolute_episode_number` ani
 `external_episode_number` a nevstupuje do completeness Season 1. Source je
-`supplementary_special`. Dokud video není ručně klasifikované nebo přesunuté do
-supplementary CatalogTitle, chybějící canonical číslo otevře hierarchy review;
-žádné pravidlo „první `[SP]` = Special E1“ neexistuje.
+`supplementary_special`. Bezpečně rozpoznaný Special nepotřebuje standardní
+canonical episode number a samotné `supplementary_number=NULL` proto neotevírá
+hierarchy review; žádné pravidlo „první `[SP]` = Special E1“ neexistuje.
 
 Canonical Special E1 lze již existujícím workflow reprezentovat přes
 season-scoped `CatalogTitle` s `part_type_manual=special`,
@@ -2393,11 +2393,13 @@ numbering. Teprve původní tlačítko **Provést změnu zařazení** volá exis
 backend a autoritativně mění DB zařazení. Libovolný ruční výběr, klasifikace,
 přesun i vlastní hodnoty formuláře zůstávají dostupné bez recommendation.
 
-Po vytvoření části `Specials` zůstává `[SP]` video bez canonical čísla a
-collection oprávněně zůstane `review_required`. Dosavadní ruční numbering
-workflow může následně potvrdit například Special E1; filename E14 se za
-canonical Special 14 ani Special 1 nepovažuje. DB schema, fyzické cesty,
-metadata providery ani duplicate workflow se kvůli této UI zkratce nemění.
+Po vytvoření části `Specials` zůstává `[SP]` video bez canonical čísla; tento
+stav je pro bezpečně známý supplementary subtype validní a sám collection do
+`review_required` nepřepne. Případné supplementary pořadí je oddělený ordinal,
+nikoli canonical standardní epizoda. Vytvoření části současně nemění
+`Video.content_type_manual`; video-level override vzniká pouze explicitní akcí
+klasifikace. DB schema, fyzické cesty, metadata providery ani duplicate workflow
+se kvůli této UI zkratce nemění.
 
 Regresní testy používají in-memory nebo dočasnou SQLite a testovací cesty.
 Produkční databáze a NAS nejsou součástí tohoto workflow.

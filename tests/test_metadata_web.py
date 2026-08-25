@@ -1454,10 +1454,10 @@ def test_hataraku_sp_recommendation_is_read_only_prefill_for_existing_form(tmp_p
     assert "AnimeDB doporučuje" in rendered
     assert "Doporučené oddělení" in rendered
     assert "S01E14 [SP]-The Common Cold.mkv" in rendered
-    assert "Special · související S01 · canonical číslo neurčeno" in rendered
+    assert "Special · související S01 · supplementary pořadí neurčeno" in rendered
     assert "Původní filename hint: S01E14" in rendered
     assert "Název z filename: The Common Cold" in rendered
-    assert "Canonical číslo: neurčeno" in rendered
+    assert "Standardní canonical číslo se pro doplňkový obsah nevyžaduje." in rendered
     assert 'type="button" class="apply-assignment-recommendation"' in rendered
     assert f'data-video-ids="{video_id}"' in rendered
     assert 'data-part-type="special"' in rendered

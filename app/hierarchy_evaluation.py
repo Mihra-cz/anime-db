@@ -53,9 +53,6 @@ MISSING_DUPLICATE_PRIMARY_REVIEW_REASON = (
 FILENAME_SEASON_CONFLICT_REVIEW_REASON = (
     "Season ve filename je v konfliktu s automaticky odvozenou season složkou."
 )
-UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON = (
-    "Explicitně označený doplňkový obsah nemá bezpečně určené canonical číslování."
-)
 MISSING_PART_NUMBER_REVIEW_REASON = (
     "Část typu Part nemá bezpečně určené číslo Part."
 )
@@ -81,7 +78,6 @@ class HierarchyIssueCode(StrEnum):
     MANUAL_SPLIT_UNMATCHED = "manual_split_unmatched"
     UNASSIGNED_VIDEO = "unassigned_video"
     FILENAME_SEASON_CONFLICT = "filename_season_conflict"
-    SUPPLEMENTARY_WITHOUT_NUMBER = "supplementary_without_number"
     NONSTANDARD_NUMBERING = "nonstandard_numbering"
     UNKNOWN_OR_MISSING_NUMBERING = "unknown_or_missing_numbering"
     NUMBERING_GAP = "numbering_gap"
@@ -185,15 +181,6 @@ def _filename_season_conflicts_with_title(
     )
 
 
-def _has_unnumbered_explicit_supplementary(video: Video) -> bool:
-    detection = detect_episode_number(video.filename)
-    return bool(
-        detection.is_supplementary
-        and detection.supplementary_number is None
-        and video.episode_number_manual_override is None
-    )
-
-
 def _common_catalog_title(videos: tuple[Video, ...]) -> CatalogTitle | None:
     titles = {
         video.catalog_title
@@ -263,7 +250,6 @@ def hierarchy_primary_note(
         return incomplete_snapshot.message
     priorities = (
         (HierarchyIssueCode.FILENAME_SEASON_CONFLICT, FILENAME_SEASON_CONFLICT_REVIEW_REASON),
-        (HierarchyIssueCode.SUPPLEMENTARY_WITHOUT_NUMBER, UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON),
         (HierarchyIssueCode.NONSTANDARD_NUMBERING, NONSTANDARD_NUMBERING_REVIEW_REASON),
         (HierarchyIssueCode.DUPLICATE_PRIMARY_MISSING, MISSING_DUPLICATE_PRIMARY_REVIEW_REASON),
         (HierarchyIssueCode.CONFIRMED_DUPLICATE, CONFIRMED_DUPLICATES_REVIEW_REASON),
@@ -382,15 +368,6 @@ def evaluate_collection_hierarchy(
                     f"automaticky zařazena jako S{title.effective_season_number}. "
                     f"{FILENAME_SEASON_CONFLICT_REVIEW_REASON}"
                 ),
-                HierarchyIssueScope.VIDEO,
-                blocking=True,
-                title=title,
-                target_videos=target,
-            )
-        if _has_unnumbered_explicit_supplementary(video):
-            add_issue(
-                HierarchyIssueCode.SUPPLEMENTARY_WITHOUT_NUMBER,
-                UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON,
                 HierarchyIssueScope.VIDEO,
                 blocking=True,
                 title=title,

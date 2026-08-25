@@ -148,7 +148,7 @@ def test_filename_season_conflict_is_localized_to_its_video():
     assert diagnostics.for_title_card(title) == issues
 
 
-def test_unnumbered_supplementary_is_localized_to_its_video():
+def test_unnumbered_known_supplementary_has_no_blocking_diagnostic():
     collection = _collection()
     title = _title(collection, 1, "Season 1")
     video = _video(
@@ -157,9 +157,7 @@ def test_unnumbered_supplementary_is_localized_to_its_video():
 
     diagnostics = hierarchy_review_diagnostics(collection, [video])
 
-    issues = diagnostics.for_video(video)
-    assert [issue.code for issue in issues] == ["supplementary_without_number"]
-    assert issues[0].blocking
+    assert diagnostics.for_video(video) == ()
 
 
 def test_numbering_gap_and_unknown_are_localized_to_title_and_video():

@@ -26,7 +26,6 @@ from .hierarchy_evaluation import (
     MISSING_PART_NUMBER_REVIEW_REASON,
     NONSTANDARD_NUMBERING_REVIEW_REASON,
     NUMBERING_REVIEW_SUMMARY,
-    UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON,
     HierarchyEvaluationResult,
     HierarchyIssue,
     HierarchyIssueScope,
@@ -1574,8 +1573,6 @@ def create_title_from_videos(
     )
     replace_explicit_video_selector_authority(selected, title)
     for video in selected:
-        if normalized_type in VIDEO_CONTENT_TYPES:
-            video.content_type_manual = video.content_type_manual or normalized_type
         video.catalog_title = title
         video.catalog_collection = collection
     session.flush()

@@ -15,7 +15,6 @@ from app.hierarchy_evaluation import HierarchyIssueCode, evaluate_collection_hie
 from app.hierarchy_review import (
     CONFIRMED_DUPLICATES_REVIEW_REASON, FILENAME_SEASON_CONFLICT_REVIEW_REASON,
     MISSING_PART_NUMBER_REVIEW_REASON, PERIOD_HINT_REVIEW_REASON,
-    UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON,
     ManualTitleDefinition, apply_manual_split,
     apply_single_title_confirmation,
     classify_videos_in_place, clear_confirmed_duplicate_videos,
@@ -33,7 +32,7 @@ from app.hierarchy_review import (
     supplementary_assignment_recommendations,
     supplementary_video_suggestions,
 )
-from app.hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPES
+from app.hierarchy_types import PART_TYPE_CHOICES
 from app.models import (
     Artwork, CatalogCollection, CatalogTitle, ExternalTitleLink, InternalSubtitle,
     ManualSplitRuleVideo, MetadataCandidate, TitleMetadata, Video, utc_now,
@@ -268,12 +267,52 @@ def test_confirmed_manual_season_remains_authoritative_over_filename_hint():
     assert collection_requires_review(collection, list(collection.videos)) is None
 
 
-def test_unnumbered_explicit_sp_requires_review_until_manually_resolved():
-    collection = _season_filename_collection("S01E14 [SP]-The Common Cold.mkv")
+@pytest.mark.parametrize("filename", [
+    "ED.mkv",
+    "NCOP.mkv",
+    "NCED.mkv",
+    "S01E14 [SP]-The Common Cold.mkv",
+])
+def test_known_unnumbered_supplementary_does_not_require_canonical_number(filename):
+    collection = _season_filename_collection(filename)
 
-    assert collection_requires_review(
-        collection, list(collection.videos)
-    ) == UNNUMBERED_SUPPLEMENTARY_REVIEW_REASON
+    result = evaluate_collection_hierarchy(
+        collection, list(collection.videos), include_legacy_fallback=False,
+    )
+
+    assert result.issues == ()
+
+
+def test_numbered_op_uses_only_supplementary_sequence_without_canonical_warning():
+    collection = _season_filename_collection("OP 01.mkv")
+    title = collection.titles[0]
+    second = Video(
+        id=2, relative_path=f"{title.relative_root_path}/OP 02.mkv",
+        root_folder="Anime", filename="OP 02.mkv", size=1, mtime_ns=2,
+        catalog_title=title, catalog_collection=collection,
+    )
+
+    result = evaluate_collection_hierarchy(
+        collection, list(collection.videos), include_legacy_fallback=False,
+    )
+    states = [effective_video_numbering(video, title) for video in collection.videos]
+
+    assert result.issues == ()
+    assert [state.supplementary_type for state in states] == ["op", "op"]
+    assert [state.supplementary_number for state in states] == [1, 2]
+    assert [state.season_episode_number for state in states] == [None, None]
+
+
+def test_genuinely_unknown_supplementary_looking_filename_still_requires_review():
+    collection = _season_filename_collection("Title [IV01][codec].mkv")
+
+    result = evaluate_collection_hierarchy(
+        collection, list(collection.videos), include_legacy_fallback=False,
+    )
+
+    assert [issue.code for issue in result.blocking_issues] == [
+        HierarchyIssueCode.UNKNOWN_OR_MISSING_NUMBERING,
+    ]
 
 
 def test_manual_episode_override_resolves_nonstandard_zero_review_reason():
@@ -1676,6 +1715,79 @@ def test_merge_title_preserves_existing_manual_content_classification():
         assert video.content_type_manual == "recap"
 
 
+def test_split_ed_and_op_into_bonus_part_keeps_automatic_content_and_no_number_issue():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Example", normalized_local_title="example",
+            relative_root_path="Anime/Example",
+        )
+        source = CatalogTitle(
+            collection=collection, local_title="Example Season",
+            normalized_local_title="example season",
+            relative_root_path="Anime/Example", part_type="season",
+            season_number=3, season_label="S3",
+        )
+        videos = [
+            Video(
+                relative_path=f"Anime/Example/{filename}", root_folder="Anime",
+                filename=filename, size=1, mtime_ns=index, file_type=file_type,
+                catalog_title=source, catalog_collection=collection,
+            )
+            for index, (filename, file_type) in enumerate((
+                ("ED.mkv", "ed"),
+                ("OP 01.mkv", "op"),
+                ("OP 02.mkv", "op"),
+            ), 1)
+        ]
+        session.add(collection)
+        session.flush()
+
+        bonus = create_title_from_videos(
+            session, collection.id, [video.id for video in videos],
+            local_title="NC – Example Season", part_type="bonus",
+            season_number=3, season_label="S3",
+        )
+        result = evaluate_collection_hierarchy(
+            collection, list(collection.videos), include_legacy_fallback=False,
+        )
+        numbering = [effective_video_numbering(video, bonus) for video in videos]
+
+        assert bonus.effective_part_type == "bonus"
+        assert bonus.effective_season_number == 3
+        assert bonus.effective_season_label == "S3"
+        assert bonus.hierarchy_manual_override is True
+        assert bonus.hierarchy_verified_at is not None
+        assert [video.file_type for video in videos] == ["ed", "op", "op"]
+        assert all(video.content_type_manual is None for video in videos)
+        assert [state.supplementary_type for state in numbering] == ["ed", "op", "op"]
+        assert [state.supplementary_number for state in numbering] == [None, 1, 2]
+        assert all(state.season_episode_number is None for state in numbering)
+        assert not any(
+            issue.catalog_title is bonus or any(video in videos for video in issue.videos)
+            for issue in result.blocking_issues
+        )
+
+        hierarchy_state = (
+            bonus.part_type_manual, bonus.season_number_manual,
+            bonus.season_label_manual, bonus.hierarchy_manual_override,
+            bonus.hierarchy_verified_at,
+        )
+        for video in videos:
+            video.content_type_manual = "bonus"
+        classify_videos_in_place(
+            session, collection.id, [video.id for video in videos], "",
+        )
+
+        assert all(video.content_type_manual is None for video in videos)
+        assert (
+            bonus.part_type_manual, bonus.season_number_manual,
+            bonus.season_label_manual, bonus.hierarchy_manual_override,
+            bonus.hierarchy_verified_at,
+        ) == hierarchy_state
+
+
 def test_any_empty_title_with_owned_metadata_can_be_deleted_without_orphans(tmp_path):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -1932,7 +2044,8 @@ def test_ova_can_be_moved_from_season_to_new_season_specific_title_and_survives_
         ova = session.get(Video, ova_id)
         ova_title = session.get(CatalogTitle, ova_title_id)
         assert ova.catalog_title_id == ova_title_id
-        assert ova.content_type_manual == "ova"
+        assert ova.content_type_manual is None
+        assert ova.file_type == "ova"
         assert ova.season_episode_number is None
         assert ova.relative_path == original_path
         assert ova_title.effective_part_type == "ova"
@@ -2120,7 +2233,7 @@ def test_standard_sxxexx_and_manually_classified_video_get_no_recommendation():
     assert supplementary_assignment_recommendations(videos) == ()
 
 
-def test_create_special_then_existing_numbering_resolves_canonical_review_without_paths():
+def test_create_special_does_not_require_canonical_number_or_content_override():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
@@ -2140,15 +2253,8 @@ def test_create_special_then_existing_numbering_resolves_canonical_review_withou
         assert special.catalog_title is title
         assert special.season_episode_number is None
         assert special.episode_number_manual_override is None
-        assert collection.hierarchy_status == "review_required"
-        assert "canonical číslování" in collection.hierarchy_note
-
-        set_video_episode_override(special, 1)
-        refresh_collection_state(collection)
-
-        assert special.local_episode_number is None
-        assert special.season_episode_number == 1
-        assert special.episode_number_source == "manual"
+        assert special.content_type_manual is None
+        assert effective_video_numbering(special, title).supplementary_type == "special"
         assert collection.hierarchy_status == "automatic"
         assert special.relative_path == original_path
 
@@ -2172,7 +2278,11 @@ def test_create_title_from_videos_accepts_all_part_types_without_inventing_video
         ) for index, _ in enumerate(PART_TYPE_CHOICES, 1)]
         session.add(collection)
         session.flush()
+        videos[0].content_type_manual = "recap"
         original_paths = {video.id: (video.filename, video.relative_path) for video in videos}
+        original_content_types = {
+            video.id: video.content_type_manual for video in videos
+        }
 
         created = []
         for video, (part_type, label) in zip(videos, PART_TYPE_CHOICES, strict=True):
@@ -2187,9 +2297,7 @@ def test_create_title_from_videos_accepts_all_part_types_without_inventing_video
         ]
         for video, (part_type, _) in zip(videos, PART_TYPE_CHOICES, strict=True):
             assert (video.filename, video.relative_path) == original_paths[video.id]
-            assert video.content_type_manual == (
-                part_type if part_type in VIDEO_CONTENT_TYPES else None
-            )
+            assert video.content_type_manual == original_content_types[video.id]
         film_video = videos[[value for value, _ in PART_TYPE_CHOICES].index("film")]
         assert film_video.catalog_title.effective_part_type == "film"
         assert film_video.content_type_manual is None
