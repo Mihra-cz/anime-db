@@ -3,8 +3,11 @@ from datetime import datetime, timezone
 import pytest
 
 from app.catalog import (
+    FILE_TYPE_TO_SUPPLEMENTARY_SUBTYPE,
     FILTER_LABELS,
     ROOT_VIDEO_GROUP_LABEL,
+    SUPPLEMENTARY_SUBTYPE_TO_FILE_TYPE,
+    VIDEO_FILE_TYPES,
     SeriesSummary,
     build_catalog_results,
     catalog_collection_display_title,
@@ -476,6 +479,98 @@ def test_classifies_bonus_video_types():
     assert classify_video("Show/NCED 02.mkv") == "nced"
     assert classify_video("Show/OVA/Show OVA 1.mkv") == "ova"
     assert classify_video("Show/Specials/Special 01.mkv") == "special"
+
+
+def test_supplementary_subtype_and_file_type_use_one_canonical_mapping():
+    expected = {
+        "ova": "ova", "special": "special", "op": "op", "ed": "ed",
+        "ncop": "ncop", "nced": "nced", "recap": "recap",
+        "preview": "pv", "bonus": "bonus", "cm": "cm", "menu": "menu",
+    }
+
+    assert SUPPLEMENTARY_SUBTYPE_TO_FILE_TYPE == expected
+    assert FILE_TYPE_TO_SUPPLEMENTARY_SUBTYPE == {
+        file_type: subtype for subtype, file_type in expected.items()
+    }
+    assert VIDEO_FILE_TYPES == {"episode", "other", *expected.values()}
+
+
+@pytest.mark.parametrize("file_type", [
+    "ova", "special", "op", "ed", "ncop", "nced", "recap", "pv",
+    "bonus", "cm", "menu",
+])
+def test_every_canonical_supplementary_file_type_has_a_catalog_filter(file_type):
+    video = Video(
+        relative_path=f"Show/{file_type}.mkv", root_folder="Show",
+        filename=f"{file_type}.mkv", size=1, mtime_ns=1, file_type=file_type,
+    )
+
+    assert f"type-{file_type}" in FILTER_LABELS
+    assert video_matches_filter(video, f"type-{file_type}")
+
+
+@pytest.mark.parametrize(("relative_path", "subtype", "number", "file_type"), [
+    ("Show/Title OP 01.mkv", "op", 1, "op"),
+    ("Show/Title ED 02.mkv", "ed", 2, "ed"),
+    ("Show/OP.mkv", "op", None, "op"),
+    ("Show/ED.mkv", "ed", None, "ed"),
+    ("Show/Title NCOP 01.mkv", "ncop", 1, "ncop"),
+    ("Show/Title NCED 01.mkv", "nced", 1, "nced"),
+    ("Show/Title (Creditless Opening).mkv", "ncop", None, "ncop"),
+    ("Show/Title (Creditless OP).mkv", "ncop", None, "ncop"),
+    ("Show/Title (Creditless Ending).mkv", "nced", None, "nced"),
+    ("Show/Title (Creditless ED).mkv", "nced", None, "nced"),
+    ("Show/Title - Clean Opening.mkv", "ncop", None, "ncop"),
+    ("Show/Title - Clean Ending.mkv", "nced", None, "nced"),
+    ("Show/Title [CM01][codec].mkv", "cm", 1, "cm"),
+    ("Show/Title [pv02][codec].mkv", "preview", 2, "pv"),
+    ("Show/Title [Menu03][codec].mkv", "menu", 3, "menu"),
+    ("Show/Title Recap 01.mkv", "recap", 1, "recap"),
+    ("Show/Title Bonus 01.mkv", "bonus", 1, "bonus"),
+    ("Show/Title Preview 01.mkv", "preview", 1, "pv"),
+])
+def test_exact_supplementary_meaning_survives_parser_and_classifier(
+    relative_path, subtype, number, file_type,
+):
+    detection = detect_episode_number(relative_path.rsplit("/", 1)[-1])
+
+    assert detection.is_supplementary
+    assert detection.supplementary_type == subtype
+    assert detection.supplementary_number == number
+    assert classify_video(relative_path) == file_type
+    assert derive_episode_number(relative_path) is None
+
+
+def test_explicit_cm_filename_outranks_mixed_cm_pv_directory():
+    relative_path = "Title/CM&PV/Title (CM collection).mkv"
+    detection = detect_episode_number(relative_path.rsplit("/", 1)[-1])
+
+    assert detection.supplementary_type == "cm"
+    assert classify_video(relative_path) == "cm"
+
+
+@pytest.mark.parametrize("relative_path", [
+    "Title/SPs/Title [IV01][codec].mkv",
+    "Title/CM&PV/Title [iv02][codec].mkv",
+])
+def test_unknown_bracketed_iv_stays_unclassified_even_under_broad_path_hint(
+    relative_path,
+):
+    detection = detect_episode_number(relative_path.rsplit("/", 1)[-1])
+
+    assert detection.kind == "unknown"
+    assert detection.supplementary_type is None
+    assert classify_video(relative_path) == "other"
+
+
+@pytest.mark.parametrize("filename", [
+    "Title - Clean Opening Scene.mkv",
+    "Title (Creditless Editorial).mkv",
+    "Title [CMX01][codec].mkv",
+])
+def test_exact_supplementary_markers_reject_nearby_false_positives(filename):
+    assert detect_episode_number(filename).kind == "unknown"
+    assert classify_video(f"Show/{filename}") == "other"
 
 
 def test_parent_series_for_video_directly_in_series_directory():

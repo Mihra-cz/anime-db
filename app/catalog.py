@@ -33,6 +33,43 @@ LANGUAGE_ALIASES = {
     "hu": "hun", "hun": "hun", "hungarian": "hun",
 }
 
+SUPPLEMENTARY_SUBTYPE_ALIASES = {
+    "oad": "ova",
+    "specials": "special",
+    "previews": "preview",
+    "pv": "preview",
+    "recaps": "recap",
+    "bonuses": "bonus",
+    "extra": "bonus",
+    "extras": "bonus",
+}
+SUPPLEMENTARY_SUBTYPE_TO_FILE_TYPE = {
+    "ova": "ova",
+    "special": "special",
+    "op": "op",
+    "ed": "ed",
+    "ncop": "ncop",
+    "nced": "nced",
+    "recap": "recap",
+    "preview": "pv",
+    "bonus": "bonus",
+    "cm": "cm",
+    "menu": "menu",
+}
+FILE_TYPE_TO_SUPPLEMENTARY_SUBTYPE = {
+    file_type: subtype
+    for subtype, file_type in SUPPLEMENTARY_SUBTYPE_TO_FILE_TYPE.items()
+}
+VIDEO_FILE_TYPES = frozenset({
+    "episode", "other", *SUPPLEMENTARY_SUBTYPE_TO_FILE_TYPE.values(),
+})
+BRACKETED_UNKNOWN_IV_SEQUENCE = re.compile(r"\[\s*IV\s*\d{1,3}\s*\]", re.IGNORECASE)
+
+
+def normalize_supplementary_subtype(value: str) -> str:
+    normalized = value.casefold()
+    return SUPPLEMENTARY_SUBTYPE_ALIASES.get(normalized, normalized)
+
 
 def normalize_language(language: str | None, title: str | None = None) -> str:
     raw = (language or "").strip().casefold().replace("_", "-")
@@ -55,11 +92,12 @@ def classify_video(relative_path: str) -> str:
     token_set = set(tokens)
     compact = re.sub(r"[^a-z0-9]+", "", value)
     supplementary = detect_episode_number(PurePosixPath(relative_path).name)
-    if supplementary.is_supplementary:
-        return {
-            "ova": "ova", "special": "special", "ncop": "ncop", "nced": "nced",
-            "preview": "pv",
-        }.get(supplementary.supplementary_type or "", "other")
+    if supplementary.is_supplementary and supplementary.supplementary_type:
+        return SUPPLEMENTARY_SUBTYPE_TO_FILE_TYPE[supplementary.supplementary_type]
+    # IV is a real library marker with unknown semantics.  Keep it in review
+    # instead of allowing a broad parent-directory hint to invent a subtype.
+    if BRACKETED_UNKNOWN_IV_SEQUENCE.search(PurePosixPath(relative_path).stem):
+        return "other"
     if "ncop" in compact or "creditlessopening" in compact:
         return "ncop"
     if "nced" in compact or "creditlessending" in compact:
@@ -68,7 +106,15 @@ def classify_video(relative_path: str) -> str:
         return "ova"
     if "special" in token_set or "specials" in token_set or "sp" in token_set:
         return "special"
-    if token_set & {"short", "shorts", "bonus", "bonuses", "extra", "extras"}:
+    if "op" in token_set:
+        return "op"
+    if "ed" in token_set:
+        return "ed"
+    if "recap" in token_set or "recaps" in token_set:
+        return "recap"
+    if "bonus" in token_set or "bonuses" in token_set:
+        return "bonus"
+    if token_set & {"short", "shorts", "extra", "extras"}:
         return "other"
     if "pv" in token_set or "preview" in token_set or "trailer" in token_set:
         return "pv"
@@ -752,9 +798,13 @@ FILTER_LABELS = {
     "bonus": "Bonusová / ostatní videa",
     "type-special": "Specials",
     "type-ova": "OVA",
+    "type-op": "OP",
+    "type-ed": "ED",
     "type-ncop": "NCOP",
     "type-nced": "NCED",
+    "type-recap": "Recap",
     "type-pv": "PV",
+    "type-bonus": "Bonus",
     "type-cm": "CM",
     "type-menu": "Menu",
     "type-other": "Ostatní",
@@ -1107,8 +1157,32 @@ ATTACHED_BANG_EPISODE = re.compile(
 SUPPLEMENTARY_SEQUENCE = re.compile(
     r"(?:^|[^a-z0-9])"
     r"(?P<type>NCOP|NCED|OVA|OAD|SPECIALS?|OP|ED|PREVIEWS?|PV|RECAPS?|"
-    r"BONUS(?:ES)?|EXTRAS?)"
+    r"BONUS(?:ES)?|EXTRAS?|CM|MENU)"
     r"\s*(?:(?:P|EPISODE|EP|E)\s*)?0*(?P<number>\d{1,3})(?:v\d+)?$",
+    re.IGNORECASE,
+)
+BRACKETED_SUPPLEMENTARY_SEQUENCE = re.compile(
+    r"\[\s*(?P<type>NCOP|NCED|OP|ED|CM|PV|MENU)\s*"
+    r"0*(?P<number>\d{1,3})\s*\]",
+    re.IGNORECASE,
+)
+GROUPED_CREDITLESS_CLEAN_MARKER = re.compile(
+    r"[\[(]\s*(?:CREDITLESS|CLEAN)\s+"
+    r"(?P<type>OPENING|OP|ENDING|ED)\s*[\])]",
+    re.IGNORECASE,
+)
+TRAILING_CREDITLESS_CLEAN_MARKER = re.compile(
+    r"(?:^|\s+-\s+)(?:CREDITLESS|CLEAN)\s+"
+    r"(?P<type>OPENING|OP|ENDING|ED)\s*$",
+    re.IGNORECASE,
+)
+CM_COLLECTION_MARKER = re.compile(
+    r"[\[(]\s*CM\s+COLLECTION\s*[\])]",
+    re.IGNORECASE,
+)
+STANDALONE_OP_ED_MARKER = re.compile(r"^(?P<type>OP|ED)$", re.IGNORECASE)
+EXPLICIT_NCOP_NCED_MARKER = re.compile(
+    r"(?<![a-z0-9])(?P<type>NCOP|NCED)(?![a-z0-9])",
     re.IGNORECASE,
 )
 SUPPLEMENTARY_CONTEXT_SUFFIX = re.compile(
@@ -1193,7 +1267,7 @@ class EpisodeNumberDetection:
             label = {
                 "ova": "OVA", "special": "Special", "ncop": "NCOP", "nced": "NCED",
                 "op": "OP", "ed": "ED", "preview": "Preview", "recap": "Recap",
-                "bonus": "Bonus",
+                "bonus": "Bonus", "cm": "CM", "menu": "Menu",
             }.get(self.supplementary_type or "", "Doplněk")
             return f"{label} {self.number:02d}"
         return None
@@ -1213,6 +1287,49 @@ def _normalized_version_hint(raw: str) -> str:
     return "CZ END" if normalized == "cz end" else "CZ"
 
 
+def _exact_supplementary_detection(stem: str) -> EpisodeNumberDetection | None:
+    if match := BRACKETED_SUPPLEMENTARY_SEQUENCE.search(stem):
+        return EpisodeNumberDetection(
+            "supplementary",
+            int(match.group("number")),
+            supplementary_type=normalize_supplementary_subtype(match.group("type")),
+            context_hint=stem[:match.start()].rstrip(" -_.") or None,
+        )
+    for pattern in (
+        GROUPED_CREDITLESS_CLEAN_MARKER,
+        TRAILING_CREDITLESS_CLEAN_MARKER,
+    ):
+        if match := pattern.search(stem):
+            raw_type = match.group("type").casefold()
+            subtype = "ncop" if raw_type in {"opening", "op"} else "nced"
+            return EpisodeNumberDetection(
+                "supplementary",
+                supplementary_type=subtype,
+                context_hint=stem[:match.start()].rstrip(" -_.") or None,
+            )
+    if match := CM_COLLECTION_MARKER.search(stem):
+        return EpisodeNumberDetection(
+            "supplementary",
+            supplementary_type="cm",
+            context_hint=stem[:match.start()].rstrip(" -_.") or None,
+        )
+    if match := STANDALONE_OP_ED_MARKER.fullmatch(stem):
+        return EpisodeNumberDetection(
+            "supplementary",
+            supplementary_type=match.group("type").casefold(),
+        )
+    if (
+        (match := EXPLICIT_NCOP_NCED_MARKER.search(stem))
+        and SUPPLEMENTARY_SEQUENCE.search(stem) is None
+    ):
+        return EpisodeNumberDetection(
+            "supplementary",
+            supplementary_type=match.group("type").casefold(),
+            context_hint=stem[:match.start()].rstrip(" -_.") or None,
+        )
+    return None
+
+
 def detect_episode_number(filename: str) -> EpisodeNumberDetection:
     """Bezpečně rozliší standardní, variantní a další nekanonické číslování."""
     stem = PurePosixPath(filename).stem
@@ -1226,13 +1343,11 @@ def detect_episode_number(filename: str) -> EpisodeNumberDetection:
             filename_episode_hint=int(match.group("episode")),
             title_candidate=title_candidate,
         )
+    if exact_supplementary := _exact_supplementary_detection(stem):
+        return exact_supplementary
     if match := SUPPLEMENTARY_SEQUENCE.search(stem):
         number = int(match.group("number"))
-        raw_type = match.group("type").casefold()
-        supplementary_type = {
-            "oad": "ova", "specials": "special", "previews": "preview", "pv": "preview",
-            "recaps": "recap", "bonuses": "bonus", "extra": "bonus", "extras": "bonus",
-        }.get(raw_type, raw_type)
+        supplementary_type = normalize_supplementary_subtype(match.group("type"))
         context_hint = stem[:match.start()].rstrip(" -_.") or None
         return EpisodeNumberDetection(
             "supplementary", number, supplementary_type=supplementary_type,
@@ -1343,7 +1458,11 @@ def derive_episode_number(filename: str) -> int | None:
     return detection.number if detection.is_standard else None
 
 
-TYPE_ORDER = {"episode": 0, "special": 1, "ova": 2, "ncop": 3, "nced": 4, "pv": 5, "cm": 6, "menu": 7, "other": 8}
+TYPE_ORDER = {
+    "episode": 0, "special": 1, "ova": 2, "ncop": 3, "nced": 4,
+    "op": 5, "ed": 6, "recap": 7, "pv": 8, "bonus": 9,
+    "cm": 10, "menu": 11, "other": 12,
+}
 
 
 def video_sort_key(video: Video):

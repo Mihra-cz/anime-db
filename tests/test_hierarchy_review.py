@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.catalog import (
-    catalog_title_display_title, catalog_title_series_label, video_matches_filter,
+    catalog_title_display_title, catalog_title_series_label, classify_video,
+    video_matches_filter,
 )
 from app.hierarchy_evaluation import HierarchyIssueCode, evaluate_collection_hierarchy
 from app.hierarchy_review import (
@@ -1942,6 +1943,67 @@ def test_two_explicit_specials_with_same_scope_share_one_safe_recommendation():
         "S01E14", "S01E15",
     ]
     assert all(item.supplementary_number is None for item in recommendations[0].items)
+
+
+@pytest.mark.parametrize(
+    ("filename", "subtype", "type_label", "proposed_title", "ordinal"),
+    [
+        ("Title [CM01][codec].mkv", "cm", "CM", "CM", 1),
+        ("Title [Menu03][codec].mkv", "menu", "Menu", "Menu", 3),
+    ],
+)
+def test_bracketed_cm_and_menu_get_precise_hierarchy_recommendations(
+    filename, subtype, type_label, proposed_title, ordinal,
+):
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    title = CatalogTitle(
+        id=1, collection=collection, local_title="Season 1",
+        normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", part_type="season",
+        season_number=1,
+    )
+    relative_path = f"{title.relative_root_path}/{filename}"
+    video = Video(
+        id=1, relative_path=relative_path, root_folder="Anime", filename=filename,
+        size=1, mtime_ns=1, catalog_title=title, catalog_collection=collection,
+        file_type=classify_video(relative_path),
+    )
+
+    recommendations = supplementary_assignment_recommendations([video])
+
+    assert len(recommendations) == 1
+    recommendation = recommendations[0]
+    assert recommendation.supplementary_type == subtype
+    assert recommendation.proposed_part_type == "bonus"
+    assert recommendation.type_label == type_label
+    assert recommendation.proposed_title == proposed_title
+    assert recommendation.items[0].supplementary_number == ordinal
+
+
+def test_unknown_iv_marker_gets_no_invented_hierarchy_recommendation():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    title = CatalogTitle(
+        id=1, collection=collection, local_title="Season 1",
+        normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", part_type="season",
+        season_number=1,
+    )
+    filename = "Title [IV01][codec].mkv"
+    relative_path = f"{title.relative_root_path}/{filename}"
+    video = Video(
+        id=1, relative_path=relative_path, root_folder="Anime", filename=filename,
+        size=1, mtime_ns=1, catalog_title=title, catalog_collection=collection,
+        file_type=classify_video(relative_path),
+    )
+
+    assert video.file_type == "other"
+    assert supplementary_assignment_recommendations([video]) == ()
 
 
 def test_standard_sxxexx_and_manually_classified_video_get_no_recommendation():

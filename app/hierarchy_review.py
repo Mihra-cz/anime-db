@@ -358,6 +358,8 @@ SUPPLEMENTARY_ASSIGNMENT_LABELS = {
     "op": ("bonus", "OP", "OP"),
     "ed": ("bonus", "ED", "ED"),
     "bonus": ("bonus", "Bonus", "Bonus"),
+    "cm": ("bonus", "CM", "CM"),
+    "menu": ("bonus", "Menu", "Menu"),
 }
 
 
@@ -452,7 +454,7 @@ def supplementary_video_suggestion(
     type_label = {
         "ova": "OVA", "special": "Specials", "ncop": "NCOP", "nced": "NCED",
         "op": "OP", "ed": "ED", "preview": "Preview", "recap": "Recap",
-        "bonus": "Bonus",
+        "bonus": "Bonus", "cm": "CM", "menu": "Menu",
     }.get(identity.supplementary_type or "", "Doplňkový obsah")
     proposed_title = f"{type_label} – {context_label}" if context_label else type_label
     return SupplementaryVideoSuggestion(

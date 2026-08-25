@@ -871,7 +871,10 @@ def test_numbered_opening_and_ending_sequences_stay_supplementary(
     assert (state.supplementary_type, state.supplementary_number) == (
         expected_type, expected_number,
     )
+    assert video.file_type == expected_type
+    assert video.local_episode_number is None
     assert video.season_episode_number is None
+    assert video.absolute_episode_number is None
 
 
 def test_unmapped_other_file_type_does_not_override_standard_episode_number():
@@ -891,21 +894,100 @@ def test_unmapped_other_file_type_does_not_override_standard_episode_number():
     assert video.season_episode_number == 1
 
 
-def test_classifier_supplementary_without_generic_number_stays_for_later_review():
+@pytest.mark.parametrize(("filename", "expected_type"), [
+    ("OP.mkv", "op"),
+    ("ED.mkv", "ed"),
+    ("Title NCOP.mkv", "ncop"),
+    ("Title NCED.mkv", "nced"),
+])
+def test_explicit_supplementary_without_number_keeps_type_without_ordinal(
+    filename, expected_type,
+):
     title = CatalogTitle(
         id=1, local_title="Season 1", normalized_local_title="season 1",
         relative_root_path="Anime/Show/Season 1", part_type="season", season_number=1,
     )
     video = Video(
-        id=1, relative_path="Anime/Show/Season 1/Title NCED.mkv",
-        root_folder="Anime", filename="Title NCED.mkv", size=1, mtime_ns=1,
-        catalog_title=title, file_type="nced",
+        id=1, relative_path=f"Anime/Show/Season 1/{filename}",
+        root_folder="Anime", filename=filename, size=1, mtime_ns=1,
+        catalog_title=title,
+        file_type=classify_video(f"Anime/Show/Season 1/{filename}"),
     )
 
     recalculate_title_numbering(title, [video])
 
-    assert effective_video_numbering(video, title).is_unknown
-    assert video.episode_number_source == "unknown"
+    state = effective_video_numbering(video, title)
+    assert state.is_supplementary
+    assert state.supplementary_type == expected_type
+    assert state.supplementary_number is None
+    assert video.file_type == expected_type
+    assert video.local_episode_number is None
+    assert video.season_episode_number is None
+    assert video.absolute_episode_number is None
+    assert video.episode_number_source == f"supplementary_{expected_type}"
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_subtype", "expected_file_type", "expected_number"),
+    [
+        ("Title [CM01][codec].mkv", "cm", "cm", 1),
+        ("Title [PV02][codec].mkv", "preview", "pv", 2),
+        ("Title [Menu03][codec].mkv", "menu", "menu", 3),
+        ("Title Recap 04.mkv", "recap", "recap", 4),
+        ("Title Bonus 05.mkv", "bonus", "bonus", 5),
+        ("Title Preview 06.mkv", "preview", "pv", 6),
+    ],
+)
+def test_canonical_supplementary_mapping_keeps_ordinal_noncanonical(
+    filename, expected_subtype, expected_file_type, expected_number,
+):
+    title = CatalogTitle(
+        id=1, local_title="Extras", normalized_local_title="extras",
+        relative_root_path="Anime/Show/Extras", part_type="bonus",
+    )
+    relative_path = f"{title.relative_root_path}/{filename}"
+    video = Video(
+        id=1, relative_path=relative_path, root_folder="Anime", filename=filename,
+        size=1, mtime_ns=1, catalog_title=title,
+        file_type=classify_video(relative_path),
+    )
+
+    recalculate_title_numbering(title, [video])
+    state = effective_video_numbering(video, title)
+
+    assert state.is_supplementary
+    assert state.supplementary_type == expected_subtype
+    assert state.supplementary_number == expected_number
+    assert video.file_type == expected_file_type
+    assert video.local_episode_number is None
+    assert video.season_episode_number is None
+    assert video.absolute_episode_number is None
+
+
+def test_unknown_iv_marker_keeps_only_broad_bonus_context_and_is_noncanonical():
+    title = CatalogTitle(
+        id=1, local_title="Extras", normalized_local_title="extras",
+        relative_root_path="Anime/Show/Extras", part_type="bonus",
+    )
+    filename = "Title [IV01][codec].mkv"
+    relative_path = f"{title.relative_root_path}/{filename}"
+    video = Video(
+        id=1, relative_path=relative_path, root_folder="Anime", filename=filename,
+        size=1, mtime_ns=1, catalog_title=title,
+        file_type=classify_video(relative_path),
+    )
+
+    recalculate_title_numbering(title, [video])
+    state = effective_video_numbering(video, title)
+
+    assert state.is_supplementary
+    assert state.detection.kind == "unknown"
+    assert state.supplementary_type is None
+    assert state.supplementary_number is None
+    assert video.file_type == "other"
+    assert video.local_episode_number is None
+    assert video.season_episode_number is None
+    assert video.absolute_episode_number is None
 
 
 def test_manual_episode_override_outranks_classifier_supplementary_fallback():

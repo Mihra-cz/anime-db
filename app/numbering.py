@@ -5,21 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .catalog import (
-    EpisodeNumberDetection, detect_episode_number, natural_sort_key, normalize_title,
+    EpisodeNumberDetection, FILE_TYPE_TO_SUPPLEMENTARY_SUBTYPE,
+    detect_episode_number, natural_sort_key, normalize_title,
 )
 from .hierarchy_authority import manual_hierarchy_snapshot_uses_legacy_projection
 from .models import CatalogCollection, CatalogTitle, Video
 
 NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
-AUTOMATIC_SUPPLEMENTARY_FILE_TYPES = {
-    "ova": "ova",
-    "special": "special",
-    "ncop": "ncop",
-    "nced": "nced",
-    "pv": "preview",
-    "cm": "cm",
-    "menu": "menu",
-}
 
 
 @dataclass(frozen=True)
@@ -76,7 +68,7 @@ class EpisodeDuplicateGroup:
             label = {
                 "ova": "OVA", "special": "Special", "ncop": "NCOP", "nced": "NCED",
                 "op": "OP", "ed": "ED", "preview": "Preview", "recap": "Recap",
-                "bonus": "Bonus",
+                "bonus": "Bonus", "cm": "CM", "menu": "Menu",
             }.get(self.supplementary_type, self.supplementary_type.upper())
             context = f" · {self.context_label}" if self.context_label else ""
             return f"{label} {self.episode_number:02d}{context}"
@@ -121,7 +113,7 @@ def automatic_supplementary_numbering(
         )
     if detection.is_nonstandard:
         return None
-    supplementary_type = AUTOMATIC_SUPPLEMENTARY_FILE_TYPES.get(
+    supplementary_type = FILE_TYPE_TO_SUPPLEMENTARY_SUBTYPE.get(
         (video.file_type or "").strip().casefold()
     )
     if supplementary_type is None or not detection.is_standard:

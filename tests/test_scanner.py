@@ -18,7 +18,7 @@ from app.hierarchy_review import (
 )
 from app.models import CatalogCollection, CatalogTitle, ExternalSubtitle, Video
 from app.migrations import migrate_schema
-from app.numbering import unresolved_duplicate_groups
+from app.numbering import effective_video_numbering, unresolved_duplicate_groups
 from app.scanner import LibrarySafetyError, iter_videos, scan_library
 
 
@@ -126,6 +126,7 @@ def test_scan_imports_supported_video_extensions_and_ignores_companion_files(
     folder.mkdir()
     supported = {
         "Episode 01.mkv", "Episode 02.mp4", "Episode 03.m4v", "Episode 04.avi",
+        "Episode 05.MKV", "Episode 06.MP4", "Episode 07.M4V", "Episode 08.AVI",
     }
     unsupported = {
         "audio.mka", "audio.m4a", "audio.flac", "archive.zip", "archive.rar",
@@ -430,6 +431,51 @@ def test_scan_splits_nc_named_children_into_reviewable_season_context_titles(
         assert collection.hierarchy_status == "review_required"
         assert collection.hierarchy_note == SUPPLEMENTARY_CONTEXT_REVIEW_REASON
         assert all(video.season_episode_number is None for video in collection.videos)
+
+
+def test_scan_persists_exact_supplementary_types_without_canonical_episodes(
+    tmp_path: Path, monkeypatch,
+):
+    folder = tmp_path / "Show" / "Extras"
+    folder.mkdir(parents=True)
+    expected = {
+        "OP.mkv": ("op", "op", None),
+        "ED.mkv": ("ed", "ed", None),
+        "Title [CM01][codec].mkv": ("cm", "cm", 1),
+        "Title [PV02][codec].mkv": ("pv", "preview", 2),
+        "Title [Menu03][codec].mkv": ("menu", "menu", 3),
+    }
+    for filename in [*expected, "Title [IV01][codec].mkv"]:
+        (folder / filename).write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        videos = {
+            video.filename: video for video in session.scalars(select(Video)).all()
+        }
+
+        for filename, (file_type, subtype, ordinal) in expected.items():
+            video = videos[filename]
+            state = effective_video_numbering(video, video.catalog_title)
+            assert video.file_type == file_type
+            assert state.is_supplementary
+            assert state.supplementary_type == subtype
+            assert state.supplementary_number == ordinal
+            assert video.local_episode_number is None
+            assert video.season_episode_number is None
+            assert video.absolute_episode_number is None
+
+        unknown = videos["Title [IV01][codec].mkv"]
+        unknown_state = effective_video_numbering(unknown, unknown.catalog_title)
+        assert unknown.file_type == "other"
+        assert unknown_state.is_supplementary
+        assert unknown_state.detection.kind == "unknown"
+        assert unknown_state.supplementary_type is None
+        assert unknown_state.supplementary_number is None
+        assert unknown.season_episode_number is None
 
 
 def test_updates_language_of_existing_external_subtitle(tmp_path: Path, monkeypatch):
