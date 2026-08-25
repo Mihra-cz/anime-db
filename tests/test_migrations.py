@@ -36,6 +36,32 @@ def test_startup_sync_applies_shared_direct_root_season_one_inference(tmp_path):
         assert collection.hierarchy_verified_at is None
 
 
+def test_startup_sync_recalculates_unnumbered_ova_without_scan(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'unnumbered-ova-sync.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Video(
+            relative_path="Anime/Show/Season 3/Show OVA.mkv",
+            root_folder="Anime", filename="Show OVA.mkv", size=1, mtime_ns=1,
+            file_type="ova", episode_number_source="unknown",
+        ))
+        session.commit()
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        video = session.scalar(select(Video))
+        assert video.file_type == "ova"
+        assert video.catalog_title.effective_part_type == "season"
+        assert video.catalog_title.effective_season_number == 3
+        assert video.local_episode_number is None
+        assert video.season_episode_number is None
+        assert video.absolute_episode_number is None
+        assert video.external_episode_number is None
+        assert video.episode_number_source == "supplementary_ova"
+        assert video.catalog_collection.hierarchy_status == "automatic"
+
+
 def test_part_number_manual_migration_is_idempotent_and_preserves_automatic_value(
     tmp_path,
 ):

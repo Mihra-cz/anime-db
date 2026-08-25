@@ -528,6 +528,21 @@ def test_every_canonical_supplementary_file_type_has_a_catalog_filter(file_type)
     ("Show/Title Recap 01.mkv", "recap", 1, "recap"),
     ("Show/Title Bonus 01.mkv", "bonus", 1, "bonus"),
     ("Show/Title Preview 01.mkv", "preview", 1, "pv"),
+    ("Show/Title OVA.mkv", "ova", None, "ova"),
+    ("Show/Title OAD.mkv", "ova", None, "ova"),
+    ("Show/Title Special.mkv", "special", None, "special"),
+    ("Show/Title OP.mkv", "op", None, "op"),
+    ("Show/Title ED.mkv", "ed", None, "ed"),
+    ("Show/Title PV.mkv", "preview", None, "pv"),
+    ("Show/Title Preview.mkv", "preview", None, "pv"),
+    ("Show/Title CM.mkv", "cm", None, "cm"),
+    ("Show/Title Menu.mkv", "menu", None, "menu"),
+    ("Show/Title Recap.mkv", "recap", None, "recap"),
+    ("Show/Title Bonus.mkv", "bonus", None, "bonus"),
+    ("Show/Title Extras.mkv", "bonus", None, "bonus"),
+    ("Show/Title [CM].mkv", "cm", None, "cm"),
+    ("Show/Title [PV].mkv", "preview", None, "pv"),
+    ("Show/Title [Menu].mkv", "menu", None, "menu"),
 ])
 def test_exact_supplementary_meaning_survives_parser_and_classifier(
     relative_path, subtype, number, file_type,
@@ -564,9 +579,24 @@ def test_unknown_bracketed_iv_stays_unclassified_even_under_broad_path_hint(
 
 
 @pytest.mark.parametrize("filename", [
+    "High School DxD Born OVA.mkv",
+    "High School DxD New OVA.mkv",
+])
+def test_high_school_dxd_unnumbered_ova_is_explicit_supplementary(filename):
+    detection = detect_episode_number(filename)
+
+    assert detection.kind == "supplementary"
+    assert detection.supplementary_type == "ova"
+    assert detection.supplementary_number is None
+    assert classify_video(f"Anime/High School DxD/{filename}") == "ova"
+    assert derive_episode_number(filename) is None
+
+
+@pytest.mark.parametrize("filename", [
     "Title - Clean Opening Scene.mkv",
     "Title (Creditless Editorial).mkv",
     "Title [CMX01][codec].mkv",
+    "Title OVATION.mkv",
 ])
 def test_exact_supplementary_markers_reject_nearby_false_positives(filename):
     assert detect_episode_number(filename).kind == "unknown"

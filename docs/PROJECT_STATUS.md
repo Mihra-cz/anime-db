@@ -3,7 +3,7 @@
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
 > **Aktualizováno:** 25. srpna 2026
-> **Aktuální checkpoint:** Stabilizace hierarchie – collection grouping authority přežívá startup sync a rescan
+> **Aktuální checkpoint:** Stabilizace hierarchie – supplementary subtype a season context zůstávají oddělené
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -3519,6 +3519,32 @@ video protějšek. Ambiguous automatic attachments, double-linked fyzické cesty
 unaccounted soubory jsou nulové. Testovací a migrační scénáře používají pouze
 dočasné knihovny a SQLite databáze; produkční DB ani NAS se nemigrují ani
 nemění.
+
+---
+
+## 6.51 Nečíslované supplementary markery a season context
+
+Bezpečný explicitní marker určuje supplementary subtype nezávisle na ordinalu.
+Například `Title OVA.mkv` a `Title OVA 01.mkv` jsou oba OVA; první nemá
+supplementary pořadí a druhý má ordinal 1. Ani jeden tím nezískává canonical
+episode number. Stejná parserová větev obsluhuje také již podporované OAD,
+Special, OP, ED, NCOP, NCED, PV/Preview, Recap, Bonus/Extra, CM a Menu.
+Neznámé `[IV01]`/`[IV02]` zůstávají mimo tuto explicitní množinu a nadále
+vyžadují review.
+
+`CatalogTitle.part_type` popisuje druh obsahu, zatímco nullable
+`season_number`/`season_label` jsou nezávislý strukturální context. OVA, Special,
+Bonus nebo Film proto mohou souviset s konkrétní sezónou, aniž vstoupí do její
+standardní completeness; bez bezpečně známého vztahu se season nevymýšlí.
+Rozhodnutí, zda několik supplementary souborů sdílí jeden metadata titul, není
+odvozováno pouze ze společného subtype a zůstává na Hierarchy Review/Metadata
+Check. Budoucí V6/V7 smí tuto potvrzenou strukturu použít jako autoritu, ale tato
+změna nic na NASu nepřesouvá ani nepřejmenovává.
+
+Startup compatibility synchronization znovu aplikuje classifier a shared
+numbering/evaluation nad existujícími řádky. Po nasazení parserové opravy proto
+pro stale `episode_number_source=unknown` stačí restart aplikace; produkční scan
+ani nové `ffprobe` nejsou potřebné.
 
 ---
 

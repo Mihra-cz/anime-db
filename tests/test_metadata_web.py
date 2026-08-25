@@ -1399,7 +1399,8 @@ def test_hierarchy_review_offers_season_specific_ova_reassignment(tmp_path):
     assert "Doporučené oddělení" in rendered
     assert "OVA 01" in rendered
     assert 'data-part-type="ova"' in rendered
-    assert 'data-season-number=""' in rendered
+    assert 'data-season-number="1"' in rendered
+    assert 'data-season-label="S1"' in rendered
     assert "Použít doporučení" in rendered
     assert "Oddělit do nové části" in rendered
     assert "Správa zařazení" in rendered

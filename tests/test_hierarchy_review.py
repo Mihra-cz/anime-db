@@ -315,6 +315,94 @@ def test_genuinely_unknown_supplementary_looking_filename_still_requires_review(
     ]
 
 
+@pytest.mark.parametrize("ova_filename", [
+    "High School DxD Born OVA.mkv",
+    "High School DxD New OVA.mkv",
+])
+def test_complete_season_with_unnumbered_ova_has_no_numbering_blocker(ova_filename):
+    collection = CatalogCollection(
+        id=1, local_title="High School DxD", normalized_local_title="high school dxd",
+        relative_root_path="Anime/High School DxD",
+    )
+    title = CatalogTitle(
+        id=1, collection=collection, local_title="Season",
+        normalized_local_title="season",
+        relative_root_path="Anime/High School DxD/Season", part_type="season",
+        season_number=3, season_label="S3",
+    )
+    regular = [
+        Video(
+            id=number,
+            relative_path=f"{title.relative_root_path}/Title - {number:02}.mkv",
+            root_folder="Anime", filename=f"Title - {number:02}.mkv",
+            size=1, mtime_ns=number, catalog_title=title,
+            catalog_collection=collection,
+        )
+        for number in range(1, 13)
+    ]
+    ova = Video(
+        id=13, relative_path=f"{title.relative_root_path}/{ova_filename}",
+        root_folder="Anime", filename=ova_filename, size=1, mtime_ns=13,
+        file_type=classify_video(f"{title.relative_root_path}/{ova_filename}"),
+        catalog_title=title, catalog_collection=collection,
+    )
+
+    recalculate_title_numbering(title, [*regular, ova])
+    result = evaluate_collection_hierarchy(
+        collection, [*regular, ova], include_legacy_fallback=False,
+    )
+    summary = summarize_title_numbering([*regular, ova], title)
+    state = effective_video_numbering(ova, title)
+    recommendations = supplementary_assignment_recommendations([*regular, ova])
+
+    assert (summary.standard_total, summary.numbered) == (12, 12)
+    assert summary.resolved_supplemental == 1
+    assert summary.unknown == 0
+    assert summary.gaps == ()
+    assert state.is_supplementary
+    assert state.supplementary_type == "ova"
+    assert state.supplementary_number is None
+    assert state.season_episode_number is None
+    assert not any(ova in issue.videos for issue in result.blocking_issues)
+    assert len(recommendations) == 1
+    assert recommendations[0].supplementary_type == "ova"
+    assert recommendations[0].season_number == 3
+    assert recommendations[0].items[0].supplementary_number is None
+
+
+def test_unnumbered_ova_does_not_hide_unconfirmed_title_structure():
+    collection = CatalogCollection(
+        id=1, local_title="High School DxD", normalized_local_title="high school dxd",
+        relative_root_path="Anime/High School DxD",
+    )
+    title = CatalogTitle(
+        id=1, collection=collection, local_title="High School DxD New",
+        normalized_local_title="high school dxd new",
+        relative_root_path="Anime/High School DxD/High School DxD New",
+        part_type="title",
+    )
+    ova = Video(
+        id=1, relative_path=f"{title.relative_root_path}/High School DxD New OVA.mkv",
+        root_folder="Anime", filename="High School DxD New OVA.mkv",
+        size=1, mtime_ns=1, file_type="ova", catalog_title=title,
+        catalog_collection=collection,
+    )
+
+    result = evaluate_collection_hierarchy(
+        collection, [ova], include_legacy_fallback=False,
+    )
+    state = effective_video_numbering(ova, title)
+    codes = {issue.code for issue in result.blocking_issues}
+    recommendations = supplementary_assignment_recommendations([ova])
+
+    assert state.is_supplementary
+    assert state.supplementary_type == "ova"
+    assert state.supplementary_number is None
+    assert HierarchyIssueCode.UNKNOWN_OR_MISSING_NUMBERING not in codes
+    assert HierarchyIssueCode.GENERIC_STRUCTURAL_TYPE in codes
+    assert recommendations == ()
+
+
 def test_manual_episode_override_resolves_nonstandard_zero_review_reason():
     collection = CatalogCollection(
         local_title="Show", normalized_local_title="show",
@@ -770,7 +858,7 @@ def test_nonblocking_period_hint_collection_reopens_for_new_scan_problem(
         assert title.season_number_manual == 2
         assert title.season_label_manual == "S2"
 
-        unknown_path = folder / "Asobi Asobase new extra.mkv"
+        unknown_path = folder / "Asobi Asobase new material.mkv"
         unknown_path.write_bytes(b"video")
         scan_library(session, tmp_path)
         unknown = session.scalar(select(Video).where(Video.filename == unknown_path.name))

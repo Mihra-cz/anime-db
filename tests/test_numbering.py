@@ -1,7 +1,8 @@
 import pytest
 
 from app.catalog import (
-    classify_video, detect_episode_number, sort_title_videos, video_sort_key,
+    FILE_TYPE_TO_SUPPLEMENTARY_SUBTYPE, classify_video, detect_episode_number,
+    sort_title_videos, video_sort_key,
 )
 from app.models import CatalogCollection, CatalogTitle, TitleMetadata, Video
 from app.numbering import (
@@ -897,8 +898,23 @@ def test_unmapped_other_file_type_does_not_override_standard_episode_number():
 @pytest.mark.parametrize(("filename", "expected_type"), [
     ("OP.mkv", "op"),
     ("ED.mkv", "ed"),
+    ("Title OVA.mkv", "ova"),
+    ("Title OAD.mkv", "ova"),
+    ("Title Special.mkv", "special"),
+    ("Title OP.mkv", "op"),
+    ("Title ED.mkv", "ed"),
     ("Title NCOP.mkv", "ncop"),
     ("Title NCED.mkv", "nced"),
+    ("Title PV.mkv", "preview"),
+    ("Title Preview.mkv", "preview"),
+    ("Title CM.mkv", "cm"),
+    ("Title Menu.mkv", "menu"),
+    ("Title Recap.mkv", "recap"),
+    ("Title Bonus.mkv", "bonus"),
+    ("Title Extras.mkv", "bonus"),
+    ("Title [CM].mkv", "cm"),
+    ("Title [PV].mkv", "preview"),
+    ("Title [Menu].mkv", "menu"),
 ])
 def test_explicit_supplementary_without_number_keeps_type_without_ordinal(
     filename, expected_type,
@@ -920,11 +936,45 @@ def test_explicit_supplementary_without_number_keeps_type_without_ordinal(
     assert state.is_supplementary
     assert state.supplementary_type == expected_type
     assert state.supplementary_number is None
-    assert video.file_type == expected_type
+    assert FILE_TYPE_TO_SUPPLEMENTARY_SUBTYPE[video.file_type] == expected_type
     assert video.local_episode_number is None
     assert video.season_episode_number is None
     assert video.absolute_episode_number is None
     assert video.episode_number_source == f"supplementary_{expected_type}"
+
+
+@pytest.mark.parametrize(("season_number", "season_label"), [
+    (3, "S3"),
+    (None, None),
+])
+def test_ova_part_keeps_optional_season_context_separate_from_video_numbering(
+    season_number, season_label,
+):
+    title = CatalogTitle(
+        id=1, local_title="OVA", normalized_local_title="ova",
+        relative_root_path="Anime/Show/OVA", part_type="ova",
+        season_number=season_number, season_label=season_label,
+    )
+    video = Video(
+        id=1, relative_path="Anime/Show/OVA/Title OVA.mkv", root_folder="Anime",
+        filename="Title OVA.mkv", size=1, mtime_ns=1, catalog_title=title,
+        file_type=classify_video("Anime/Show/OVA/Title OVA.mkv"),
+    )
+
+    recalculate_title_numbering(title, [video])
+    state = effective_video_numbering(video, title)
+    summary = summarize_title_numbering([video], title)
+
+    assert title.effective_part_type == "ova"
+    assert title.effective_season_number == season_number
+    assert title.effective_season_label == season_label
+    assert state.is_supplementary
+    assert state.supplementary_type == "ova"
+    assert state.supplementary_number is None
+    assert state.season_episode_number is None
+    assert summary.supplemental is True
+    assert summary.standard_total == 0
+    assert summary.resolved_supplemental == 1
 
 
 @pytest.mark.parametrize(

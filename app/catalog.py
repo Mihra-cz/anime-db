@@ -1166,6 +1166,16 @@ BRACKETED_SUPPLEMENTARY_SEQUENCE = re.compile(
     r"0*(?P<number>\d{1,3})\s*\]",
     re.IGNORECASE,
 )
+BRACKETED_UNNUMBERED_SUPPLEMENTARY_MARKER = re.compile(
+    r"\[\s*(?P<type>NCOP|NCED|OP|ED|CM|PV|MENU)\s*\]",
+    re.IGNORECASE,
+)
+UNNUMBERED_SUPPLEMENTARY_SUFFIX = re.compile(
+    r"(?:^|[^a-z0-9])"
+    r"(?P<type>NCOP|NCED|OVA|OAD|SPECIALS?|OP|ED|PREVIEWS?|PV|RECAPS?|"
+    r"BONUS(?:ES)?|EXTRAS?|CM|MENU)\s*$",
+    re.IGNORECASE,
+)
 GROUPED_CREDITLESS_CLEAN_MARKER = re.compile(
     r"[\[(]\s*(?:CREDITLESS|CLEAN)\s+"
     r"(?P<type>OPENING|OP|ENDING|ED)\s*[\])]",
@@ -1295,6 +1305,12 @@ def _exact_supplementary_detection(stem: str) -> EpisodeNumberDetection | None:
             supplementary_type=normalize_supplementary_subtype(match.group("type")),
             context_hint=stem[:match.start()].rstrip(" -_.") or None,
         )
+    if match := BRACKETED_UNNUMBERED_SUPPLEMENTARY_MARKER.search(stem):
+        return EpisodeNumberDetection(
+            "supplementary",
+            supplementary_type=normalize_supplementary_subtype(match.group("type")),
+            context_hint=stem[:match.start()].rstrip(" -_.") or None,
+        )
     for pattern in (
         GROUPED_CREDITLESS_CLEAN_MARKER,
         TRAILING_CREDITLESS_CLEAN_MARKER,
@@ -1325,6 +1341,12 @@ def _exact_supplementary_detection(stem: str) -> EpisodeNumberDetection | None:
         return EpisodeNumberDetection(
             "supplementary",
             supplementary_type=match.group("type").casefold(),
+            context_hint=stem[:match.start()].rstrip(" -_.") or None,
+        )
+    if match := UNNUMBERED_SUPPLEMENTARY_SUFFIX.search(stem):
+        return EpisodeNumberDetection(
+            "supplementary",
+            supplementary_type=normalize_supplementary_subtype(match.group("type")),
             context_hint=stem[:match.start()].rstrip(" -_.") or None,
         )
     return None

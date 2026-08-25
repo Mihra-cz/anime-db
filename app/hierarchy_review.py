@@ -389,9 +389,14 @@ def supplementary_assignment_recommendations(
             detection.supplementary_type,
             ("bonus", "Doplňkový obsah", "Bonus"),
         )
+        season_context = (
+            detection.season_hint
+            if detection.season_hint is not None
+            else current.effective_season_number
+        )
         key = (
             current.id, detection.supplementary_type,
-            detection.season_hint, proposed_title,
+            season_context, proposed_title,
         )
         grouped.setdefault(key, []).append(SupplementaryAssignmentItem(
             video=video,
