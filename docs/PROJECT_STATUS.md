@@ -3,7 +3,7 @@
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
 > **Aktualizováno:** 26. srpna 2026
-> **Aktuální checkpoint:** Autoritativní lokální názvy a strukturální pořadí CatalogTitle
+> **Aktuální checkpoint:** Hlavní season-context zobrazení nad ověřenou hierarchií
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -3675,6 +3675,52 @@ Automatické ověření 26. srpna 2026:
 
 ```bash
 .venv/bin/pytest -q                       # 891 passed
+.venv/bin/python -m compileall -q app tests  # prošlo
+načtení všech Jinja2 šablon               # 14 šablon, prošlo
+git diff --check                          # prošlo
+```
+
+---
+
+## 6.54 Hlavní season-context zobrazení
+
+Hlavní katalog nyní používá samostatný read-only prezentační view-model nad
+existujícími `CatalogTitle`. Hlavní episodické části jsou effective typy
+`season`, `part`, legacy `cour` a technický fallback `title`. Centrální
+supplementary taxonomie zahrnuje Film, OVA, Special, Preview, Recap, Bonus a
+Other. Neznámý typ se bezpečně zachová jako anime-level další část.
+
+Supplementary `CatalogTitle` se připojí pod hlavní část jen tehdy, když jeho
+`effective_season_number` odpovídá právě jedné hlavní části. Filename,
+metadata title ani textový label se pro attachment nepoužívají. `NULL`,
+chybějící cílová sezóna nebo více hlavních částí se stejným season contextem
+ponechá titul v sekci **Další části**. Každý skutečný title je proto v projekci
+právě jednou: jako hlavní položka, nested supplementary nebo anime-level extra.
+
+Homepage zachovává přímý detail jedné hlavní sezóny, pokud collection nemá
+anime-level sibling; season-scoped OVA/Special/Bonus/Film tento shortcut neruší.
+Více hlavních sezón otevře selector, který zobrazuje pouze hlavní části a
+anime-level extras. Detail hlavní sezóny nechá epizody nahoře a pod nimi renderuje
+navázané typové skupiny přes výchozí sbalené `<details>`. Každý nested title i
+video odkazuje na původní `/titles/{id}` deep link a používá stávající canonical
+display-title resolver.
+
+Veškeré title pořadí prochází `catalog_title_sort_key`; explicitní legacy/manual
+override zůstává respektovaný a žádná nová hodnota pořadí se nezapisuje.
+Databázová hierarchie, metadata, videos, URL identita ani NAS se nemění.
+Hierarchy Review nadále renderuje raw seznam všech `CatalogTitle` ve stejných
+kartách; jeho source, templates, grouping a workflow nebyly upraveny.
+
+Read-only projekce aktivní High School DxD collection ID 48 obsahuje 14 titulů:
+4 hlavní sezóny a 10 jednoznačně navázaných supplementary částí, bez
+anime-level zbytku. S1 obsahuje Special, Bonus a OVA; S2 Bonus a OVA; S3
+Special, Bonus a OVA; S4 Bonus a Preview. Legacy `sort_order_manual` hodnoty
+zůstávají pouze přečtené centrálním sortem a nejsou migrovány.
+
+Automatické ověření 26. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                       # 896 passed
 .venv/bin/python -m compileall -q app tests  # prošlo
 načtení všech Jinja2 šablon               # 14 šablon, prošlo
 git diff --check                          # prošlo

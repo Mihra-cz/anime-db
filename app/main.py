@@ -55,6 +55,7 @@ from .catalog import (
     video_matches_search,
 )
 from .config import Settings, get_settings
+from .collection_presentation import build_collection_presentation
 from .database import Base, make_engine, make_session_factory
 from .migrations import migrate_schema
 from .hierarchy_authority import activate_manual_hierarchy_snapshot
@@ -220,7 +221,8 @@ METADATA_STATUS_LABELS = {
 
 
 def _homepage_collection_rows(
-    videos: list[Video], collection_title_ids: dict[int, tuple[int, ...]],
+    videos: list[Video],
+    collection_titles: dict[int, tuple[CatalogTitle, ...]],
     title_name_preference: object = "romaji",
 ) -> list[dict]:
     """Sestaví navigační homepage nad uloženou logickou hierarchií."""
@@ -232,22 +234,26 @@ def _homepage_collection_rows(
     for group in results.groups:
         if group.is_root_group or group.catalog_collection_id is None:
             continue
-        title_ids = collection_title_ids.get(group.catalog_collection_id, ())
+        titles = collection_titles.get(group.catalog_collection_id, ())
+        presentation = build_collection_presentation(titles)
         group_videos = results.videos_by_title[group.relative_path]
-        sole_title_id = title_ids[0] if len(title_ids) == 1 else None
+        direct_title = presentation.direct_title
         has_unambiguous_title = bool(
-            sole_title_id
+            direct_title
             and group_videos
-            and all(video.catalog_title_id == sole_title_id for video in group_videos)
+            and all(
+                video.catalog_title_id in presentation.all_title_ids
+                for video in group_videos
+            )
         )
         rows.append({
             "group": group,
             "href": (
-                f"/titles/{sole_title_id}"
+                f"/titles/{direct_title.id}"
                 if has_unambiguous_title
                 else f"/collections/{group.catalog_collection_id}"
             ),
-            "title_count": len(title_ids),
+            "title_count": len(titles),
             "opens_title": has_unambiguous_title,
         })
     return rows
@@ -273,7 +279,12 @@ def _load_catalog_title(session, catalog_title_id: int | None):
     return session.scalar(select(CatalogTitle).options(
         selectinload(CatalogTitle.external_links),
         selectinload(CatalogTitle.metadata_record),
-        selectinload(CatalogTitle.collection),
+        selectinload(CatalogTitle.collection).selectinload(
+            CatalogCollection.titles
+        ).selectinload(CatalogTitle.metadata_record),
+        selectinload(CatalogTitle.collection).selectinload(
+            CatalogCollection.titles
+        ).selectinload(CatalogTitle.videos),
         selectinload(CatalogTitle.metadata_candidates),
         selectinload(CatalogTitle.artwork),
         selectinload(CatalogTitle.videos),
@@ -593,17 +604,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(Video.catalog_title).selectinload(CatalogTitle.metadata_record),
                 selectinload(Video.catalog_collection),
             )).all()
-            collection_title_ids = {
-                collection.id: tuple(title.id for title in collection.titles)
+            collection_titles = {
+                collection.id: tuple(collection.titles)
                 for collection in session.scalars(select(CatalogCollection).options(
-                    selectinload(CatalogCollection.titles)
+                    selectinload(CatalogCollection.titles).selectinload(
+                        CatalogTitle.videos
+                    )
                 )).all()
             }
         folders: dict[str, dict[str, int]] = {}
         totals = _empty_stats()
         collection_rows = _homepage_collection_rows(
             videos,
-            collection_title_ids,
+            collection_titles,
             get_preferred_title_language(request),
         )
         totals["anime_titles"] = len(collection_rows)
@@ -868,6 +881,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return local_redirect_response(
                 f"/titles/{catalog_title.id}?{urlencode(parameters)}", status_code=307
             )
+        primary_presentation = None
+        if catalog_title and catalog_title.collection is not None:
+            collection_presentation = build_collection_presentation(
+                catalog_title.collection.titles
+            )
+            primary_presentation = collection_presentation.primary_part_for_title(
+                catalog_title.id
+            )
         selected_path = catalog_title.relative_root_path if catalog_title else series_path
         title_candidates = [
             video for video in all_videos
@@ -960,6 +981,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "metadata_split_evaluation": (
                 evaluate_metadata_split(catalog_title) if catalog_title else None
             ),
+            "supplementary_groups": (
+                primary_presentation.supplementary_groups
+                if primary_presentation is not None else ()
+            ),
+            "is_primary_main_title": primary_presentation is not None,
+            "supplementary_title_state_query": urlencode({
+                "filter_name": filter_name,
+                "q": results.query,
+                "sort": results.sort,
+                "direction": results.direction,
+            }),
             "catalog_title_display_title": catalog_title_display_title,
             "catalog_title_series_label": catalog_title_series_label,
             "subtitle_track_display": subtitle_track_display,
@@ -1061,7 +1093,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for video in all_videos:
             if video.catalog_title and video.catalog_title.catalog_collection_id == collection.id:
                 videos_by_part.setdefault(video.catalog_title_id, []).append(video)
-        parts = []
+        parts_by_title_id = {}
+        visible_title_ids = set()
         folded_query = normalize_search_query(q).casefold()
         collection_query_match = bool(folded_query) and (
             folded_query in collection.local_title.casefold()
@@ -1090,16 +1123,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 filtered if not folded_query or collection_query_match or title_query_match
                 else [video for video in filtered if video_matches_search(video, folded_query)]
             )
-            if matched or title.metadata_status == "migration_review_required":
-                parts.append({
-                    "title": title, "stats": stats, "metadata": title.metadata_record,
-                    "videos": title_videos_list,
-                })
+            parts_by_title_id[title.id] = {
+                "title": title, "stats": stats, "metadata": title.metadata_record,
+                "videos": title_videos_list,
+            }
+            if (
+                matched
+                or title.metadata_status == "migration_review_required"
+                or filter_name == "all" and not folded_query
+            ):
+                visible_title_ids.add(title.id)
+        presentation = build_collection_presentation(collection.titles)
+        navigation_parts = []
+        for primary in presentation.primary_parts:
+            attached_ids = {
+                part.title.id for part in primary.supplementary_parts
+            }
+            if primary.title.id not in visible_title_ids and not (
+                attached_ids & visible_title_ids
+            ):
+                continue
+            navigation_parts.append({
+                "part": parts_by_title_id[primary.title.id],
+                "section": "primary",
+                "section_label": "Sezóny a hlavní části",
+                "supplementary_part_count": len(primary.supplementary_parts),
+            })
+        for extra in presentation.anime_level_parts:
+            if extra.title.id not in visible_title_ids:
+                continue
+            navigation_parts.append({
+                "part": parts_by_title_id[extra.title.id],
+                "section": "extra",
+                "section_label": "Další části",
+                "supplementary_part_count": 0,
+            })
         state = {"filter_name": filter_name, "q": normalize_search_query(q)}
         if sort:
             state.update(sort=sort, direction=direction or "asc")
         return templates.TemplateResponse(request, "collection.html", {
-            "collection": collection, "parts": parts, "filter_name": filter_name,
+            "collection": collection, "parts": tuple(parts_by_title_id.values()),
+            "navigation_parts": navigation_parts, "filter_name": filter_name,
             "filter_label": FILTER_LABELS[filter_name], "q": normalize_search_query(q),
             "sort": sort or "", "direction": direction or "",
             "title_state_query": urlencode(state),

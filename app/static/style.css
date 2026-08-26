@@ -471,6 +471,47 @@ summary {
 .media-check-table .media-row.severity-success { box-shadow: inset .25rem 0 #10b981; }
 .media-select { justify-content: center; }
 .media-controls > summary { color: #a993ff; font-weight: 700; }
+.collection-section-heading th {
+  background: #101722;
+  color: #c4b5fd;
+  font-size: .9rem;
+  letter-spacing: .03em;
+}
+.season-supplementary { display: grid; gap: .7rem; }
+.season-supplementary > h2 { margin-bottom: 0; }
+.season-supplementary > p { margin: 0 0 .35rem; }
+.season-supplementary-group {
+  border: 1px solid #364258;
+  border-radius: 9px;
+  background: #101722;
+  padding: 0 .8rem;
+}
+.season-supplementary-group > summary {
+  color: #c4b5fd;
+  font-weight: 700;
+}
+.season-supplementary-content {
+  display: grid;
+  gap: .75rem;
+  padding: .2rem 0 .9rem;
+}
+.season-supplementary-part {
+  border-top: 1px solid #293345;
+  padding-top: .75rem;
+}
+.season-supplementary-part h3 { margin: 0 0 .25rem; }
+.season-supplementary-part ul {
+  display: grid;
+  gap: .4rem;
+  list-style: none;
+  margin: .75rem 0 0;
+  padding: 0;
+}
+.season-supplementary-part li {
+  padding: .55rem .7rem;
+  border-radius: 7px;
+  background: #151c27;
+}
 .media-control-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
