@@ -18,6 +18,7 @@ PART_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
 # but it is not offered as a new user-facing hierarchy choice.
 PART_TYPES = frozenset({*(value for value, _ in PART_TYPE_CHOICES), "cour"})
 PART_TYPE_LABELS = {**dict(PART_TYPE_CHOICES), "cour": "Cour"}
+SUPPLEMENTARY_PART_TYPES = PART_TYPES - {"season", "part", "cour"}
 # ``title`` remains readable as a legacy/technical inference fallback, but new
 # authoritative hierarchy input must always choose a concrete structural type.
 TECHNICAL_PART_TYPES = frozenset({*PART_TYPES, "title"})

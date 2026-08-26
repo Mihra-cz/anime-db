@@ -517,6 +517,40 @@ def test_metadata_check_renders_safe_split_and_hierarchy_review_keeps_all_title_
         } == before_assignments
 
 
+def test_hierarchy_review_uses_verified_bonus_local_title_without_restructuring(
+    tmp_path: Path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'supplementary-display.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection, title, _ = supplementary_title(
+            ["ED.mkv", "OP 01.mkv", "OP 02.mkv"], part_type="bonus",
+        )
+        session.add(collection)
+        session.commit()
+        collection_id, title_id = collection.id, title.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review/{collection_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    assert rendered.count('class="panel hierarchy-title-card') == 1
+    assert (
+        f'<h3><a href="/titles/{title_id}">NC – High School DxD Born</a></h3>'
+        in rendered
+    )
+    assert f'id="title-{title_id}"' in rendered
+
+
 def test_metadata_split_route_is_post_only_and_requires_explicit_confirmation(tmp_path):
     web_app = create_app(Settings(
         anime_path=tmp_path,

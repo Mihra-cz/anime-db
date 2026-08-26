@@ -113,6 +113,7 @@ def test_blank_local_title_uses_shared_nc_context_not_first_video():
         assert created.local_title == "NC – High School DxD Born"
         assert created.local_title != "OP"
         assert created.sort_order_manual is None
+        assert catalog_title_display_title(created) == "NC – High School DxD Born"
 
 
 def test_blank_local_title_without_safe_context_uses_generic_type_and_season():

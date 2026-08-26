@@ -9,7 +9,8 @@ import re
 from typing import Literal
 import unicodedata
 
-from .hierarchy_types import VIDEO_CONTENT_TYPE_LABELS
+from .hierarchy_authority import manual_hierarchy_snapshot_is_complete
+from .hierarchy_types import SUPPLEMENTARY_PART_TYPES, VIDEO_CONTENT_TYPE_LABELS
 from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
     InternalSubtitle, Video,
@@ -301,12 +302,18 @@ def catalog_title_display_title(
     explicit = _catalog_title_explicit_display_title(title, preference)
     if explicit:
         return explicit
+    local = (title.local_title or "").strip()
+    if (
+        local
+        and manual_hierarchy_snapshot_is_complete(title)
+        and title.effective_part_type in SUPPLEMENTARY_PART_TYPES
+    ):
+        return local
     filename_title = title_filename_display_title(
         videos if videos is not None else title.videos
     )
     if filename_title:
         return filename_title
-    local = (title.local_title or "").strip()
     return local or "Titul bez názvu"
 
 

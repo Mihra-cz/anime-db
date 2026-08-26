@@ -3661,13 +3661,20 @@ strukturální pořadí. Hierarchy Review stále renderuje každý skutečný
 skrývání ani nový prezentační koncept. Změněn byl pouze popisek order inputu na
 **Ruční pořadí** s vysvětlením automatic režimu.
 
+Canonical display resolver zachovává nejvyšší prioritu ručního display title a
+preferovaných metadat. Bez nich použije u kompletního autoritativního
+supplementary snapshotu jeho `local_title` před filename-derived kandidátem
+jednotlivého videa. OP/ED/OVA marker tak nepřejmenuje celou potvrzenou NC, OVA,
+Special nebo jinou supplementary část pouze při renderování. U Season, Part a
+nepotvrzené inference zůstává dosavadní bezpečný filename fallback beze změny.
+
 Změna nepřidává DB sloupec, nemění aktivní `data/anime.db`, neprovádí produkční
 scan a nic nepřejmenovává ani nepřesouvá na NASu.
 
 Automatické ověření 26. srpna 2026:
 
 ```bash
-.venv/bin/pytest -q                       # 883 passed
+.venv/bin/pytest -q                       # 891 passed
 .venv/bin/python -m compileall -q app tests  # prošlo
 načtení všech Jinja2 šablon               # 14 šablon, prošlo
 git diff --check                          # prošlo

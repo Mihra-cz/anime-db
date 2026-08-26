@@ -34,7 +34,7 @@ from app.catalog import (
 )
 from app.models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    InternalSubtitle, TitleMetadata, Video,
+    InternalSubtitle, TitleMetadata, Video, utc_now,
 )
 
 
@@ -63,6 +63,138 @@ def test_catalog_title_display_title_prefers_manual_then_metadata_then_local():
     assert catalog_title_display_title(title) == "Metadata title"
     title.metadata_record = None
     assert catalog_title_display_title(title) == "Local title"
+
+
+def _verified_supplementary_display_title(
+    local_title: str,
+    filenames: list[str],
+    *,
+    part_type: str = "bonus",
+    metadata: TitleMetadata | None = None,
+    manual_display_title: str | None = None,
+) -> CatalogTitle:
+    title = CatalogTitle(
+        local_title=local_title,
+        normalized_local_title=local_title.casefold(),
+        relative_root_path=f"Anime/Show/{local_title}",
+        part_type=part_type,
+        hierarchy_manual_override=True,
+        part_type_manual=part_type,
+        season_number_manual=3,
+        season_label_manual="S3",
+        hierarchy_verified_at=utc_now(),
+        metadata_record=metadata,
+        manual_display_title=manual_display_title,
+    )
+    title.videos = [
+        Video(
+            relative_path=f"{title.relative_root_path}/{filename}",
+            root_folder="Anime",
+            filename=filename,
+            size=1,
+            mtime_ns=index,
+        )
+        for index, filename in enumerate(filenames, 1)
+    ]
+    return title
+
+
+@pytest.mark.parametrize("local_title", [
+    "NC – High School DxD Born",
+    "NC – High School DxD Hero",
+])
+def test_verified_bonus_display_uses_local_identity_before_op_filename_fallback(
+    local_title,
+):
+    title = _verified_supplementary_display_title(
+        local_title, ["ED.mkv", "OP 01.mkv", "OP 02.mkv"],
+    )
+
+    assert title_filename_display_title(title.videos) == "OP"
+    assert catalog_title_display_title(title) == local_title
+
+
+def test_verified_bonus_with_bare_op_ed_names_uses_logical_local_identity():
+    title = _verified_supplementary_display_title(
+        "NC – Example Anime", ["ED.mkv", "OP01.mkv", "OP02.mkv"],
+    )
+
+    assert title_filename_display_title(title.videos) is None
+    assert catalog_title_display_title(title) == "NC – Example Anime"
+    assert catalog_title_display_title(title) not in {"OP", "ED"}
+
+
+def test_verified_ova_display_uses_local_identity_before_video_candidate():
+    title = _verified_supplementary_display_title(
+        "OVA – Example", ["Example OVA 01.mkv"], part_type="ova",
+    )
+
+    assert title_filename_display_title(title.videos) == "Example OVA"
+    assert catalog_title_display_title(title) == "OVA – Example"
+
+
+def test_unverified_supplementary_keeps_rich_filename_fallback():
+    title = CatalogTitle(
+        local_title="OVA",
+        normalized_local_title="ova",
+        relative_root_path="Anime/Show/OVA",
+        part_type="ova",
+    )
+    title.videos = [Video(
+        relative_path="Anime/Show/OVA/Example Anime OVA 01.mkv",
+        root_folder="Anime",
+        filename="Example Anime OVA 01.mkv",
+        size=1,
+        mtime_ns=1,
+    )]
+
+    assert title_filename_display_title(title.videos) == "Example Anime OVA"
+    assert catalog_title_display_title(title) == "Example Anime OVA"
+
+
+def test_verified_supplementary_keeps_metadata_and_manual_display_authority():
+    title = _verified_supplementary_display_title(
+        "NC – Example",
+        ["OP 01.mkv"],
+        metadata=TitleMetadata(
+            display_title="Metadata English",
+            title_romaji="Metadata Romaji",
+            title_english="Metadata English",
+        ),
+    )
+
+    assert catalog_title_display_title(title, "english") == "Metadata English"
+    assert title.local_title == "NC – Example"
+
+    title.manual_display_title = "Manual display"
+    assert catalog_title_display_title(title, "english") == "Manual display"
+    assert title.local_title == "NC – Example"
+
+
+def test_verified_season_keeps_meaningful_filename_fallback():
+    title = CatalogTitle(
+        local_title="Season 1",
+        normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1",
+        part_type="season",
+        hierarchy_manual_override=True,
+        part_type_manual="season",
+        season_number_manual=1,
+        season_label_manual="S1",
+        hierarchy_verified_at=utc_now(),
+    )
+    title.videos = [
+        Video(
+            relative_path=f"Anime/Show/Season 1/Example Anime - {number:02}.mkv",
+            root_folder="Anime",
+            filename=f"Example Anime - {number:02}.mkv",
+            size=1,
+            mtime_ns=number,
+        )
+        for number in range(1, 3)
+    ]
+
+    assert catalog_title_display_title(title) == "Example Anime"
 
 
 @pytest.mark.parametrize(("preference", "expected"), [
