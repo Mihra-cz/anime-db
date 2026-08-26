@@ -1148,6 +1148,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "section": "primary",
                 "section_label": "Sezóny a hlavní části",
                 "supplementary_part_count": len(primary.supplementary_parts),
+                "supplementary_video_count": primary.supplementary_video_count,
+                "supplementary_video_tooltip": primary.supplementary_video_tooltip,
             })
         for extra in presentation.anime_level_parts:
             if extra.title.id not in visible_title_ids:
@@ -1157,6 +1159,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "section": "extra",
                 "section_label": "Další části",
                 "supplementary_part_count": 0,
+                "supplementary_video_count": None,
+                "supplementary_video_tooltip": "",
             })
         state = {"filter_name": filter_name, "q": normalize_search_query(q)}
         if sort:

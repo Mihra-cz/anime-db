@@ -477,6 +477,11 @@ summary {
   font-size: .9rem;
   letter-spacing: .03em;
 }
+.supplementary-video-count[title] {
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: .2em;
+}
 .season-supplementary { display: grid; gap: .7rem; }
 .season-supplementary > h2 { margin-bottom: 0; }
 .season-supplementary > p { margin: 0 0 .35rem; }

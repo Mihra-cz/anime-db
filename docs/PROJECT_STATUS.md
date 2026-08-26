@@ -3728,6 +3728,37 @@ git diff --check                          # prošlo
 
 ---
 
+## 6.55 Souhrn doplňkových videí v season selectoru
+
+Read-only `collection_presentation` nyní pro každou hlavní část odvozuje
+celkový počet videí přímo ze stejných `supplementary_groups`, které se po
+otevření sezóny renderují dole v detailu. Selector jej zobrazuje ve sloupci
+**Doplňkový obsah**. Nenulová hodnota má jednoduchý nativní tooltip s lidskými
+labely a počty jednotlivých neprázdných typů; nulová hodnota tooltip nemá.
+Počítají se `Video`, nikoli počty `CatalogTitle`.
+
+Anime-level extras nejsou součástí `supplementary_groups` žádné primární
+části, a proto se do season součtu nemohou dostat. Taxonomie, attachment i
+pořadí typů nadále pocházejí z existujícího centrálního view-modelu;
+šablona hierarchii znovu neodvozuje. Aktivní High School DxD collection ID 48
+v read-only projekci obsahuje součty S1=15 (`Special 11`, `Bonus 2`, `OVA 2`),
+S2=5 (`Bonus 4`, `OVA 1`), S3=10 (`Special 6`, `Bonus 3`, `OVA 1`) a S4=4
+(`Bonus 3`, `Preview 1`).
+
+Hierarchy Review, databázové schema, hierarchy data, metadata, order hodnoty,
+aktivní databáze ani NAS se touto prezentační změnou nemění.
+
+Automatické ověření 26. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                       # 898 passed
+.venv/bin/python -m compileall -q app tests  # prošlo
+načtení všech Jinja2 šablon               # 14/14, prošlo
+git diff --check                          # prošlo
+```
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

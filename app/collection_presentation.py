@@ -44,6 +44,26 @@ class PrimaryTitlePresentation:
             for part in group.parts
         )
 
+    @property
+    def supplementary_video_count(self) -> int:
+        return sum(group.video_count for group in self.supplementary_groups)
+
+    @property
+    def supplementary_video_counts_by_type(
+        self,
+    ) -> tuple[SupplementaryGroupPresentation, ...]:
+        """Non-empty attached groups used by the season overview tooltip."""
+        return tuple(
+            group for group in self.supplementary_groups if group.video_count
+        )
+
+    @property
+    def supplementary_video_tooltip(self) -> str:
+        return "\n".join(
+            f"{group.label}: {group.video_count}"
+            for group in self.supplementary_video_counts_by_type
+        )
+
 
 @dataclass(frozen=True)
 class CollectionPresentation:

@@ -147,6 +147,90 @@ def test_view_model_uses_central_structure_and_keeps_every_title_reachable():
         ) if title.id is not None
     }
     assert presentation.direct_title is None
+    assert presentation.primary_parts[0].supplementary_video_count == 0
+    assert presentation.primary_parts[0].supplementary_video_counts_by_type == ()
+    assert presentation.primary_parts[0].supplementary_video_tooltip == ""
+
+
+def test_attached_supplementary_video_counts_use_the_existing_group_projection():
+    collection = _collection("Counts")
+    season_one = _title(collection, "Season 1", "season", 1, ("S1E01.mkv",))
+    season_two = _title(collection, "Season 2", "season", 2, ("S2E01.mkv",))
+    season_three = _title(collection, "Season 3", "season", 3, ("S3E01.mkv",))
+    _title(collection, "OVA A – S1", "ova", 1, ("OVA01.mkv",))
+    _title(collection, "OVA B – S1", "ova", 1, ("OVA02.mkv",))
+    _title(collection, "Bonus A – S1", "bonus", 1, ("ED.mkv",))
+    _title(
+        collection, "Bonus B – S1", "bonus", 1,
+        ("OP01.mkv", "OP02.mkv"),
+    )
+    _title(
+        collection, "Specials – S2", "special", 2,
+        ("Special01.mkv", "Special02.mkv", "Special03.mkv"),
+    )
+    _title(
+        collection, "Anime-level OVA", "ova", None,
+        ("Anime OVA01.mkv", "Anime OVA02.mkv"),
+    )
+
+    presentation = build_collection_presentation(collection.titles)
+    projected = {
+        item.title: item for item in presentation.primary_parts
+    }
+    first = projected[season_one]
+    second = projected[season_two]
+    third = projected[season_three]
+
+    assert first.supplementary_video_count == 5
+    assert [
+        (group.part_type, group.label, group.video_count)
+        for group in first.supplementary_video_counts_by_type
+    ] == [("ova", "OVA", 2), ("bonus", "Bonus", 3)]
+    assert first.supplementary_video_tooltip == "OVA: 2\nBonus: 3"
+    assert first.supplementary_video_count == sum(
+        len(part.videos) for part in first.supplementary_parts
+    )
+    assert second.supplementary_video_count == 3
+    assert second.supplementary_video_tooltip == "Special: 3"
+    assert third.supplementary_video_count == 0
+    assert third.supplementary_video_tooltip == ""
+    assert [item.title.local_title for item in presentation.anime_level_parts] == [
+        "Anime-level OVA",
+    ]
+
+
+def test_hsdxd_like_supplementary_video_projection_sums_each_season():
+    collection = _collection("Four Season Counts")
+    for season_number in range(1, 5):
+        _title(
+            collection, f"Season {season_number}", "season", season_number,
+            (f"S{season_number}E01.mkv",),
+        )
+    expected = {
+        1: (("special", 11), ("bonus", 2), ("ova", 2)),
+        2: (("bonus", 4), ("ova", 1)),
+        3: (("special", 6), ("bonus", 3), ("ova", 1)),
+        4: (("bonus", 3), ("preview", 1)),
+    }
+    for season_number, groups in expected.items():
+        for part_type, count in groups:
+            _title(
+                collection,
+                f"{part_type.title()} – S{season_number}",
+                part_type,
+                season_number,
+                tuple(
+                    f"{part_type}-{index:02}.mkv"
+                    for index in range(1, count + 1)
+                ),
+            )
+
+    presentation = build_collection_presentation(collection.titles)
+
+    assert {
+        item.title.effective_season_number: item.supplementary_video_count
+        for item in presentation.primary_parts
+    } == {1: 15, 2: 5, 3: 10, 4: 4}
 
 
 def test_ambiguous_same_season_primary_match_keeps_supplementary_at_anime_level():
@@ -252,6 +336,25 @@ def test_main_selector_and_season_detail_nest_only_exact_supplementary_context(
         assert f'href="/titles/{title_id}?' in collection_html
     assert "Sezóny a hlavní části" in collection_html
     assert "Další části" in collection_html
+    assert "<th>Doplňkový obsah</th>" in collection_html
+    s1_row = collection_html.split(
+        f'<tr id="title-{season_ids[1]}">', 1,
+    )[1].split("</tr>", 1)[0]
+    s2_row = collection_html.split(
+        f'<tr id="title-{season_ids[2]}">', 1,
+    )[1].split("</tr>", 1)[0]
+    s3_row = collection_html.split(
+        f'<tr id="title-{season_ids[3]}">', 1,
+    )[1].split("</tr>", 1)[0]
+    assert 'data-label="Doplňkový obsah"' in s1_row
+    assert '>1</span>' in s1_row
+    assert 'title="OVA: 1"' in s1_row
+    assert '>0</span>' in s2_row
+    assert 'class="supplementary-video-count" title=' not in s2_row
+    assert '>6</span>' in s3_row
+    assert 'title="OVA: 1\nSpecial: 2\nBonus: 3"' in s3_row
+    assert "Anime-level OVA" not in s3_row
+    assert "Special – S5" not in s3_row
 
     detail_html = endpoints["/titles/{catalog_title_id}"](
         _request(web_app, f"/titles/{season_ids[3]}"), season_ids[3],
