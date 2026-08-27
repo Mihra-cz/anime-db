@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.catalog import (
+    PHYSICAL_ROOT_VIDEO_GROUP_LABEL,
     ROOT_VIDEO_GROUP_LABEL,
     TITLE_NAME_PREFERENCE_LABELS,
     build_catalog_results,
@@ -3111,8 +3112,9 @@ def test_external_subtitle_language_override_web_workflow_sets_and_clears(tmp_pa
 
 def test_root_folder_link_has_readable_label_and_no_dead_dot_url():
     stats = {
-        "episodes": 0, "bonus": 2, "cs": 0, "sk": 0, "translated": 0,
-        "missing": 2, "unknown": 0,
+        "total": 2, "episodes": 0, "bonus": 2, "cs": 0, "sk": 0,
+        "translated": 0, "missing": 2, "unknown": 0,
+        "logical_assigned": 1, "logical_unassigned": 1,
     }
     request = type("Request", (), {
         "url_for": lambda self, name, **kwargs: (
@@ -3128,7 +3130,8 @@ def test_root_folder_link_has_readable_label_and_no_dead_dot_url():
         }, message=None, error=None, confirm_deletions=False, q="",
     )
 
-    assert 'href="/root-videos">Nezařazená videa z kořene knihovny</a>' in rendered
+    assert 'href="/root-videos">Videa v kořeni knihovny</a>' in rendered
+    assert "Fyzicky v rootu: 2 · logicky zařazeno: 1 · nezařazeno: 1" in rendered
     assert "/folders/." not in rendered
     assert ">.</a>" not in rendered
     assert ">2</td>" in rendered
@@ -3425,7 +3428,11 @@ def test_homepage_uses_logical_collections_and_simplifies_unambiguous_navigation
         assert f'href="{href}">{name}</a>' in logical_section
     assert logical_section.count("Root Film</a>") == 2
     assert "Legacy tečka" not in logical_section
-    assert ROOT_VIDEO_GROUP_LABEL in rendered
+    assert PHYSICAL_ROOT_VIDEO_GROUP_LABEL in rendered
+    assert (
+        "Fyzicky v rootu: 3 · logicky zařazeno: 2 · nezařazeno: 1"
+        in rendered
+    )
     assert 'href="/hierarchy-review"' in logical_section
 
     with web_app.state.sessions() as session:
@@ -3511,13 +3518,13 @@ def test_root_video_page_lists_files_and_manual_assignment_keeps_physical_paths(
     assert "First Movie.mkv" in rendered
     assert "Second Movie.mkv" in rendered
     assert "Společné umístění z nich nedělá jednu anime kolekci" in rendered
-    assert f'action="/root-videos/{first_id}/assignment"' in rendered
-    assert f'action="/root-videos/{second_id}/new-title"' in rendered
-    assert "Existing Movie" in rendered
+    assert f'href="/unassigned-videos#video-{first_id}"' in rendered
+    assert f'href="/unassigned-videos#video-{second_id}"' in rendered
+    assert f'action="/unassigned-videos/{first_id}/assignment"' not in rendered
     assert rendered.count("Neznámé") >= 2
 
     assignment_response = endpoints["/root-videos/{video_id}/assignment"](
-        first_id, target_title_id=str(target_title_id)
+        first_id, target_title_id=str(target_title_id), confirm_manual=True,
     )
     creation_response = endpoints["/root-videos/{video_id}/new-title"](
         second_id, display_title="Second Movie", part_type="film"
@@ -3547,6 +3554,20 @@ def test_root_video_page_lists_files_and_manual_assignment_keeps_physical_paths(
         assert stored_second.catalog_title.hierarchy_manual_override is True
         assert stored_second.catalog_title.hierarchy_verified_at is not None
         assert stored_second.catalog_collection.hierarchy_status == "verified"
+
+    assigned_rendered = endpoints["/root-videos"](request).body.decode()
+    first_row = assigned_rendered.split(f'id="video-{first_id}"', 1)[1].split(
+        "</tr>", 1,
+    )[0]
+    second_row = assigned_rendered.split(f'id="video-{second_id}"', 1)[1].split(
+        "</tr>", 1,
+    )[0]
+    for row in (first_row, second_row):
+        assert "LOGICKY ZAŘAZENO" in row
+        assert "Vyřešit v Hierarchy Review" not in row
+        assert "unassigned-videos" not in row
+    assert "Existing Movie" in first_row
+    assert "Second Movie" in second_row
 
 
 def test_created_root_titles_survive_refresh_restart_and_scan(tmp_path):
@@ -3608,7 +3629,10 @@ def test_created_root_titles_survive_refresh_restart_and_scan(tmp_path):
     )
     assert first_response.status_code == 303
     refreshed_page = render_root_videos()
-    assert paths[0].name not in refreshed_page
+    assert paths[0].name in refreshed_page
+    assert "LOGICKY ZAŘAZENO" in refreshed_page.split(
+        f'id="video-{first_id}"', 1,
+    )[1].split("</tr>", 1)[0]
     assert paths[1].name in refreshed_page
 
     second_response = endpoints["/root-videos/{video_id}/new-title"](
@@ -3648,9 +3672,8 @@ def test_created_root_titles_survive_refresh_restart_and_scan(tmp_path):
     assert ROOT_VIDEO_GROUP_LABEL not in logical_homepage
 
     after_commit_page = render_root_videos()
-    assert paths[0].name not in after_commit_page
-    assert paths[1].name not in after_commit_page
-    assert paths[2].name in after_commit_page
+    assert all(path.name in after_commit_page for path in paths)
+    assert after_commit_page.count("LOGICKY ZAŘAZENO") == 2
 
     with web_app.state.sessions() as session:
         loaded_videos = list(session.scalars(select(Video).options(
@@ -3675,6 +3698,9 @@ def test_created_root_titles_survive_refresh_restart_and_scan(tmp_path):
         legacy_after_restart = session.get(Video, legacy_id)
         assert legacy_after_restart.catalog_collection.relative_root_path == "."
         assert legacy_after_restart.catalog_title.relative_root_path == "."
+    after_restart_page = render_root_videos()
+    assert all(path.name in after_restart_page for path in paths)
+    assert after_restart_page.count("LOGICKY ZAŘAZENO") == 2
 
     with web_app.state.sessions() as session:
         scan_library(session, tmp_path)
@@ -3689,3 +3715,6 @@ def test_created_root_titles_survive_refresh_restart_and_scan(tmp_path):
         legacy = session.get(Video, legacy_id)
         assert legacy.catalog_collection_id is None
         assert legacy.catalog_title_id is None
+    after_scan_page = render_root_videos()
+    assert all(path.name in after_scan_page for path in paths)
+    assert after_scan_page.count("LOGICKY ZAŘAZENO") == 2

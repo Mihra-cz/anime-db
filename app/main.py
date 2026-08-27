@@ -11,12 +11,13 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from .catalog import (
     MANUAL_LANGUAGE_CHOICES,
     FILTER_LABELS,
+    PHYSICAL_ROOT_VIDEO_GROUP_LABEL,
     ROOT_FOLDER,
     ROOT_VIDEO_GROUP_LABEL,
     TITLE_NAME_PREFERENCE_LABELS,
@@ -63,8 +64,10 @@ from .hierarchy_evaluation import HierarchyIssueCode, finalize_hierarchy_write
 from .hierarchy_review import (
     SIMPLE_DEFINITION_FIELDS,
     apply_manual_split, apply_single_title_confirmation,
+    assign_known_videos_to_title,
     classify_videos_in_place, clear_confirmed_duplicate_videos,
     collection_grouping_suggestions, create_main_collection,
+    create_anime_for_known_videos, create_title_for_known_videos,
     confirm_duplicate_groups, confirm_duplicate_videos, create_title_from_videos,
     delete_empty_collection, delete_empty_collections, delete_empty_local_title,
     definitions_as_json, definitions_to_json, parse_manual_definitions,
@@ -110,6 +113,12 @@ from .metadata.service import (
 )
 from .metadata.split import apply_metadata_split, evaluate_metadata_split
 from .title_order import catalog_title_sort_key
+from .unassigned_videos import (
+    InsufficientVideoAssignmentSummary,
+    insufficient_video_assignment,
+    insufficient_video_assignment_kind,
+    insufficient_video_assignments,
+)
 from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
     TitleMetadata, UnresolvedExternalSubtitle, Video, utc_now,
@@ -621,8 +630,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         totals["anime_titles"] = len(collection_rows)
         for video in videos:
-            if not (is_root_video(video) and has_meaningful_root_assignment(video)):
-                _add_video(folders.setdefault(video.root_folder, _empty_stats()), video)
+            folder_stats = folders.setdefault(video.root_folder, _empty_stats())
+            _add_video(folder_stats, video)
+            if is_root_video(video):
+                key = (
+                    "logical_unassigned"
+                    if insufficient_video_assignment(video) is not None
+                    else "logical_assigned"
+                )
+                folder_stats[key] = folder_stats.get(key, 0) + 1
             _add_video(totals, video, separate_films=True)
         return templates.TemplateResponse(request, "index.html", {
             "collections": collection_rows,
@@ -653,16 +669,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "catalog_state_url": catalog_state_url,
         })
 
-    @app.get("/root-videos", response_class=HTMLResponse)
-    def root_videos(request: Request):
+    def unassigned_videos_response(
+        request: Request, *, technical_root_only: bool,
+    ):
         title_name_preference = get_preferred_title_language(request)
-        videos = sorted(
-            [
-                video for video in _load_videos(sessions)
-                if is_root_video(video) and not has_meaningful_root_assignment(video)
-            ],
-            key=lambda video: video.filename.casefold(),
-        )
+        loaded_videos = _load_videos(sessions)
+        if technical_root_only:
+            video_assignments = [
+                (video, insufficient_video_assignment(video))
+                for video in loaded_videos if is_root_video(video)
+            ]
+        else:
+            video_assignments = [
+                (assignment.video, assignment)
+                for assignment in insufficient_video_assignments(loaded_videos)
+            ]
+        video_assignments.sort(key=lambda item: (
+            item[0].filename.casefold(), item[0].relative_path.casefold(),
+        ))
         with sessions() as session:
             target_titles = list(session.scalars(select(CatalogTitle).options(
                 selectinload(CatalogTitle.collection),
@@ -671,11 +695,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ).join(CatalogTitle.collection).where(
                 CatalogCollection.relative_root_path != ROOT_FOLDER
             ).order_by(CatalogCollection.local_title, CatalogTitle.local_title)).all())
+            target_collections = list(session.scalars(
+                select(CatalogCollection).where(
+                    CatalogCollection.relative_root_path != ROOT_FOLDER
+                ).order_by(CatalogCollection.local_title)
+            ).all())
         rows = []
-        for video in videos:
+        for video, assignment in video_assignments:
             meaningful_assignment = has_meaningful_root_assignment(video)
             rows.append({
                 "video": video,
+                "assignment_issue": assignment,
                 "display_title": (
                     catalog_title_display_title(
                         video.catalog_title, title_name_preference, videos=[video],
@@ -692,21 +722,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return templates.TemplateResponse(request, "root_videos.html", {
             "rows": rows,
             "target_titles": target_titles,
-            "root_group_label": ROOT_VIDEO_GROUP_LABEL,
+            "target_collections": target_collections,
+            "root_group_label": (
+                PHYSICAL_ROOT_VIDEO_GROUP_LABEL
+                if technical_root_only else "Nezařazená videa"
+            ),
+            "technical_root_only": technical_root_only,
+            "part_type_choices": PART_TYPE_CHOICES,
             "metadata_status_labels": METADATA_STATUS_LABELS,
             "subtitle_track_display": subtitle_track_display,
             "manual_hardsub_state": manual_hardsub_state,
         })
 
+    @app.get("/unassigned-videos", response_class=HTMLResponse)
+    def unassigned_videos(request: Request):
+        return unassigned_videos_response(request, technical_root_only=False)
+
+    @app.get("/root-videos", response_class=HTMLResponse)
+    def root_videos(request: Request):
+        return unassigned_videos_response(request, technical_root_only=True)
+
+    @app.post("/unassigned-videos/{video_id}/assignment")
     @app.post("/root-videos/{video_id}/assignment")
-    def assign_root_video(video_id: int, target_title_id: str = Form("")):
+    def assign_root_video(
+        video_id: int, target_title_id: str = Form(""),
+        confirm_manual: bool = Form(False),
+    ):
         with sessions() as session:
             video = session.get(Video, video_id)
-            if video is None or not is_root_video(video):
-                raise HTTPException(status_code=404, detail="Root video nebylo nalezeno")
+            if video is None or (
+                not is_root_video(video)
+                and insufficient_video_assignment(video) is None
+            ):
+                raise HTTPException(status_code=404, detail="Nezařazené video nebylo nalezeno")
             old_collection = video.catalog_collection
             target_title = None
             if target_title_id.strip():
+                if not confirm_manual:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Potvrďte autoritativní logické přiřazení.",
+                    )
                 try:
                     parsed_title_id = int(target_title_id)
                 except ValueError as exc:
@@ -717,24 +773,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     or target_title.collection.relative_root_path == ROOT_FOLDER
                 ):
                     raise HTTPException(status_code=400, detail="Cílový titul nelze použít")
-                video.catalog_title = target_title
-                video.catalog_collection = target_title.collection
+                try:
+                    assign_known_videos_to_title(
+                        session, [video.id], target_title.id,
+                    )
+                except ValueError as exc:
+                    session.rollback()
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
             else:
                 video.catalog_title = None
                 video.catalog_collection = None
-            replace_explicit_video_selector_authority(
-                [video], target_title,
-            )
-            session.flush()
-            finalize_hierarchy_write([
-                collection for collection in (
-                    old_collection,
-                    target_title.collection if target_title is not None else None,
-                )
-                if collection is not None
-            ])
+                replace_explicit_video_selector_authority([video], None)
+                session.flush()
+                if old_collection is not None:
+                    session.expire(old_collection, ["titles", "videos"])
+                    finalize_hierarchy_write([old_collection])
             session.commit()
-        return local_redirect_response(f"/root-videos#video-{video_id}")
+        return local_redirect_response(f"/unassigned-videos#video-{video_id}")
 
     @app.post("/root-videos/{video_id}/new-title")
     def create_root_video_title(
@@ -798,6 +853,65 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ])
             session.commit()
         return local_redirect_response(f"/root-videos#video-{video_id}")
+
+    def unassigned_title_form_values(form) -> dict:
+        def optional_int(name: str) -> int | None:
+            raw = str(form.get(name) or "").strip()
+            return int(raw) if raw else None
+
+        if str(form.get("confirm_manual") or "").strip().casefold() not in {
+            "1", "true", "yes", "on",
+        }:
+            raise ValueError("Potvrďte autoritativní logické zařazení.")
+        return {
+            "local_title": str(form.get("local_title") or ""),
+            "part_type": str(form.get("part_type") or ""),
+            "season_number": optional_int("season_number"),
+            "season_label": str(form.get("season_label") or ""),
+            "part_number": optional_int("part_number"),
+            "sort_order": optional_int("sort_order"),
+        }
+
+    def require_unassigned_video(session, video_id: int) -> Video:
+        video = session.get(Video, video_id)
+        if video is None or insufficient_video_assignment(video) is None:
+            raise ValueError("Video už není v seznamu nezařazených položek.")
+        return video
+
+    @app.post("/unassigned-videos/{video_id}/new-title")
+    async def create_unassigned_video_title(request: Request, video_id: int):
+        form = await request.form()
+        try:
+            collection_id = int(str(form.get("collection_id") or ""))
+            values = unassigned_title_form_values(form)
+            with sessions() as session:
+                require_unassigned_video(session, video_id)
+                title = create_title_for_known_videos(
+                    session, collection_id, [video_id], **values,
+                )
+                session.commit()
+                title_id = title.id
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return local_redirect_response(f"/titles/{title_id}")
+
+    @app.post("/unassigned-videos/{video_id}/new-anime")
+    async def create_unassigned_video_anime(request: Request, video_id: int):
+        form = await request.form()
+        try:
+            values = unassigned_title_form_values(form)
+            collection_title = str(form.get("collection_title") or "")
+            with sessions() as session:
+                require_unassigned_video(session, video_id)
+                title = create_anime_for_known_videos(
+                    session, [video_id], collection_title=collection_title,
+                    **values,
+                )
+                session.commit()
+                title_id = title.id
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return local_redirect_response(f"/titles/{title_id}")
 
     @app.get("/catalog/{filter_name}", response_class=HTMLResponse)
     def catalog(
@@ -1374,11 +1488,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
             ).order_by(CatalogCollection.local_title)).all())
-            video_counts = dict(session.execute(
-                select(Video.catalog_collection_id, func.count(Video.id))
-                .where(Video.catalog_collection_id.is_not(None))
-                .group_by(Video.catalog_collection_id)
-            ).all())
+            video_counts: dict[int, int] = {}
+            unassigned_assignments = []
+            assignment_rows = session.execute(select(
+                Video.id,
+                Video.filename,
+                Video.relative_path,
+                Video.catalog_collection_id.label("video_collection_id"),
+                CatalogTitle.id.label("title_id"),
+                CatalogCollection.id.label("title_collection_id"),
+                CatalogCollection.relative_root_path.label("title_collection_path"),
+            ).outerjoin(
+                CatalogTitle, Video.catalog_title_id == CatalogTitle.id,
+            ).outerjoin(
+                CatalogCollection,
+                CatalogTitle.catalog_collection_id == CatalogCollection.id,
+            )).all()
+            for assignment_row in assignment_rows:
+                if assignment_row.video_collection_id is not None:
+                    video_counts[assignment_row.video_collection_id] = (
+                        video_counts.get(assignment_row.video_collection_id, 0) + 1
+                    )
+                kind = insufficient_video_assignment_kind(
+                    title_exists=assignment_row.title_id is not None,
+                    title_collection_exists=(
+                        assignment_row.title_collection_id is not None
+                    ),
+                    title_collection_id=assignment_row.title_collection_id,
+                    title_collection_path=assignment_row.title_collection_path,
+                    video_collection_id=assignment_row.video_collection_id,
+                )
+                if kind is None:
+                    continue
+                code, reason = kind
+                unassigned_assignments.append(InsufficientVideoAssignmentSummary(
+                    video_id=assignment_row.id,
+                    filename=assignment_row.filename,
+                    relative_path=assignment_row.relative_path,
+                    code=code,
+                    reason=reason,
+                ))
+            unassigned_assignments.sort(key=lambda assignment: (
+                assignment.filename.casefold(), assignment.relative_path.casefold(),
+            ))
             rows = []
             for collection in collections:
                 summaries = [
@@ -1405,6 +1557,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
         return templates.TemplateResponse(request, "hierarchy_review.html", {
             "rows": rows, "suggestions": suggestions,
+            "unassigned_assignments": unassigned_assignments,
             "selectable_collections": selectable_collections,
             "empty_collections": empty_collections,
             "message": message,

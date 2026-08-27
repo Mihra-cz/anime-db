@@ -27,8 +27,8 @@
 </tbody></table></div></section>
 <section class="panel physical-folders"><h2>Technický pohled podle fyzického umístění</h2>
 <p>Složky a cesty na NASu slouží scanneru a diagnostice; neurčují logickou anime collection.</p>
-<div class="table-wrap"><table class="responsive-cards"><thead><tr><th>Složka</th><th>Epizody</th><th>Bonusy</th><th>CZ</th><th>SK</th><th>CZ/SK</th><th>Bez CZ/SK</th><th>Neznámé</th></tr></thead><tbody>
-  {% for name, data in folders %}<tr><td data-label="Složka" class="card-primary">{% if name == '.' %}<a href="{{ url_for('root_videos') }}">Nezařazená videa z kořene knihovny</a><small>Fyzické soubory přímo v kořeni; nejde o jednu anime kolekci.</small>{% else %}<a href="{{ url_for('folder_detail', folder=name) }}">{{ name }}</a>{% endif %}</td><td data-label="Epizody">{{ data.episodes }}</td><td data-label="Bonusy">{{ data.bonus }}</td><td data-label="CZ">{{ data.cs }}</td><td data-label="SK">{{ data.sk }}</td><td data-label="CZ/SK">{{ data.translated }}</td><td data-label="Bez CZ/SK">{{ data.missing }}</td><td data-label="Neznámé">{{ data.unknown }}</td></tr>
-{% else %}<tr><td colspan="8">Databáze je prázdná. Spusťte první sken.</td></tr>{% endfor %}
+<div class="table-wrap"><table class="responsive-cards"><thead><tr><th>Složka</th><th>Celkem</th><th>Epizody</th><th>Bonusy</th><th>CZ</th><th>SK</th><th>CZ/SK</th><th>Bez CZ/SK</th><th>Neznámé</th></tr></thead><tbody>
+  {% for name, data in folders %}<tr><td data-label="Složka" class="card-primary">{% if name == '.' %}<a href="{{ url_for('root_videos') }}">Videa v kořeni knihovny</a><small>Fyzicky v rootu: {{ data.total }} · logicky zařazeno: {{ data.get('logical_assigned', 0) }} · nezařazeno: {{ data.get('logical_unassigned', 0) }}</small>{% else %}<a href="{{ url_for('folder_detail', folder=name) }}">{{ name }}</a>{% endif %}</td><td data-label="Celkem">{{ data.total }}</td><td data-label="Epizody">{{ data.episodes }}</td><td data-label="Bonusy">{{ data.bonus }}</td><td data-label="CZ">{{ data.cs }}</td><td data-label="SK">{{ data.sk }}</td><td data-label="CZ/SK">{{ data.translated }}</td><td data-label="Bez CZ/SK">{{ data.missing }}</td><td data-label="Neznámé">{{ data.unknown }}</td></tr>
+{% else %}<tr><td colspan="9">Databáze je prázdná. Spusťte první sken.</td></tr>{% endfor %}
 </tbody></table></div></section>
 {% endblock %}

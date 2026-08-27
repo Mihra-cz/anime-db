@@ -829,9 +829,10 @@ def _unique_manual_collection_path(session: Session, name: str) -> str:
     return path
 
 
-def create_main_collection(
-    session: Session, local_title: str, title_ids: list[int],
+def create_manual_collection(
+    session: Session, local_title: str,
 ) -> CatalogCollection:
+    """Create an explicitly named logical anime without moving filesystem data."""
     name = local_title.strip()[:200]
     if not name:
         raise ValueError("Hlavní collection musí mít lokální název.")
@@ -842,6 +843,13 @@ def create_main_collection(
     )
     session.add(collection)
     session.flush()
+    return collection
+
+
+def create_main_collection(
+    session: Session, local_title: str, title_ids: list[int],
+) -> CatalogCollection:
+    collection = create_manual_collection(session, local_title)
     move_titles_to_collection(session, collection.id, title_ids)
     return collection
 
@@ -1546,24 +1554,23 @@ def move_videos_to_title(
     target = next((title for title in collection.titles if title.id == target_title_id), None)
     if target is None:
         raise ValueError("Cílová část neexistuje v této kolekci.")
-    for video in selected:
-        video.catalog_title = target
-        video.catalog_collection = collection
-    replace_explicit_video_selector_authority(selected, target)
-    session.flush()
-    refresh_collection_state(collection)
-    return target
+    return assign_known_videos_to_title(
+        session, [video.id for video in selected], target.id,
+    )
 
 
 def create_title_from_videos(
     session: Session, collection_id: int, video_ids: list[int], *,
     local_title: str = "", part_type: str, season_number: int | None = None,
     season_label: str | None = None, part_number: int | None = None,
+    sort_order: int | None = None,
 ) -> CatalogTitle:
     normalized_type = part_type.strip().casefold()
     if normalized_type not in PART_TYPES:
         raise ValueError("Neplatný typ části.")
     _validate_structural_numbers(normalized_type, season_number, part_number)
+    if sort_order is not None and sort_order < 0:
+        raise ValueError("Pořadí části nesmí být záporné.")
     normalized_label = (season_label or "").strip()[:50] or (
         f"S{season_number}" if season_number is not None else None
     )
@@ -1604,7 +1611,7 @@ def create_title_from_videos(
         season_number=season_number,
         part_number=part_number if normalized_type in {"part", "cour"} else None,
         season_label=normalized_label,
-        sort_order=None,
+        sort_order=sort_order,
         verified_at=utc_now(),
     )
     replace_explicit_video_selector_authority(selected, title)
@@ -1614,6 +1621,107 @@ def create_title_from_videos(
     session.flush()
     refresh_collection_state(collection)
     return title
+
+
+def assign_known_videos_to_title(
+    session: Session, video_ids: list[int], target_title_id: int,
+) -> CatalogTitle:
+    """Persist an explicit assignment even when videos start outside the target."""
+    selected_ids = {int(video_id) for video_id in video_ids}
+    if not selected_ids:
+        raise ValueError("Vyberte alespoň jedno video.")
+    selected = list(session.scalars(select(Video).options(
+        selectinload(Video.catalog_collection),
+        selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
+        selectinload(Video.manual_split_rule_videos).selectinload(
+            ManualSplitRuleVideo.catalog_title
+        ),
+    ).where(Video.id.in_(selected_ids))).all())
+    if len(selected) != len(selected_ids):
+        raise ValueError("Výběr obsahuje neexistující video.")
+    target = session.scalar(select(CatalogTitle).options(
+        selectinload(CatalogTitle.collection).selectinload(CatalogCollection.titles),
+        selectinload(CatalogTitle.collection).selectinload(CatalogCollection.videos),
+    ).where(CatalogTitle.id == target_title_id))
+    if target is None or target.collection is None:
+        raise ValueError("Cílová část nepatří k platné collection.")
+    sources = {
+        video.catalog_collection for video in selected
+        if video.catalog_collection is not None
+    }
+    for video in selected:
+        video.catalog_title = target
+        video.catalog_collection = target.collection
+    replace_explicit_video_selector_authority(selected, target)
+    session.flush()
+    affected = sources | {target.collection}
+    for collection in affected:
+        session.expire(collection, ["titles", "videos"])
+    finalize_hierarchy_write(list(affected))
+    return target
+
+
+def create_title_for_known_videos(
+    session: Session, collection_id: int, video_ids: list[int], *,
+    local_title: str = "", part_type: str, season_number: int | None = None,
+    season_label: str | None = None, part_number: int | None = None,
+    sort_order: int | None = None,
+) -> CatalogTitle:
+    """Create an authoritative part and move known videos into its collection."""
+    selected_ids = {int(video_id) for video_id in video_ids}
+    if not selected_ids:
+        raise ValueError("Vyberte alespoň jedno video.")
+    selected = list(session.scalars(select(Video).options(
+        selectinload(Video.catalog_collection),
+    ).where(Video.id.in_(selected_ids))).all())
+    if len(selected) != len(selected_ids):
+        raise ValueError("Výběr obsahuje neexistující video.")
+    collection = session.get(CatalogCollection, collection_id)
+    if collection is None:
+        raise ValueError("Kolekce nebyla nalezena.")
+    sources = {
+        video.catalog_collection for video in selected
+        if video.catalog_collection is not None
+    }
+    for video in selected:
+        video.catalog_title = None
+        video.catalog_collection = collection
+    session.flush()
+    session.expire(collection, ["titles", "videos"])
+    title = create_title_from_videos(
+        session, collection.id, list(selected_ids),
+        local_title=local_title,
+        part_type=part_type,
+        season_number=season_number,
+        season_label=season_label,
+        part_number=part_number,
+        sort_order=sort_order,
+    )
+    other_sources = [source for source in sources if source is not collection]
+    if other_sources:
+        for source in other_sources:
+            session.expire(source, ["titles", "videos"])
+        finalize_hierarchy_write(other_sources)
+    return title
+
+
+def create_anime_for_known_videos(
+    session: Session, video_ids: list[int], *, collection_title: str,
+    local_title: str = "", part_type: str, season_number: int | None = None,
+    season_label: str | None = None, part_number: int | None = None,
+    sort_order: int | None = None,
+) -> CatalogTitle:
+    """Create one new anime and authoritative part for explicitly chosen videos."""
+    collection = create_manual_collection(session, collection_title)
+    return create_title_for_known_videos(
+        session, collection.id, video_ids,
+        local_title=local_title,
+        part_type=part_type,
+        season_number=season_number,
+        season_label=season_label,
+        part_number=part_number,
+        sort_order=sort_order,
+    )
 
 
 def merge_title_into(

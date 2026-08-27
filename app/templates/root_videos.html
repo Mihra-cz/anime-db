@@ -1,10 +1,15 @@
 {% extends "base.html" %}
 {% block main_class %}content-shell content-wide{% endblock %}
 {% block title %}{{ root_group_label }} · AnimeDB{% endblock %}
-{% block content %}<p><a href="/">← Zpět na přehled</a></p>
+{% block content %}
+<p><a href="/hierarchy-review">← Zpět na Hierarchy Review</a></p>
 <h1>{{ root_group_label }}</h1>
-<p>Tyto soubory leží fyzicky přímo v kořeni knihovny. Společné umístění z nich nedělá jednu anime kolekci a ruční zařazení nemění ani nepřesouvá soubory na NASu.</p>
-<section class="panel root-video-list"><div class="table-wrap"><table class="responsive-cards"><thead><tr><th>Název</th><th>Typ / epizoda</th><th>Délka</th><th>Titulky</th><th>Hardsub</th><th>Metadata</th><th>Současné zařazení</th><th>Ruční zařazení</th></tr></thead><tbody>
+{% if technical_root_only %}
+<p>Toto je technický inventář všech souborů fyzicky umístěných přímo v kořeni knihovny bez ohledu na jejich logické zařazení. Nezařazené položky se řeší v <a href="/hierarchy-review#unassigned-videos">Hierarchy Review</a>. Společné umístění z nich nedělá jednu anime kolekci a ruční zařazení nemění ani nepřesouvá soubory na NASu.</p>
+{% else %}
+<p>AnimeDB tyto soubory zná, ale nemá pro ně úplné bezpečné zařazení <strong>CatalogCollection → CatalogTitle → Video</strong>. Každá níže uvedená operace je autoritativní logické rozhodnutí; fyzická cesta a soubor na NASu zůstávají beze změny.</p>
+{% endif %}
+<section class="panel root-video-list"><div class="table-wrap"><table class="responsive-cards root-video-table"><thead><tr><th>Název</th><th>Typ / epizoda</th><th>Délka</th><th>Titulky</th><th>Hardsub</th><th>Metadata</th><th>Logické zařazení</th><th>{{ 'Akce' if technical_root_only else 'Ruční zařazení' }}</th></tr></thead><tbody>
 {% for row in rows %}{% set video = row.video %}{% set content_display = effective_video_content_display(video) %}{% set subtitle_tracks = subtitle_track_display(video) %}{% set hardsub_state = manual_hardsub_state(video) %}<tr id="video-{{ video.id }}">
 <td data-label="Název" class="episode-title card-primary" title="{{ video.relative_path }}"><strong>{{ row.display_title }}</strong><small class="technical-filename">{{ video.filename }}</small><details class="technical-details"><summary>Technická cesta</summary><small class="technical-path">{{ video.relative_path }}</small></details></td>
 <td data-label="Typ / epizoda">{{ content_display.display_label }}{% if video.season_episode_number is not none %}<small>E{{ video.season_episode_number }}{% if video.absolute_episode_number is not none %} · A{{ video.absolute_episode_number }}{% endif %}{% if content_display.noncanonical_position %} · pozice {{ content_display.noncanonical_position }}{% endif %}</small>{% elif content_display.noncanonical_position %}<small>Pozice {{ content_display.noncanonical_position }}</small>{% elif video.local_episode_number is not none %}<small>Lokální L{{ video.local_episode_number }}</small>{% endif %}</td>
@@ -12,8 +17,43 @@
 <td data-label="Titulky" class="subtitle-list">{% for track in subtitle_tracks %}<span class="tag" title="{{ track.details }}">{{ track.label }}</span>{% if not loop.last %}<span aria-hidden="true"> · </span>{% endif %}{% else %}—{% endfor %}</td>
 <td data-label="Hardsub">{% if hardsub_state == 'yes' %}Ano<small>{% if video.manual_hardsub_cs %}CZ{% endif %}{% if video.manual_hardsub_cs and video.manual_hardsub_sk %} · {% endif %}{% if video.manual_hardsub_sk %}SK{% endif %}</small>{% elif hardsub_state == 'no' %}Ne{% else %}Neznámé{% endif %}</td>
 <td data-label="Metadata">{% if row.metadata %}<strong>{{ catalog_title_display_title(video.catalog_title, title_name_preference, videos=[video]) }}</strong><small>{{ row.metadata.metadata_provider or '—' }} · {{ metadata_status_labels.get(video.catalog_title.metadata_status, video.catalog_title.metadata_status) }}</small>{% else %}—{% endif %}</td>
-<td data-label="Současné zařazení">{% if row.meaningful_assignment and video.catalog_title %}<a href="/titles/{{ video.catalog_title.id }}">{{ video.catalog_title.collection.local_title }} → {{ catalog_title_display_title(video.catalog_title, title_name_preference, videos=[video]) }}</a><small>Lokální část: {{ video.catalog_title.local_title }} · {{ catalog_title_series_label(video.catalog_title) }}</small>{% elif row.meaningful_assignment and video.catalog_collection %}{{ video.catalog_collection.local_title }}<small>Bez přiřazeného CatalogTitle</small>{% elif video.catalog_collection or video.catalog_title %}<span class="warning">Technická původní root skupina „.“</span><small>Není považována za anime kolekci.</small>{% else %}Nezařazeno{% endif %}</td>
-<td data-label="Ruční zařazení" class="root-assignment card-wide"><form method="post" action="/root-videos/{{ video.id }}/assignment"><label>Přiřadit k existujícímu titulu<select name="target_title_id"><option value="">Bez přiřazení</option>{% for title in target_titles %}<option value="{{ title.id }}" {% if row.meaningful_assignment and video.catalog_title and video.catalog_title.id == title.id %}selected{% endif %}>{{ title.collection.local_title }} → {{ catalog_title_display_title(title, title_name_preference) }} ({{ catalog_title_series_label(title) }})</option>{% endfor %}</select></label><button type="submit">Uložit přiřazení</button></form>
-<details><summary>Vytvořit samostatnou část</summary><form method="post" action="/root-videos/{{ video.id }}/new-title"><input type="text" name="display_title" maxlength="200" required value="{{ row.display_title }}" aria-label="Název nové části"><select name="part_type"><option value="film">Film</option><option value="ova">OVA</option><option value="special">Special</option></select><button type="submit">Vytvořit a přiřadit</button></form></details></td>
-</tr>{% else %}<tr><td colspan="8">V kořeni knihovny nejsou žádná videa.</td></tr>{% endfor %}
+{% if row.assignment_issue %}<td data-label="Logické zařazení" class="unassigned-reason"><strong>NEZAŘAZENO · BLOCKING</strong><small>{{ row.assignment_issue.reason }}</small>{% if row.assignment_issue.code == 'technical_root_placeholder' %}<small>Technická původní root skupina „.“ není považována za anime kolekci.</small>{% elif video.catalog_collection %}<small>Současná collection: {{ video.catalog_collection.local_title }}</small>{% endif %}</td>{% else %}<td data-label="Logické zařazení" class="logical-assignment"><strong>LOGICKY ZAŘAZENO</strong><a href="/titles/{{ video.catalog_title.id }}">{{ video.catalog_title.collection.manual_display_title or video.catalog_title.collection.local_title }}</a><small>Část: {{ catalog_title_display_title(video.catalog_title, title_name_preference, videos=[video]) }} · {{ catalog_title_series_label(video.catalog_title) }}</small></td>{% endif %}
+<td data-label="{{ 'Akce' if technical_root_only else 'Ruční zařazení' }}" class="root-assignment card-wide">
+{% if technical_root_only %}
+  {% if row.assignment_issue %}<a class="button-link" href="/unassigned-videos#video-{{ video.id }}">Vyřešit v Hierarchy Review</a>{% else %}<a class="button-secondary" href="/titles/{{ video.catalog_title.id }}">Otevřít logickou část</a>{% endif %}
+{% else %}
+  <form method="post" action="/unassigned-videos/{{ video.id }}/assignment">
+    <label>Přiřadit do existujícího anime a části<select name="target_title_id" required><option value="">Vyberte collection → část</option>{% for title in target_titles %}<option value="{{ title.id }}">{{ title.collection.local_title }} → {{ catalog_title_display_title(title, title_name_preference) }} ({{ catalog_title_series_label(title) }})</option>{% endfor %}</select></label>
+    <label><input type="checkbox" name="confirm_manual" value="true" required> Potvrzuji autoritativní logické přiřazení.</label>
+    <button type="submit">Přiřadit do existující části</button>
+  </form>
+  <details><summary>Vytvořit novou část v existujícím anime</summary>
+    <form method="post" action="/unassigned-videos/{{ video.id }}/new-title" class="unassigned-title-form">
+      <label>Existující anime / collection<select name="collection_id" required><option value="">Vyberte collection</option>{% for collection in target_collections %}<option value="{{ collection.id }}">{{ collection.manual_display_title or collection.local_title }}</option>{% endfor %}</select></label>
+      <label>Lokální název nové části<input type="text" name="local_title" maxlength="200" required value="{{ row.display_title }}"></label>
+      <label>Typ části<select name="part_type" required>{% for value, label in part_type_choices %}<option value="{{ value }}"{% if value == 'film' %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+      <label>Číslo sezóny<input type="number" name="season_number" min="1" inputmode="numeric"></label>
+      <label>Označení sezóny<input type="text" name="season_label" maxlength="50" placeholder="např. S2"></label>
+      <label>Číslo Part<input type="number" name="part_number" min="1" inputmode="numeric"></label>
+      <label>Pořadí části<input type="number" name="sort_order" min="0" inputmode="numeric"></label>
+      <label><input type="checkbox" name="confirm_manual" value="true" required> Potvrzuji novou autoritativní část.</label>
+      <button type="submit">Vytvořit část a přiřadit</button>
+    </form>
+  </details>
+  <details><summary>Vytvořit nové anime</summary>
+    <form method="post" action="/unassigned-videos/{{ video.id }}/new-anime" class="unassigned-title-form">
+      <label>Název nového anime / collection<input type="text" name="collection_title" maxlength="200" required value="{{ row.display_title }}"></label>
+      <label>Lokální název první části<input type="text" name="local_title" maxlength="200" required value="{{ row.display_title }}"></label>
+      <label>Typ části<select name="part_type" required>{% for value, label in part_type_choices %}<option value="{{ value }}"{% if value == 'film' %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+      <label>Číslo sezóny<input type="number" name="season_number" min="1" inputmode="numeric"></label>
+      <label>Označení sezóny<input type="text" name="season_label" maxlength="50" placeholder="pro film může zůstat prázdné"></label>
+      <label>Číslo Part<input type="number" name="part_number" min="1" inputmode="numeric"></label>
+      <label>Pořadí části<input type="number" name="sort_order" min="0" inputmode="numeric"></label>
+      <label><input type="checkbox" name="confirm_manual" value="true" required> Potvrzuji nové anime a autoritativní hierarchy údaje.</label>
+      <button type="submit">Vytvořit nové anime a přiřadit</button>
+    </form>
+  </details>
+{% endif %}
+</td>
+</tr>{% else %}<tr><td colspan="8">{{ 'V kořeni knihovny nejsou žádná fyzická videa.' if technical_root_only else 'Žádná známá videa nyní nemají neúplné logické zařazení.' }}</td></tr>{% endfor %}
 </tbody></table></div></section>{% endblock %}

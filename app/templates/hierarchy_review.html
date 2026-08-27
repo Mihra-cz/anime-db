@@ -7,6 +7,22 @@
 <p>CatalogCollection je hlavní anime; CatalogTitle je season, film, OVA nebo doplňková část. Všechny akce níže mění pouze databázové vazby, nikdy složky ani videosoubory.</p>
 {% if message %}<div class="notice success">{{ message }}</div>{% endif %}
 
+{% if unassigned_assignments %}
+<section class="panel hierarchy-unassigned-blocker" id="unassigned-videos" aria-labelledby="unassigned-videos-heading">
+  <div class="hierarchy-unassigned-heading">
+    <div>
+      <p class="blocking-kicker">BLOCKING · HIERARCHIE NENÍ VYŘEŠENA</p>
+      <h2 id="unassigned-videos-heading">Nezařazená videa · {{ unassigned_assignments|length }}</h2>
+    </div>
+    <a class="button-link blocking-action" href="/unassigned-videos">Vyřešit nezařazená videa</a>
+  </div>
+  <p>AnimeDB tyto soubory zná, ale nedokázal je bezpečně přiřadit k anime / collection / části. Dokud zde zůstává alespoň jedna položka, logická hierarchie knihovny není plně vyřešena.</p>
+  <ul class="hierarchy-unassigned-list">
+    {% for assignment in unassigned_assignments %}<li><strong>{{ assignment.filename }}</strong><span>{{ assignment.reason }}</span><small class="technical-path">{{ assignment.relative_path }}</small></li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+
 {% if suggestions %}
 <section class="panel" id="grouping-suggestions">
   <h2>Možné společné anime</h2>

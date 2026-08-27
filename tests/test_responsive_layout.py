@@ -83,6 +83,17 @@ def test_media_check_reuses_landscape_cards_and_stacks_filters_on_mobile():
     assert '.media-control-grid' in css
 
 
+def test_unassigned_video_workflow_uses_desktop_cards_without_horizontal_scroll():
+    css = STYLE_PATH.read_text(encoding="utf-8")
+    root_videos = source("root_videos.html")
+
+    assert 'class="responsive-cards root-video-table"' in root_videos
+    assert "@media (max-width: 120rem)" in css
+    assert ".root-video-table tbody tr" in css
+    assert ".table-wrap:has(> .root-video-table) { overflow-x: visible" in css
+    assert 'class="unassigned-title-form"' in root_videos
+
+
 def test_touch_accessible_paths_and_critical_hierarchy_controls_remain_present():
     series = source("series.html")
     root_videos = source("root_videos.html")

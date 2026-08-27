@@ -220,6 +220,7 @@ UNKNOWN_LANGUAGE_VALUES = {"und", "unk", "unknown", "n/a", "none"}
 
 ROOT_FOLDER = "."
 ROOT_VIDEO_GROUP_LABEL = "Nezařazená videa z kořene knihovny"
+PHYSICAL_ROOT_VIDEO_GROUP_LABEL = "Videa v kořeni knihovny"
 
 
 TITLE_NAME_PREFERENCES = ("romaji", "english", "native")

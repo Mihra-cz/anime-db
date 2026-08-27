@@ -2,8 +2,8 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 26. srpna 2026
-> **Aktuální checkpoint:** Hlavní season-context zobrazení nad ověřenou hierarchií
+> **Aktualizováno:** 27. srpna 2026
+> **Aktuální checkpoint:** Oddělený physical-root inventář a logický assignment
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -3755,6 +3755,73 @@ Automatické ověření 26. srpna 2026:
 .venv/bin/python -m compileall -q app tests  # prošlo
 načtení všech Jinja2 šablon               # 14/14, prošlo
 git diff --check                          # prošlo
+```
+
+---
+
+## 6.56 First-class blocking workflow nezařazených videí
+
+Globální Hierarchy Review nyní v úplně prvním výrazném blocking panelu ukazuje
+každé známé `Video`, jehož logická vazba není úplná a konzistentní přes konkrétní
+`CatalogTitle` do `CatalogCollection`. Definice není vázaná na fyzický root:
+zahrnuje chybějící title, chybějící collection přes title, chybějící nebo
+rozpornou redundantní Video → Collection vazbu a legacy technické zařazení k
+pseudo-collection `.`. Korektně zařazené video s jiným nezávislým hierarchy
+problémem se do tohoto panelu nepřidává; jeho původní review issue zůstává.
+
+Akce **Vyřešit nezařazená videa** vede do společného workflow, které rozlišuje
+tři autoritativní operace: přiřazení do existujícího anime a existující části,
+vytvoření nové části v existujícím anime a vytvoření nového anime s první
+částí. Nová část používá stávající hierarchy typy, season/Part pole, manuální
+snapshot, centrální naming a order logiku, explicitní M:N selector authority a
+společný hierarchy finalizer. Restartová synchronizace i běžný rescan proto
+ruční rozhodnutí zachovají, i když soubor fyzicky leží v rootu nebo v jiné
+složce. Úspěšné přiřazení odstraní pouze unassigned blocker; jiné skutečné
+review issues se dál vyhodnocují.
+
+`/root-videos` zůstává sekundárním technickým filtrem fyzického kořene a odkazuje
+zpět do Hierarchy Review. Assignment stránka používá na běžných desktopových a
+tabletových šířkách card layout, takže rozsáhlé formuláře nevynucují horizontální
+scrollbar. Databázové schema ani fyzické cesty se nemění.
+
+Automatické ověření 27. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                          # 903 passed
+.venv/bin/python -m compileall -q app tests # prošlo
+načtení všech Jinja2 šablon                  # 14/14, prošlo
+git diff --check                             # prošlo
+```
+
+---
+
+## 6.57 Physical-root inventář nezávislý na logickém assignmentu
+
+Technický `/root-videos` pohled nyní vybírá výhradně podle skutečné fyzické
+pozice (`Video.relative_path` bez parent adresáře). Zobrazuje proto jak
+nezařazené root soubory, tak root soubory s kompletním autoritativním
+`CatalogCollection -> CatalogTitle` assignmentem. Logicky zařazená položka
+ukazuje collection, část a hierarchy typ a nenabízí znovu unassigned formuláře;
+nezařazená položka odkazuje do jediného společného `/unassigned-videos`
+workflow.
+
+Homepage technický přehled již zařazená root videa nevynechává. Řádek
+**Videa v kořeni knihovny** ukazuje celkový fyzický počet a samostatný rozpad na
+logicky zařazené a nezařazené položky. Hlavní logický katalog a Hierarchy Review
+nadále používají svou vlastní assignment semantiku. Stav „logicky správně
+zařazeno, fyzicky stále v rootu“ tak zůstává viditelný jako budoucí vstup pro
+V6, aniž by sám vytvářel hierarchy blocker nebo prováděl fyzickou reorganizaci.
+
+Databázové schema, assignment persistence, metadata, collection detail ani
+fyzické soubory se tímto prezentačním oddělením nemění.
+
+Automatické ověření 27. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                          # 904 passed
+.venv/bin/python -m compileall -q app tests # prošlo
+načtení všech Jinja2 šablon                  # 14/14, prošlo
+git diff --check                             # prošlo
 ```
 
 ---
