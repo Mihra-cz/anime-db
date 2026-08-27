@@ -10,7 +10,11 @@ from typing import Literal
 import unicodedata
 
 from .hierarchy_authority import manual_hierarchy_snapshot_is_complete
-from .hierarchy_types import SUPPLEMENTARY_PART_TYPES, VIDEO_CONTENT_TYPE_LABELS
+from .hierarchy_types import (
+    MAIN_CONTENT_PART_TYPES,
+    SUPPLEMENTARY_PART_TYPES,
+    VIDEO_CONTENT_TYPE_LABELS,
+)
 from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
     InternalSubtitle, Video,
@@ -356,9 +360,18 @@ def catalog_collection_display_title(
         candidates.values(),
         key=catalog_title_sort_key,
     )
+    primary_titles = [
+        title for title in ordered
+        if title.effective_part_type in MAIN_CONTENT_PART_TYPES
+    ]
+    identity_titles = (
+        primary_titles
+        if primary_titles
+        else ordered if len(ordered) == 1 else ()
+    )
     explicit_titles = [
         (title, explicit)
-        for title in ordered
+        for title in identity_titles
         if (explicit := _catalog_title_explicit_display_title(title, preference))
     ]
     sibling_part_numbers: dict[str, set[int]] = {}

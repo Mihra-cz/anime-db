@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from fastapi import HTTPException
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.orm import selectinload
 
 from app.catalog import (
@@ -3246,6 +3246,157 @@ def test_homepage_collection_name_uses_metadata_preference_and_local_fallback(
         catalog = render(preference)
         assert f'href="/titles/{metadata_title_id}">{expected}</a>' in catalog
         assert ">Fyzický název (P21)</a>" not in catalog
+
+
+def test_homepage_collection_identity_is_not_taken_from_supplementary_title(
+    tmp_path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'homepage-collection-identity.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+
+        overlord = CatalogCollection(
+            local_title="OVERLORD (L15-L22)",
+            normalized_local_title="overlord l15-l22",
+            relative_root_path="Anime/OVERLORD (L15-L22)",
+            hierarchy_status="verified",
+            hierarchy_verified_at=utc_now(),
+        )
+        season_one = CatalogTitle(
+            collection=overlord,
+            local_title="Overlord (L15)",
+            normalized_local_title="overlord l15",
+            relative_root_path="Anime/OVERLORD (L15-L22)/Overlord (L15)",
+            part_type="season",
+            season_number=1,
+            season_label="S1",
+        )
+        season_two = CatalogTitle(
+            collection=overlord,
+            local_title="Overlord II (Z18)",
+            normalized_local_title="overlord ii z18",
+            relative_root_path="Anime/OVERLORD (L15-L22)/Overlord II (Z18)",
+            part_type="season",
+            season_number=2,
+            season_label="S2",
+        )
+        nc_manual = CatalogTitle(
+            collection=overlord,
+            local_title="NC",
+            normalized_local_title="nc",
+            relative_root_path="Anime/OVERLORD (L15-L22)/NC-S1",
+            part_type="bonus",
+            season_number=1,
+            manual_display_title="NC - Overlord",
+        )
+        nc_metadata = CatalogTitle(
+            collection=overlord,
+            local_title="NC",
+            normalized_local_title="nc",
+            relative_root_path="Anime/OVERLORD (L15-L22)/NC-S2",
+            part_type="bonus",
+            season_number=2,
+            metadata_status="linked_manual",
+            metadata_record=TitleMetadata(
+                display_title="NC Metadata English",
+                title_romaji="NC Metadata Romaji",
+                title_english="NC Metadata English",
+                title_native="NC Metadata Native",
+            ),
+        )
+
+        def add_video(title, filename, *, file_type):
+            return Video(
+                relative_path=f"{title.relative_root_path}/{filename}",
+                root_folder="Anime", filename=filename, size=1, mtime_ns=1,
+                file_type=file_type, catalog_collection=title.collection,
+                catalog_title=title,
+            )
+
+        videos = [
+            add_video(season_one, "Overlord 01.mkv", file_type="episode"),
+            add_video(season_two, "Overlord II 01.mkv", file_type="episode"),
+            add_video(nc_manual, "NCOP.mkv", file_type="ncop"),
+            add_video(nc_metadata, "NCED.mkv", file_type="nced"),
+        ]
+        film_ids = {}
+        for name, slug in (
+            ("Hotarubi no Mori e", "hotarubi-no-mori-e"),
+            ("Koe no Katachi", "koe-no-katachi"),
+        ):
+            collection = CatalogCollection(
+                local_title=name, normalized_local_title=name.casefold(),
+                relative_root_path=f"@manual/{slug}",
+                hierarchy_status="verified", hierarchy_verified_at=utc_now(),
+            )
+            title = CatalogTitle(
+                collection=collection,
+                local_title=name, normalized_local_title=name.casefold(),
+                relative_root_path=f"@manual/{slug}/title", part_type="film",
+            )
+            videos.append(add_video(title, f"{name}.mkv", file_type="other"))
+            session.add(collection)
+            session.flush()
+            film_ids[name] = title.id
+        session.add_all(videos)
+        session.commit()
+        overlord_id = overlord.id
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    def get_request(path):
+        return Request({
+            "type": "http", "app": web_app, "method": "GET", "path": path,
+            "root_path": "", "scheme": "http", "query_string": b"",
+            "headers": [], "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+        })
+
+    request = get_request("/")
+    engine = web_app.state.sessions.kw["bind"]
+    homepage_query_count = 0
+
+    def count_homepage_query(*_args):
+        nonlocal homepage_query_count
+        homepage_query_count += 1
+
+    event.listen(engine, "before_cursor_execute", count_homepage_query)
+    try:
+        homepage = endpoints["/"](request).body.decode()
+    finally:
+        event.remove(engine, "before_cursor_execute", count_homepage_query)
+    logical_homepage = homepage.split(
+        'class="panel logical-catalog"', 1,
+    )[1].split('class="panel physical-folders"', 1)[0]
+
+    assert (
+        f'href="/collections/{overlord_id}">OVERLORD (L15-L22)</a>'
+        in logical_homepage
+    )
+    assert ">NC - Overlord</a>" not in logical_homepage
+    assert ">NC Metadata Romaji</a>" not in logical_homepage
+    for name, title_id in film_ids.items():
+        assert f'href="/titles/{title_id}">{name}</a>' in logical_homepage
+    assert homepage_query_count == 10
+
+    collection_detail = endpoints["/collections/{collection_id}"](
+        get_request(f"/collections/{overlord_id}"), overlord_id,
+    ).body.decode()
+    assert "<h1>OVERLORD (L15-L22)</h1>" in collection_detail
+    assert "Lokální kolekce: OVERLORD (L15-L22)" in collection_detail
+
+    hierarchy_detail = endpoints["/hierarchy-review/{collection_id}"](
+        get_request(f"/hierarchy-review/{overlord_id}"), overlord_id,
+    ).body.decode()
+    assert "NC - Overlord" in hierarchy_detail
+    assert "NC Metadata Romaji" in hierarchy_detail
 
 
 def test_homepage_uses_logical_collections_and_simplifies_unambiguous_navigation(

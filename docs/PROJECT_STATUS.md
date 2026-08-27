@@ -3,7 +3,7 @@
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
 > **Aktualizováno:** 27. srpna 2026
-> **Aktuální checkpoint:** Oddělený physical-root inventář a logický assignment
+> **Aktuální checkpoint:** Collection identity názvy bez supplementary úniku
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -3819,6 +3819,38 @@ Automatické ověření 27. srpna 2026:
 
 ```bash
 .venv/bin/pytest -q                          # 904 passed
+.venv/bin/python -m compileall -q app tests # prošlo
+načtení všech Jinja2 šablon                  # 14/14, prošlo
+git diff --check                             # prošlo
+```
+
+---
+
+## 6.58 Collection identity názvy bez supplementary úniku
+
+Homepage nadále používá centrální `catalog_collection_display_title` a globální
+preference Romaji/English/Native, ale explicitní per-title název může být
+zdrojem identity collection jen z hlavních částí definovaných stávající
+hierarchy taxonomií. Ruční nebo metadata display title doplňkové části typu
+NC/Bonus proto nepřebije název celé collection jen proto, že je prvním
+explicitně pojmenovaným title ve strukturálním pořadí.
+
+Priorita zůstává: ruční `CatalogCollection.manual_display_title`, bezpečný
+explicitní název hlavní části s jazykovým fallbackem a nakonec
+`CatalogCollection.local_title`. Pokud collection nemá žádnou hlavní Season/
+Part/title část, jediný samostatný CatalogTitle zůstává bezpečným zdrojem názvu;
+samostatné filmy si proto zachovávají metadata varianty. Více čistě
+supplementary částí bez hlavní identity spadne konzervativně na collection
+local title. Prázdná legacy collection také používá lokální fallback.
+
+Změna je čistě read-only presentation fix. Nemění collection membership,
+hierarchii, detail collection, Hierarchy Review, metadata, databázové schema
+ani fyzická data. Homepage zachovává dosavadních deset SQL dotazů.
+
+Automatické ověření 27. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                          # 914 passed
 .venv/bin/python -m compileall -q app tests # prošlo
 načtení všech Jinja2 šablon                  # 14/14, prošlo
 git diff --check                             # prošlo

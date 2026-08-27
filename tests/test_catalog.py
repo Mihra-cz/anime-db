@@ -341,6 +341,144 @@ def test_collection_without_display_metadata_keeps_local_fallback():
     ) == "Local fallback (Z20)"
 
 
+@pytest.mark.parametrize("supplementary_source", ["manual", "metadata"])
+def test_collection_identity_ignores_supplementary_display_title(
+    supplementary_source,
+):
+    collection = CatalogCollection(
+        local_title="OVERLORD (L15-L22)",
+        normalized_local_title="overlord l15-l22",
+        relative_root_path="Anime/OVERLORD (L15-L22)",
+    )
+    season = CatalogTitle(
+        collection=collection,
+        local_title="Overlord (L15)",
+        normalized_local_title="overlord l15",
+        relative_root_path="Anime/OVERLORD (L15-L22)/Overlord (L15)",
+        part_type="season",
+        season_number=1,
+    )
+    supplementary = CatalogTitle(
+        collection=collection,
+        local_title="NC",
+        normalized_local_title="nc",
+        relative_root_path="Anime/OVERLORD (L15-L22)/NC",
+        part_type="bonus",
+        season_number=1,
+        manual_display_title=(
+            "NC - Overlord" if supplementary_source == "manual" else None
+        ),
+        metadata_record=(
+            TitleMetadata(
+                display_title="NC Metadata",
+                title_romaji="NC Metadata Romaji",
+                title_english="NC Metadata English",
+                title_native="NC Metadata Native",
+            )
+            if supplementary_source == "metadata" else None
+        ),
+    )
+
+    assert catalog_collection_display_title(
+        collection, "romaji", titles=[supplementary, season]
+    ) == "OVERLORD (L15-L22)"
+
+
+@pytest.mark.parametrize(("preference", "expected"), [
+    ("romaji", "Main Romaji"),
+    ("english", "Main English"),
+    ("native", "Main Native"),
+])
+def test_collection_identity_uses_deterministic_primary_metadata_preference(
+    preference, expected,
+):
+    collection = CatalogCollection(
+        local_title="Local Collection",
+        normalized_local_title="local collection",
+        relative_root_path="Anime/Local Collection",
+    )
+    season_two = CatalogTitle(
+        collection=collection,
+        local_title="Season 2",
+        normalized_local_title="season 2",
+        relative_root_path="Anime/Local Collection/Season 2",
+        part_type="season",
+        season_number=2,
+        manual_display_title="Second Season Must Not Win",
+    )
+    season_one = CatalogTitle(
+        collection=collection,
+        local_title="Season 1",
+        normalized_local_title="season 1",
+        relative_root_path="Anime/Local Collection/Season 1",
+        part_type="season",
+        season_number=1,
+        metadata_record=TitleMetadata(
+            display_title="Main English",
+            title_romaji="Main Romaji",
+            title_english="Main English",
+            title_native="Main Native",
+        ),
+    )
+    bonus = CatalogTitle(
+        collection=collection,
+        local_title="NC",
+        normalized_local_title="nc",
+        relative_root_path="Anime/Local Collection/NC",
+        part_type="bonus",
+        season_number=1,
+        manual_display_title="Supplementary Must Not Win",
+    )
+
+    assert catalog_collection_display_title(
+        collection, preference, titles=[season_two, bonus, season_one]
+    ) == expected
+
+
+@pytest.mark.parametrize(("preference", "expected"), [
+    ("romaji", "Hotarubi no Mori e"),
+    ("english", "Into the Forest of Fireflies' Light"),
+    ("native", "蛍火の杜へ"),
+])
+def test_single_standalone_film_remains_a_collection_identity_source(
+    preference, expected,
+):
+    collection = CatalogCollection(
+        local_title="Hotarubi no Mori e",
+        normalized_local_title="hotarubi no mori e",
+        relative_root_path="@manual/hotarubi-no-mori-e",
+    )
+    film = CatalogTitle(
+        collection=collection,
+        local_title="Hotarubi no Mori e",
+        normalized_local_title="hotarubi no mori e",
+        relative_root_path="@manual/hotarubi-no-mori-e/title",
+        part_type="film",
+        metadata_record=TitleMetadata(
+            display_title="Into the Forest of Fireflies' Light",
+            title_romaji="Hotarubi no Mori e",
+            title_english="Into the Forest of Fireflies' Light",
+            title_native="蛍火の杜へ",
+        ),
+    )
+
+    assert catalog_collection_display_title(
+        collection, preference, titles=[film]
+    ) == expected
+
+
+def test_collection_without_titles_has_safe_local_fallback():
+    collection = CatalogCollection(
+        local_title="Empty legacy collection",
+        normalized_local_title="empty legacy collection",
+        relative_root_path="@legacy/empty",
+    )
+
+    assert catalog_collection_display_title(
+        collection, "romaji", titles=[]
+    ) == "Empty legacy collection"
+
+
 @pytest.mark.parametrize(("filename", "expected"), [
     ("Ansatsu Kyoushitsu 01.mp4", "Ansatsu Kyoushitsu"),
     ("Ansatsu Kyoushitsu - 01.mkv", "Ansatsu Kyoushitsu"),
