@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
@@ -17,6 +19,42 @@ class ManualHierarchySnapshot(Protocol):
 class MutableManualHierarchySnapshot(ManualHierarchySnapshot, Protocol):
     season_label_manual: str | None
     sort_order_manual: int | None
+
+
+class EffectiveHierarchyTitle(Protocol):
+    @property
+    def effective_part_type(self) -> str: ...
+
+    @property
+    def effective_season_number(self) -> int | None: ...
+
+    @property
+    def effective_part_number(self) -> int | None: ...
+
+
+@dataclass(frozen=True)
+class SplitSeasonStructureIssue:
+    season_number: int
+    titles: tuple[EffectiveHierarchyTitle, ...]
+    missing_part_number: bool
+    duplicate_part_numbers: tuple[int, ...]
+
+    @property
+    def message(self) -> str:
+        prefix = f"Season {self.season_number} už v této kolekci existuje."
+        if self.missing_part_number:
+            return (
+                f"{prefix} Pokud jde o úmyslně rozdělenou sezónu, nastavte "
+                "všem jejím částem unikátní explicitní číslo Part. "
+                "Chybějící Part 1 se automaticky nedoplňuje."
+            )
+        duplicate_labels = ", ".join(
+            f"Part {number}" for number in self.duplicate_part_numbers
+        )
+        return (
+            f"{prefix} {duplicate_labels} je použito vícekrát; každá část "
+            "rozdělené sezóny musí mít unikátní explicitní číslo Part."
+        )
 
 
 class ManualHierarchyAuthorityState(StrEnum):
@@ -39,11 +77,51 @@ def structural_hierarchy_issue(
         return "Číslo Part musí být kladné."
     if part_type == "part" and part_number is None:
         return "Pro typ Part potvrďte číslo Part."
-    if part_type == "season" and part_number is not None:
-        return "Samostatná sezóna nesmí mít číslo Part."
-    if part_type not in {"part", "cour"} and part_number is not None:
-        return "Číslo Part lze uložit pouze pro typ Part."
+    if part_type not in {"season", "part", "cour"} and part_number is not None:
+        return "Číslo Part lze uložit pouze pro Season nebo Part."
     return None
+
+
+def split_season_structure_issues(
+    titles: Iterable[EffectiveHierarchyTitle],
+    *,
+    override_title: EffectiveHierarchyTitle | None = None,
+    override_part_type: str | None = None,
+    override_season_number: int | None = None,
+    override_part_number: int | None = None,
+) -> tuple[SplitSeasonStructureIssue, ...]:
+    """Find ambiguous sibling Season identities without mutating stored data."""
+    by_season: dict[int, list[tuple[EffectiveHierarchyTitle, int | None]]] = {}
+    for title in titles:
+        if title is override_title:
+            part_type = override_part_type
+            season_number = override_season_number
+            part_number = override_part_number
+        else:
+            part_type = title.effective_part_type
+            season_number = title.effective_season_number
+            part_number = title.effective_part_number
+        if part_type == "season" and season_number is not None:
+            by_season.setdefault(season_number, []).append((title, part_number))
+
+    issues: list[SplitSeasonStructureIssue] = []
+    for season_number, members in sorted(by_season.items()):
+        if len(members) < 2:
+            continue
+        part_numbers = [part_number for _, part_number in members]
+        duplicates = tuple(sorted({
+            number for number in part_numbers
+            if number is not None and part_numbers.count(number) > 1
+        }))
+        missing = any(number is None for number in part_numbers)
+        if missing or duplicates:
+            issues.append(SplitSeasonStructureIssue(
+                season_number=season_number,
+                titles=tuple(title for title, _ in members),
+                missing_part_number=missing,
+                duplicate_part_numbers=duplicates,
+            ))
+    return tuple(issues)
 
 
 def manual_hierarchy_snapshot_issue(

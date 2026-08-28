@@ -356,6 +356,70 @@ def test_complete_manual_season_without_problems_is_verified():
     assert result.status == "verified"
 
 
+def _manual_split_season(
+    collection: CatalogCollection,
+    *,
+    title_id: int,
+    part_number: int | None,
+) -> CatalogTitle:
+    return _title(
+        collection,
+        title_id=title_id,
+        local_title=f"Season 1 part {title_id}",
+        relative_root_path=f"Anime/Test Anime/.catalog-part-{title_id}",
+        part_type="season",
+        season_number=1,
+        part_type_manual="season",
+        season_number_manual=1,
+        season_label_manual="S1",
+        part_number_manual=part_number,
+        hierarchy_manual_override=True,
+        hierarchy_verified_at=utc_now(),
+    )
+
+
+def test_two_manual_season_parts_with_unique_ordinals_are_verified():
+    collection = _collection()
+    first = _manual_split_season(collection, title_id=1, part_number=1)
+    second = _manual_split_season(collection, title_id=2, part_number=2)
+
+    result = evaluate_collection_hierarchy(collection, [])
+
+    assert result.status == "verified"
+    assert result.blocking_issues == ()
+    assert (first.effective_part_number, second.effective_part_number) == (1, 2)
+
+
+@pytest.mark.parametrize(
+    ("first_part", "second_part"),
+    [(None, None), (None, 2), (1, 1)],
+)
+def test_ambiguous_duplicate_season_parts_are_collection_blocker(
+    first_part,
+    second_part,
+):
+    collection = _collection(status="verified")
+    first = _manual_split_season(
+        collection, title_id=1, part_number=first_part,
+    )
+    second = _manual_split_season(
+        collection, title_id=2, part_number=second_part,
+    )
+
+    result = evaluate_collection_hierarchy(collection, [])
+
+    issue = next(
+        item for item in result.issues
+        if item.code == HierarchyIssueCode.AMBIGUOUS_SPLIT_SEASON
+    )
+    assert result.status == "review_required"
+    assert issue.blocking is True
+    assert issue.scope == HierarchyIssueScope.COLLECTION
+    assert issue.related_catalog_titles == (first, second)
+    assert "Season 1 už v této kolekci existuje" in issue.message
+    assert result.primary_note == issue.message
+
+
 def test_inactive_manual_values_are_not_effective_authority():
     collection = _collection()
     title = _title(

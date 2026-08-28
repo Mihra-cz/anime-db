@@ -10,6 +10,7 @@ from .hierarchy_authority import (
     manual_hierarchy_snapshot_is_complete,
     manual_hierarchy_snapshot_issue,
     manual_hierarchy_snapshot_requires_preservation,
+    split_season_structure_issues,
     structural_hierarchy_issue,
 )
 from .hierarchy_provenance import (
@@ -91,6 +92,7 @@ class HierarchyIssueCode(StrEnum):
     SOFT_LONG_FLAT_SERIES = "soft_long_flat_series"
     GENERIC_STRUCTURAL_TYPE = "generic_structural_type"
     MISSING_PART_NUMBER = "missing_part_number"
+    AMBIGUOUS_SPLIT_SEASON = "ambiguous_split_season"
     INCOMPLETE_MANUAL_SNAPSHOT = "incomplete_manual_snapshot"
     RELATED_NAMED_CHILD = "related_named_child"
     SUPPLEMENTARY_NAMED_CHILD = "supplementary_named_child"
@@ -251,6 +253,15 @@ def hierarchy_primary_note(
     )
     if incomplete_snapshot is not None:
         return incomplete_snapshot.message
+    split_season = next(
+        (
+            issue for issue in blocking
+            if issue.code == HierarchyIssueCode.AMBIGUOUS_SPLIT_SEASON
+        ),
+        None,
+    )
+    if split_season is not None:
+        return split_season.message
     priorities = (
         (HierarchyIssueCode.FILENAME_SEASON_CONFLICT, FILENAME_SEASON_CONFLICT_REVIEW_REASON),
         (HierarchyIssueCode.NONSTANDARD_NUMBERING, NONSTANDARD_NUMBERING_REVIEW_REASON),
@@ -555,6 +566,15 @@ def evaluate_collection_hierarchy(
                 blocking=True,
                 title=title,
             )
+
+    for split_issue in split_season_structure_issues(titles):
+        add_issue(
+            HierarchyIssueCode.AMBIGUOUS_SPLIT_SEASON,
+            split_issue.message,
+            HierarchyIssueScope.COLLECTION,
+            blocking=True,
+            related_titles=split_issue.titles,
+        )
 
     represented_confirmed_videos: set[Video] = set()
     for group in confirmed_duplicate_groups(all_videos):

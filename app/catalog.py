@@ -422,7 +422,13 @@ def catalog_title_series_label(title: CatalogTitle) -> str:
         if title.effective_season_number is not None else None
     )
     if part_type == "season":
-        return season_label or "—"
+        part_label = (
+            f"Part {title.effective_part_number}"
+            if title.effective_part_number is not None else None
+        )
+        return " · ".join(
+            value for value in (season_label, part_label) if value
+        ) or "—"
     if part_type == "cour" and title.effective_part_number is not None:
         return f"Cour {title.effective_part_number}"
     if season_label:

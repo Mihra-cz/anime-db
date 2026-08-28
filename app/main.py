@@ -68,9 +68,12 @@ from .hierarchy_review import (
     classify_videos_in_place, clear_confirmed_duplicate_videos,
     collection_grouping_suggestions, create_main_collection,
     create_anime_for_known_videos, create_title_for_known_videos,
-    confirm_duplicate_groups, confirm_duplicate_videos, create_title_from_videos,
+    confirm_duplicate_groups, confirm_duplicate_videos,
+    confirm_existing_split_season_parts, create_title_from_videos,
+    create_title_with_complementary_season_part,
     delete_empty_collection, delete_empty_collections, delete_empty_local_title,
     definitions_as_json, definitions_to_json, parse_manual_definitions,
+    existing_split_season_part_proposals,
     confirm_effective_collection_hierarchy,
     catalog_title_hierarchy_is_verified,
     hierarchy_review_diagnostics, manual_hierarchy_snapshot_issue,
@@ -83,6 +86,7 @@ from .hierarchy_review import (
     set_manual_duplicate_status,
     single_title_confirmation_suggestion, supplementary_assignment_recommendations,
     supplementary_video_suggestions, set_manual_title_hierarchy,
+    complementary_season_part_proposal_for_videos,
 )
 from .hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPE_CHOICES
 from .metadata.providers.anilist import AniListProvider
@@ -1293,6 +1297,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request, collection_id: int, definitions_json: str | None = None,
         preview=None, error: str | None = None, external_search_candidates=None,
         simple_rows=None, message: str | None = None,
+        assignment_split_proposal=None,
     ):
         with sessions() as session:
             collection = session.scalar(select(CatalogCollection).options(
@@ -1479,6 +1484,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 },
                 "simple_rows": simple_rows or simple_definition_rows(collection),
                 "message": message,
+                "split_season_part_proposals": (
+                    existing_split_season_part_proposals(collection)
+                ),
+                "assignment_split_proposal": assignment_split_proposal,
             })
 
     @app.get("/hierarchy-review", response_class=HTMLResponse)
@@ -2078,6 +2087,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/hierarchy-review/{collection_id}/manage-videos")
     async def hierarchy_review_manage_videos(request: Request, collection_id: int):
         form = await request.form()
+        assignment_split_proposal = None
         try:
             video_ids = [int(value) for value in form.getlist("video_ids")]
             operation = str(form.get("operation") or "").strip()
@@ -2109,20 +2119,114 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 elif operation == "create":
                     raw_season = str(form.get("season_number") or "").strip()
                     raw_part = str(form.get("part_number") or "").strip()
-                    create_title_from_videos(
-                        session, collection_id, video_ids,
-                        local_title=str(form.get("local_title") or ""),
-                        part_type=str(form.get("part_type") or ""),
-                        season_number=int(raw_season) if raw_season else None,
-                        season_label=str(form.get("season_label") or ""),
-                        part_number=int(raw_part) if raw_part else None,
-                    )
-                    message = "Byla vytvořena nová logická část a vybraná videa do ní přesunuta."
+                    season_number = int(raw_season) if raw_season else None
+                    part_number = int(raw_part) if raw_part else None
+                    local_title = str(form.get("local_title") or "")
+                    season_label = str(form.get("season_label") or "")
+                    part_type = str(form.get("part_type") or "")
+                    apply_complementary = str(
+                        form.get("apply_complementary_proposal") or ""
+                    ).casefold() in {"true", "on", "1"}
+                    if apply_complementary:
+                        if str(form.get("confirm_split_season") or "").casefold() not in {
+                            "true", "on", "1",
+                        }:
+                            raise ValueError(
+                                "Rozdělení Season na Part 1 / Part 2 je nutné potvrdit."
+                            )
+                        if season_number is None or part_number is None:
+                            raise ValueError("Návrh rozdělení nemá úplnou Season/Part identitu.")
+                        create_title_with_complementary_season_part(
+                            session,
+                            collection_id,
+                            video_ids,
+                            local_title=local_title,
+                            season_number=season_number,
+                            season_label=season_label,
+                            part_number=part_number,
+                            expected_source_title_id=int(str(
+                                form.get("expected_source_title_id") or ""
+                            )),
+                            expected_complementary_part_number=int(str(
+                                form.get("expected_complementary_part_number") or ""
+                            )),
+                        )
+                        message = (
+                            "Season byla atomicky rozdělena na Part 1 a Part 2; "
+                            "fyzické cesty zůstaly beze změny."
+                        )
+                    else:
+                        assignment_split_proposal = (
+                            complementary_season_part_proposal_for_videos(
+                                session,
+                                collection_id,
+                                video_ids,
+                                part_type=part_type,
+                                season_number=season_number,
+                                part_number=part_number,
+                                local_title=local_title,
+                                season_label=season_label,
+                            )
+                        )
+                        if assignment_split_proposal is None:
+                            create_title_from_videos(
+                                session, collection_id, video_ids,
+                                local_title=local_title,
+                                part_type=part_type,
+                                season_number=season_number,
+                                season_label=season_label,
+                                part_number=part_number,
+                            )
+                            message = (
+                                "Byla vytvořena nová logická část a vybraná "
+                                "videa do ní přesunuta."
+                            )
                 else:
                     raise ValueError("Vyberte platnou operaci správy zařazení.")
+                if assignment_split_proposal is None:
+                    session.commit()
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if assignment_split_proposal is not None:
+            return hierarchy_review_context(
+                request,
+                collection_id,
+                assignment_split_proposal=assignment_split_proposal,
+            )
+        return local_redirect_response(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}"
+            "#operation-result",
+        )
+
+    @app.post("/hierarchy-review/{collection_id}/confirm-split-season-parts")
+    async def hierarchy_review_confirm_split_season_parts(
+        request: Request, collection_id: int,
+    ):
+        form = await request.form()
+        if str(form.get("confirm_split_season") or "").casefold() not in {
+            "true", "on", "1",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="Rozdělení Season na Part 1 / Part 2 je nutné potvrdit.",
+            )
+        try:
+            season_number = int(str(form.get("season_number") or ""))
+            title_ids = [int(value) for value in form.getlist("title_ids")]
+            with sessions() as session:
+                confirm_existing_split_season_parts(
+                    session,
+                    collection_id,
+                    season_number=season_number,
+                    title_ids=title_ids,
+                )
                 session.commit()
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = (
+            f"Season {season_number} byla potvrzena jako Part 1 / Part 2; "
+            "video membership se nezměnil."
+        )
         return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}"
             "#operation-result",

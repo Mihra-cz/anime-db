@@ -12,6 +12,52 @@
 {% if collection.hierarchy_note %}<p class="warning">Souhrnný uložený důvod: {{ collection.hierarchy_note }}</p>{% endif %}
 {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
 
+{% if split_season_part_proposals|default([]) %}
+<section class="panel part-recommendation" id="split-season-proposals" aria-labelledby="split-season-proposals-heading">
+  <h2 id="split-season-proposals-heading">Navržené řešení rozdělené sezóny</h2>
+  {% for proposal in split_season_part_proposals %}
+  <article>
+    <p>Nalezeny dvě samostatné části Season {{ proposal.season_number }}. Jejich úplné epizodní rozsahy se nepřekrývají, bez mezery na sebe navazují a začínají E01.</p>
+    <ul>{% for item in proposal.items %}<li><strong>{{ item.title_name }}</strong> · {{ item.episode_range.label }} → <strong>{{ item.structural_label }}</strong></li>{% endfor %}</ul>
+    <p>Toto je pouze návrh. CatalogTitle, video membership, metadata, duplicity ani canonical numbering se potvrzením nemění.</p>
+    <form method="post" action="/hierarchy-review/{{ collection.id }}/confirm-split-season-parts">
+      <input type="hidden" name="season_number" value="{{ proposal.season_number }}">
+      {% for item in proposal.items %}<input type="hidden" name="title_ids" value="{{ item.title_id }}">{% endfor %}
+      <label><input type="checkbox" name="confirm_split_season" value="true" required> Potvrzuji, že jde o jednu sezónu rozdělenou na Part 1 a Part 2.</label>
+      <button type="submit">Potvrdit Part 1 / Part 2</button>
+    </form>
+  </article>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if assignment_split_proposal %}
+<section class="panel part-recommendation" id="complementary-part-proposal" aria-labelledby="complementary-part-proposal-heading">
+  <h2 id="complementary-part-proposal-heading">Navržené doplnění druhé části Season {{ assignment_split_proposal.season_number }}</h2>
+  <p>Požadované oddělení by ponechalo původní Season bez čísla Part. AnimeDB umí tento jednoznačný první split uložit atomicky až po vašem potvrzení:</p>
+  <ul>
+    <li><strong>Nová vybraná část:</strong> {{ assignment_split_proposal.selected.label }} → <strong>{{ assignment_split_proposal.selected_structural_label }}</strong></li>
+    <li><strong>Zbývající {{ assignment_split_proposal.source_title_name }}:</strong> {{ assignment_split_proposal.remaining.label }} → <strong>{{ assignment_split_proposal.remaining_structural_label }}</strong></li>
+  </ul>
+  <p>Rozsahy se nepřekrývají, bez mezery na sebe navazují a začínají E01. Návrh zatím nic nezapsal.</p>
+  <form method="post" action="/hierarchy-review/{{ collection.id }}/manage-videos">
+    {% for video_id in assignment_split_proposal.selected_video_ids %}<input type="hidden" name="video_ids" value="{{ video_id }}">{% endfor %}
+    <input type="hidden" name="operation" value="create">
+    <input type="hidden" name="part_type" value="season">
+    <input type="hidden" name="local_title" value="{{ assignment_split_proposal.requested_local_title }}">
+    <input type="hidden" name="season_number" value="{{ assignment_split_proposal.season_number }}">
+    <input type="hidden" name="season_label" value="{{ assignment_split_proposal.requested_season_label }}">
+    <input type="hidden" name="part_number" value="{{ assignment_split_proposal.requested_part_number }}">
+    <input type="hidden" name="expected_source_title_id" value="{{ assignment_split_proposal.source_title_id }}">
+    <input type="hidden" name="expected_complementary_part_number" value="{{ assignment_split_proposal.complementary_part_number }}">
+    <input type="hidden" name="apply_complementary_proposal" value="true">
+    <label><input type="checkbox" name="confirm_split_season" value="true" required> Potvrzuji výslednou strukturu {{ assignment_split_proposal.remaining_structural_label }} + {{ assignment_split_proposal.selected_structural_label }}.</label>
+    <button type="submit">Použít návrh a uložit</button>
+    <button type="button" class="button-secondary" id="edit-complementary-proposal">Vrátit se k úpravě</button>
+  </form>
+</section>
+{% endif %}
+
 {% if review_diagnostics is defined %}
 <section class="panel hierarchy-issue-overview" aria-labelledby="active-review-issues">
   <div class="hierarchy-issue-overview-heading">
@@ -65,6 +111,7 @@
     <label data-season-number>Číslo sezóny <input type="number" min="1" name="season_number_manual" value="{{ title.season_number_manual if title.season_number_manual is not none else '' }}"></label>
     <label data-season-label>Označení sezóny <input type="text" maxlength="50" name="season_label_manual" value="{{ title.season_label_manual or '' }}" placeholder="S1 / vlastní název"></label>
     <label data-part-number>Číslo Part <input type="number" min="1" name="part_number_manual" value="{{ title.part_number_manual if title.part_number_manual is not none else '' }}"></label>
+    <small data-part-number>Volitelné pro jedinou sezónu; pokud má stejné číslo sezóny více částí, každá musí mít unikátní explicitní číslo Part.</small>
     <label>Ruční pořadí <input type="number" min="0" name="sort_order_manual" value="{{ title.sort_order_manual if title.sort_order_manual is not none else '' }}" placeholder="automatické strukturální řazení"></label>
     <label><input type="checkbox" name="hierarchy_verified" value="true" {% if catalog_title_hierarchy_is_verified(title) %}checked{% endif %}> Zařazení ověřeno</label>
     <input type="hidden" name="return_to" value="hierarchy_review">
@@ -152,6 +199,7 @@
   </form>
   <details class="bulk-numbering"><summary>Hromadné číslování vybraných videí</summary><form method="post" action="/hierarchy-review/{{ collection.id }}/numbering-preview"><p>Výsledné mapování se nejprve zobrazí v náhledu. Pořadí je stabilní natural filename → cesta → ID.</p><div class="assignment-video-list">{% for video in videos %}<label><input type="checkbox" name="video_ids" value="{{ video.id }}"> {{ video.filename }}</label>{% endfor %}</div><label>Očíslovat od <input type="number" min="1" name="start_episode" value="1" required></label><button type="submit">Zobrazit náhled číslování</button></form></details>
   <script>document.querySelectorAll('.apply-assignment-recommendation').forEach(function(button){button.addEventListener('click',function(){const form=document.getElementById('assignment-form');const selected=new Set(button.dataset.videoIds.split(','));form.querySelectorAll('input[name="video_ids"]').forEach(function(input){input.checked=selected.has(input.value);});form.querySelector('input[name="operation"][value="create"]').checked=true;form.elements.part_type.value=button.dataset.partType;form.elements.local_title.value=button.dataset.localTitle;form.elements.season_number.value=button.dataset.seasonNumber;form.elements.season_label.value=button.dataset.seasonLabel;document.getElementById('assignment-prefill-status').textContent='Doporučení bylo pouze předvyplněno. Hodnoty můžete změnit; zatím nebylo nic uloženo.';window.location.hash='assignment';form.elements.local_title.focus();});});</script>
+  {% if assignment_split_proposal %}<script>document.getElementById('edit-complementary-proposal').addEventListener('click',function(){const form=document.getElementById('assignment-form');const selected=new Set({{ assignment_split_proposal.selected_video_ids|list|tojson }}.map(String));form.querySelectorAll('input[name="video_ids"]').forEach(function(input){input.checked=selected.has(input.value);});form.querySelector('input[name="operation"][value="create"]').checked=true;form.elements.part_type.value='season';form.elements.local_title.value={{ assignment_split_proposal.requested_local_title|tojson }};form.elements.season_number.value={{ assignment_split_proposal.season_number|tojson }};form.elements.season_label.value={{ assignment_split_proposal.requested_season_label|tojson }};form.elements.part_number.value={{ assignment_split_proposal.requested_part_number|tojson }};document.getElementById('assignment-prefill-status').textContent='Původní požadavek byl vrácen do formuláře; nic nebylo uloženo.';window.location.hash='assignment';form.elements.local_title.focus();});</script>{% endif %}
 </section>
 
 {% if nonstandard_videos %}<section class="panel separation-panel"><h2>Oddělit do nové části</h2><p>Vyberte nestandardní videa přímo v blocích výše. Typ neurčuje parser; volbu potvrzuje uživatel. Fyzické soubory se nepřesouvají.</p><form id="separate-nonstandard-form" class="inline-form structural-fields-form" method="post" action="/hierarchy-review/{{ collection.id }}/separate-nonstandard"><label>Typ části <select name="part_type" required>{% for value, label in part_type_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label><label>Lokální název části <input type="text" maxlength="200" required name="local_title" value="Preview" list="part-title-suggestions" placeholder="Preview / Recap / Bonus"></label><label data-season-number>Číslo sezóny <input type="number" min="1" name="season_number"></label><label data-part-number>Číslo Part <input type="number" min="1" name="part_number"></label><datalist id="part-title-suggestions">{% for value in ['Preview','Special','Recap','OVA','Bonus'] %}<option value="{{ value }}">{% endfor %}</datalist><button type="submit">Oddělit do nové části</button></form><p><small>Změní se pouze <code>Video.catalog_title_id</code>. <code>relative_path</code>, filename ani soubor na NASu zůstávají identické. Externí metadata jsou volitelná.</small></p></section>{% endif %}

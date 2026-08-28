@@ -2693,8 +2693,10 @@ Změna nevyžaduje DB schema migraci a nemění fyzické soubory ani adresáře.
 ## 6.39 Season + volitelný Part
 
 Season je primární strukturální osa anime. Part je volitelné logické členění
-uvnitř Season a obě osy se ukládají samostatně. `Season 1 Part 2` má
-`part_type=part`, `season_number=1`, `part_number=2` a zobrazuje se jako
+uvnitř Season a obě osy se ukládají samostatně. Strukturální Part může mít
+`part_type=part`, `season_number=1`, `part_number=2`; explicitně rozdělená
+Season může zachovat `part_type=season`, `season_number=1` a použít stejnou
+samostatnou osu `part_number=2`. Obě varianty se zobrazují jako
 `S1 · Part 2`; samostatné `Part 2` bez známého season scope má
 `season_number=NULL`, nikoli 2. Vnořená cesta `Season 1/Part 2` dědí season
 scope z parentu. `Part 2 != Season 2` platí v parseru, scanneru, startup sync,
@@ -2707,9 +2709,12 @@ manual hodnotu před automatickou. Explicitní potvrzení jedné části i celé
 collection snapshotuje také Part ordinal. Manual override chrání scanner,
 startup sync i rebuild stejně jako u season number.
 
-Běžné hierarchy formuláře a ruční split zobrazují pro `season` číslo a označení
-sezóny; pro `part` samostatné **Číslo sezóny** a **Číslo Part**. Backend stejné
-kombinace validuje a autoritativní Part bez čísla Part odmítne. Centrální
+Běžné hierarchy formuláře a ruční split zobrazují pro `season` i `part`
+samostatné **Číslo sezóny** a **Číslo Part**. Pro jedinou Season je Part
+volitelný; více sibling Season titles se stejným `season_number` je jednoznačných
+jen s explicitními, neprázdnými a unikátními Part ordinaly. Backend neúplný
+nebo duplicitní split odmítne a autoritativní `part` bez čísla Part odmítne
+také. Centrální
 structural label skládá effective hodnoty (`S1`, `S1 · Part 1`,
 `S1 · Part 2`, `Part 2`). Legacy `part_type=cour` zůstává čitelný a backendově
 kompatibilní pro staré záznamy, ale Cour není nová hlavní uživatelská volba ani
@@ -3996,6 +4001,86 @@ hierarchy/duplicate/scanner/startup/UI sada        # 408 passed
 .venv/bin/python -m compileall -q app              # prošlo
 načtení všech Jinja2 šablon                        # 14/14, prošlo
 git diff --check                                   # prošlo
+```
+
+---
+
+## 6.62 Ruční Part ordinal pro rozdělenou Season
+
+`CatalogTitle.part_number_manual` a effective Part osa už ve schematu existovaly,
+ale sdílená authority validace zakazovala `part_number` pro `part_type=season`,
+write helper jej před uložením zahazoval a JavaScript pole pro Season skryl a
+disableoval. Hierarchy Review proto nedokázalo autoritativně vyjádřit jednu
+Season rozdělenou do několika samostatných `CatalogTitle`.
+
+Manual snapshot nyní dovoluje například `season_number=1, part_number=1` a
+`season_number=1, part_number=2`, aniž se mění canonical episode numbering nebo
+z Part 2 vzniká Season 2. Jediný Season title může mít autoritativní
+`part_number=NULL`. Pokud ale v jedné collection existuje více effective Season
+titles se stejným neprázdným `season_number`, všechny musí mít explicitní a
+vzájemně unikátní Part ordinal. Chybějící Part 1 ani jiná hodnota se nikdy
+neodvozuje z E01–E13 / E14–E26 ani z pořadí title.
+
+Guard je server-side a prospektivně kontroluje celou collection před jednotlivým
+manual POSTem, takže odmítnutí nezanechá částečný snapshot. Již existující
+`S1 + S1`, `S1 + S1/Part 2` nebo duplicitní `S1/Part 1` se automaticky
+nepřepisuje: shared evaluator vytvoří blocking `ambiguous_split_season`, startup
+a runtime refresh nastaví `review_required` a raw Hierarchy Review zachová oba
+titles samostatně. Atomickou opravu všech dotčených ordinalů umožňuje existující
+hromadná definice ručního rozdělení; nový paralelní persistence mechanismus
+nevznikl.
+
+Centralizovaný structural label zobrazuje manual Season parts jako `S1 · Part 1`
+a `S1 · Part 2`. Complete manual authority je nadále chráněna před startupem,
+scannerem i rebuildem. Změna nepřidává DB schema ani automatický backfill a
+nepracuje s fyzickými soubory.
+
+Automatická validace tohoto kroku:
+
+```text
+nové cílené split-season scénáře                    # 17 passed
+relevantní hierarchy/numbering/UI/lifecycle sada    # 659 passed
+celá testovací sada                                 # 947 passed
+```
+
+---
+
+## 6.63 Asistované potvrzení prvního splitu Season
+
+Přísný invariant z části 6.62 zůstává beze změny, ale běžná **Správa zařazení
+jednotlivých videí** už se při prvním splitu nezastaví pouze na chybě
+`S1 + S1/Part 2`. Read-only prospective evaluator umí pro původní jedinou Season
+navrhnout complementary Part 1 nebo Part 2 pouze tehdy, když uživatel výslovně
+zvolil P1/P2, vybraná i zbývající množina mají úplný unikátní episode range,
+rozsahy od E01 bez mezery navazují a jejich pořadí odpovídá zvoleným ordinalům.
+První POST nic nezapíše; zobrazí oba výsledné rozsahy a structural labels.
+Teprve explicitně potvrzený druhý POST návrh znovu vyhodnotí nad aktuální DB a v
+jedné transakci nastaví complementary manual snapshot, vytvoří novou část a
+přesune původně vybraná videa.
+
+Shared proposal evaluator současně nabízí nahoře v Hierarchy Review opravu již
+existujícího `S1 + S1`, pokud právě dva Season titles bez Part ordinalů obsahují
+úplné nepřekrývající se řady, které od E01 bez mezery navazují. Potvrzení mění
+pouze manual hierarchy snapshoty stejných CatalogTitle. Jejich ID, video
+membership, metadata vazby, duplicate vazby a canonical numbering zůstávají
+beze změny. Návrh je pokaždé znovu serverově ověřen a bez potvrzovacího checkboxu
+se nic nezapíše.
+
+Žádná complementary inference nevzniká pro Part 3, pro již existující více Parts,
+identické nebo překrývající se rozsahy, mezeru v řadě, neúplné numbering ani
+rozdělení potvrzené duplicate skupiny mezi oba cíle. Tyto případy zůstávají v
+ručním review. Simple i JSON advanced preview nyní kromě assignment konfliktů
+prospektivně kontrolují také výsledný split-season invariant; validní celý P1/P2
+plán projde a partial plán se odmítne už v náhledu.
+
+Změna nepřidává schema, nový obecný workflow framework ani filesystem operace.
+
+Automatická validace navazujícího workflow:
+
+```text
+nové cílené proposal/atomicity/preview scénáře       # 13 passed
+relevantní hierarchy/numbering/UI/lifecycle sada    # 672 passed
+celá testovací sada                                 # 960 passed
 ```
 
 ---

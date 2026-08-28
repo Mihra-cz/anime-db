@@ -1,5 +1,6 @@
 import asyncio
 from http.cookies import SimpleCookie
+import json
 from pathlib import Path
 import re
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -26,7 +27,7 @@ from app.main import (
     get_preferred_title_language, templates,
 )
 from app.hierarchy_review import (
-    PERIOD_HINT_REVIEW_REASON,
+    PERIOD_HINT_REVIEW_REASON, SIMPLE_DEFINITION_FIELDS,
     confirm_duplicate_videos, separate_nonstandard_videos,
     refresh_collection_state, simple_definition_rows, single_title_confirmation_suggestion,
     supplementary_assignment_recommendations,
@@ -1999,6 +2000,529 @@ def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_pat
     assert 'name="return_to" value="hierarchy_review"' in review_html
     assert "Typ celé části" in review_html
     assert "Klasifikace vybraných videí" in review_html
+
+
+def test_hierarchy_review_post_persists_manual_season_part_number(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'season-part-post.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Genjitsu Shugi Yuusha",
+            normalized_local_title="genjitsu shugi yuusha",
+            relative_root_path="Anime/Genjitsu",
+        )
+        first = CatalogTitle(
+            collection=collection,
+            local_title="First half",
+            normalized_local_title="first half",
+            relative_root_path="Anime/Genjitsu/.catalog-part-1",
+            part_type="season",
+            season_number=1,
+            season_label="S1",
+            part_type_manual="season",
+            season_number_manual=1,
+            season_label_manual="S1",
+            part_number_manual=1,
+            hierarchy_manual_override=True,
+            hierarchy_verified_at=utc_now(),
+        )
+        second = CatalogTitle(
+            collection=collection,
+            local_title="Second half",
+            normalized_local_title="second half",
+            relative_root_path="Anime/Genjitsu/.catalog-part-2",
+            part_type="season",
+            season_number=2,
+            season_label="S2",
+        )
+        session.add(collection)
+        session.commit()
+        collection_id, second_id = collection.id, second.id
+
+    endpoints = {
+        route.path: route.endpoint
+        for route in web_app.routes if hasattr(route, "endpoint")
+    }
+    response = endpoints[
+        "/collections/{collection_id}/titles/{catalog_title_id}/hierarchy"
+    ](
+        collection_id,
+        second_id,
+        season_number_manual="1",
+        season_label_manual="S1",
+        part_number_manual="2",
+        part_type_manual="season",
+        sort_order_manual="",
+        hierarchy_verified=True,
+        filter_name="all",
+        q="",
+        sort="",
+        direction="",
+        return_to="hierarchy_review",
+    )
+
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        second = session.get(CatalogTitle, second_id)
+        assert collection.hierarchy_status == "verified"
+        assert second.part_type_manual == "season"
+        assert second.season_number_manual == 1
+        assert second.part_number_manual == 2
+        assert second.effective_season_number == 1
+        assert second.effective_part_number == 2
+
+    rendered = endpoints["/hierarchy-review/{collection_id}"](
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+    card = rendered.split(f'id="title-{second_id}"', 1)[1].split(
+        "</article>", 1,
+    )[0]
+    assert "S1 · Part 2" in card
+    assert 'name="part_number_manual" value="2"' in card
+    assert "každá musí mít unikátní explicitní číslo Part" in card
+
+
+def test_hierarchy_review_post_rejects_duplicate_season_without_parts(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'duplicate-season-post.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        first = CatalogTitle(
+            collection=collection,
+            local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Show/.catalog-part-1",
+            part_type="season",
+            season_number=1,
+            season_label="S1",
+            part_type_manual="season",
+            season_number_manual=1,
+            season_label_manual="S1",
+            hierarchy_manual_override=True,
+            hierarchy_verified_at=utc_now(),
+        )
+        second = CatalogTitle(
+            collection=collection,
+            local_title="Season 2",
+            normalized_local_title="season 2",
+            relative_root_path="Anime/Show/.catalog-part-2",
+            part_type="season",
+            season_number=2,
+            season_label="S2",
+        )
+        session.add(collection)
+        session.commit()
+        collection_id, second_id = collection.id, second.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None)
+        == "/collections/{collection_id}/titles/{catalog_title_id}/hierarchy"
+    )
+    with pytest.raises(HTTPException) as raised:
+        endpoint(
+            collection_id,
+            second_id,
+            season_number_manual="1",
+            season_label_manual="S1",
+            part_number_manual="",
+            part_type_manual="season",
+            sort_order_manual="",
+            hierarchy_verified=True,
+            filter_name="all",
+            q="",
+            sort="",
+            direction="",
+            return_to="hierarchy_review",
+        )
+
+    assert raised.value.status_code == 400
+    assert "Season 1 už v této kolekci existuje" in raised.value.detail
+    assert "unikátní explicitní číslo Part" in raised.value.detail
+    with web_app.state.sessions() as session:
+        second = session.get(CatalogTitle, second_id)
+        assert second.part_type_manual is None
+        assert second.season_number_manual is None
+        assert second.part_number_manual is None
+
+
+def test_existing_duplicate_seasons_render_review_warning_without_backfill(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'existing-duplicate-seasons.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show", hierarchy_status="verified",
+        )
+        titles = []
+        for ordinal in (1, 2):
+            title = CatalogTitle(
+                collection=collection,
+                local_title=f"Half {ordinal}",
+                normalized_local_title=f"half {ordinal}",
+                relative_root_path=f"Anime/Show/.catalog-part-{ordinal}",
+                part_type="season",
+                season_number=1,
+                season_label="S1",
+                part_type_manual="season",
+                season_number_manual=1,
+                season_label_manual="S1",
+                hierarchy_manual_override=True,
+                hierarchy_verified_at=utc_now(),
+            )
+            Video(
+                relative_path=f"Anime/Show/Half {ordinal}/Episode {ordinal:02}.mkv",
+                root_folder="Anime",
+                filename=f"Episode {ordinal:02}.mkv",
+                size=1,
+                mtime_ns=ordinal,
+                season_episode_number=ordinal,
+                catalog_title=title,
+                catalog_collection=collection,
+            )
+            titles.append(title)
+        session.add(collection)
+        refresh_collection_state(collection)
+        session.commit()
+        collection_id = collection.id
+        title_ids = [title.id for title in titles]
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review/{collection_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    assert "stav <strong>review_required</strong>" in rendered
+    assert "Season 1 už v této kolekci existuje" in rendered
+    assert "Chybějící Part 1 se automaticky nedoplňuje" in rendered
+    for title_id in title_ids:
+        assert f'id="title-{title_id}"' in rendered
+    with web_app.state.sessions() as session:
+        titles = [session.get(CatalogTitle, title_id) for title_id in title_ids]
+        assert [title.part_number_manual for title in titles] == [None, None]
+
+
+def test_manage_videos_first_split_renders_confirmation_before_atomic_write(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'assisted-season-split.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Show",
+            part_type="season", season_number=1, season_label="S1",
+            part_type_manual="season", season_number_manual=1,
+            season_label_manual="S1", hierarchy_manual_override=True,
+            hierarchy_verified_at=utc_now(),
+        )
+        for episode in range(1, 25):
+            Video(
+                relative_path=f"Anime/Show/Episode {episode:02}.mkv",
+                root_folder="Anime", filename=f"Episode {episode:02}.mkv",
+                size=1, mtime_ns=episode, local_episode_number=episode,
+                season_episode_number=episode,
+                catalog_title=title, catalog_collection=collection,
+            )
+        session.add(collection)
+        refresh_collection_state(collection, recalculate=False)
+        session.commit()
+        collection_id, source_id = collection.id, title.id
+        selected_ids = [
+            video.id for video in title.videos if video.season_episode_number >= 13
+        ]
+        before_membership = {
+            video.id: video.catalog_title_id for video in collection.videos
+        }
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    path = f"/hierarchy-review/{collection_id}/manage-videos"
+    proposal_response = asyncio.run(endpoints[
+        "/hierarchy-review/{collection_id}/manage-videos"
+    ](post_form_request(web_app, path, [
+        *(("video_ids", str(video_id)) for video_id in selected_ids),
+        ("operation", "create"),
+        ("part_type", "season"),
+        ("local_title", "Part 2"),
+        ("season_number", "1"),
+        ("season_label", "S1"),
+        ("part_number", "2"),
+    ]), collection_id))
+
+    assert proposal_response.status_code == 200
+    rendered = proposal_response.body.decode()
+    assert "Navržené doplnění druhé části Season 1" in rendered
+    assert "E13–E24" in rendered and "S1 · Part 2" in rendered
+    assert "E01–E12" in rendered and "S1 · Part 1" in rendered
+    assert "Návrh zatím nic nezapsal" in rendered
+    assert "Použít návrh a uložit" in rendered
+    assert "Vrátit se k úpravě" in rendered
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        assert len(collection.titles) == 1
+        assert collection.titles[0].part_number_manual is None
+        assert {
+            video.id: video.catalog_title_id for video in collection.videos
+        } == before_membership
+
+    confirm_response = asyncio.run(endpoints[
+        "/hierarchy-review/{collection_id}/manage-videos"
+    ](post_form_request(web_app, path, [
+        *(("video_ids", str(video_id)) for video_id in selected_ids),
+        ("operation", "create"),
+        ("part_type", "season"),
+        ("local_title", "Part 2"),
+        ("season_number", "1"),
+        ("season_label", "S1"),
+        ("part_number", "2"),
+        ("expected_source_title_id", str(source_id)),
+        ("expected_complementary_part_number", "1"),
+        ("apply_complementary_proposal", "true"),
+        ("confirm_split_season", "true"),
+    ]), collection_id))
+
+    assert confirm_response.status_code == 303
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        titles = sorted(collection.titles, key=lambda item: item.part_number_manual)
+        assert [title.id for title in titles if title.part_number_manual == 1] == [source_id]
+        assert [title.part_number_manual for title in titles] == [1, 2]
+        assert [
+            [video.season_episode_number for video in title.videos]
+            for title in titles
+        ] == [list(range(1, 13)), list(range(13, 25))]
+
+
+def test_existing_contiguous_season_parts_render_and_require_explicit_confirmation(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'existing-season-proposal.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Genjitsu", normalized_local_title="genjitsu",
+            relative_root_path="Anime/Genjitsu",
+        )
+        titles = []
+        for index, (start, end) in enumerate(((1, 13), (14, 26)), 1):
+            title = CatalogTitle(
+                collection=collection, local_title=f"Half {index}",
+                normalized_local_title=f"half {index}",
+                relative_root_path=f"Anime/Genjitsu/Half {index}",
+                part_type="season", season_number=1, season_label="S1",
+                part_type_manual="season", season_number_manual=1,
+                season_label_manual="S1", hierarchy_manual_override=True,
+                hierarchy_verified_at=utc_now(),
+            )
+            for episode in range(start, end + 1):
+                Video(
+                    relative_path=f"Anime/Genjitsu/Half {index}/E{episode:02}.mkv",
+                    root_folder="Anime", filename=f"E{episode:02}.mkv",
+                    size=1, mtime_ns=episode, local_episode_number=episode,
+                    season_episode_number=episode,
+                    catalog_title=title, catalog_collection=collection,
+                )
+            titles.append(title)
+        session.add(collection)
+        refresh_collection_state(collection, recalculate=False)
+        session.commit()
+        collection_id = collection.id
+        title_ids = [title.id for title in titles]
+        membership = {
+            video.id: video.catalog_title_id for video in collection.videos
+        }
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    rendered = endpoints["/hierarchy-review/{collection_id}"](
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+    proposal_block = rendered.split('id="split-season-proposals"', 1)[1].split(
+        "</section>", 1,
+    )[0]
+    assert "Navržené řešení rozdělené sezóny" in proposal_block
+    assert "E01–E13" in proposal_block and "S1 · Part 1" in proposal_block
+    assert "E14–E26" in proposal_block and "S1 · Part 2" in proposal_block
+    assert "Toto je pouze návrh" in proposal_block
+    assert 'name="confirm_split_season"' in proposal_block
+    with web_app.state.sessions() as session:
+        assert [
+            session.get(CatalogTitle, title_id).part_number_manual
+            for title_id in title_ids
+        ] == [None, None]
+
+    path = f"/hierarchy-review/{collection_id}/confirm-split-season-parts"
+    with pytest.raises(HTTPException) as rejected:
+        asyncio.run(endpoints[
+            "/hierarchy-review/{collection_id}/confirm-split-season-parts"
+        ](post_form_request(web_app, path, [
+            ("season_number", "1"),
+            *(("title_ids", str(title_id)) for title_id in title_ids),
+        ]), collection_id))
+    assert rejected.value.status_code == 400
+    with web_app.state.sessions() as session:
+        assert [
+            session.get(CatalogTitle, title_id).part_number_manual
+            for title_id in title_ids
+        ] == [None, None]
+
+    response = asyncio.run(endpoints[
+        "/hierarchy-review/{collection_id}/confirm-split-season-parts"
+    ](post_form_request(web_app, path, [
+        ("season_number", "1"),
+        *(("title_ids", str(title_id)) for title_id in title_ids),
+        ("confirm_split_season", "true"),
+    ]), collection_id))
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        assert [
+            session.get(CatalogTitle, title_id).part_number_manual
+            for title_id in title_ids
+        ] == [1, 2]
+        assert {
+            video.id: video.catalog_title_id for video in collection.videos
+        } == membership
+        assert collection.hierarchy_status == "verified"
+
+
+def test_advanced_json_and_simple_preview_share_split_season_validation(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'advanced-season-preview.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Season 1",
+            normalized_local_title="season 1", relative_root_path="Anime/Show",
+        )
+        for episode in range(1, 25):
+            Video(
+                relative_path=f"Anime/Show/E{episode:02}.mkv",
+                root_folder="Anime", filename=f"E{episode:02}.mkv",
+                size=1, mtime_ns=episode, local_episode_number=episode,
+                catalog_title=title, catalog_collection=collection,
+            )
+        session.add(collection)
+        session.commit()
+        collection_id, title_id = collection.id, title.id
+
+    def rows(first_part):
+        return [
+            {
+                "title_id": str(title_id) if index == 1 else "",
+                "local_title": f"Part {index}",
+                "manual_display_title": "",
+                "season_number_manual": "1",
+                "season_label_manual": "S1",
+                "part_number_manual": str(first_part if index == 1 else 2),
+                "part_type_manual": "season",
+                "episode_start": "1" if index == 1 else "13",
+                "episode_end": "12" if index == 1 else "24",
+                "episode_start_offset": "",
+                "numbering_mode": "season_local",
+                "sort_order": "",
+                "filename_pattern": "",
+                "video_ids": "",
+            }
+            for index in (1, 2)
+        ]
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    invalid_rows = rows("")
+    invalid_json = [
+        {
+            key: (
+                int(value) if key in {
+                    "title_id", "season_number_manual", "part_number_manual",
+                    "episode_start", "episode_end",
+                } and value else value or None
+            )
+            for key, value in row.items()
+            if key != "video_ids"
+        }
+        for row in invalid_rows
+    ]
+    invalid_json_response = endpoints["/hierarchy-review/{collection_id}/preview"](
+        web_request(web_app, f"/hierarchy-review/{collection_id}/preview"),
+        collection_id,
+        definitions_json=json.dumps(invalid_json),
+    )
+    assert "všem jejím částem unikátní explicitní číslo Part" in (
+        invalid_json_response.body.decode()
+    )
+
+    simple_path = f"/hierarchy-review/{collection_id}/simple-preview"
+    invalid_simple = asyncio.run(endpoints[
+        "/hierarchy-review/{collection_id}/simple-preview"
+    ](post_form_request(web_app, simple_path, [
+        (field, row[field])
+        for field in SIMPLE_DEFINITION_FIELDS
+        for row in invalid_rows
+    ]), collection_id))
+    assert "všem jejím částem unikátní explicitní číslo Part" in (
+        invalid_simple.body.decode()
+    )
+
+    valid_rows = rows(1)
+    valid_simple = asyncio.run(endpoints[
+        "/hierarchy-review/{collection_id}/simple-preview"
+    ](post_form_request(web_app, simple_path, [
+        (field, row[field])
+        for field in SIMPLE_DEFINITION_FIELDS
+        for row in valid_rows
+    ]), collection_id))
+    valid_rendered = valid_simple.body.decode()
+    assert "Náhled přiřazení" in valid_rendered
+    assert "Nezařazeno: 0 · konflikty: 0" in valid_rendered
 
 
 def test_disabled_buttons_have_shared_inactive_visual_style():

@@ -288,6 +288,68 @@ def test_startup_treats_confirmed_duplicate_as_nonblocking_cleanup(tmp_path):
         assert secondary.duplicate_of_video_id == primary_id
 
 
+def test_startup_flags_existing_duplicate_seasons_without_backfill(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'duplicate-seasons.db'}")
+    Base.metadata.create_all(engine)
+    verified_at = datetime(2024, 2, 3, 4, 5, 6)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show",
+            normalized_local_title="show",
+            relative_root_path="Anime/Show",
+            hierarchy_status="verified",
+        )
+        titles = []
+        for ordinal, episode in ((1, 1), (2, 14)):
+            title = CatalogTitle(
+                collection=collection,
+                local_title=f"Part {ordinal}",
+                normalized_local_title=f"part {ordinal}",
+                relative_root_path=f"Anime/Show/Season 1/Part {ordinal}",
+                part_type="part",
+                season_number=1,
+                part_number=ordinal,
+                season_label="S1",
+                part_type_manual="season",
+                season_number_manual=1,
+                season_label_manual="S1",
+                part_number_manual=None,
+                hierarchy_manual_override=True,
+                hierarchy_verified_at=verified_at,
+            )
+            Video(
+                relative_path=(
+                    f"Anime/Show/Season 1/Part {ordinal}/Episode {episode:02}.mkv"
+                ),
+                root_folder="Anime",
+                filename=f"Episode {episode:02}.mkv",
+                size=1,
+                mtime_ns=episode,
+                catalog_title=title,
+                catalog_collection=collection,
+            )
+            titles.append(title)
+        session.add(collection)
+        session.commit()
+        collection_id = collection.id
+        title_ids = [title.id for title in titles]
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, collection_id)
+        titles = [session.get(CatalogTitle, title_id) for title_id in title_ids]
+        assert collection.hierarchy_status == "review_required"
+        assert "Season 1 už v této kolekci existuje" in collection.hierarchy_note
+        assert [title.part_type_manual for title in titles] == ["season", "season"]
+        assert [title.season_number_manual for title in titles] == [1, 1]
+        assert [title.part_number_manual for title in titles] == [None, None]
+        assert [title.hierarchy_verified_at for title in titles] == [
+            verified_at,
+            verified_at,
+        ]
+
+
 def test_startup_sync_applies_shared_direct_root_season_one_inference(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'structural-sync.db'}")
     Base.metadata.create_all(engine)

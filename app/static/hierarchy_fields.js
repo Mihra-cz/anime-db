@@ -14,11 +14,12 @@
     const partType = typeSelect.value;
     const isSeason = partType === "season";
     const isPart = partType === "part";
+    const hasPartAxis = isSeason || isPart;
     const isConcrete = Boolean(partType);
 
     setFieldState(form, "[data-season-number]", isConcrete);
     setFieldState(form, "[data-season-label]", isConcrete && !isPart);
-    setFieldState(form, "[data-part-number]", isPart);
+    setFieldState(form, "[data-part-number]", hasPartAxis);
 
     const partInput = form.querySelector('input[name="part_number_manual"], input[name="part_number"]');
     if (partInput) partInput.required = isPart;

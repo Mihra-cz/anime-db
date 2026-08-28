@@ -17,6 +17,7 @@ from .hierarchy import parse_explicit_part
 from .hierarchy_authority import (
     activate_manual_hierarchy_snapshot,
     clear_manual_hierarchy_snapshot,
+    split_season_structure_issues,
     structural_hierarchy_issue,
 )
 from .hierarchy_evaluation import (
@@ -55,7 +56,7 @@ from .models import (
     ManualSplitRuleVideo, Video, utc_now,
 )
 from .numbering import (
-    clear_duplicate_group, effective_video_numbering,
+    clear_duplicate_group, effective_video_numbering, is_nonprimary_duplicate_video,
     set_duplicate_group_primary,
     supplementary_context_map, video_numbering_identity,
 )
@@ -228,6 +229,15 @@ class HierarchyReviewDiagnostics:
                 )
                 for video in issue.videos
             )
+            belongs_to_title = belongs_to_title or any(
+                related.id == title_id
+                if title_id is not None
+                else (
+                    not isinstance(title, int)
+                    and related is title
+                )
+                for related in issue.related_catalog_titles
+            )
             if belongs_to_title:
                 direct.append(issue)
                 seen.add(id(issue))
@@ -238,6 +248,64 @@ class HierarchyReviewDiagnostics:
 
     def video_has_blocking_issue(self, video: Video | int) -> bool:
         return any(issue.blocking for issue in self.for_video(video))
+
+
+@dataclass(frozen=True)
+class SeasonEpisodeRange:
+    start: int
+    end: int
+    video_ids: tuple[int, ...]
+
+    @property
+    def label(self) -> str:
+        if self.start == self.end:
+            return f"E{self.start:02}"
+        return f"E{self.start:02}–E{self.end:02}"
+
+
+@dataclass(frozen=True)
+class SplitSeasonPartProposalItem:
+    title_id: int
+    title_name: str
+    season_number: int
+    proposed_part_number: int
+    episode_range: SeasonEpisodeRange
+
+    @property
+    def structural_label(self) -> str:
+        return f"S{self.season_number} · Part {self.proposed_part_number}"
+
+
+@dataclass(frozen=True)
+class ExistingSplitSeasonPartProposal:
+    season_number: int
+    items: tuple[SplitSeasonPartProposalItem, ...]
+
+    @property
+    def title_ids(self) -> tuple[int, ...]:
+        return tuple(item.title_id for item in self.items)
+
+
+@dataclass(frozen=True)
+class ComplementarySeasonPartProposal:
+    source_title_id: int
+    source_title_name: str
+    season_number: int
+    requested_part_number: int
+    complementary_part_number: int
+    selected: SeasonEpisodeRange
+    remaining: SeasonEpisodeRange
+    selected_video_ids: tuple[int, ...]
+    requested_local_title: str
+    requested_season_label: str
+
+    @property
+    def selected_structural_label(self) -> str:
+        return f"S{self.season_number} · Part {self.requested_part_number}"
+
+    @property
+    def remaining_structural_label(self) -> str:
+        return f"S{self.season_number} · Part {self.complementary_part_number}"
 
 
 @dataclass(frozen=True)
@@ -997,6 +1065,7 @@ def confirm_effective_collection_hierarchy(collection: CatalogCollection) -> Non
         raise ValueError(
             "Hierarchii nelze potvrdit, dokud všechny části nemají konkrétní typ."
         )
+    _validate_split_season_structure(collection)
     snapshots = []
     for title in collection.titles:
         _validate_structural_numbers(
@@ -1177,7 +1246,9 @@ def apply_single_title_confirmation(
         title,
         part_type=normalized_type,
         season_number=season_number,
-        part_number=part_number if normalized_type in {"part", "cour"} else None,
+        part_number=(
+            part_number if normalized_type in {"season", "part", "cour"} else None
+        ),
         season_label=label,
         sort_order=title.sort_order_manual,
         verified_at=utc_now(),
@@ -1191,6 +1262,249 @@ def _validate_structural_numbers(
 ) -> None:
     if issue := structural_hierarchy_issue(part_type, season_number, part_number):
         raise ValueError(issue)
+
+
+def _validate_split_season_structure(
+    collection: CatalogCollection,
+    *,
+    override_title: CatalogTitle | None = None,
+    override_part_type: str | None = None,
+    override_season_number: int | None = None,
+    override_part_number: int | None = None,
+) -> None:
+    issues = split_season_structure_issues(
+        collection.titles,
+        override_title=override_title,
+        override_part_type=override_part_type,
+        override_season_number=override_season_number,
+        override_part_number=override_part_number,
+    )
+    if issues:
+        raise ValueError(issues[0].message)
+
+
+@dataclass(frozen=True)
+class _ProjectedHierarchyTitle:
+    effective_part_type: str
+    effective_season_number: int | None
+    effective_part_number: int | None
+
+
+def _safe_contiguous_episode_range(
+    videos: list[Video], title: CatalogTitle,
+) -> SeasonEpisodeRange | None:
+    if not videos:
+        return None
+    video_ids = {video.id for video in videos}
+    numbered: list[tuple[int, int]] = []
+    for video in videos:
+        if is_nonprimary_duplicate_video(video):
+            if video.duplicate_of_video_id not in video_ids:
+                return None
+            continue
+        state = effective_video_numbering(video, title)
+        if (
+            video.id is None
+            or not state.is_standard
+            or state.season_episode_number is None
+        ):
+            return None
+        numbered.append((state.season_episode_number, video.id))
+    if not numbered:
+        return None
+    numbers = [number for number, _ in numbered]
+    if len(set(numbers)) != len(numbers):
+        return None
+    ordered = sorted(numbers)
+    if ordered != list(range(ordered[0], ordered[-1] + 1)):
+        return None
+    return SeasonEpisodeRange(
+        start=ordered[0],
+        end=ordered[-1],
+        video_ids=tuple(video_id for _, video_id in sorted(numbered)),
+    )
+
+
+def _ranges_are_safe_first_two_parts(
+    first: SeasonEpisodeRange, second: SeasonEpisodeRange,
+) -> bool:
+    return first.start == 1 and first.end + 1 == second.start
+
+
+def existing_split_season_part_proposals(
+    collection: CatalogCollection,
+) -> tuple[ExistingSplitSeasonPartProposal, ...]:
+    """Return only unambiguous, contiguous P1/P2 suggestions; never authority."""
+    by_season: dict[int, list[CatalogTitle]] = {}
+    for title in collection.titles:
+        if (
+            title.effective_part_type == "season"
+            and title.effective_season_number is not None
+        ):
+            by_season.setdefault(title.effective_season_number, []).append(title)
+
+    proposals: list[ExistingSplitSeasonPartProposal] = []
+    for season_number, titles in sorted(by_season.items()):
+        if (
+            len(titles) != 2
+            or any(title.id is None for title in titles)
+            or any(title.effective_part_number is not None for title in titles)
+        ):
+            continue
+        ranged = [
+            (title, _safe_contiguous_episode_range(list(title.videos), title))
+            for title in titles
+        ]
+        if any(episode_range is None for _, episode_range in ranged):
+            continue
+        ordered = sorted(ranged, key=lambda item: item[1].start)
+        first_range = ordered[0][1]
+        second_range = ordered[1][1]
+        if not _ranges_are_safe_first_two_parts(first_range, second_range):
+            continue
+        proposals.append(ExistingSplitSeasonPartProposal(
+            season_number=season_number,
+            items=tuple(
+                SplitSeasonPartProposalItem(
+                    title_id=title.id,
+                    title_name=title.local_title,
+                    season_number=season_number,
+                    proposed_part_number=part_number,
+                    episode_range=episode_range,
+                )
+                for part_number, (title, episode_range) in enumerate(ordered, 1)
+            ),
+        ))
+    return tuple(proposals)
+
+
+def complementary_season_part_proposal(
+    collection: CatalogCollection,
+    selected: list[Video],
+    *,
+    part_type: str,
+    season_number: int | None,
+    part_number: int | None,
+    local_title: str = "",
+    season_label: str | None = None,
+) -> ComplementarySeasonPartProposal | None:
+    """Suggest the other P1/P2 ordinal only for a safe first split of one S1."""
+    normalized_type = part_type.strip().casefold()
+    if (
+        normalized_type != "season"
+        or season_number is None
+        or part_number not in {1, 2}
+        or not selected
+    ):
+        return None
+    source_titles = {
+        video.catalog_title for video in selected if video.catalog_title is not None
+    }
+    if len(source_titles) != 1:
+        return None
+    source = next(iter(source_titles))
+    if (
+        source.id is None
+        or any(video.catalog_title is not source for video in selected)
+        or source.effective_part_type != "season"
+        or source.effective_season_number != season_number
+        or source.effective_part_number is not None
+    ):
+        return None
+    same_season = [
+        title for title in collection.titles
+        if title.effective_part_type == "season"
+        and title.effective_season_number == season_number
+    ]
+    if same_season != [source]:
+        return None
+    selected_ids = {video.id for video in selected}
+    remaining = [
+        video for video in source.videos if video.id not in selected_ids
+    ]
+    selected_range = _safe_contiguous_episode_range(selected, source)
+    remaining_range = _safe_contiguous_episode_range(remaining, source)
+    if selected_range is None or remaining_range is None:
+        return None
+    ordered = sorted((selected_range, remaining_range), key=lambda item: item.start)
+    if not _ranges_are_safe_first_two_parts(ordered[0], ordered[1]):
+        return None
+    selected_should_be_first = part_number == 1
+    if (selected_range is ordered[0]) != selected_should_be_first:
+        return None
+    return ComplementarySeasonPartProposal(
+        source_title_id=source.id,
+        source_title_name=source.local_title,
+        season_number=season_number,
+        requested_part_number=part_number,
+        complementary_part_number=2 if part_number == 1 else 1,
+        selected=selected_range,
+        remaining=remaining_range,
+        selected_video_ids=tuple(sorted(video.id for video in selected)),
+        requested_local_title=local_title.strip(),
+        requested_season_label=(season_label or "").strip(),
+    )
+
+
+def complementary_season_part_proposal_for_videos(
+    session: Session,
+    collection_id: int,
+    video_ids: list[int],
+    *,
+    part_type: str,
+    season_number: int | None,
+    part_number: int | None,
+    local_title: str = "",
+    season_label: str | None = None,
+) -> ComplementarySeasonPartProposal | None:
+    collection = _load_collection_for_assignment(session, collection_id)
+    selected = _selected_videos(collection, video_ids)
+    return complementary_season_part_proposal(
+        collection,
+        selected,
+        part_type=part_type,
+        season_number=season_number,
+        part_number=part_number,
+        local_title=local_title,
+        season_label=season_label,
+    )
+
+
+def _validate_manual_split_structure(
+    collection: CatalogCollection,
+    definitions: list[ManualTitleDefinition],
+) -> None:
+    definitions_by_id = {
+        definition.title_id: definition
+        for definition in definitions
+        if definition.title_id is not None
+    }
+    projected: list[_ProjectedHierarchyTitle] = []
+    for title in collection.titles:
+        definition = definitions_by_id.get(title.id)
+        if definition is not None and definition.part_type_manual is not None:
+            projected.append(_ProjectedHierarchyTitle(
+                effective_part_type=definition.part_type_manual,
+                effective_season_number=definition.season_number_manual,
+                effective_part_number=definition.part_number_manual,
+            ))
+        else:
+            projected.append(_ProjectedHierarchyTitle(
+                effective_part_type=title.effective_part_type,
+                effective_season_number=title.effective_season_number,
+                effective_part_number=title.effective_part_number,
+            ))
+    projected.extend(
+        _ProjectedHierarchyTitle(
+            effective_part_type=definition.part_type_manual,
+            effective_season_number=definition.season_number_manual,
+            effective_part_number=definition.part_number_manual,
+        )
+        for definition in definitions
+        if definition.title_id is None and definition.part_type_manual is not None
+    )
+    if issues := split_season_structure_issues(projected):
+        raise ValueError(issues[0].message)
 
 
 def set_manual_title_hierarchy(
@@ -1229,11 +1543,19 @@ def set_manual_title_hierarchy(
         snapshot_type = normalized_type
         snapshot_season_number = season_number
         snapshot_part_number = part_number
-        if snapshot_type not in {"part", "cour"}:
+        if snapshot_type not in {"season", "part", "cour"}:
             snapshot_part_number = None
         _validate_structural_numbers(
             snapshot_type, snapshot_season_number, snapshot_part_number,
         )
+        if title.collection is not None:
+            _validate_split_season_structure(
+                title.collection,
+                override_title=title,
+                override_part_type=snapshot_type,
+                override_season_number=snapshot_season_number,
+                override_part_number=snapshot_part_number,
+            )
         if snapshot_type == "part":
             snapshot_label = (
                 normalized_label
@@ -1441,7 +1763,10 @@ def preview_assignments(
 ) -> AssignmentPreview:
     if collection is not None:
         _validate_manual_split_definition_targets(collection, definitions)
-    return evaluate_manual_split_assignment(videos, definitions)
+    preview = evaluate_manual_split_assignment(videos, definitions)
+    if collection is not None:
+        _validate_manual_split_structure(collection, definitions)
+    return preview
 
 
 def _load_collection_for_assignment(session: Session, collection_id: int) -> CatalogCollection:
@@ -1563,6 +1888,7 @@ def create_title_from_videos(
     local_title: str = "", part_type: str, season_number: int | None = None,
     season_label: str | None = None, part_number: int | None = None,
     sort_order: int | None = None,
+    recalculate: bool = True,
 ) -> CatalogTitle:
     normalized_type = part_type.strip().casefold()
     if normalized_type not in PART_TYPES:
@@ -1608,18 +1934,192 @@ def create_title_from_videos(
         title,
         part_type=normalized_type,
         season_number=season_number,
-        part_number=part_number if normalized_type in {"part", "cour"} else None,
+        part_number=(
+            part_number if normalized_type in {"season", "part", "cour"} else None
+        ),
         season_label=normalized_label,
         sort_order=sort_order,
         verified_at=utc_now(),
     )
+    _validate_split_season_structure(collection)
     replace_explicit_video_selector_authority(selected, title)
     for video in selected:
         video.catalog_title = title
         video.catalog_collection = collection
     session.flush()
-    refresh_collection_state(collection)
+    refresh_collection_state(collection, recalculate=recalculate)
     return title
+
+
+def create_title_with_complementary_season_part(
+    session: Session,
+    collection_id: int,
+    video_ids: list[int],
+    *,
+    local_title: str,
+    season_number: int,
+    season_label: str | None,
+    part_number: int,
+    expected_source_title_id: int,
+    expected_complementary_part_number: int,
+) -> CatalogTitle:
+    """Atomically apply an explicitly confirmed safe first P1/P2 split."""
+    collection = _load_collection_for_assignment(session, collection_id)
+    selected = _selected_videos(collection, video_ids)
+    proposal = complementary_season_part_proposal(
+        collection,
+        selected,
+        part_type="season",
+        season_number=season_number,
+        part_number=part_number,
+        local_title=local_title,
+        season_label=season_label,
+    )
+    if (
+        proposal is None
+        or proposal.source_title_id != expected_source_title_id
+        or proposal.complementary_part_number != expected_complementary_part_number
+        or proposal.selected_video_ids != tuple(sorted(video_ids))
+    ):
+        raise ValueError(
+            "Návrh rozdělené sezóny už neodpovídá aktuálním datům; "
+            "načtěte Hierarchy Review znovu."
+        )
+    original_membership = {
+        video.id: video.catalog_title_id for video in collection.videos
+    }
+    original_numbering = {
+        video.id: (
+            video.local_episode_number,
+            video.season_episode_number,
+            video.absolute_episode_number,
+            video.external_episode_number,
+        )
+        for video in collection.videos
+    }
+    original_duplicates = {
+        video.id: video.duplicate_of_video_id for video in collection.videos
+    }
+    source = next(
+        title for title in collection.titles
+        if title.id == proposal.source_title_id
+    )
+    source_label = source.effective_season_label or f"S{season_number}"
+    activate_manual_hierarchy_snapshot(
+        source,
+        part_type="season",
+        season_number=season_number,
+        part_number=proposal.complementary_part_number,
+        season_label=source_label,
+        sort_order=source.sort_order_manual,
+        verified_at=utc_now(),
+    )
+    title = create_title_from_videos(
+        session,
+        collection_id,
+        video_ids,
+        local_title=local_title,
+        part_type="season",
+        season_number=season_number,
+        season_label=season_label,
+        part_number=part_number,
+        recalculate=False,
+    )
+    _validate_split_season_structure(collection)
+    selected_ids = set(proposal.selected_video_ids)
+    if any(
+        video.catalog_title_id != (
+            title.id if video.id in selected_ids else original_membership[video.id]
+        )
+        for video in collection.videos
+    ):
+        raise ValueError("Atomické rozdělení změnilo jiné video membership.")
+    if original_numbering != {
+        video.id: (
+            video.local_episode_number,
+            video.season_episode_number,
+            video.absolute_episode_number,
+            video.external_episode_number,
+        )
+        for video in collection.videos
+    }:
+        raise ValueError("Part ordinal nesmí změnit canonical episode numbering.")
+    if original_duplicates != {
+        video.id: video.duplicate_of_video_id for video in collection.videos
+    }:
+        raise ValueError("Rozdělení Season nesmí změnit duplicate vazby.")
+    return title
+
+
+def confirm_existing_split_season_parts(
+    session: Session,
+    collection_id: int,
+    *,
+    season_number: int,
+    title_ids: list[int],
+) -> ExistingSplitSeasonPartProposal:
+    """Persist a freshly revalidated contiguous P1/P2 proposal without moving videos."""
+    collection = _load_collection_for_assignment(session, collection_id)
+    requested_ids = tuple(title_ids)
+    proposal = next((
+        item for item in existing_split_season_part_proposals(collection)
+        if item.season_number == season_number
+        and item.title_ids == requested_ids
+    ), None)
+    if proposal is None:
+        raise ValueError(
+            "Návrh rozdělené sezóny už neodpovídá aktuálním datům; "
+            "načtěte Hierarchy Review znovu."
+        )
+    membership = {
+        video.id: video.catalog_title_id for video in collection.videos
+    }
+    numbering = {
+        video.id: (
+            video.local_episode_number,
+            video.season_episode_number,
+            video.absolute_episode_number,
+            video.external_episode_number,
+        )
+        for video in collection.videos
+    }
+    duplicate_links = {
+        video.id: video.duplicate_of_video_id for video in collection.videos
+    }
+    titles_by_id = {title.id: title for title in collection.titles}
+    now = utc_now()
+    for item in proposal.items:
+        title = titles_by_id[item.title_id]
+        activate_manual_hierarchy_snapshot(
+            title,
+            part_type="season",
+            season_number=season_number,
+            part_number=item.proposed_part_number,
+            season_label=title.effective_season_label or f"S{season_number}",
+            sort_order=title.sort_order_manual,
+            verified_at=now,
+        )
+    _validate_split_season_structure(collection)
+    refresh_collection_state(collection, recalculate=False)
+    if membership != {
+        video.id: video.catalog_title_id for video in collection.videos
+    }:
+        raise ValueError("Potvrzení Part ordinalů nesmí změnit video membership.")
+    if numbering != {
+        video.id: (
+            video.local_episode_number,
+            video.season_episode_number,
+            video.absolute_episode_number,
+            video.external_episode_number,
+        )
+        for video in collection.videos
+    }:
+        raise ValueError("Potvrzení Part ordinalů nesmí změnit canonical numbering.")
+    if duplicate_links != {
+        video.id: video.duplicate_of_video_id for video in collection.videos
+    }:
+        raise ValueError("Potvrzení Part ordinalů nesmí změnit duplicate vazby.")
+    return proposal
 
 
 def assign_known_videos_to_title(
@@ -1851,7 +2351,7 @@ def apply_manual_split(
         title.manual_display_title = definition.manual_display_title
         if definition.part_type_manual is not None:
             snapshot_part_number = definition.part_number_manual
-            if definition.part_type_manual not in {"part", "cour"}:
+            if definition.part_type_manual not in {"season", "part", "cour"}:
                 snapshot_part_number = None
             activate_manual_hierarchy_snapshot(
                 title,
@@ -1868,6 +2368,7 @@ def apply_manual_split(
         title.numbering_mode = definition.numbering_mode
         title.episode_filename_pattern = definition.filename_pattern
         resolved.append(title)
+    _validate_split_season_structure(collection)
     session.flush()
     synchronize_manual_split_authority(
         definitions,

@@ -16,6 +16,7 @@ from app.catalog import (
 from app.hierarchy_review import (
     MISSING_DUPLICATE_PRIMARY_REVIEW_REASON, SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
     confirm_duplicate_videos, set_manual_duplicate_status,
+    set_manual_title_hierarchy,
 )
 from app.hierarchy_authority import activate_manual_hierarchy_snapshot
 from app.models import (
@@ -401,6 +402,57 @@ def test_scan_does_not_overwrite_manual_part_snapshot(tmp_path: Path, monkeypatc
         assert title.part_number_manual == 4
         assert title.effective_season_number == 3
         assert title.effective_part_number == 4
+
+
+def test_manual_season_parts_survive_startup_and_rescan(
+    tmp_path: Path,
+    monkeypatch,
+):
+    paths = [
+        tmp_path / "Show" / "Season 1" / "Part 1" / "Episode 01.mkv",
+        tmp_path / "Show" / "Season 1" / "Part 2" / "Episode 14.mkv",
+    ]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"video")
+    before = {path: path.read_bytes() for path in paths}
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine(f"sqlite:///{tmp_path / 'season-parts.db'}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        titles = list(session.scalars(
+            select(CatalogTitle).order_by(CatalogTitle.part_number)
+        ))
+        assert [title.part_number for title in titles] == [1, 2]
+        for title, part_number in zip(titles, (1, 2), strict=True):
+            set_manual_title_hierarchy(
+                title,
+                part_type="season",
+                season_number=1,
+                season_label="S1",
+                part_number=part_number,
+                sort_order=None,
+                hierarchy_verified=True,
+            )
+        session.commit()
+        collection_id = titles[0].catalog_collection_id
+        title_ids = [title.id for title in titles]
+
+    migrate_schema(engine)
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        collection = session.get(CatalogCollection, collection_id)
+        titles = [session.get(CatalogTitle, title_id) for title_id in title_ids]
+        assert collection.hierarchy_status == "verified"
+        assert [title.part_type_manual for title in titles] == ["season", "season"]
+        assert [title.season_number_manual for title in titles] == [1, 1]
+        assert [title.part_number_manual for title in titles] == [1, 2]
+        assert [title.effective_part_number for title in titles] == [1, 2]
+        assert [title.videos[0].season_episode_number for title in titles] == [1, 14]
+
+    assert {path: path.read_bytes() for path in paths} == before
 
 
 def test_scan_keeps_ova_beside_season_episode_out_of_standard_numbering(

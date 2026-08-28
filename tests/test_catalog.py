@@ -622,6 +622,27 @@ def test_effective_part_number_uses_manual_value_only_for_manual_snapshot():
     assert catalog_title_series_label(title) == "S1 · Part 3"
 
 
+def test_manual_season_part_uses_existing_structural_label():
+    title = CatalogTitle(
+        local_title="Season 1 split",
+        normalized_local_title="season 1 split",
+        relative_root_path="Anime/Show/.catalog-part-2",
+        part_type="season",
+        season_number=1,
+        season_label="S1",
+        part_type_manual="season",
+        season_number_manual=1,
+        season_label_manual="S1",
+        part_number_manual=2,
+        hierarchy_manual_override=True,
+    )
+
+    assert title.effective_part_type == "season"
+    assert title.effective_season_number == 1
+    assert title.effective_part_number == 2
+    assert catalog_title_series_label(title) == "S1 · Part 2"
+
+
 def test_root_videos_use_workflow_group_instead_of_fake_dot_collection():
     pseudo_collection = CatalogCollection(
         id=1, local_title="Knihovna", normalized_local_title="knihovna",

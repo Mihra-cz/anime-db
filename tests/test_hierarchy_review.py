@@ -25,6 +25,10 @@ from app.hierarchy_review import (
     delete_empty_local_title, extract_local_period_hint, merge_title_into,
     move_videos_to_title, parse_manual_definitions, parse_simple_definitions,
     definitions_as_json, preview_assignments, refresh_collection_state,
+    complementary_season_part_proposal_for_videos,
+    confirm_existing_split_season_parts,
+    create_title_with_complementary_season_part,
+    existing_split_season_part_proposals,
     separate_nonstandard_videos,
     set_manual_duplicate_status, set_manual_title_hierarchy,
     simple_definition_rows,
@@ -683,6 +687,131 @@ def test_manual_part_requires_ordinal_and_stores_season_and_part_independently()
     assert collection.hierarchy_status == "verified"
 
 
+def _season_sibling(
+    collection: CatalogCollection,
+    *,
+    title_id: int,
+    season_number: int,
+    part_number: int | None = None,
+    manual: bool = False,
+) -> CatalogTitle:
+    return CatalogTitle(
+        id=title_id,
+        collection=collection,
+        local_title=f"Season {season_number} part {title_id}",
+        normalized_local_title=f"season {season_number} part {title_id}",
+        relative_root_path=f"Anime/Show/.catalog-part-{title_id}",
+        part_type="season",
+        season_number=season_number,
+        season_label=f"S{season_number}",
+        part_type_manual="season" if manual else None,
+        season_number_manual=season_number if manual else None,
+        season_label_manual=f"S{season_number}" if manual else None,
+        part_number_manual=part_number if manual else None,
+        hierarchy_manual_override=manual,
+        hierarchy_verified_at=utc_now() if manual else None,
+    )
+
+
+def test_manual_season_accepts_part_number_as_independent_axis():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    first = _season_sibling(
+        collection, title_id=1, season_number=1, part_number=1, manual=True,
+    )
+    second = _season_sibling(collection, title_id=2, season_number=2)
+
+    set_manual_title_hierarchy(
+        second,
+        season_number=1,
+        season_label="S1",
+        part_type="season",
+        part_number=2,
+        sort_order=None,
+        hierarchy_verified=True,
+    )
+
+    assert (
+        first.effective_season_number,
+        first.effective_part_number,
+        second.effective_season_number,
+        second.effective_part_number,
+    ) == (1, 1, 1, 2)
+    assert second.part_type_manual == "season"
+    assert second.part_number_manual == 2
+    assert catalog_title_series_label(second) == "S1 · Part 2"
+    assert collection.hierarchy_status == "verified"
+
+
+@pytest.mark.parametrize(
+    ("existing_part", "submitted_part", "message"),
+    [
+        (None, None, "všem jejím částem"),
+        (None, 2, "všem jejím částem"),
+        (1, 1, "Part 1 je použito vícekrát"),
+    ],
+)
+def test_manual_duplicate_season_requires_complete_unique_part_numbers(
+    existing_part,
+    submitted_part,
+    message,
+):
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    _season_sibling(
+        collection,
+        title_id=1,
+        season_number=1,
+        part_number=existing_part,
+        manual=True,
+    )
+    second = _season_sibling(collection, title_id=2, season_number=2)
+
+    with pytest.raises(ValueError, match=message):
+        set_manual_title_hierarchy(
+            second,
+            season_number=1,
+            season_label="S1",
+            part_type="season",
+            part_number=submitted_part,
+            sort_order=None,
+            hierarchy_verified=True,
+        )
+
+    assert second.part_type_manual is None
+    assert second.season_number_manual is None
+    assert second.part_number_manual is None
+
+
+def test_manual_different_seasons_do_not_require_part_numbers():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    first = _season_sibling(
+        collection, title_id=1, season_number=1, manual=True,
+    )
+    second = _season_sibling(collection, title_id=2, season_number=2)
+
+    set_manual_title_hierarchy(
+        second,
+        season_number=2,
+        season_label="S2",
+        part_type="season",
+        part_number=None,
+        sort_order=None,
+        hierarchy_verified=True,
+    )
+
+    assert first.effective_part_number is None
+    assert second.effective_part_number is None
+    assert collection.hierarchy_status == "verified"
+
+
 def test_part_without_ordinal_remains_review_required():
     collection, title = simple_collection(part_type="part", status="automatic")
     title.season_number = 1
@@ -772,6 +901,7 @@ def test_manual_title_hierarchy_stores_authoritative_season_two_snapshot():
 
     assert title.part_type_manual == "season"
     assert title.season_number_manual == 2
+    assert title.part_number_manual is None
     assert title.season_label_manual == "S2"
     assert title.sort_order_manual == 1
     assert title.hierarchy_manual_override is True
@@ -1104,6 +1234,408 @@ def test_manual_split_creates_two_titles_and_assigns_ranges():
         collection = session.get(CatalogCollection, collection_id)
         assert collection.hierarchy_status == "verified"
         assert collection.hierarchy_verified_at is not None
+
+
+def test_manual_split_can_repair_existing_duplicate_seasons_atomically():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show", hierarchy_status="verified",
+        )
+        titles = []
+        for ordinal, episode in ((1, 1), (2, 14)):
+            title = CatalogTitle(
+                collection=collection,
+                local_title=f"Half {ordinal}",
+                normalized_local_title=f"half {ordinal}",
+                relative_root_path=f"Anime/Show/.catalog-part-{ordinal}",
+                part_type="season",
+                season_number=1,
+                season_label="S1",
+                part_type_manual="season",
+                season_number_manual=1,
+                season_label_manual="S1",
+                hierarchy_manual_override=True,
+                hierarchy_verified_at=utc_now(),
+            )
+            Video(
+                relative_path=f"Anime/Show/Half {ordinal}/Episode {episode:02}.mkv",
+                root_folder="Anime",
+                filename=f"Episode {episode:02}.mkv",
+                size=1,
+                mtime_ns=episode,
+                catalog_title=title,
+                catalog_collection=collection,
+            )
+            titles.append(title)
+        session.add(collection)
+        session.commit()
+
+        definitions = [
+            ManualTitleDefinition(
+                title_id=title.id,
+                local_title=title.local_title,
+                manual_display_title=None,
+                season_number_manual=1,
+                season_label_manual="S1",
+                part_number_manual=ordinal,
+                part_type_manual="season",
+                episode_start=start,
+                episode_end=end,
+                episode_start_offset=None,
+                numbering_mode="unknown",
+                sort_order=None,
+                filename_pattern=None,
+                video_ids=(),
+            )
+            for title, ordinal, start, end in (
+                (titles[0], 1, 1, 13),
+                (titles[1], 2, 14, 26),
+            )
+        ]
+
+        apply_manual_split(session, collection.id, definitions)
+        session.flush()
+
+        assert [title.part_type_manual for title in titles] == ["season", "season"]
+        assert [title.season_number_manual for title in titles] == [1, 1]
+        assert [title.part_number_manual for title in titles] == [1, 2]
+        assert collection.hierarchy_status == "verified"
+        assert [title.effective_part_number for title in titles] == [1, 2]
+        assert [len(title.videos) for title in titles] == [1, 1]
+        assert [title.videos[0].season_episode_number for title in titles] == [1, 14]
+
+
+def _confirm_seeded_collection_as_unsplit_season(
+    session: Session, collection_id: int, title_id: int,
+) -> CatalogTitle:
+    title = session.get(CatalogTitle, title_id)
+    set_manual_title_hierarchy(
+        title,
+        season_number=1,
+        season_label="S1",
+        part_type="season",
+        part_number=None,
+        sort_order=None,
+        hierarchy_verified=True,
+    )
+    session.flush()
+    return title
+
+
+@pytest.mark.parametrize(
+    ("requested_part", "selected_numbers", "complementary_part"),
+    (
+        (2, range(13, 25), 1),
+        (1, range(1, 13), 2),
+    ),
+)
+def test_first_individual_video_split_requires_and_atomically_applies_complementary_part(
+    requested_part, selected_numbers, complementary_part,
+):
+    engine, collection_id, title_id = seeded_collection(24)
+    selected_numbers = set(selected_numbers)
+    with Session(engine) as session:
+        source = _confirm_seeded_collection_as_unsplit_season(
+            session, collection_id, title_id,
+        )
+        selected_ids = [
+            video.id for video in source.videos
+            if video.local_episode_number in selected_numbers
+        ]
+        original_membership = {
+            video.id: video.catalog_title_id for video in source.videos
+        }
+        original_numbering = {
+            video.id: video.season_episode_number for video in source.videos
+        }
+
+        proposal = complementary_season_part_proposal_for_videos(
+            session,
+            collection_id,
+            selected_ids,
+            part_type="season",
+            season_number=1,
+            part_number=requested_part,
+            local_title=f"Part {requested_part}",
+            season_label="S1",
+        )
+
+        assert proposal is not None
+        assert proposal.complementary_part_number == complementary_part
+        assert proposal.selected.label == (
+            "E01–E12" if requested_part == 1 else "E13–E24"
+        )
+        assert {
+            video.id: video.catalog_title_id for video in source.videos
+        } == original_membership
+        created = create_title_with_complementary_season_part(
+            session,
+            collection_id,
+            selected_ids,
+            local_title=f"Part {requested_part}",
+            season_number=1,
+            season_label="S1",
+            part_number=requested_part,
+            expected_source_title_id=proposal.source_title_id,
+            expected_complementary_part_number=complementary_part,
+        )
+        session.flush()
+
+        titles = session.scalars(
+            select(CatalogTitle).order_by(CatalogTitle.part_number_manual)
+        ).all()
+        assert [title.id for title in titles if title.part_number_manual == complementary_part] == [title_id]
+        assert [(title.season_number_manual, title.part_number_manual) for title in titles] == [
+            (1, 1), (1, 2),
+        ]
+        assert {
+            video.local_episode_number for video in created.videos
+        } == selected_numbers
+        assert {
+            video.local_episode_number for video in source.videos
+        } == set(range(1, 25)) - selected_numbers
+        assert {
+            video.id: video.season_episode_number
+            for title in titles for video in title.videos
+        } == original_numbering
+        assert session.get(CatalogCollection, collection_id).hierarchy_status == "verified"
+
+
+def test_rejected_or_stale_complementary_part_proposal_writes_nothing():
+    engine, collection_id, title_id = seeded_collection(24)
+    with Session(engine) as session:
+        source = _confirm_seeded_collection_as_unsplit_season(
+            session, collection_id, title_id,
+        )
+        selected_ids = [
+            video.id for video in source.videos
+            if video.local_episode_number >= 13
+        ]
+        before = {
+            video.id: video.catalog_title_id for video in source.videos
+        }
+        proposal = complementary_season_part_proposal_for_videos(
+            session, collection_id, selected_ids,
+            part_type="season", season_number=1, part_number=2,
+        )
+        assert proposal is not None
+        assert len(session.get(CatalogCollection, collection_id).titles) == 1
+        assert {video.id: video.catalog_title_id for video in source.videos} == before
+
+        with pytest.raises(ValueError, match="neodpovídá aktuálním datům"):
+            create_title_with_complementary_season_part(
+                session, collection_id, selected_ids,
+                local_title="Part 2", season_number=1, season_label="S1",
+                part_number=2, expected_source_title_id=title_id,
+                expected_complementary_part_number=2,
+            )
+        assert source.part_number_manual is None
+        assert len(session.get(CatalogCollection, collection_id).titles) == 1
+        assert {video.id: video.catalog_title_id for video in source.videos} == before
+
+
+def test_unsplit_season_part_three_has_no_complementary_inference_and_is_rejected():
+    engine, collection_id, title_id = seeded_collection(24)
+    with Session(engine) as session:
+        source = _confirm_seeded_collection_as_unsplit_season(
+            session, collection_id, title_id,
+        )
+        selected_ids = [
+            video.id for video in source.videos
+            if video.local_episode_number >= 13
+        ]
+        assert complementary_season_part_proposal_for_videos(
+            session, collection_id, selected_ids,
+            part_type="season", season_number=1, part_number=3,
+        ) is None
+        with pytest.raises(ValueError, match="Season 1 už"):
+            create_title_from_videos(
+                session, collection_id, selected_ids,
+                local_title="Part 3", part_type="season",
+                season_number=1, part_number=3,
+            )
+        session.rollback()
+        collection = session.get(CatalogCollection, collection_id)
+        assert len(collection.titles) == 1
+        assert collection.titles[0].part_number_manual is None
+        assert len(collection.titles[0].videos) == 24
+
+
+def test_existing_parts_accept_third_part_without_complementary_proposal():
+    engine, collection_id, title_id = seeded_collection(24)
+    with Session(engine) as session:
+        apply_manual_split(session, collection_id, [
+            ManualTitleDefinition(
+                title_id=title_id if part == 1 else None,
+                local_title=f"Part {part}", manual_display_title=None,
+                season_number_manual=1, season_label_manual="S1",
+                part_number_manual=part, part_type_manual="season",
+                episode_start=start, episode_end=end,
+                episode_start_offset=None, numbering_mode="season_local",
+                sort_order=None, filename_pattern=None, video_ids=(),
+            )
+            for part, start, end in ((1, 1, 12), (2, 13, 24))
+        ])
+        session.flush()
+        second = next(
+            title for title in session.get(CatalogCollection, collection_id).titles
+            if title.part_number_manual == 2
+        )
+        selected_ids = [
+            video.id for video in second.videos
+            if video.local_episode_number >= 21
+        ]
+        assert complementary_season_part_proposal_for_videos(
+            session, collection_id, selected_ids,
+            part_type="season", season_number=1, part_number=3,
+        ) is None
+        created = create_title_from_videos(
+            session, collection_id, selected_ids,
+            local_title="Part 3", part_type="season",
+            season_number=1, season_label="S1", part_number=3,
+        )
+        session.flush()
+        assert created.part_number_manual == 3
+        assert sorted(
+            title.part_number_manual
+            for title in session.get(CatalogCollection, collection_id).titles
+        ) == [1, 2, 3]
+
+
+def _seed_existing_split_candidate(
+    session: Session,
+    ranges: tuple[tuple[int, int], tuple[int, int]],
+) -> tuple[CatalogCollection, tuple[CatalogTitle, CatalogTitle]]:
+    collection = CatalogCollection(
+        local_title="Genjitsu", normalized_local_title="genjitsu",
+        relative_root_path="Anime/Genjitsu",
+    )
+    titles = []
+    for index, (start, end) in enumerate(ranges, 1):
+        title = CatalogTitle(
+            collection=collection, local_title=f"Half {index}",
+            normalized_local_title=f"half {index}",
+            relative_root_path=f"Anime/Genjitsu/Half {index}",
+            part_type="season", season_number=1, season_label="S1",
+            part_type_manual="season", season_number_manual=1,
+            season_label_manual="S1", hierarchy_manual_override=True,
+            hierarchy_verified_at=utc_now(),
+        )
+        for episode in range(start, end + 1):
+            Video(
+                relative_path=f"Anime/Genjitsu/Half {index}/Episode {episode:02}.mkv",
+                root_folder="Anime", filename=f"Episode {episode:02}.mkv",
+                size=1, mtime_ns=episode, local_episode_number=episode,
+                season_episode_number=episode,
+                catalog_title=title, catalog_collection=collection,
+            )
+        titles.append(title)
+    session.add(collection)
+    session.flush()
+    refresh_collection_state(collection, recalculate=False)
+    return collection, (titles[0], titles[1])
+
+
+def test_existing_contiguous_split_proposal_changes_only_manual_part_identity():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection, titles = _seed_existing_split_candidate(
+            session, ((1, 13), (14, 26)),
+        )
+        metadata = TitleMetadata(
+            catalog_title_id=titles[0].id,
+            display_title="Genjitsu",
+            metadata_provider="anilist",
+        )
+        session.add(metadata)
+        session.flush()
+        title_ids = tuple(title.id for title in titles)
+        membership = {
+            video.id: video.catalog_title_id for video in collection.videos
+        }
+        numbering = {
+            video.id: video.season_episode_number for video in collection.videos
+        }
+        proposals = existing_split_season_part_proposals(collection)
+
+        assert len(proposals) == 1
+        assert proposals[0].title_ids == title_ids
+        assert [item.episode_range.label for item in proposals[0].items] == [
+            "E01–E13", "E14–E26",
+        ]
+        assert [item.proposed_part_number for item in proposals[0].items] == [1, 2]
+        confirm_existing_split_season_parts(
+            session, collection.id, season_number=1,
+            title_ids=list(proposals[0].title_ids),
+        )
+        session.flush()
+
+        assert tuple(title.id for title in titles) == title_ids
+        assert [title.part_number_manual for title in titles] == [1, 2]
+        assert {video.id: video.catalog_title_id for video in collection.videos} == membership
+        assert {video.id: video.season_episode_number for video in collection.videos} == numbering
+        assert metadata.catalog_title_id == titles[0].id
+        assert collection.hierarchy_status == "verified"
+        assert all(
+            issue.code != HierarchyIssueCode.AMBIGUOUS_SPLIT_SEASON
+            for issue in evaluate_collection_hierarchy(collection).issues
+        )
+
+
+@pytest.mark.parametrize("ranges", (((1, 12), (1, 12)), ((1, 12), (7, 18)), ((1, 12), (14, 24))))
+def test_existing_split_proposal_rejects_identical_overlap_and_gap(ranges):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection, _ = _seed_existing_split_candidate(session, ranges)
+        assert existing_split_season_part_proposals(collection) == ()
+        assert any(
+            issue.code == HierarchyIssueCode.AMBIGUOUS_SPLIT_SEASON
+            for issue in evaluate_collection_hierarchy(collection).blocking_issues
+        )
+
+
+def test_advanced_split_preview_rejects_partial_season_parts_and_accepts_complete_plan():
+    engine, collection_id, title_id = seeded_collection(24)
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, collection_id)
+        partial = [
+            ManualTitleDefinition(
+                title_id=title_id if part_number is None else None,
+                local_title="First half" if part_number is None else "Part 2",
+                manual_display_title=None,
+                season_number_manual=1,
+                season_label_manual="S1",
+                part_number_manual=part_number,
+                part_type_manual="season",
+                episode_start=start,
+                episode_end=end,
+                episode_start_offset=None,
+                numbering_mode="season_local",
+                sort_order=None,
+                filename_pattern=None,
+                video_ids=(),
+            )
+            for part_number, start, end in ((None, 1, 12), (2, 13, 24))
+        ]
+        with pytest.raises(ValueError, match="všem jejím částem"):
+            preview_assignments(
+                list(collection.videos), partial, collection=collection,
+            )
+
+        complete = [
+            replace(definition, part_number_manual=index)
+            for index, definition in enumerate(partial, 1)
+        ]
+        preview = preview_assignments(
+            list(collection.videos), complete, collection=collection,
+        )
+        assert not preview.conflicts
+        assert not preview.unmatched_video_ids
 
 
 def test_overlapping_ranges_require_explicit_confirmation():

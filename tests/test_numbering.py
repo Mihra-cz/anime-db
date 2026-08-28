@@ -316,6 +316,56 @@ def test_collection_numbering_supports_seasons_with_and_without_parts():
     assert s1.part_number is None and s3.part_number is None
 
 
+def test_manual_season_parts_do_not_change_canonical_episode_numbers():
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    first = CatalogTitle(
+        id=1, collection=collection, local_title="First half",
+        normalized_local_title="first half",
+        relative_root_path="Anime/Show/.catalog-part-1",
+        part_type="season", season_number=1, season_label="S1",
+    )
+    second = CatalogTitle(
+        id=2, collection=collection, local_title="Second half",
+        normalized_local_title="second half",
+        relative_root_path="Anime/Show/.catalog-part-2",
+        part_type="season", season_number=1, season_label="S1",
+    )
+    first_videos = videos(1, 13)
+    second_videos = videos(14, 26)
+
+    recalculate_collection_numbering(collection, {
+        first.id: first_videos,
+        second.id: second_videos,
+    })
+    before = (
+        [video.season_episode_number for video in first_videos],
+        [video.season_episode_number for video in second_videos],
+    )
+
+    for title, part_number in ((first, 1), (second, 2)):
+        title.part_type_manual = "season"
+        title.season_number_manual = 1
+        title.season_label_manual = "S1"
+        title.part_number_manual = part_number
+        title.hierarchy_manual_override = True
+    recalculate_collection_numbering(collection, {
+        first.id: first_videos,
+        second.id: second_videos,
+    })
+
+    assert before == (
+        list(range(1, 14)),
+        list(range(14, 27)),
+    )
+    assert [video.season_episode_number for video in first_videos] == before[0]
+    assert [video.season_episode_number for video in second_videos] == before[1]
+    assert (first.effective_season_number, second.effective_season_number) == (1, 1)
+    assert (first.effective_part_number, second.effective_part_number) == (1, 2)
+
+
 def test_standalone_parts_keep_null_season_and_use_part_order_for_offsets():
     collection = CatalogCollection(
         id=1, local_title="Show", normalized_local_title="show",

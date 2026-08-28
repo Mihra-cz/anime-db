@@ -14,6 +14,7 @@
     <label data-season-number>Číslo sezóny <input type="number" min="1" name="season_number_manual" value="{{ part.title.season_number_manual if part.title.season_number_manual is not none else '' }}"></label>
     <label data-season-label>Označení sezóny <input type="text" maxlength="50" name="season_label_manual" value="{{ part.title.season_label_manual or '' }}" placeholder="S1 / vlastní název"></label>
     <label data-part-number>Číslo Part <input type="number" min="1" name="part_number_manual" value="{{ part.title.part_number_manual if part.title.part_number_manual is not none else '' }}"></label>
+    <small data-part-number>Volitelné pro jedinou sezónu; pokud má stejné číslo sezóny více částí, každá musí mít unikátní explicitní číslo Part.</small>
     <label>Pořadí <input type="number" min="0" name="sort_order_manual" value="{{ part.title.sort_order_manual if part.title.sort_order_manual is not none else '' }}"></label>
     <label title="Potvrzuje typ části, season scope, číslo Part, pořadí a další ruční údaje tohoto titulu."><input type="checkbox" name="hierarchy_verified" value="true" {% if catalog_title_hierarchy_is_verified(part.title) %}checked{% endif %}> Zařazení ověřeno</label>
     <input type="hidden" name="filter_name" value="{{ filter_name }}"><input type="hidden" name="q" value="{{ q }}"><input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="direction" value="{{ direction }}">
