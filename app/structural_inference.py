@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 
+from .hierarchy import HierarchyIdentity
 from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .models import CatalogCollection, CatalogTitle, Video
 from .numbering import effective_video_numbering, is_nonprimary_duplicate_video
@@ -43,6 +45,63 @@ class AutomaticStructuralValues:
     part_number: int | None
     season_label: str | None
     reason: str
+
+
+def invalidate_automatic_hierarchy_for_collection_move(
+    title: CatalogTitle,
+    raw_hierarchy: Mapping[str, HierarchyIdentity],
+) -> bool:
+    """Restore raw parser input before inference in a different collection.
+
+    Automatic structural fields are a persisted cache of both path facts and
+    collection-context inference.  In particular, a direct-root episodic title
+    may have become automatic S1 only because it was alone at its former root.
+    A parent change must not feed that final cache back into inference as if it
+    were an explicit path fact.  Manual snapshots remain authoritative.
+    """
+    if manual_hierarchy_snapshot_requires_preservation(title):
+        return False
+
+    identities = []
+    for video in title.videos:
+        identity = raw_hierarchy.get(video.relative_path)
+        if (
+            identity is None
+            or identity.title.relative_root_path != title.relative_root_path
+        ):
+            identities = []
+            break
+        identities.append(identity.title)
+
+    structural_inputs = {
+        (
+            identity.part_type,
+            identity.season_number,
+            identity.part_number,
+            identity.season_label,
+        )
+        for identity in identities
+    }
+    raw = (
+        next(iter(structural_inputs))
+        if identities and len(structural_inputs) == 1
+        else ("title", None, None, None)
+    )
+    current = (
+        title.part_type,
+        title.season_number,
+        title.part_number,
+        title.season_label,
+    )
+    if current == raw:
+        return False
+    (
+        title.part_type,
+        title.season_number,
+        title.part_number,
+        title.season_label,
+    ) = raw
+    return True
 
 
 def is_direct_root_title(title: CatalogTitle) -> bool:

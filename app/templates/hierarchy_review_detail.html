@@ -78,6 +78,15 @@
   <button type="submit">Uložit stav hierarchie</button>
 </form>
 
+<section class="panel hierarchy-automatic-reevaluation" aria-labelledby="automatic-reevaluation-heading">
+  <h2 id="automatic-reevaluation-heading">Přepočítat automatickou hierarchii</h2>
+  <p>Explicitně znovu sestaví pouze automatické strukturální hodnoty z aktuálních cest videí a vyhodnotí je v této collection. Ručně potvrzené typy, Season/Part hodnoty včetně potvrzeného prázdného údaje, metadata, duplicity, video membership a canonical numbering zůstanou zachovány. AnimeDB nebude hádat pořadí Season ani Part.</p>
+  <form class="inline-form" method="post" action="/hierarchy-review/{{ collection.id }}/reevaluate-automatic">
+    <label><input type="checkbox" name="confirm_automatic_reevaluation" value="true" required> Potvrzuji přepočet pouze automatické hierarchy cache v aktuální collection.</label>
+    <button type="submit">Přepočítat automatickou hierarchii</button>
+  </form>
+</section>
+
 {% if part_confirmation_suggestion %}
 <section class="panel">
   <h2>Ručně potvrdit typ jediné části</h2>

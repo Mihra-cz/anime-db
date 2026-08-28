@@ -13,7 +13,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .catalog import GENERIC_ROOTS, detect_episode_number, normalize_title
-from .hierarchy import parse_explicit_part
+from .hierarchy import derive_library_hierarchy, parse_explicit_part
 from .hierarchy_authority import (
     activate_manual_hierarchy_snapshot,
     clear_manual_hierarchy_snapshot,
@@ -64,6 +64,7 @@ from .structural_inference import (
     GENERIC_TITLE_REVIEW_REASON,
     LONG_FLAT_SEQUENCE_REVIEW_REASON,
     direct_root_episode_profile,
+    invalidate_automatic_hierarchy_for_collection_move,
 )
 from .title_naming import (
     generic_catalog_title_local_title,
@@ -828,8 +829,10 @@ def _stored_title_paths(decision: CollectionGroupingDecision) -> tuple[str, ...]
     return tuple(dict.fromkeys(values))
 
 
-def apply_collection_grouping_authority(session: Session) -> None:
-    """Po automatic reconstruction obnoví poslední explicitní collection membership."""
+def collection_grouping_authority_targets(
+    session: Session,
+) -> dict[CatalogTitle, CatalogCollection]:
+    """Resolve valid persisted grouping decisions without changing membership."""
     decisions = list(session.scalars(
         select(CollectionGroupingDecision).order_by(
             CollectionGroupingDecision.updated_at,
@@ -844,6 +847,10 @@ def apply_collection_grouping_authority(session: Session) -> None:
         title.relative_root_path: title
         for title in session.scalars(select(CatalogTitle)).all()
     }
+    projected_collections = {
+        title: title.collection for title in titles.values()
+    }
+    assignments: dict[CatalogTitle, CatalogCollection] = {}
     for decision in decisions:
         if decision.decision != "merged":
             continue
@@ -862,7 +869,7 @@ def apply_collection_grouping_authority(session: Session) -> None:
                 resulting_collections = {
                     target
                     if other.catalog_title_id in selected_ids
-                    else other.catalog_title.collection
+                    else projected_collections.get(other.catalog_title)
                     for other in link.video.manual_split_rule_videos
                     if other.catalog_title is not None
                 }
@@ -876,11 +883,19 @@ def apply_collection_grouping_authority(session: Session) -> None:
             if not selected:
                 break
         for title in selected:
-            title.collection = target
-            for video in title.videos:
-                video.catalog_collection = target
-            for link in title.manual_split_rule_videos:
-                link.video.catalog_collection = target
+            projected_collections[title] = target
+            assignments[title] = target
+    return assignments
+
+
+def apply_collection_grouping_authority(session: Session) -> None:
+    """Po automatic reconstruction obnoví poslední explicitní collection membership."""
+    for title, target in collection_grouping_authority_targets(session).items():
+        title.collection = target
+        for video in title.videos:
+            video.catalog_collection = target
+        for link in title.manual_split_rule_videos:
+            link.video.catalog_collection = target
     session.flush()
 
 
@@ -938,7 +953,10 @@ def move_titles_to_collection(
     ).where(CatalogTitle.id.in_(selected_ids))).all())
     if len(titles) != len(selected_ids):
         raise ValueError("Výběr obsahuje cizí nebo neexistující část.")
-    sources = {title.collection for title in titles if title.collection is not None}
+    moved_titles = [title for title in titles if title.collection is not target]
+    sources = {
+        title.collection for title in moved_titles if title.collection is not None
+    }
     for title in titles:
         for link in title.manual_split_rule_videos:
             resulting_collections = {
@@ -953,14 +971,23 @@ def move_titles_to_collection(
                     "Část nelze přesunout bez dalších částí, se kterými sdílí "
                     "explicitní selector authority."
                 )
-    for title in titles:
+    if not moved_titles:
+        return target
+
+    affected = sources | {target}
+    raw_hierarchy = derive_library_hierarchy([
+        video.relative_path
+        for collection in affected
+        for video in collection.videos
+    ])
+    for title in moved_titles:
+        invalidate_automatic_hierarchy_for_collection_move(title, raw_hierarchy)
         title.collection = target
         for video in title.videos:
             video.catalog_collection = target
         for link in title.manual_split_rule_videos:
             link.video.catalog_collection = target
     session.flush()
-    affected = sources | {target}
     for collection in affected:
         session.expire(collection, ["titles", "videos"])
     finalize_hierarchy_write(list(affected))
@@ -1797,6 +1824,81 @@ def refresh_collection_state(
     collection: CatalogCollection, *, recalculate: bool = True,
 ) -> None:
     finalize_hierarchy_write([collection], recalculate=recalculate)
+
+
+def _collection_context_reevaluation_preserved_state(
+    collection: CatalogCollection,
+) -> tuple:
+    """Snapshot authority and identity that a structural cache refresh cannot change."""
+    return (
+        tuple(sorted(title.id for title in collection.titles)),
+        tuple(sorted(
+            (
+                title.id,
+                title.hierarchy_manual_override,
+                title.part_type_manual,
+                title.season_number_manual,
+                title.part_number_manual,
+                title.season_label_manual,
+                title.sort_order_manual,
+                title.hierarchy_verified_at,
+                (
+                    title.metadata_record.catalog_title_id
+                    if title.metadata_record is not None else None
+                ),
+                tuple(sorted(link.id for link in title.external_links)),
+                tuple(sorted(candidate.id for candidate in title.metadata_candidates)),
+                tuple(sorted(artwork.id for artwork in title.artwork)),
+                tuple(sorted(
+                    link.video_id for link in title.manual_split_rule_videos
+                )),
+            )
+            for title in collection.titles
+        )),
+        tuple(sorted(
+            (
+                video.id,
+                video.catalog_title_id,
+                video.catalog_collection_id,
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.external_episode_number,
+                video.episode_number_source,
+                video.episode_number_confidence,
+                video.episode_number_manual_override,
+                video.episode_number_verified_at,
+                video.duplicate_of_video_id,
+                video.duplicate_primary_missing,
+                video.duplicate_status_manual,
+            )
+            for video in collection.videos
+        )),
+    )
+
+
+def reevaluate_automatic_collection_hierarchy(
+    session: Session, collection_id: int,
+) -> CatalogCollection:
+    """Explicitly rebuild only automatic structural cache in current context."""
+    collection = _load_collection_for_assignment(session, collection_id)
+    preserved = _collection_context_reevaluation_preserved_state(collection)
+    raw_hierarchy = derive_library_hierarchy([
+        video.relative_path for video in collection.videos
+    ])
+    for title in collection.titles:
+        invalidate_automatic_hierarchy_for_collection_move(title, raw_hierarchy)
+
+    # This is a structural cache repair.  The shared finalizer still runs
+    # inference and evaluation, while established canonical numbering remains
+    # byte-for-byte authoritative for this explicit action.
+    refresh_collection_state(collection, recalculate=False)
+    if _collection_context_reevaluation_preserved_state(collection) != preserved:
+        raise ValueError(
+            "Přepočet automatické hierarchie by změnil autoritativní vazby "
+            "nebo canonical numbering; operace byla zrušena."
+        )
+    return collection
 
 
 def classify_videos_in_place(

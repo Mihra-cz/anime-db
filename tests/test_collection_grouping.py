@@ -7,13 +7,16 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.config import Settings
-from app.hierarchy_evaluation import evaluate_collection_hierarchy
+from app.hierarchy_evaluation import (
+    HierarchyIssueCode, evaluate_collection_hierarchy, finalize_hierarchy_write,
+)
 from app.hierarchy_review import (
     PROBABLE_GROUPING_REVIEW_REASON, CollectionGroupingMetrics,
     collection_grouping_suggestions, create_main_collection,
     delete_empty_collection, delete_empty_collections, delete_empty_local_title,
     move_titles_to_collection, record_grouping_decision,
     record_manual_collection_merge,
+    reevaluate_automatic_collection_hierarchy,
 )
 from app.migrations import migrate_schema
 from app.main import create_app
@@ -36,6 +39,40 @@ def _sessions():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     return engine, sessionmaker(engine)
+
+
+def _episode_title(
+    collection: CatalogCollection,
+    *,
+    title_name: str,
+    title_path: str,
+    episodes: tuple[int, ...] = (1, 2),
+    part_type: str = "title",
+    season_number: int | None = None,
+    part_number: int | None = None,
+    season_label: str | None = None,
+) -> CatalogTitle:
+    title = CatalogTitle(
+        collection=collection,
+        local_title=title_name,
+        normalized_local_title=title_name.casefold(),
+        relative_root_path=title_path,
+        part_type=part_type,
+        season_number=season_number,
+        part_number=part_number,
+        season_label=season_label,
+    )
+    for episode in episodes:
+        Video(
+            catalog_title=title,
+            catalog_collection=collection,
+            relative_path=f"{title_path}/E{episode:02}.mkv",
+            root_folder="Anime",
+            filename=f"E{episode:02}.mkv",
+            size=episode,
+            mtime_ns=episode,
+        )
+    return title
 
 
 @pytest.mark.parametrize(("folders", "expected_types"), [
@@ -335,6 +372,565 @@ def test_manual_collection_move_preserves_title_video_metadata_and_scan(
         assert session.scalar(select(func.count()).select_from(Video)) == 2
 
 
+def test_move_reinfers_automatic_singleton_s1_in_target_context():
+    _, sessions = _sessions()
+    with sessions() as session:
+        target = CatalogCollection(
+            local_title="Target", normalized_local_title="target",
+            relative_root_path="Anime/Target",
+        )
+        source = CatalogCollection(
+            local_title="Fragment", normalized_local_title="fragment",
+            relative_root_path="Anime/Fragment",
+        )
+        target_title = _episode_title(
+            target, title_name="Target", title_path="Anime/Target",
+        )
+        moved = _episode_title(
+            source, title_name="Fragment", title_path="Anime/Fragment",
+        )
+        session.add_all([target, source])
+        session.flush()
+        finalize_hierarchy_write([target, source])
+        before_numbering = {
+            video.id: (
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.external_episode_number,
+            )
+            for video in moved.videos
+        }
+        assert (target_title.part_type, target_title.season_number) == ("season", 1)
+        assert (moved.part_type, moved.season_number) == ("season", 1)
+
+        move_titles_to_collection(session, target.id, [moved.id])
+
+        assert (target_title.part_type, target_title.season_number) == ("season", 1)
+        assert (
+            moved.part_type, moved.season_number, moved.part_number,
+            moved.season_label,
+        ) == ("title", None, None, None)
+        assert moved.hierarchy_manual_override is False
+        assert moved.hierarchy_verified_at is None
+        evaluation = evaluate_collection_hierarchy(target, list(target.videos))
+        assert target.hierarchy_status == "review_required"
+        assert HierarchyIssueCode.AMBIGUOUS_SPLIT_SEASON not in {
+            issue.code for issue in evaluation.issues
+        }
+        assert HierarchyIssueCode.GENERIC_STRUCTURAL_TYPE in {
+            issue.code for issue in evaluation.issues
+        }
+        assert before_numbering == {
+            video.id: (
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.external_episode_number,
+            )
+            for video in moved.videos
+        }
+        assert source.titles == []
+        source_evaluation = evaluate_collection_hierarchy(source, list(source.videos))
+        assert (source.hierarchy_status, source.hierarchy_note) == (
+            source_evaluation.status, source_evaluation.primary_note,
+        )
+
+
+def test_move_reinfers_supported_explicit_season_two_signal():
+    _, sessions = _sessions()
+    with sessions() as session:
+        source = CatalogCollection(
+            local_title="Fragment", normalized_local_title="fragment",
+            relative_root_path="Anime/Fragment",
+        )
+        target = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        moved = _episode_title(
+            source,
+            title_name="Season 2",
+            title_path="Anime/Fragment/Season 2",
+            part_type="season",
+            season_number=2,
+            season_label="S2",
+        )
+        session.add_all([source, target])
+        session.flush()
+
+        move_titles_to_collection(session, target.id, [moved.id])
+
+        assert (
+            moved.part_type, moved.season_number, moved.part_number,
+            moved.season_label,
+        ) == ("season", 2, None, "S2")
+        assert moved.hierarchy_manual_override is False
+
+
+@pytest.mark.parametrize(
+    ("season_number", "season_label"),
+    [(2, "S2"), (None, None)],
+)
+def test_move_preserves_complete_manual_season_authority_including_null(
+    season_number, season_label,
+):
+    _, sessions = _sessions()
+    timestamp = utc_now()
+    with sessions() as session:
+        source = CatalogCollection(
+            local_title="Fragment", normalized_local_title="fragment",
+            relative_root_path="Anime/Fragment",
+        )
+        target = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        moved = _episode_title(
+            source, title_name="Fragment", title_path="Anime/Fragment",
+        )
+        moved.hierarchy_manual_override = True
+        moved.part_type_manual = "season"
+        moved.season_number_manual = season_number
+        moved.part_number_manual = None
+        moved.season_label_manual = season_label
+        moved.hierarchy_verified_at = timestamp
+        session.add_all([source, target])
+        session.flush()
+        finalize_hierarchy_write([source])
+        automatic_before = (
+            moved.part_type, moved.season_number, moved.part_number,
+            moved.season_label,
+        )
+
+        move_titles_to_collection(session, target.id, [moved.id])
+
+        assert (
+            moved.part_type_manual,
+            moved.season_number_manual,
+            moved.part_number_manual,
+            moved.season_label_manual,
+            moved.hierarchy_manual_override,
+            moved.hierarchy_verified_at,
+        ) == ("season", season_number, None, season_label, True, timestamp)
+        assert moved.effective_season_number == season_number
+        assert (
+            moved.part_type, moved.season_number, moved.part_number,
+            moved.season_label,
+        ) == automatic_before
+
+
+def test_three_singleton_s1_moves_do_not_create_three_stale_seasons():
+    _, sessions = _sessions()
+    with sessions() as session:
+        collections = [
+            CatalogCollection(
+                local_title=name,
+                normalized_local_title=name.casefold(),
+                relative_root_path=f"Anime/{name}",
+            )
+            for name in ("Main", "Fragment B", "Fragment C")
+        ]
+        titles = [
+            _episode_title(
+                collection,
+                title_name=collection.local_title,
+                title_path=collection.relative_root_path,
+            )
+            for collection in collections
+        ]
+        session.add_all(collections)
+        session.flush()
+        finalize_hierarchy_write(collections)
+        assert [title.season_number for title in titles] == [1, 1, 1]
+
+        move_titles_to_collection(
+            session, collections[0].id, [titles[1].id, titles[2].id],
+        )
+
+        assert [title.season_number for title in titles] == [1, None, None]
+        evaluation = evaluate_collection_hierarchy(
+            collections[0], list(collections[0].videos),
+        )
+        assert HierarchyIssueCode.AMBIGUOUS_SPLIT_SEASON not in {
+            issue.code for issue in evaluation.issues
+        }
+
+
+def test_explicit_duplicate_season_evidence_remains_split_season_blocker():
+    _, sessions = _sessions()
+    with sessions() as session:
+        target = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="@manual/show",
+        )
+        sources = []
+        titles = []
+        for suffix in ("A", "B"):
+            source = CatalogCollection(
+                local_title=f"Fragment {suffix}",
+                normalized_local_title=f"fragment {suffix.casefold()}",
+                relative_root_path=f"Anime/Fragment {suffix}",
+            )
+            title = _episode_title(
+                source,
+                title_name="Season 1",
+                title_path=f"Anime/Fragment {suffix}/Season 1",
+                part_type="season",
+                season_number=1,
+                season_label="S1",
+            )
+            sources.append(source)
+            titles.append(title)
+        session.add_all([target, *sources])
+        session.flush()
+
+        move_titles_to_collection(session, target.id, [title.id for title in titles])
+
+        assert [title.season_number for title in titles] == [1, 1]
+        evaluation = evaluate_collection_hierarchy(target, list(target.videos))
+        assert target.hierarchy_status == "review_required"
+        assert HierarchyIssueCode.AMBIGUOUS_SPLIT_SEASON in {
+            issue.code for issue in evaluation.issues
+        }
+
+
+def test_manual_split_parts_and_numbering_survive_collection_move():
+    _, sessions = _sessions()
+    timestamp = utc_now()
+    with sessions() as session:
+        source = CatalogCollection(
+            local_title="Split", normalized_local_title="split",
+            relative_root_path="Anime/Split",
+        )
+        target = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="@manual/show",
+        )
+        first = _episode_title(
+            source, title_name="First half", title_path="Anime/Split/First half",
+            episodes=(1, 2),
+        )
+        second = _episode_title(
+            source, title_name="Second half", title_path="Anime/Split/Second half",
+            episodes=(3, 4),
+        )
+        for title, part_number in ((first, 1), (second, 2)):
+            title.hierarchy_manual_override = True
+            title.part_type_manual = "season"
+            title.season_number_manual = 1
+            title.part_number_manual = part_number
+            title.season_label_manual = "S1"
+            title.hierarchy_verified_at = timestamp
+        session.add_all([source, target])
+        session.flush()
+        finalize_hierarchy_write([source])
+        numbering = {
+            video.id: (
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.external_episode_number,
+            )
+            for title in (first, second) for video in title.videos
+        }
+
+        move_titles_to_collection(session, target.id, [first.id, second.id])
+
+        assert [title.effective_part_number for title in (first, second)] == [1, 2]
+        assert numbering == {
+            video.id: (
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.external_episode_number,
+            )
+            for title in (first, second) for video in title.videos
+        }
+        assert HierarchyIssueCode.AMBIGUOUS_SPLIT_SEASON not in {
+            issue.code
+            for issue in evaluate_collection_hierarchy(
+                target, list(target.videos),
+            ).issues
+        }
+
+
+def test_collection_move_rolls_back_membership_and_invalidation_atomically(
+    monkeypatch,
+):
+    _, sessions = _sessions()
+    with sessions() as session:
+        source = CatalogCollection(
+            local_title="Fragment", normalized_local_title="fragment",
+            relative_root_path="Anime/Fragment",
+        )
+        target = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        moved = _episode_title(
+            source, title_name="Fragment", title_path="Anime/Fragment",
+        )
+        session.add_all([source, target])
+        session.commit()
+        finalize_hierarchy_write([source])
+        session.commit()
+        moved_id, source_id = moved.id, source.id
+        video_ids = [video.id for video in moved.videos]
+
+        def fail_finalization(*_args, **_kwargs):
+            raise ValueError("simulated finalizer failure")
+
+        monkeypatch.setattr(
+            "app.hierarchy_review.finalize_hierarchy_write", fail_finalization,
+        )
+        with pytest.raises(ValueError, match="simulated finalizer failure"):
+            move_titles_to_collection(session, target.id, [moved.id])
+        session.rollback()
+        session.expire_all()
+
+        stored = session.get(CatalogTitle, moved_id)
+        assert stored.catalog_collection_id == source_id
+        assert (stored.part_type, stored.season_number, stored.season_label) == (
+            "season", 1, "S1",
+        )
+        assert {
+            session.get(Video, video_id).catalog_collection_id
+            for video_id in video_ids
+        } == {source_id}
+
+
+def test_explicit_collection_context_reevaluation_repairs_all_stale_automatic_s1():
+    _, sessions = _sessions()
+    timestamp = utc_now()
+    with sessions() as session:
+        collection = CatalogCollection(
+            local_title="Main", normalized_local_title="main",
+            relative_root_path="Anime/Main",
+        )
+        first = _episode_title(
+            collection, title_name="Fragment A", title_path="Anime/Fragment A",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        second = _episode_title(
+            collection, title_name="Fragment B", title_path="Anime/Fragment B",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        manual = _episode_title(
+            collection, title_name="Main", title_path="Anime/Main",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        manual.hierarchy_manual_override = True
+        manual.part_type_manual = "season"
+        manual.season_number_manual = 1
+        manual.part_number_manual = None
+        manual.season_label_manual = "S1"
+        manual.hierarchy_verified_at = timestamp
+        duplicate = Video(
+            catalog_title=first, catalog_collection=collection,
+            relative_path="Anime/Fragment A/E01 copy.mkv", root_folder="Anime",
+            filename="E01 copy.mkv", size=100, mtime_ns=100,
+        )
+        second.videos[-1].duplicate_status_manual = "suspected"
+        session.add(collection)
+        session.flush()
+        finalize_hierarchy_write([collection])
+        set_duplicate_group_primary([first.videos[0], duplicate], first.videos[0])
+        session.add_all([
+            TitleMetadata(
+                catalog_title_id=first.id,
+                display_title="Fragment A metadata",
+                metadata_provider="anilist",
+                metadata_external_id="1001",
+            ),
+            ExternalTitleLink(
+                catalog_title_id=first.id,
+                provider="anilist", external_id="1001",
+                match_method="manual_search", is_primary=True, is_manual=True,
+            ),
+        ])
+        session.flush()
+        session.expire(first, ["metadata_record", "external_links"])
+        title_ids = tuple(title.id for title in (first, second, manual))
+        membership = {
+            video.id: (video.catalog_title_id, video.catalog_collection_id)
+            for video in collection.videos
+        }
+        numbering = {
+            video.id: (
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.external_episode_number,
+                video.episode_number_source,
+                video.episode_number_confidence,
+            )
+            for video in collection.videos
+        }
+        duplicate_state = {
+            video.id: (
+                video.duplicate_of_video_id,
+                video.duplicate_primary_missing,
+                video.duplicate_status_manual,
+            )
+            for video in collection.videos
+        }
+
+        reevaluate_automatic_collection_hierarchy(session, collection.id)
+
+        assert tuple(title.id for title in (first, second, manual)) == title_ids
+        assert (
+            first.part_type, first.season_number, first.part_number,
+            first.season_label,
+        ) == ("title", None, None, None)
+        assert (
+            second.part_type, second.season_number, second.part_number,
+            second.season_label,
+        ) == ("title", None, None, None)
+        assert (
+            manual.part_type_manual,
+            manual.season_number_manual,
+            manual.part_number_manual,
+            manual.season_label_manual,
+            manual.hierarchy_manual_override,
+            manual.hierarchy_verified_at,
+        ) == ("season", 1, None, "S1", True, timestamp)
+        assert membership == {
+            video.id: (video.catalog_title_id, video.catalog_collection_id)
+            for video in collection.videos
+        }
+        assert numbering == {
+            video.id: (
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.external_episode_number,
+                video.episode_number_source,
+                video.episode_number_confidence,
+            )
+            for video in collection.videos
+        }
+        assert duplicate_state == {
+            video.id: (
+                video.duplicate_of_video_id,
+                video.duplicate_primary_missing,
+                video.duplicate_status_manual,
+            )
+            for video in collection.videos
+        }
+        assert first.metadata_record.metadata_external_id == "1001"
+        assert first.external_links[0].external_id == "1001"
+        evaluation = evaluate_collection_hierarchy(collection, list(collection.videos))
+        assert HierarchyIssueCode.AMBIGUOUS_SPLIT_SEASON not in {
+            issue.code for issue in evaluation.issues
+        }
+        assert collection.hierarchy_status == "review_required"
+
+
+def test_explicit_reevaluation_rederives_raw_s2_and_preserves_manual_s2_and_null():
+    _, sessions = _sessions()
+    timestamp = utc_now()
+    with sessions() as session:
+        collection = CatalogCollection(
+            local_title="Current", normalized_local_title="current",
+            relative_root_path="@manual/current",
+        )
+        raw_s2 = _episode_title(
+            collection, title_name="Season 2",
+            title_path="Anime/Fragment/Season 2",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        manual_s2 = _episode_title(
+            collection, title_name="Manual S2",
+            title_path="Anime/Manual S2",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        manual_null = _episode_title(
+            collection, title_name="Manual unknown season",
+            title_path="Anime/Manual unknown season",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        for title, season_number, label in (
+            (manual_s2, 2, "S2"),
+            (manual_null, None, None),
+        ):
+            title.hierarchy_manual_override = True
+            title.part_type_manual = "season"
+            title.season_number_manual = season_number
+            title.part_number_manual = None
+            title.season_label_manual = label
+            title.hierarchy_verified_at = timestamp
+        session.add(collection)
+        session.flush()
+        automatic_caches = {
+            title.id: (
+                title.part_type, title.season_number, title.part_number,
+                title.season_label,
+            )
+            for title in (manual_s2, manual_null)
+        }
+
+        reevaluate_automatic_collection_hierarchy(session, collection.id)
+
+        assert (
+            raw_s2.part_type, raw_s2.season_number, raw_s2.part_number,
+            raw_s2.season_label,
+        ) == ("season", 2, None, "S2")
+        assert (manual_s2.effective_part_type, manual_s2.effective_season_number) == (
+            "season", 2,
+        )
+        assert (
+            manual_null.effective_part_type,
+            manual_null.effective_season_number,
+            manual_null.effective_season_label,
+        ) == ("season", None, None)
+        assert {
+            title.id: (
+                title.part_type, title.season_number, title.part_number,
+                title.season_label,
+            )
+            for title in (manual_s2, manual_null)
+        } == automatic_caches
+        assert all(
+            title.hierarchy_verified_at == timestamp
+            for title in (manual_s2, manual_null)
+        )
+
+
+def test_explicit_collection_context_reevaluation_rolls_back_atomically(monkeypatch):
+    _, sessions = _sessions()
+    with sessions() as session:
+        collection = CatalogCollection(
+            local_title="Current", normalized_local_title="current",
+            relative_root_path="@manual/current",
+        )
+        stale = _episode_title(
+            collection, title_name="Fragment", title_path="Anime/Fragment",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        session.add(collection)
+        session.commit()
+        collection_id, title_id = collection.id, stale.id
+
+        def fail_finalization(*_args, **_kwargs):
+            raise ValueError("simulated reevaluation failure")
+
+        monkeypatch.setattr(
+            "app.hierarchy_review.finalize_hierarchy_write", fail_finalization,
+        )
+        with pytest.raises(ValueError, match="simulated reevaluation failure"):
+            reevaluate_automatic_collection_hierarchy(session, collection_id)
+        session.rollback()
+        session.expire_all()
+
+        stored = session.get(CatalogTitle, title_id)
+        assert stored.catalog_collection_id == collection_id
+        assert (
+            stored.part_type, stored.season_number, stored.part_number,
+            stored.season_label,
+        ) == ("season", 1, None, "S1")
+
+
 def test_move_without_manual_snapshot_does_not_create_false_authority():
     _, sessions = _sessions()
     with sessions() as session:
@@ -627,6 +1223,213 @@ def test_manual_collection_merge_survives_startup_rescan_and_restart(
             born.hierarchy_verified_at.replace(tzinfo=None),
         ) == authority
         assert collection_grouping_suggestions(session) == []
+
+
+def test_automatic_collection_move_survives_startup_scanner_and_is_idempotent(
+    tmp_path: Path, monkeypatch,
+):
+    for name in ("Main", "Fragment"):
+        for episode in (1, 2):
+            path = tmp_path / "Anime" / name / f"E{episode:02}.mkv"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine(f"sqlite:///{tmp_path / 'automatic-move.db'}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        target = session.scalar(select(CatalogCollection).where(
+            CatalogCollection.relative_root_path == "Anime/Main"
+        ))
+        source = session.scalar(select(CatalogCollection).where(
+            CatalogCollection.relative_root_path == "Anime/Fragment"
+        ))
+        target_title = target.titles[0]
+        moved = source.titles[0]
+        assert (target_title.part_type, target_title.season_number) == ("season", 1)
+        assert (moved.part_type, moved.season_number) == ("season", 1)
+        moved_id = moved.id
+        target_id = target.id
+        membership = {
+            video.id: (video.catalog_title_id, video.relative_path)
+            for video in moved.videos
+        }
+
+        move_titles_to_collection(session, target.id, [moved.id])
+        record_manual_collection_merge(session, target, [moved.id])
+        session.commit()
+        assert (
+            moved.part_type, moved.season_number, moved.part_number,
+            moved.season_label,
+        ) == ("title", None, None, None)
+
+    migrate_schema(engine)
+    with Session(engine) as session:
+        moved = session.get(CatalogTitle, moved_id)
+        assert moved.catalog_collection_id == target_id
+        assert (
+            moved.part_type, moved.season_number, moved.part_number,
+            moved.season_label,
+        ) == ("title", None, None, None)
+        assert {
+            video.id: (video.catalog_title_id, video.relative_path)
+            for video in moved.videos
+        } == membership
+
+        scan_library(session, tmp_path)
+        moved = session.get(CatalogTitle, moved_id)
+        assert moved.catalog_collection_id == target_id
+        assert (
+            moved.part_type, moved.season_number, moved.part_number,
+            moved.season_label,
+        ) == ("title", None, None, None)
+        assert {
+            video.id: (video.catalog_title_id, video.relative_path)
+            for video in moved.videos
+        } == membership
+
+    with Session(engine) as session:
+        before = {
+            title.id: (
+                title.catalog_collection_id,
+                title.part_type,
+                title.season_number,
+                title.part_number,
+                title.season_label,
+                title.updated_at,
+            )
+            for title in session.scalars(select(CatalogTitle))
+        }
+    updates = []
+
+    def record_update(_connection, _cursor, statement, parameters, _context, _many):
+        if statement.lstrip().upper().startswith("UPDATE CATALOG_TITLES"):
+            updates.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", record_update)
+    try:
+        migrate_schema(engine)
+    finally:
+        event.remove(engine, "before_cursor_execute", record_update)
+
+    with Session(engine) as session:
+        after = {
+            title.id: (
+                title.catalog_collection_id,
+                title.part_type,
+                title.season_number,
+                title.part_number,
+                title.season_label,
+                title.updated_at,
+            )
+            for title in session.scalars(select(CatalogTitle))
+        }
+    assert updates == []
+    assert after == before
+
+
+def test_explicit_historical_reevaluation_survives_idempotent_startup(
+    tmp_path: Path, monkeypatch,
+):
+    for name in ("Main", "Fragment"):
+        for episode in (1, 2):
+            path = tmp_path / "Anime" / name / f"E{episode:02}.mkv"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"video")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine(f"sqlite:///{tmp_path / 'historical-reevaluation.db'}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        target = session.scalar(select(CatalogCollection).where(
+            CatalogCollection.relative_root_path == "Anime/Main"
+        ))
+        source = session.scalar(select(CatalogCollection).where(
+            CatalogCollection.relative_root_path == "Anime/Fragment"
+        ))
+        manual = target.titles[0]
+        moved = source.titles[0]
+        manual.hierarchy_manual_override = True
+        manual.part_type_manual = "season"
+        manual.season_number_manual = 1
+        manual.part_number_manual = None
+        manual.season_label_manual = "S1"
+        manual.hierarchy_verified_at = utc_now()
+        move_titles_to_collection(session, target.id, [moved.id])
+        record_manual_collection_merge(session, target, [moved.id])
+        session.commit()
+        target_id, manual_id, moved_id = target.id, manual.id, moved.id
+
+        # Simulace historického stavu vytvořeného před collection-move fixem.
+        moved.part_type = "season"
+        moved.season_number = 1
+        moved.part_number = None
+        moved.season_label = "S1"
+        session.commit()
+
+        reevaluate_automatic_collection_hierarchy(session, target.id)
+        session.commit()
+        assert (
+            moved.part_type, moved.season_number, moved.part_number,
+            moved.season_label,
+        ) == ("title", None, None, None)
+        assert manual.effective_season_number == 1
+
+    migrate_schema(engine)
+    with Session(engine) as session:
+        moved = session.get(CatalogTitle, moved_id)
+        manual = session.get(CatalogTitle, manual_id)
+        assert moved.catalog_collection_id == target_id
+        assert (
+            moved.part_type, moved.season_number, moved.part_number,
+            moved.season_label,
+        ) == ("title", None, None, None)
+        assert (
+            manual.hierarchy_manual_override,
+            manual.part_type_manual,
+            manual.season_number_manual,
+            manual.part_number_manual,
+        ) == (True, "season", 1, None)
+        before = {
+            title.id: (
+                title.catalog_collection_id,
+                title.part_type,
+                title.season_number,
+                title.part_number,
+                title.season_label,
+                title.updated_at,
+            )
+            for title in session.scalars(select(CatalogTitle))
+        }
+
+    updates = []
+
+    def record_update(_connection, _cursor, statement, parameters, _context, _many):
+        if statement.lstrip().upper().startswith("UPDATE CATALOG_TITLES"):
+            updates.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", record_update)
+    try:
+        migrate_schema(engine)
+    finally:
+        event.remove(engine, "before_cursor_execute", record_update)
+
+    with Session(engine) as session:
+        after = {
+            title.id: (
+                title.catalog_collection_id,
+                title.part_type,
+                title.season_number,
+                title.part_number,
+                title.season_label,
+                title.updated_at,
+            )
+            for title in session.scalars(select(CatalogTitle))
+        }
+    assert updates == []
+    assert after == before
 
 
 def test_keep_collections_separate_survives_startup_rescan_and_restart(
@@ -1004,22 +1807,61 @@ def test_confirmed_physical_duplicate_survives_collection_move():
             Video(
                 catalog_title=title, catalog_collection=source,
                 relative_path=f"Anime/Uzaki-chan Season 2/{filename}", root_folder="Anime",
-                filename=filename, size=size, mtime_ns=1, local_episode_number=1,
-                season_episode_number=1,
+                filename=filename, size=size, mtime_ns=1,
+                local_episode_number=episode, season_episode_number=episode,
+                duplicate_status_manual=duplicate_status,
             )
-            for filename, size in (("E01.mkv", 1), ("E01 copy.mkv", 2))
+            for filename, size, episode, duplicate_status in (
+                ("E01.mkv", 1, 1, None),
+                ("E01 copy.mkv", 2, 1, None),
+                ("E02 maybe copy.mkv", 3, 2, "suspected"),
+            )
         ]
         session.add_all([source, target])
         session.flush()
-        set_duplicate_group_primary(videos, videos[0])
+        metadata = TitleMetadata(
+            catalog_title_id=title.id,
+            display_title="Uzaki-chan Wants to Hang Out! Season 2",
+            metadata_provider="anilist",
+            metadata_external_id="124395",
+        )
+        link = ExternalTitleLink(
+            catalog_title_id=title.id,
+            provider="anilist",
+            external_id="124395",
+            match_method="manual_search",
+            is_primary=True,
+            is_manual=True,
+        )
+        session.add_all([metadata, link])
+        session.flush()
+        set_duplicate_group_primary(videos[:2], videos[0])
         duplicate_id, primary_id = videos[1].id, videos[0].id
+        suspected_id = videos[2].id
+        title_id = title.id
+        membership = {
+            video.id: (video.catalog_title_id, video.relative_path)
+            for video in videos
+        }
 
         move_titles_to_collection(session, target.id, [title.id])
         session.commit()
 
         assert session.get(Video, duplicate_id).duplicate_of_video_id == primary_id
-        assert len(title.videos) == 2
-        assert len({video.relative_path for video in title.videos}) == 2
+        assert session.get(Video, suspected_id).duplicate_status_manual == "suspected"
+        assert session.get(Video, suspected_id).duplicate_of_video_id is None
+        assert session.get(CatalogTitle, title_id).metadata_record.metadata_external_id == (
+            "124395"
+        )
+        assert session.get(CatalogTitle, title_id).external_links[0].external_id == (
+            "124395"
+        )
+        assert len(title.videos) == 3
+        assert len({video.relative_path for video in title.videos}) == 3
+        assert {
+            video.id: (video.catalog_title_id, video.relative_path)
+            for video in title.videos
+        } == membership
         assert all(video.catalog_collection_id == target.id for video in title.videos)
 
 

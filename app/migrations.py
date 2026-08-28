@@ -13,7 +13,11 @@ from .database import Base
 from .hierarchy import derive_library_hierarchy
 from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .hierarchy_evaluation import finalize_collection_hierarchy
-from .hierarchy_review import apply_collection_grouping_authority, extract_local_period_hint
+from .hierarchy_review import (
+    apply_collection_grouping_authority,
+    collection_grouping_authority_targets,
+    extract_local_period_hint,
+)
 from .manual_split import (
     apply_manual_split_decisions,
     evaluate_persisted_manual_split,
@@ -223,6 +227,10 @@ def migrate_schema(engine) -> None:
             collection.relative_root_path: collection
             for collection in session.scalars(select(CatalogCollection)).all()
         }
+        grouping_targets = {
+            title.relative_root_path: target
+            for title, target in collection_grouping_authority_targets(session).items()
+        }
         created_automatic_titles: set[CatalogTitle] = set()
         created_automatic_collections: set[CatalogCollection] = set()
         automatic_structural_inputs: dict[
@@ -278,7 +286,9 @@ def migrate_schema(engine) -> None:
                 session.flush()
                 titles[part.relative_root_path] = title
                 created_automatic_titles.add(title)
-            title.catalog_collection_id = collection.id
+            title.catalog_collection_id = grouping_targets.get(
+                part.relative_root_path, collection,
+            ).id
             title.local_title = part.local_title
             title.normalized_local_title = normalize_title(part.local_title)
             if not manual_hierarchy_snapshot_requires_preservation(title):
@@ -357,7 +367,10 @@ def migrate_schema(engine) -> None:
                 title.collection
                 if manual_hierarchy_snapshot_requires_preservation(title)
                 and title.collection is not None
-                else collections[identity.collection.relative_root_path]
+                else grouping_targets.get(
+                    title.relative_root_path,
+                    collections[identity.collection.relative_root_path],
+                )
             )
             video.catalog_collection_id = collection.id
             videos_by_collection.setdefault(collection.id, []).append(video)

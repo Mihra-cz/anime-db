@@ -213,6 +213,9 @@ def test_candidate_and_artwork_mutations_are_post_only():
         "/videos/{video_id}/audio-tracks/{track_id}/language"
     ] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/confirm-part"] == {"POST"}
+    assert paths[
+        "/hierarchy-review/{collection_id}/reevaluate-automatic"
+    ] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/simple-preview"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/separate-nonstandard"] == {"POST"}
     assert paths["/hierarchy-review/{collection_id}/manage-videos"] == {"POST"}
@@ -2222,6 +2225,52 @@ def test_existing_duplicate_seasons_render_review_warning_without_backfill(tmp_p
     with web_app.state.sessions() as session:
         titles = [session.get(CatalogTitle, title_id) for title_id in title_ids]
         assert [title.part_number_manual for title in titles] == [None, None]
+
+
+def test_hierarchy_review_exposes_confirmed_automatic_reevaluation(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'reevaluation-ui.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show", normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Show",
+            normalized_local_title="show", relative_root_path="Anime/Show",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        Video(
+            relative_path="Anime/Show/E01.mkv", root_folder="Anime",
+            filename="E01.mkv", size=1, mtime_ns=1,
+            catalog_collection=collection, catalog_title=title,
+        )
+        session.add(collection)
+        session.commit()
+        collection_id = collection.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review/{collection_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+
+    assert "Přepočítat automatickou hierarchii" in rendered
+    assert (
+        f'action="/hierarchy-review/{collection_id}/reevaluate-automatic"'
+        in rendered
+    )
+    assert 'name="confirm_automatic_reevaluation"' in rendered
+    assert "Ručně potvrzené typy" in rendered
+    assert "canonical numbering zůstanou zachovány" in rendered
+    assert "nebude hádat pořadí Season ani Part" in rendered
 
 
 def test_manage_videos_first_split_renders_confirmation_before_atomic_write(tmp_path):

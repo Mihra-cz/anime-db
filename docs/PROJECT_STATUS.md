@@ -4085,6 +4085,89 @@ celá testovací sada                                 # 960 passed
 
 ---
 
+## 6.64 Collection move jako hierarchy lifecycle boundary
+
+Persistované automatic hodnoty `CatalogTitle.part_type`, `season_number`,
+`part_number` a `season_label` jsou finální cache nad raw path evidence i
+collection-context inference. Před opravou přesun zachoval tuto cache a shared
+finalizer ji v nové non-direct-root collection znovu použil jako údajně explicitní
+strukturální vstup. Slabé automatic `S1`, které vzniklo pouze ze souvislé E01…
+řady jediného direct-root title, proto po merge přežilo jako stale `S1` a nový
+split-season guard oprávněně hlásil `S1 + S1`.
+
+Skutečná změna `CatalogTitle.catalog_collection_id` nyní nejprve pro každý
+přesouvaný title bez manual authority obnoví raw structural input společným
+`derive_library_hierarchy()` nad path evidence dotčených collections. Teprve pak
+se title a jeho redundantní video collection vazby přesunou a existující
+`finalize_hierarchy_write()` lokálně dokončí source i target collection. Explicitní
+podporovaný `Season 2` signál se znovu odvodí jako S2; bez bezpečné evidence skončí
+původní singleton S1 jako generic/unknown review. Žádné pořadí Season/Part se
+nevymýšlí z pořadí přesunu, filename sortu ani episode ranges.
+
+Complete i historicky neúplný manual hierarchy snapshot je nadále chráněn včetně
+autoritativního `NULL`, manual Part ordinalů a verified timestampu. Move nemění
+CatalogTitle ID, video membership, canonical numbering, metadata, confirmed
+duplicate vazby ani manual suspected stav. Split-season invariant zůstává beze
+změny: dvě skutečně explicitní S1 bez unikátních Parts dál vytvoří blocking
+`ambiguous_split_season`.
+
+Persistentní collection-grouping authority se nově vyhodnotí už při automatic
+reconstruction startupu a scanneru. Titul se tak během stabilního lifecycle
+dočasně neflushne zpět do fyzicky odvozené source collection a následně znovu do
+manual targetu. Stabilní opakovaný startup proto nevytváří transientní
+`UPDATE catalog_titles` ani `updated_at` churn. Neexistuje schema migrace ani
+historický hromadný backfill; starší stale merge opraví explicitní collection-context
+re-evaluation z části 6.65, další skutečný move/merge nebo ruční hierarchy workflow.
+
+Automatická validace tohoto lifecycle:
+
+```text
+nové cílené move/provenance/atomicity/idempotence scénáře  # 10 passed
+relevantní hierarchy/move/scanner/startup sada             # 541 passed
+celá testovací sada                                         # 969 passed
+```
+
+---
+
+## 6.65 Explicitní collection-context re-evaluation
+
+Historické collection merges vytvořené před částí 6.64 mohou v jedné collection
+stále obsahovat několik stale automatic S1 vedle skutečné manual S1. Jednotlivý
+manual title POST takový stav nemůže vždy bezpečně opravit, protože strict
+split-season guard správně odmítá neplatný mezistav s dalšími dvěma S1. Guard se
+neoslabuje a startup neprovádí žádný automatic backfill.
+
+Hierarchy Review proto obsahuje explicitně potvrzovanou akci **Přepočítat
+automatickou hierarchii**. Jedním collection-level write znovu sestaví raw
+structural input všech titles bez manual authority přes stejný
+`invalidate_automatic_hierarchy_for_collection_move()` helper jako collection
+move a následně použije shared inference/evaluation v aktuální collection.
+Automatic explicitní Season 2 evidence znovu vytvoří S2; starý singleton-derived
+S1 bez bezpečné raw evidence skončí jako generic/unknown review. Pořadí Season ani
+Part se nikdy neodvozuje.
+
+Complete i historicky neúplné manual snapshoty včetně autoritativního `NULL`
+zůstávají beze změny. Structure-only finalizace nepřepisuje canonical numbering.
+Operace před i po změně porovná CatalogTitle IDs, Video membership, všechna
+canonical numbering pole, manual hierarchy authority, metadata ownership,
+manual-split selectory a duplicate/suspected stav; jakákoli odchylka zruší celou
+transakci. Fyzické cesty ani NAS se nemění.
+
+Akce není spuštěna startupem, scannerem ani migrací a neobsahuje žádnou
+Kimetsu-specific výjimku. Po explicitním přepočtu persistentní grouping authority
+zajistí, že startup/scanner nadále odvodí stejný current-collection výsledek a
+stabilní opakovaný startup nevytváří `UPDATE catalog_titles` ani timestamp churn.
+
+Automatická validace explicitní re-evaluation:
+
+```text
+nové cílené backend/UI/preservation/startup scénáře  # 6 passed
+relevantní hierarchy/move/refresh/lifecycle sada     # 547 passed
+celá testovací sada                                   # 975 passed
+```
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

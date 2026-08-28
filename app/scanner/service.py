@@ -16,7 +16,11 @@ from app.catalog import (
 from app.hierarchy import derive_library_hierarchy
 from app.hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from app.hierarchy_evaluation import finalize_collection_hierarchy
-from app.hierarchy_review import apply_collection_grouping_authority, extract_local_period_hint
+from app.hierarchy_review import (
+    apply_collection_grouping_authority,
+    collection_grouping_authority_targets,
+    extract_local_period_hint,
+)
 from app.manual_split import (
     apply_manual_split_decisions,
     evaluate_persisted_manual_split,
@@ -425,6 +429,10 @@ def _scan_library(
         value.relative_root_path: value
         for value in session.scalars(select(CatalogTitle)).all()
     }
+    grouping_targets = {
+        title.relative_root_path: target
+        for title, target in collection_grouping_authority_targets(session).items()
+    }
     protected_collection_paths: set[str] = set()
     for video in current_videos:
         authority_collections = persisted_manual_split_authority_collections(video)
@@ -512,9 +520,9 @@ def _scan_library(
             session.add(collection)
             session.flush()
             collections[collection.relative_root_path] = collection
-        video.catalog_collection = collection
         split_titles = manual_split_titles(collection)
         if split_titles:
+            video.catalog_collection = collection
             continue
         catalog_title = titles.get(title_data.relative_root_path)
         if catalog_title is None:
@@ -525,7 +533,11 @@ def _scan_library(
             )
             session.add(catalog_title)
             titles[catalog_title.relative_root_path] = catalog_title
-        catalog_title.collection = collection
+        assignment_collection = grouping_targets.get(
+            catalog_title.relative_root_path, collection,
+        )
+        video.catalog_collection = assignment_collection
+        catalog_title.collection = assignment_collection
         if not manual_hierarchy_snapshot_requires_preservation(catalog_title):
             catalog_title.part_type = title_data.part_type
             catalog_title.season_number = title_data.season_number

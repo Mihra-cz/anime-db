@@ -166,6 +166,70 @@ def test_confirmation_validation_failure_leaves_no_partial_authority(tmp_path):
         assert all(title.part_type_manual is None for title in titles)
 
 
+def test_explicit_automatic_reevaluation_route_requires_confirmation(tmp_path):
+    app = _app(tmp_path, "explicit-reevaluation.db")
+    with app.state.sessions() as session:
+        collection = CatalogCollection(
+            local_title="Main", normalized_local_title="main",
+            relative_root_path="Anime/Main",
+        )
+        stale = CatalogTitle(
+            collection=collection, local_title="Fragment",
+            normalized_local_title="fragment",
+            relative_root_path="Anime/Fragment",
+            part_type="season", season_number=1, season_label="S1",
+        )
+        manual = CatalogTitle(
+            collection=collection, local_title="Main",
+            normalized_local_title="main", relative_root_path="Anime/Main",
+            part_type="season", season_number=1, season_label="S1",
+            part_type_manual="season", season_number_manual=1,
+            season_label_manual="S1", hierarchy_manual_override=True,
+            hierarchy_verified_at=utc_now(),
+        )
+        session.add_all([
+            Video(
+                relative_path="Anime/Fragment/E01.mkv", root_folder="Anime",
+                filename="E01.mkv", size=1, mtime_ns=1,
+                catalog_collection=collection, catalog_title=stale,
+            ),
+            Video(
+                relative_path="Anime/Main/E01.mkv", root_folder="Anime",
+                filename="E01.mkv", size=2, mtime_ns=2,
+                catalog_collection=collection, catalog_title=manual,
+            ),
+        ])
+        session.commit()
+        collection_id, stale_id, manual_id = collection.id, stale.id, manual.id
+
+    endpoint = _endpoint(
+        app, "/hierarchy-review/{collection_id}/reevaluate-automatic",
+    )
+    with pytest.raises(HTTPException) as raised:
+        endpoint(collection_id, confirm_automatic_reevaluation=False)
+    assert raised.value.status_code == 400
+    with app.state.sessions() as session:
+        stale = session.get(CatalogTitle, stale_id)
+        assert (stale.part_type, stale.season_number) == ("season", 1)
+
+    response = endpoint(collection_id, confirm_automatic_reevaluation=True)
+    assert response.status_code == 303
+    assert "operation-result" in response.headers["location"]
+    with app.state.sessions() as session:
+        stale = session.get(CatalogTitle, stale_id)
+        manual = session.get(CatalogTitle, manual_id)
+        assert (
+            stale.part_type, stale.season_number, stale.part_number,
+            stale.season_label,
+        ) == ("title", None, None, None)
+        assert (
+            manual.hierarchy_manual_override,
+            manual.part_type_manual,
+            manual.season_number_manual,
+            manual.season_label_manual,
+        ) == (True, "season", 1, "S1")
+
+
 def test_title_numbering_route_finalizes_collection_status_and_note(tmp_path):
     app = _app(tmp_path, "numbering-finalizer.db")
     with app.state.sessions() as session:

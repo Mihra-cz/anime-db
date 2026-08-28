@@ -81,7 +81,7 @@ from .hierarchy_review import (
     move_titles_to_collection, record_grouping_decision,
     record_manual_collection_merge,
     parse_simple_definitions,
-    refresh_collection_state,
+    reevaluate_automatic_collection_hierarchy, refresh_collection_state,
     preview_assignments, separate_nonstandard_videos, simple_definition_rows,
     set_manual_duplicate_status,
     single_title_confirmation_suggestion, supplementary_assignment_recommendations,
@@ -2054,6 +2054,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             refresh_collection_state(collection)
             session.commit()
         return local_redirect_response(f"/hierarchy-review/{collection_id}")
+
+    @app.post("/hierarchy-review/{collection_id}/reevaluate-automatic")
+    def hierarchy_review_reevaluate_automatic(
+        collection_id: int,
+        confirm_automatic_reevaluation: bool = Form(False),
+    ):
+        if not confirm_automatic_reevaluation:
+            raise HTTPException(
+                status_code=400,
+                detail="Přepočet automatické hierarchie je nutné explicitně potvrdit.",
+            )
+        with sessions() as session:
+            try:
+                reevaluate_automatic_collection_hierarchy(session, collection_id)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = (
+            "Automatická hierarchie byla znovu vyhodnocena v aktuální collection; "
+            "ruční potvrzené hodnoty zůstaly zachovány."
+        )
+        return local_redirect_response(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}"
+            "#operation-result"
+        )
 
     @app.post("/hierarchy-review/{collection_id}/separate-nonstandard")
     async def hierarchy_review_separate_nonstandard(request: Request, collection_id: int):
