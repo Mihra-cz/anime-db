@@ -16,6 +16,8 @@ from app.catalog import (
     classify_video,
     derive_episode_number,
     detect_episode_number,
+    effective_video_content_display,
+    effective_video_content_type,
     filename_display_title,
     derive_season_info,
     determine_parent_series,
@@ -1337,6 +1339,113 @@ def test_film_filter_uses_effective_hierarchy_and_excludes_other_parts():
     )
     assert mixed_group.total == 2
     assert mixed_group.problematic == 1
+
+
+@pytest.mark.parametrize("part_type", [
+    "film", "ova", "special", "bonus", "preview", "recap",
+])
+def test_effective_video_content_uses_exact_supplementary_title_type(part_type):
+    collection = CatalogCollection(
+        id=100, local_title="Work", normalized_local_title="work",
+        relative_root_path="Anime/Work",
+    )
+    title = CatalogTitle(
+        id=100, collection=collection, local_title="Part",
+        normalized_local_title="part", relative_root_path="Anime/Work/Part",
+        part_type=part_type,
+    )
+    video = Video(
+        id=100, relative_path="Anime/Work/Part/opaque.mkv", root_folder="Anime",
+        filename="opaque.mkv", size=1, mtime_ns=1, file_type="other",
+        catalog_collection=collection, catalog_title=title,
+    )
+
+    display = effective_video_content_display(video)
+
+    assert effective_video_content_type(video) == part_type
+    assert display.value == part_type
+    assert display.display_label == {
+        "film": "Film", "ova": "OVA", "special": "Special",
+        "bonus": "Bonus", "preview": "Preview", "recap": "Recap",
+    }[part_type]
+    assert display.is_manual is False
+    assert video.file_type == "other"
+
+
+def test_verified_manual_standalone_film_overrides_parser_other():
+    collection = CatalogCollection(
+        id=103, local_title="Hotarubi no Mori e",
+        normalized_local_title="hotarubi no mori e",
+        relative_root_path="@manual/hotarubi-no-mori-e",
+        hierarchy_status="verified", hierarchy_verified_at=utc_now(),
+    )
+    title = CatalogTitle(
+        id=103, collection=collection, local_title="Hotarubi no Mori e",
+        normalized_local_title="hotarubi no mori e",
+        relative_root_path="@manual/hotarubi-no-mori-e/title",
+        part_type="title", part_type_manual="film",
+        hierarchy_manual_override=True, hierarchy_verified_at=utc_now(),
+    )
+    video = Video(
+        id=103, relative_path="Hotarubi no Mori e.mkv", root_folder=".",
+        filename="Hotarubi no Mori e.mkv", size=1, mtime_ns=1,
+        file_type="other", catalog_collection=collection, catalog_title=title,
+    )
+
+    assert title.effective_part_type == "film"
+    assert effective_video_content_type(video) == "film"
+    assert effective_video_content_display(video).display_label == "Film"
+    assert video.file_type == "other"
+
+
+def test_manual_video_content_classification_overrides_film_title():
+    collection = CatalogCollection(
+        id=101, local_title="Film", normalized_local_title="film",
+        relative_root_path="Anime/Film",
+    )
+    title = CatalogTitle(
+        id=101, collection=collection, local_title="Film",
+        normalized_local_title="film", relative_root_path="Anime/Film/Film",
+        part_type="film",
+    )
+    video = Video(
+        id=101, relative_path="Anime/Film/Film/extra.mkv", root_folder="Anime",
+        filename="extra.mkv", size=1, mtime_ns=1, file_type="other",
+        content_type_manual="ova", catalog_collection=collection,
+        catalog_title=title,
+    )
+
+    display = effective_video_content_display(video)
+
+    assert effective_video_content_type(video) == "ova"
+    assert display.value == "ova"
+    assert display.display_label == "OVA · ručně zařazeno"
+    assert display.is_manual is True
+    assert is_film_video(video) is False
+
+
+def test_movie_word_does_not_create_film_without_structural_context():
+    collection = CatalogCollection(
+        id=102, local_title="Movie Club", normalized_local_title="movie club",
+        relative_root_path="Anime/Movie Club",
+    )
+    title = CatalogTitle(
+        id=102, collection=collection, local_title="Season 1",
+        normalized_local_title="season 1",
+        relative_root_path="Anime/Movie Club/Season 1", part_type="season",
+        season_number=1,
+    )
+    path = "Anime/Movie Club/Season 1/Movie Club - 01.mkv"
+    video = Video(
+        id=102, relative_path=path, root_folder="Anime",
+        filename="Movie Club - 01.mkv", size=1, mtime_ns=1,
+        file_type=classify_video(path), catalog_collection=collection,
+        catalog_title=title,
+    )
+
+    assert video.file_type == "episode"
+    assert effective_video_content_type(video) == "episode"
+    assert is_film_video(video) is False
 
 
 def test_search_by_title_is_case_insensitive_and_returns_all_filtered_title_videos():

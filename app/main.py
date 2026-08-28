@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from .catalog import (
     MANUAL_LANGUAGE_CHOICES,
@@ -293,7 +293,7 @@ def _load_catalog_title(session, catalog_title_id: int | None):
         ).selectinload(CatalogTitle.metadata_record),
         selectinload(CatalogTitle.collection).selectinload(
             CatalogCollection.titles
-        ).selectinload(CatalogTitle.videos),
+        ).selectinload(CatalogTitle.videos).joinedload(Video.catalog_title),
         selectinload(CatalogTitle.metadata_candidates),
         selectinload(CatalogTitle.artwork),
         selectinload(CatalogTitle.videos),

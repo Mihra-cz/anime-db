@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from sqlalchemy import event
 from starlette.requests import Request
 
 from app.collection_presentation import build_collection_presentation
@@ -279,6 +280,70 @@ def test_homepage_keeps_single_season_shortcut_with_attached_supplementary(
     assert f'href="/titles/{ids["single_title"]}">Single</a>' in rendered
     assert f'href="/titles/{ids["attached_title"]}">Single Attached</a>' in rendered
     assert f'href="/collections/{ids["multi_collection"]}">Multi</a>' in rendered
+
+
+def test_attached_film_classification_keeps_main_and_hierarchy_presentations(
+    tmp_path: Path,
+):
+    web_app, endpoints = _app(tmp_path)
+    with web_app.state.sessions() as session:
+        collection = _collection("Series With Films")
+        season = _title(
+            collection, "Season 1", "season", 1, ("Series - 01.mkv",),
+        )
+        film = _title(
+            collection, "The Dark Hero", "film", 1,
+            ("The Dark Hero.mkv",),
+        )
+        session.add(collection)
+        session.commit()
+        collection_id, season_id, film_id = collection.id, season.id, film.id
+        film_video_id = film.videos[0].id
+        assert film.videos[0].file_type == "other"
+        assert (
+            film.videos[0].local_episode_number,
+            film.videos[0].season_episode_number,
+            film.videos[0].absolute_episode_number,
+            film.videos[0].external_episode_number,
+        ) == (None, None, None, None)
+
+    homepage = endpoints["/"](_request(web_app, "/")).body.decode()
+    assert f'href="/titles/{season_id}">Series With Films</a>' in homepage
+
+    detail_query_count = 0
+
+    def count_detail_query(*_args):
+        nonlocal detail_query_count
+        detail_query_count += 1
+
+    engine = web_app.state.sessions.kw["bind"]
+    event.listen(engine, "before_cursor_execute", count_detail_query)
+    try:
+        season_detail = endpoints["/titles/{catalog_title_id}"](
+            _request(web_app, f"/titles/{season_id}"), season_id,
+        ).body.decode()
+    finally:
+        event.remove(engine, "before_cursor_execute", count_detail_query)
+    film_item = season_detail.split(
+        f'href="/titles/{film_id}?', 1,
+    )[1].split("</li>", 1)[0]
+    assert "The Dark Hero.mkv" in film_item
+    assert "<small>Film</small>" in film_item
+    assert "<small>other</small>" not in film_item
+    # The back-reference is joined into the existing title-videos SELECT, so the
+    # established detached season-detail read model keeps its statement budget.
+    assert detail_query_count == 20
+
+    hierarchy = endpoints["/hierarchy-review/{collection_id}"](
+        _request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
+    ).body.decode()
+    assert hierarchy.count('class="panel hierarchy-title-card') == 2
+    assert f'id="title-{season_id}"' in hierarchy
+    assert f'id="title-{film_id}"' in hierarchy
+    film_assignment = hierarchy.split(
+        f'id="assignment-video-{film_video_id}"', 1,
+    )[1].split("</label>", 1)[0]
+    assert "Film" in film_assignment
 
 
 def test_main_selector_and_season_detail_nest_only_exact_supplementary_context(

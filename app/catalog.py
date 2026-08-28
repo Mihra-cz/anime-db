@@ -12,6 +12,7 @@ import unicodedata
 from .hierarchy_authority import manual_hierarchy_snapshot_is_complete
 from .hierarchy_types import (
     MAIN_CONTENT_PART_TYPES,
+    PART_TYPE_LABELS,
     SUPPLEMENTARY_PART_TYPES,
     VIDEO_CONTENT_TYPE_LABELS,
 )
@@ -852,12 +853,28 @@ def unresolved_duplicate_video_ids(videos: Iterable[Video]) -> set[int]:
     }
 
 
+def hierarchy_video_content_type(video: Video) -> str | None:
+    """Project an exact supplementary type from the current title hierarchy."""
+    title = video.catalog_title
+    if (
+        title is not None
+        and title.effective_part_type in SUPPLEMENTARY_PART_TYPES
+    ):
+        return title.effective_part_type
+    return None
+
+
+def effective_video_content_type(video: Video) -> str:
+    """Resolve manual video authority before title hierarchy and scanner data."""
+    manual = (video.content_type_manual or "").strip().casefold()
+    if manual:
+        return manual
+    return hierarchy_video_content_type(video) or video.file_type
+
+
 def is_film_video(video: Video) -> bool:
-    """Use the authoritative title hierarchy shared by statistics and filters."""
-    return bool(
-        video.catalog_title is not None
-        and video.catalog_title.effective_part_type == "film"
-    )
+    """Use the shared effective classification for statistics and filters."""
+    return effective_video_content_type(video) == "film"
 
 
 def video_matches_filter(
@@ -1477,8 +1494,15 @@ def effective_video_content_display(video: Video) -> VideoContentDisplay:
     """
     manual_value = (video.content_type_manual or "").strip().casefold()
     is_manual = bool(manual_value)
-    value = manual_value if is_manual else video.file_type
-    label = VIDEO_CONTENT_TYPE_LABELS.get(value, value) if is_manual else value
+    hierarchy_value = hierarchy_video_content_type(video) if not is_manual else None
+    value = effective_video_content_type(video)
+    label = (
+        VIDEO_CONTENT_TYPE_LABELS.get(value, value)
+        if is_manual
+        else PART_TYPE_LABELS.get(value, value)
+        if hierarchy_value is not None
+        else value
+    )
     detection = detect_episode_number(video.filename)
     noncanonical_position = (
         detection.display_value if detection.is_nonstandard else None

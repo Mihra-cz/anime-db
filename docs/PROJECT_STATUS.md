@@ -2,8 +2,8 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 27. srpna 2026
-> **Aktuální checkpoint:** Collection identity názvy bez supplementary úniku
+> **Aktualizováno:** 28. srpna 2026
+> **Aktuální checkpoint:** Effective filmová klasifikace videí z hierarchy
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -3851,6 +3851,48 @@ Automatické ověření 27. srpna 2026:
 
 ```bash
 .venv/bin/pytest -q                          # 914 passed
+.venv/bin/python -m compileall -q app tests # prošlo
+načtení všech Jinja2 šablon                  # 14/14, prošlo
+git diff --check                             # prošlo
+```
+
+---
+
+## 6.59 Effective filmová klasifikace videí z hierarchy
+
+Uložené `Video.file_type` nadále přesně znamená automatický výsledek filename
+parseru a scanner jej při novém nebo změněném souboru může deterministicky
+obnovit. Parser záměrně neklasifikuje video jako film jen podle slova `Movie`
+ani podle názvu parent složky. Film s neprůkazným filename proto smí mít raw
+`file_type="other"`, aniž je jeho uživatelská klasifikace chybná.
+
+Společný effective resolver používá prioritu explicitní
+`Video.content_type_manual` → přesný supplementary
+`CatalogTitle.effective_part_type` → parserový `Video.file_type`. Film, OVA,
+Special, Preview, Recap a Bonus tak sdílejí jednu taxonomii; hierarchy kontext
+opravuje slabé `other`, ale nikdy nepřepisuje ruční video-level rozhodnutí.
+`Film` zůstává title-level typem a do `content_type_manual` se nově nezapisuje.
+Standardní canonical episode number filmového videa zůstává `NULL`, i když má
+Film season context.
+
+Detail hlavní sezóny skládá supplementary skupiny z detached title read-modelu.
+Jeho existující `_load_catalog_title()` dříve načítal
+`CatalogTitle.videos`, ale nikoli zpětnou vazbu `Video.catalog_title`, protože ji
+původní display helper nepotřeboval. Back-reference je nyní eager-loaded JOINem
+uvnitř existující větve `collection.titles -> videos`, ze které se skládají
+supplementary skupiny. Přímý loader hlavního title zůstává beze změny. Nevznikla
+samostatná filmová načítací cesta, lazy load ani nový SQL statement; season
+detail drží stejný budget 20 dotazů.
+
+Startup migrace raw klasifikaci ani hierarchy assignment nemění. Běžný rescan
+může pro změněný soubor znovu uložit parserové `other`, ale autoritativní title
+assignment a jeho effective Film výsledek přežijí. Databázové schema, hierarchy,
+metadata, naming ani fyzické cesty se nemění.
+
+Automatické ověření 28. srpna 2026:
+
+```bash
+.venv/bin/pytest -q                          # 925 passed
 .venv/bin/python -m compileall -q app tests # prošlo
 načtení všech Jinja2 šablon                  # 14/14, prošlo
 git diff --check                             # prošlo

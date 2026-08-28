@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.database import Base
 from app.catalog import (
     build_video_language_profile,
+    effective_video_content_type,
     set_audio_track_manual_language,
     set_external_subtitle_manual_language,
     set_manual_hardsub,
@@ -16,8 +17,10 @@ from app.hierarchy_review import (
     MISSING_DUPLICATE_PRIMARY_REVIEW_REASON, SUPPLEMENTARY_CONTEXT_REVIEW_REASON,
     confirm_duplicate_videos, set_manual_duplicate_status,
 )
+from app.hierarchy_authority import activate_manual_hierarchy_snapshot
 from app.models import (
-    CatalogCollection, CatalogTitle, ExternalSubtitle, UnresolvedExternalSubtitle, Video,
+    CatalogCollection, CatalogTitle, ExternalSubtitle, ManualSplitRuleVideo,
+    UnresolvedExternalSubtitle, Video, utc_now,
 )
 from app.migrations import migrate_schema
 from app.numbering import effective_video_numbering, unresolved_duplicate_groups
@@ -115,6 +118,72 @@ def test_scan_preserves_meaningful_root_assignment_and_regular_folder_hierarchy(
         assert regular.catalog_collection.local_title == "Regular Show"
         assert regular.catalog_title.local_title == "Regular Show"
         assert root_path.exists() and collection_only_path.exists() and regular_path.exists()
+
+
+def test_effective_root_film_classification_survives_startup_and_rescan(
+    tmp_path: Path, monkeypatch,
+):
+    media = tmp_path / "Opaque Work.mkv"
+    media.write_bytes(b"film")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine(f"sqlite:///{tmp_path / 'film-lifecycle.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+
+    with sessions() as session:
+        scan_library(session, tmp_path)
+        video = session.scalar(select(Video).where(Video.relative_path == media.name))
+        collection = CatalogCollection(
+            local_title="Opaque Work", normalized_local_title="opaque work",
+            relative_root_path="@manual/opaque-work",
+            hierarchy_status="verified", hierarchy_verified_at=utc_now(),
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Opaque Work",
+            normalized_local_title="opaque work",
+            relative_root_path="@manual/opaque-work/title", part_type="title",
+        )
+        activate_manual_hierarchy_snapshot(
+            title, part_type="film", season_number=None, part_number=None,
+            season_label=None, sort_order=None, verified_at=utc_now(),
+        )
+        video.catalog_collection = collection
+        video.catalog_title = title
+        video.manual_split_rule_videos.append(
+            ManualSplitRuleVideo(catalog_title=title)
+        )
+        session.commit()
+        video_id, title_id = video.id, title.id
+        assert video.file_type == "other"
+        assert effective_video_content_type(video) == "film"
+
+    migrate_schema(engine)
+    with sessions() as session:
+        restarted = session.get(Video, video_id)
+        assert restarted.catalog_title_id == title_id
+        assert restarted.catalog_title.effective_part_type == "film"
+        assert restarted.file_type == "other"
+        assert restarted.content_type_manual is None
+        assert effective_video_content_type(restarted) == "film"
+
+    media.write_bytes(b"film changed")
+    with sessions() as session:
+        scan_library(session, tmp_path)
+    with sessions() as session:
+        rescanned = session.get(Video, video_id)
+        assert rescanned.catalog_title_id == title_id
+        assert rescanned.catalog_title.effective_part_type == "film"
+        assert rescanned.file_type == "other"
+        assert rescanned.content_type_manual is None
+        assert effective_video_content_type(rescanned) == "film"
+        assert (
+            rescanned.local_episode_number,
+            rescanned.season_episode_number,
+            rescanned.absolute_episode_number,
+            rescanned.external_episode_number,
+        ) == (None, None, None, None)
+        assert rescanned.relative_path == media.name
+    assert media.exists()
 
 
 def test_ignores_recycle(tmp_path: Path):
