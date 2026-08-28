@@ -13,7 +13,7 @@ from app.catalog import (
 )
 from app.hierarchy_evaluation import HierarchyIssueCode, evaluate_collection_hierarchy
 from app.hierarchy_review import (
-    CONFIRMED_DUPLICATES_REVIEW_REASON, FILENAME_SEASON_CONFLICT_REVIEW_REASON,
+    FILENAME_SEASON_CONFLICT_REVIEW_REASON,
     MISSING_PART_NUMBER_REVIEW_REASON, PERIOD_HINT_REVIEW_REASON,
     ManualTitleDefinition, apply_manual_split,
     apply_single_title_confirmation,
@@ -935,8 +935,8 @@ def test_confirmed_duplicate_persists_can_change_primary_and_can_be_cleared():
         confirm_duplicate_groups(session, collection.id, [([first.id, second.id], first.id)])
         session.commit()
         collection_id, first_id, second_id = collection.id, first.id, second.id
-        assert collection.hierarchy_status == "review_required"
-        assert collection.hierarchy_note == CONFIRMED_DUPLICATES_REVIEW_REASON
+        assert collection.hierarchy_status == "verified"
+        assert collection.hierarchy_note is None
 
     with sessions() as session:
         collection = session.get(CatalogCollection, collection_id)

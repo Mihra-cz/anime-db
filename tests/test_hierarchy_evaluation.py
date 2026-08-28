@@ -409,7 +409,7 @@ def test_historical_verification_marker_is_preserved_without_legacy_projection()
     assert result.status == "review_required"
 
 
-def test_confirmed_secondary_is_excluded_from_count_but_remains_review_issue():
+def test_confirmed_secondary_is_excluded_from_count_and_is_nonblocking_cleanup():
     collection = _collection()
     title = _title(collection)
     primary = _video(collection, title, 1, "Primary.mkv", episode_number=1)
@@ -430,7 +430,14 @@ def test_confirmed_secondary_is_excluded_from_count_but_remains_review_issue():
     assert summary.numbered == 1
     assert HierarchyIssueCode.CANONICAL_DUPLICATE not in _codes(result)
     assert HierarchyIssueCode.CONFIRMED_DUPLICATE in _codes(result)
-    assert result.status == "review_required"
+    confirmed = next(
+        issue for issue in result.issues
+        if issue.code == HierarchyIssueCode.CONFIRMED_DUPLICATE
+    )
+    assert confirmed.blocking is False
+    assert result.blocking_issues == ()
+    assert result.status == "automatic"
+    assert result.primary_note is None
 
 
 def test_missing_duplicate_primary_has_stable_video_issue():
@@ -453,6 +460,56 @@ def test_missing_duplicate_primary_has_stable_video_issue():
     )
     assert issue.scope == HierarchyIssueScope.VIDEO
     assert issue.videos == (video,)
+    assert issue.blocking is True
+    assert result.status == "review_required"
+
+
+def test_unrepresented_confirmed_reference_is_missing_primary_blocker():
+    collection = _collection()
+    title = _title(collection)
+    video = _video(
+        collection,
+        title,
+        1,
+        "Orphaned duplicate.mkv",
+        episode_number=1,
+        duplicate_of_video_id=999,
+    )
+
+    result = evaluate_collection_hierarchy(collection, [video])
+
+    issue = next(
+        item for item in result.issues
+        if item.code == HierarchyIssueCode.DUPLICATE_PRIMARY_MISSING
+    )
+    assert issue.videos == (video,)
+    assert issue.blocking is True
+    assert HierarchyIssueCode.CONFIRMED_DUPLICATE not in _codes(result)
+    assert result.status == "review_required"
+
+
+def test_obsolete_confirmed_duplicate_review_note_is_not_a_legacy_blocker():
+    collection = _collection(
+        status="review_required",
+        note="Potvrzené duplicitní soubory vyžadují vyřešení.",
+    )
+    title = _title(collection)
+    primary = _video(collection, title, 1, "Primary.mkv", episode_number=1)
+    secondary = _video(
+        collection,
+        title,
+        2,
+        "Secondary.mkv",
+        episode_number=1,
+        duplicate_of=primary,
+        duplicate_of_video_id=primary.id,
+    )
+
+    result = evaluate_collection_hierarchy(collection, [primary, secondary])
+
+    assert result.status == "automatic"
+    assert result.blocking_issues == ()
+    assert HierarchyIssueCode.LEGACY_UNLOCALIZED_REVIEW_STATE not in _codes(result)
 
 
 def test_stale_persisted_review_uses_explicit_legacy_fallback():

@@ -26,7 +26,7 @@ from app.main import (
     get_preferred_title_language, templates,
 )
 from app.hierarchy_review import (
-    CONFIRMED_DUPLICATES_REVIEW_REASON, PERIOD_HINT_REVIEW_REASON,
+    PERIOD_HINT_REVIEW_REASON,
     confirm_duplicate_videos, separate_nonstandard_videos,
     refresh_collection_state, simple_definition_rows, single_title_confirmation_suggestion,
     supplementary_assignment_recommendations,
@@ -1058,8 +1058,8 @@ def test_bungo_bulk_duplicate_resolution_keeps_physical_cleanup_warning(tmp_path
 
     with web_app.state.sessions() as session:
         collection = session.get(CatalogCollection, collection_id)
-        assert collection.hierarchy_status == "review_required"
-        assert collection.hierarchy_note == CONFIRMED_DUPLICATES_REVIEW_REASON
+        assert collection.hierarchy_status == "verified"
+        assert collection.hierarchy_note is None
 
     after = endpoints["/hierarchy-review/{collection_id}"](
         web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
@@ -1070,10 +1070,18 @@ def test_bungo_bulk_duplicate_resolution_keeps_physical_cleanup_warning(tmp_path
     assert "<dt>Rozsah</dt><dd>E1–E13</dd>" in after
     assert "<dt>Potvrzených duplicit</dt><dd>13</dd>" in after
     assert "Číslování vyřešeno" in after
-    assert "Fyzické duplicity vyžadují vyřešení: 13" in after
+    assert "13 potvrzených duplicit čeká na fyzický cleanup." in after
+    assert "Bez aktivního blokujícího problému" in after
+    assert "13 blokujících problémů" not in after
+    assert "Potvrzené duplicitní soubory čekají na fyzický cleanup." in after
     assert "Potvrzené duplicity (13)" in after
     assert "Vyřešit duplicity · podezření" not in after
     assert 'class="automatic-duplicate-badge"' not in after
+
+    overview = endpoints["/hierarchy-review"](
+        web_request(web_app, "/hierarchy-review"),
+    ).body.decode()
+    assert f'<a href="/hierarchy-review/{collection_id}">' not in overview
 
     title_detail = endpoints["/titles/{catalog_title_id}"](
         web_request(web_app, f"/titles/{title_id}"), title_id,

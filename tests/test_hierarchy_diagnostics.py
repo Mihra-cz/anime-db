@@ -205,8 +205,10 @@ def test_unresolved_and_confirmed_duplicate_groups_stay_video_scoped():
     )
     assert unresolved_issue.scope == "video"
     assert unresolved_issue.videos == tuple(unresolved)
+    assert unresolved_issue.blocking is True
+    assert unresolved_diagnostics.blocking_count >= 1
 
-    confirmed_collection = _collection()
+    confirmed_collection = _collection(status="automatic")
     confirmed_title = _title(confirmed_collection, 1, "Season 1")
     primary = _video(
         confirmed_collection, 1, "Primary.mkv",
@@ -228,6 +230,8 @@ def test_unresolved_and_confirmed_duplicate_groups_stay_video_scoped():
     )
     assert confirmed_issue.scope == "video"
     assert set(confirmed_issue.videos) == {primary, duplicate}
+    assert confirmed_issue.blocking is False
+    assert confirmed_diagnostics.blocking_count == 0
     assert not any(
         issue.code == "canonical_duplicate"
         for issue in confirmed_diagnostics.issues
@@ -248,6 +252,7 @@ def test_missing_duplicate_primary_is_localized_to_secondary_video():
         issue.code == "duplicate_primary_missing"
         for issue in diagnostics.for_video(video)
     )
+    assert diagnostics.blocking_count == 1
 
 
 def test_unknown_persisted_reason_remains_a_collection_fallback():

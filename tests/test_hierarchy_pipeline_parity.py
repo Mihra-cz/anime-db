@@ -358,6 +358,9 @@ def test_duplicate_semantics_match_after_scan_and_startup(
         summary = summarize_title_numbering(collection.videos, collection.titles[0])
         assert summary.standard_total == 1
         assert HierarchyIssueCode.CONFIRMED_DUPLICATE in {
+            issue.code for issue in evaluation.soft_warnings
+        }
+        assert HierarchyIssueCode.CONFIRMED_DUPLICATE not in {
             issue.code for issue in evaluation.blocking_issues
         }
 
@@ -369,6 +372,9 @@ def test_duplicate_semantics_match_after_scan_and_startup(
         summary = summarize_title_numbering(collection.videos, collection.titles[0])
         assert summary.standard_total == 1
         assert HierarchyIssueCode.CONFIRMED_DUPLICATE in {
+            issue.code for issue in evaluation.soft_warnings
+        }
+        assert HierarchyIssueCode.CONFIRMED_DUPLICATE not in {
             issue.code for issue in evaluation.blocking_issues
         }
 

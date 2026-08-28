@@ -1619,9 +1619,14 @@ Potvrzená duplicate copy se nepočítá jako další logická standardní epizo
 Například `Bungo to Alchemist - Shinpan no Haguruma` s E1–E13 ve dvou kopiích
 proto po potvrzení ukazuje 26 fyzických videí, 13 logických standardních epizod,
 13/13, rozsah E1–E13, nula nevyřešených číselných kolizí a 13 potvrzených
-duplicitních souborů. Číslování je vyřešené, ale kolekce zůstává
-`review_required` s důvodem **Potvrzené duplicitní soubory vyžadují vyřešení.**
-Potvrzená duplicita se záměrně nezobrazuje zeleně jako legitimní konečný stav.
+duplicitních souborů. Číslování i logická identita zůstávají vyřešené.
+Platná potvrzená duplicita s existujícím primary sama
+nezpůsobuje `review_required`, nepočítá se mezi blokující problémy a kompletní
+ruční hierarchy proto může zůstat `verified`. UI ji nadále zobrazuje jako
+neblokující backlog fyzického cleanupu včetně primary, secondary kopií, změny
+primary a zrušení chybného potvrzení. Unresolved kolize a
+`duplicate_primary_missing` zůstávají blokující; chybějící primary AnimeDB
+automaticky nenahrazuje.
 
 Dlouhodobým cílem je na NASu vztah **jedna logická epizoda = jedna uživatelem
 preferovaná fyzická verze**. Budoucí samostatná akce **Vyřešit duplicitu** má
@@ -3956,6 +3961,42 @@ git diff --check                                   # prošlo
 
 Změna nepřidává DB sloupec, nemění produkční `data/anime.db`, nespouští
 produkční scan a nijak nepracuje s fyzickými daty na NASu.
+
+---
+
+## 6.61 Potvrzená duplicita jako neblokující fyzický backlog
+
+Shared hierarchy evaluator dříve emitoval issue `confirmed_duplicate` se stejným
+`blocking=true` jako unresolved canonical kolizi. Tím po potvrzení primary sice
+numbering správně vyloučil secondary kopii z logického počtu, ale scanner,
+startup, runtime refresh i Hierarchy Review ze společného výsledku znovu odvodily
+`review_required` a uložily poznámku, že potvrzené soubory vyžadují vyřešení.
+
+Platný `confirmed_duplicate` je nyní structured non-blocking issue s informací,
+že fyzický cleanup čeká. Zůstává v DB, diagnostice, detailu titulu,
+Hierarchy Review i katalogovém filtru duplicit, ale nevstupuje do blocking count,
+primary note ani odvozeného hierarchy statusu. Známá stará odvozená confirmed
+poznámka se nepovyšuje na neurčitý legacy blocker, takže existující záznam se
+při nejbližší startup synchronizaci přepne na správný `automatic` nebo
+`verified` stav. Jiné neznámé legacy review důvody se nadále konzervativně
+zachovávají.
+
+Unresolved `canonical_duplicate` a `duplicate_primary_missing` zůstávají
+blokující. Scanner při zmizení primary pouze zruší neplatnou vazbu, nastaví
+`duplicate_primary_missing=true` a nevybírá náhradu. Samostatné manual
+`suspected` se nemění. Oprava nepřidává fyzický cleanup ani DB schema a nemění
+soubory na NASu.
+
+Automatické ověření 28. srpna 2026:
+
+```bash
+nové cílené duplicate workflow testy             # 8 passed
+hierarchy/duplicate/scanner/startup/UI sada        # 408 passed
+.venv/bin/pytest -q                                # 930 passed
+.venv/bin/python -m compileall -q app              # prošlo
+načtení všech Jinja2 šablon                        # 14/14, prošlo
+git diff --check                                   # prošlo
+```
 
 ---
 

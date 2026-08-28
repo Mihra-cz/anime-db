@@ -6,11 +6,13 @@ from sqlalchemy.orm import Session
 
 from app.migrations import migrate_schema
 from app.database import Base
+from app.hierarchy_evaluation import HierarchyIssueCode, evaluate_collection_hierarchy
 from app.models import (
     AudioTrack, CatalogCollection, CatalogTitle, CollectionGroupingDecision,
     ExternalSubtitle, ExternalTitleLink, InternalSubtitle, ManualSplitRuleVideo,
     TitleMetadata, UnresolvedExternalSubtitle, Video,
 )
+from app.numbering import summarize_title_numbering
 
 
 def _catalog_title_persisted_state(session: Session):
@@ -198,6 +200,92 @@ def test_startup_real_structural_change_updates_title_and_timestamp(tmp_path):
         )
         assert title.updated_at != fixed_updated_at
     assert len(updates) == 1
+
+
+def test_startup_treats_confirmed_duplicate_as_nonblocking_cleanup(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'confirmed-cleanup.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Show",
+            normalized_local_title="show",
+            relative_root_path="Anime/Show",
+            hierarchy_status="review_required",
+            hierarchy_note=(
+                "Potvrzené duplicitní soubory vyžadují vyřešení."
+            ),
+        )
+        title = CatalogTitle(
+            collection=collection,
+            local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Show/Season 1",
+            part_type="season",
+            season_number=1,
+            season_label="S1",
+            hierarchy_manual_override=True,
+            part_type_manual="season",
+            season_number_manual=1,
+            season_label_manual="S1",
+        )
+        primary = Video(
+            relative_path="Anime/Show/Season 1/Show - 01.mkv",
+            root_folder="Anime",
+            filename="Show - 01.mkv",
+            size=1,
+            mtime_ns=1,
+            season_episode_number=1,
+            catalog_title=title,
+            catalog_collection=collection,
+        )
+        secondary = Video(
+            relative_path="Anime/Show/Season 1/Show 01.mp4",
+            root_folder="Anime",
+            filename="Show 01.mp4",
+            size=2,
+            mtime_ns=2,
+            season_episode_number=1,
+            catalog_title=title,
+            catalog_collection=collection,
+        )
+        session.add(collection)
+        session.flush()
+        secondary.duplicate_of = primary
+        session.commit()
+        primary_id, secondary_id = primary.id, secondary.id
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        collection = session.scalar(select(CatalogCollection))
+        title = collection.titles[0]
+        primary = session.get(Video, primary_id)
+        secondary = session.get(Video, secondary_id)
+        summary = summarize_title_numbering(list(title.videos), title)
+        evaluation = evaluate_collection_hierarchy(
+            collection,
+            list(collection.videos),
+        )
+        assert collection.hierarchy_status == "verified"
+        assert collection.hierarchy_note is None
+        assert (summary.total, summary.standard_total, summary.numbered) == (2, 1, 1)
+        assert summary.confirmed_duplicates == 1
+        assert secondary.duplicate_of_video_id == primary.id
+        confirmed = next(
+            issue for issue in evaluation.issues
+            if issue.code == HierarchyIssueCode.CONFIRMED_DUPLICATE
+        )
+        assert confirmed.blocking is False
+        assert evaluation.blocking_issues == ()
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        collection = session.scalar(select(CatalogCollection))
+        secondary = session.get(Video, secondary_id)
+        assert collection.hierarchy_status == "verified"
+        assert collection.hierarchy_note is None
+        assert secondary.duplicate_of_video_id == primary_id
 
 
 def test_startup_sync_applies_shared_direct_root_season_one_inference(tmp_path):

@@ -44,8 +44,11 @@ from .structural_inference import (
 )
 
 
-CONFIRMED_DUPLICATES_REVIEW_REASON = (
+LEGACY_CONFIRMED_DUPLICATES_REVIEW_REASON = (
     "Potvrzené duplicitní soubory vyžadují vyřešení."
+)
+CONFIRMED_DUPLICATES_CLEANUP_NOTICE = (
+    "Potvrzené duplicitní soubory čekají na fyzický cleanup."
 )
 MISSING_DUPLICATE_PRIMARY_REVIEW_REASON = (
     "Primární video potvrzené duplicity chybí; vztah vyžaduje novou ruční kontrolu."
@@ -252,7 +255,6 @@ def hierarchy_primary_note(
         (HierarchyIssueCode.FILENAME_SEASON_CONFLICT, FILENAME_SEASON_CONFLICT_REVIEW_REASON),
         (HierarchyIssueCode.NONSTANDARD_NUMBERING, NONSTANDARD_NUMBERING_REVIEW_REASON),
         (HierarchyIssueCode.DUPLICATE_PRIMARY_MISSING, MISSING_DUPLICATE_PRIMARY_REVIEW_REASON),
-        (HierarchyIssueCode.CONFIRMED_DUPLICATE, CONFIRMED_DUPLICATES_REVIEW_REASON),
         (HierarchyIssueCode.LONG_FLAT_SERIES, LONG_FLAT_SEQUENCE_REVIEW_REASON),
         (HierarchyIssueCode.RELATED_NAMED_CHILD, RELATED_NAMED_CHILD_REVIEW_REASON),
         (
@@ -559,9 +561,9 @@ def evaluate_collection_hierarchy(
         represented_confirmed_videos.update(group.videos)
         add_issue(
             HierarchyIssueCode.CONFIRMED_DUPLICATE,
-            CONFIRMED_DUPLICATES_REVIEW_REASON,
+            CONFIRMED_DUPLICATES_CLEANUP_NOTICE,
             HierarchyIssueScope.VIDEO,
-            blocking=True,
+            blocking=False,
             title=_common_catalog_title(group.videos),
             target_videos=group.videos,
         )
@@ -569,10 +571,11 @@ def evaluate_collection_hierarchy(
         if (
             is_confirmed_duplicate(video)
             and video not in represented_confirmed_videos
+            and not video.duplicate_primary_missing
         ):
             add_issue(
-                HierarchyIssueCode.CONFIRMED_DUPLICATE,
-                CONFIRMED_DUPLICATES_REVIEW_REASON,
+                HierarchyIssueCode.DUPLICATE_PRIMARY_MISSING,
+                MISSING_DUPLICATE_PRIMARY_REVIEW_REASON,
                 HierarchyIssueScope.VIDEO,
                 blocking=True,
                 title=_video_title(video, titles_by_id),
@@ -583,6 +586,8 @@ def evaluate_collection_hierarchy(
         include_legacy_fallback
         and collection.hierarchy_status in {"review_required", "conflict"}
         and not any(issue.blocking for issue in issues)
+        and (collection.hierarchy_note or "").strip()
+        != LEGACY_CONFIRMED_DUPLICATES_REVIEW_REASON
     ):
         note = (collection.hierarchy_note or "").strip()
         add_issue(

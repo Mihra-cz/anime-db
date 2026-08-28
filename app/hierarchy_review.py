@@ -20,7 +20,6 @@ from .hierarchy_authority import (
     structural_hierarchy_issue,
 )
 from .hierarchy_evaluation import (
-    CONFIRMED_DUPLICATES_REVIEW_REASON,
     FILENAME_SEASON_CONFLICT_REVIEW_REASON,
     MISSING_DUPLICATE_PRIMARY_REVIEW_REASON,
     MISSING_PART_NUMBER_REVIEW_REASON,
