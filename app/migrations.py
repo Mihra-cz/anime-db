@@ -25,8 +25,70 @@ from .models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
     InternalSubtitle, TitleMetadata, Video,
 )
+from .structural_inference import infer_automatic_structural_values
 
 logger = logging.getLogger(__name__)
+
+
+AutomaticStructuralInput = tuple[str, int | None, int | None, str | None]
+
+
+def _set_catalog_title_structural_values(
+    title: CatalogTitle,
+    values: AutomaticStructuralInput,
+) -> None:
+    current = (
+        title.part_type,
+        title.season_number,
+        title.part_number,
+        title.season_label,
+    )
+    if current == values:
+        return
+    (
+        title.part_type,
+        title.season_number,
+        title.part_number,
+        title.season_label,
+    ) = values
+
+
+def _apply_startup_structural_inputs(
+    collection: CatalogCollection,
+    videos: list[Video],
+    inputs: dict[CatalogTitle, AutomaticStructuralInput],
+    *,
+    infer_final: bool,
+) -> None:
+    """Apply raw path input or its final shared-inference projection in memory."""
+    for title in collection.titles:
+        raw = inputs.get(title)
+        if raw is None:
+            continue
+        values = raw
+        if infer_final:
+            title_videos = [
+                video for video in videos
+                if video.catalog_title is title
+                or video.catalog_title_id == title.id
+            ]
+            inferred = infer_automatic_structural_values(
+                part_type=raw[0],
+                season_number=raw[1],
+                part_number=raw[2],
+                season_label=raw[3],
+                is_direct_root=(
+                    title.relative_root_path == collection.relative_root_path
+                ),
+                videos=title_videos,
+            )
+            values = (
+                inferred.part_type,
+                inferred.season_number,
+                inferred.part_number,
+                inferred.season_label,
+            )
+        _set_catalog_title_structural_values(title, values)
 
 
 def migrate_schema(engine) -> None:
@@ -163,6 +225,9 @@ def migrate_schema(engine) -> None:
         }
         created_automatic_titles: set[CatalogTitle] = set()
         created_automatic_collections: set[CatalogCollection] = set()
+        automatic_structural_inputs: dict[
+            CatalogTitle, AutomaticStructuralInput
+        ] = {}
         identities_by_title_path = {
             identity.title.relative_root_path: identity
             for identity in hierarchy.values()
@@ -217,10 +282,12 @@ def migrate_schema(engine) -> None:
             title.local_title = part.local_title
             title.normalized_local_title = normalize_title(part.local_title)
             if not manual_hierarchy_snapshot_requires_preservation(title):
-                title.part_type = part.part_type
-                title.season_number = part.season_number
-                title.part_number = part.part_number
-                title.season_label = part.season_label
+                automatic_structural_inputs[title] = (
+                    part.part_type,
+                    part.season_number,
+                    part.part_number,
+                    part.season_label,
+                )
                 title.original_folder_name = part.original_folder_name
                 title.sort_order = part.sort_order
             used_titles.add(title)
@@ -311,17 +378,36 @@ def migrate_schema(engine) -> None:
         for collection in collections.values():
             collection_videos = videos_by_collection.get(collection.id, [])
             if not collection_videos:
+                _apply_startup_structural_inputs(
+                    collection,
+                    [],
+                    automatic_structural_inputs,
+                    infer_final=False,
+                )
                 continue
             collection.local_period_hint = extract_local_period_hint(collection.local_title)
             if manual_split_titles(collection):
-                manual_split = evaluate_persisted_manual_split(
-                    collection,
-                    collection_videos,
-                )
-                if historical_manual_split_ambiguities(collection, manual_split):
-                    protected_collection_ids.add(collection.id)
-                    continue
-                apply_manual_split_decisions(manual_split, collection)
+                with session.no_autoflush:
+                    _apply_startup_structural_inputs(
+                        collection,
+                        collection_videos,
+                        automatic_structural_inputs,
+                        infer_final=False,
+                    )
+                    manual_split = evaluate_persisted_manual_split(
+                        collection,
+                        collection_videos,
+                    )
+                    if historical_manual_split_ambiguities(collection, manual_split):
+                        protected_collection_ids.add(collection.id)
+                        continue
+                    apply_manual_split_decisions(manual_split, collection)
+                    _apply_startup_structural_inputs(
+                        collection,
+                        collection_videos,
+                        automatic_structural_inputs,
+                        infer_final=True,
+                    )
                 session.flush()
                 assigned_title_ids = {
                     video.catalog_title_id for video in collection_videos
@@ -361,6 +447,23 @@ def migrate_schema(engine) -> None:
                     titles.pop(title.relative_root_path, None)
                 session.flush()
                 continue
+            with session.no_autoflush:
+                # The raw path projection is an input to the shared inference,
+                # not a persistent intermediate state.  Returning to the
+                # already stored final value before the next flush keeps a
+                # stable startup free of UPDATE/updated_at churn.
+                _apply_startup_structural_inputs(
+                    collection,
+                    collection_videos,
+                    automatic_structural_inputs,
+                    infer_final=False,
+                )
+                _apply_startup_structural_inputs(
+                    collection,
+                    collection_videos,
+                    automatic_structural_inputs,
+                    infer_final=True,
+                )
 
         # Identity derivation precedes global manual-split evaluation.  When
         # explicit authority redirects every video to another collection, the

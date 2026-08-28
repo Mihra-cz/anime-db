@@ -3,7 +3,7 @@
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
 > **Aktualizováno:** 28. srpna 2026
-> **Aktuální checkpoint:** Effective filmová klasifikace videí z hierarchy
+> **Aktuální checkpoint:** Databázově idempotentní startup CatalogTitle
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -3897,6 +3897,65 @@ Automatické ověření 28. srpna 2026:
 načtení všech Jinja2 šablon                  # 14/14, prošlo
 git diff --check                             # prošlo
 ```
+
+---
+
+## 6.60 Databázově idempotentní startup CatalogTitle
+
+Normální FastAPI lifespan spouští `migrate_schema()`, jehož součástí je také
+startup hierarchy synchronizace. Audit stabilního opakovaného startupu odhalil,
+že direct-root automatic Season 1 se nejprve v ORM přepnula na raw path hodnoty
+`title/NULL/NULL`, tento mezistav se při grouping synchronizaci flushnul a až
+finální shared structural inference jej vrátila na `season/1/S1`. SQLAlchemy
+proto správně provedlo dva skutečné UPDATE a Python `onupdate=utc_now` při
+každém z nich změnil `CatalogTitle.updated_at`, přestože konečný sémantický stav
+řádku zůstal shodný.
+
+Stejná scalar hodnota sama problém nezpůsobovala: takové přiřazení může objekt
+krátce zařadit do `Session.dirty`, ale `Session.is_modified()` zůstává false a
+flush UPDATE nevydá. Churn vznikl až z dočasně odlišné čtveřice `part_type`,
+`season_number`, `part_number`, `season_label`. Regrese vznikla přesunem finální
+structural inference za mezilehlý flush při sjednocení startup lifecycle; starší
+raw path synchronizace byla sama o sobě obecnější a starší.
+
+Startup nyní drží raw path structural hodnoty jako vstup synchronizace odděleně.
+Po automatic assignmentu a obnovení persistentní collection-grouping authority
+je aplikuje spolu se stejnou čistou structural inference, kterou používá finální
+scanner/startup/runtime pipeline, uvnitř jedné no-autoflush fáze. Do následujícího
+flush tak vstupuje pouze výsledná persistentní hodnota. Pokud se výsledná hodnota
+rovná původnímu řádku, nevznikne `UPDATE catalog_titles` a `updated_at` se
+nezmění. Pokud se skutečně změnil vstup a finální inference, vznikne jeden
+legitimní UPDATE a běžný `onupdate` timestamp zůstává aktivní.
+
+Complete i historicky incomplete manual snapshoty nadále obchází automatic
+strukturální synchronizaci. Nullable manual hodnoty, explicitní
+`hierarchy_manual_override`, verified hierarchy, persistentní manual split,
+season-scoped supplementary části i Film se season contextem zůstávají
+zachované. Numbering recalculation a finální structured hierarchy evaluation se
+stále spouštějí; oprava nevypíná žádný startup krok a nemění schema.
+
+Regresní test zachycuje všechny SQL `UPDATE catalog_titles` na druhém stabilním
+startup lifecycle nad kombinací direct-root Season 1, explicitní Season,
+season-scoped OVA a Filmu, confirmed manual Season a manual Filmu s autoritativně
+prázdným season contextem. Ověřuje shodný kompletní persistentní stav i
+`updated_at`, nulový počet UPDATE a shodný SHA-256 testovacího SQLite souboru.
+Samostatný test odstraní druhou epizodu z automatic E1–E2 řady: finální
+hierarchy se legitimně změní ze Season 1 na generic title, vznikne právě jeden
+UPDATE a timestamp se obnoví.
+
+Automatické ověření 28. srpna 2026:
+
+```bash
+nové cílené startup idempotence testy             # 2 passed
+startup/scanner/hierarchy lifecycle sada           # 390 passed
+.venv/bin/pytest -q                                # 927 passed
+.venv/bin/python -m compileall -q app              # prošlo
+načtení všech Jinja2 šablon                        # 14/14, prošlo
+git diff --check                                   # prošlo
+```
+
+Změna nepřidává DB sloupec, nemění produkční `data/anime.db`, nespouští
+produkční scan a nijak nepracuje s fyzickými daty na NASu.
 
 ---
 

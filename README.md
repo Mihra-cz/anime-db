@@ -116,6 +116,11 @@ pytest
 
 Při startu aplikace proběhne idempotentní migrace SQLite: mimo jiné doplní nullable `CatalogTitle.part_number_manual`, `Video.media_part_number`, `Video.czsk_availability_manual`, ruční language override a způsob přiřazení external subtitle rows, vytvoří evidenci `unresolved_external_subtitles` a association `manual_split_rule_videos` pro explicitní manual-split authority. Existující `Video.catalog_title_id` se do nové association heuristicky nekopíruje, protože starý automatic assignment nelze bezpečně odlišit od historického explicitního výběru. Každé SQLite spojení aplikace zapíná `PRAGMA foreign_keys=ON`, takže association respektuje své foreign keys a `ON DELETE CASCADE`. Existující automatické `part_number` se nemění, `media_part_number`, CZ/SK workflow marker i language override u starých záznamů zůstávají `NULL` a nic se neodhaduje z filename nebo stáří anime. Konsistenční oprava lokálních názvů a pořadí nepřidává schema změnu ani legacy backfill; neprokazatelné starší `sort_order_manual` hodnoty ponechává beze změny. Ruční smazání databáze není pro tuto verzi nutné.
 
+Startup hierarchy synchronizace je databázově idempotentní: pokud se žádná
+persistentní hodnota `CatalogTitle` skutečně nezmění, nevznikne pro něj SQL
+`UPDATE` a jeho `updated_at` zůstane beze změny. Legitimní změna inference,
+hierarchie nebo jiné persistentní hodnoty nadále timestamp aktualizuje.
+
 ## Licence
 
 AnimeDB je vydán pod licencí GNU General Public License v3.0 (`GPL-3.0-only`). Podrobnosti jsou uvedeny v souboru [LICENSE](LICENSE).

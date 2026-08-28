@@ -1,6 +1,7 @@
 from datetime import datetime
+from hashlib import sha256
 
-from sqlalchemy import create_engine, func, inspect, select, text
+from sqlalchemy import create_engine, event, func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from app.migrations import migrate_schema
@@ -10,6 +11,193 @@ from app.models import (
     ExternalSubtitle, ExternalTitleLink, InternalSubtitle, ManualSplitRuleVideo,
     TitleMetadata, UnresolvedExternalSubtitle, Video,
 )
+
+
+def _catalog_title_persisted_state(session: Session):
+    semantic_columns = tuple(
+        column.name for column in CatalogTitle.__table__.columns
+        if column.name not in {"created_at", "updated_at"}
+    )
+    titles = list(session.scalars(
+        select(CatalogTitle).order_by(CatalogTitle.relative_root_path)
+    ))
+    return (
+        {
+            title.relative_root_path: tuple(
+                getattr(title, column) for column in semantic_columns
+            )
+            for title in titles
+        },
+        {title.relative_root_path: title.updated_at for title in titles},
+    )
+
+
+def _record_catalog_title_updates(engine):
+    statements = []
+
+    def record(_connection, _cursor, statement, parameters, _context, _many):
+        if statement.lstrip().upper().startswith("UPDATE CATALOG_TITLES"):
+            statements.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", record)
+    return statements, record
+
+
+def test_stable_startup_does_not_touch_catalog_titles(tmp_path):
+    database_path = tmp_path / "stable-startup.db"
+    engine = create_engine(f"sqlite:///{database_path}")
+    Base.metadata.create_all(engine)
+    paths = (
+        "Anime/Flat/Flat - 01.mkv",
+        "Anime/Flat/Flat - 02.mkv",
+        "Anime/Mixed/Season 1/Mixed - 01.mkv",
+        "Anime/Mixed/Season 1/Mixed - 02.mkv",
+        "Anime/Mixed/Season 1/OVA/OVA 01.mkv",
+        "Anime/Mixed/Season 1/Movies/Movie.mkv",
+        "Anime/Manual/Season 3/Manual - 01.mkv",
+        "Anime/Manual/Season 3/Manual - 02.mkv",
+    )
+    with Session(engine) as session:
+        session.add_all([
+            Video(
+                relative_path=path,
+                root_folder="Anime",
+                filename=path.rsplit("/", 1)[-1],
+                size=index,
+                mtime_ns=index,
+            )
+            for index, path in enumerate(paths, 1)
+        ])
+        session.commit()
+
+    migrate_schema(engine)
+    fixed_updated_at = datetime(2024, 1, 2, 3, 4, 5)
+    verified_at = datetime(2024, 2, 3, 4, 5, 6)
+    with Session(engine) as session:
+        manual_season = session.scalar(select(CatalogTitle).where(
+            CatalogTitle.relative_root_path == "Anime/Manual/Season 3"
+        ))
+        manual_film = session.scalar(select(CatalogTitle).where(
+            CatalogTitle.relative_root_path == "Anime/Mixed/Season 1/Movies"
+        ))
+        assert manual_season is not None
+        assert manual_film is not None
+        manual_season.hierarchy_manual_override = True
+        manual_season.part_type_manual = "season"
+        manual_season.season_number_manual = 3
+        manual_season.part_number_manual = None
+        manual_season.season_label_manual = "S3"
+        manual_season.hierarchy_verified_at = verified_at
+        manual_film.hierarchy_manual_override = True
+        manual_film.part_type_manual = "film"
+        manual_film.season_number_manual = None
+        manual_film.part_number_manual = None
+        manual_film.season_label_manual = None
+        manual_film.hierarchy_verified_at = verified_at
+        for title in session.scalars(select(CatalogTitle)):
+            title.updated_at = fixed_updated_at
+        session.commit()
+
+    # First lifecycle settles derived collection status over the configured
+    # representative automatic, supplementary and authoritative hierarchy.
+    migrate_schema(engine)
+    with Session(engine) as session:
+        before_semantic, before_timestamps = _catalog_title_persisted_state(session)
+        flat = session.scalar(select(CatalogTitle).where(
+            CatalogTitle.relative_root_path == "Anime/Flat"
+        ))
+        ova = session.scalar(select(CatalogTitle).where(
+            CatalogTitle.relative_root_path == "Anime/Mixed/Season 1/OVA"
+        ))
+        manual_season = session.scalar(select(CatalogTitle).where(
+            CatalogTitle.relative_root_path == "Anime/Manual/Season 3"
+        ))
+        manual_film = session.scalar(select(CatalogTitle).where(
+            CatalogTitle.relative_root_path == "Anime/Mixed/Season 1/Movies"
+        ))
+        assert (flat.part_type, flat.season_number, flat.season_label) == (
+            "season", 1, "S1",
+        )
+        assert (ova.part_type, ova.season_number, ova.season_label) == (
+            "ova", 1, "S1",
+        )
+        assert manual_season.collection.hierarchy_status == "verified"
+        assert (
+            manual_season.hierarchy_manual_override,
+            manual_season.part_type_manual,
+            manual_season.season_number_manual,
+            manual_season.season_label_manual,
+        ) == (True, "season", 3, "S3")
+        assert (
+            manual_film.hierarchy_manual_override,
+            manual_film.part_type_manual,
+            manual_film.season_number_manual,
+            manual_film.season_label_manual,
+        ) == (True, "film", None, None)
+        assert (
+            manual_film.part_type,
+            manual_film.season_number,
+            manual_film.season_label,
+            manual_film.effective_season_number,
+        ) == ("film", 1, "S1", None)
+    before_database_sha = sha256(database_path.read_bytes()).hexdigest()
+
+    updates, listener = _record_catalog_title_updates(engine)
+    try:
+        migrate_schema(engine)
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+
+    with Session(engine) as session:
+        after_semantic, after_timestamps = _catalog_title_persisted_state(session)
+    assert after_semantic == before_semantic
+    assert after_timestamps == before_timestamps
+    assert set(after_timestamps.values()) == {fixed_updated_at}
+    assert updates == []
+    assert sha256(database_path.read_bytes()).hexdigest() == before_database_sha
+
+
+def test_startup_real_structural_change_updates_title_and_timestamp(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'startup-real-change.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all([
+            Video(
+                relative_path=f"Anime/Flat/E{number:02}.mkv",
+                root_folder="Anime",
+                filename=f"E{number:02}.mkv",
+                size=number,
+                mtime_ns=number,
+            )
+            for number in (1, 2)
+        ])
+        session.commit()
+
+    migrate_schema(engine)
+    fixed_updated_at = datetime(2024, 1, 2, 3, 4, 5)
+    with Session(engine) as session:
+        title = session.scalar(select(CatalogTitle))
+        removed = session.scalar(select(Video).where(Video.filename == "E02.mkv"))
+        assert (title.part_type, title.season_number, title.season_label) == (
+            "season", 1, "S1",
+        )
+        title.updated_at = fixed_updated_at
+        session.delete(removed)
+        session.commit()
+
+    updates, listener = _record_catalog_title_updates(engine)
+    try:
+        migrate_schema(engine)
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+
+    with Session(engine) as session:
+        title = session.scalar(select(CatalogTitle))
+        assert (title.part_type, title.season_number, title.season_label) == (
+            "title", None, None,
+        )
+        assert title.updated_at != fixed_updated_at
+    assert len(updates) == 1
 
 
 def test_startup_sync_applies_shared_direct_root_season_one_inference(tmp_path):
