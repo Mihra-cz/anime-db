@@ -53,6 +53,11 @@ class Video(Base):
     catalog_title_id: Mapped[int | None] = mapped_column(
         ForeignKey("catalog_titles.id"), nullable=True, index=True
     )
+    video_variant_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("video_variant_groups.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     catalog_collection_id: Mapped[int | None] = mapped_column(
         ForeignKey("catalog_collections.id"), nullable=True, index=True
     )
@@ -68,6 +73,9 @@ class Video(Base):
         "Video", foreign_keys=[duplicate_of_video_id], back_populates="duplicate_of",
     )
     catalog_title: Mapped[CatalogTitle | None] = relationship(back_populates="videos")
+    video_variant_group: Mapped[VideoVariantGroup | None] = relationship(
+        back_populates="videos"
+    )
     catalog_collection: Mapped[CatalogCollection | None] = relationship(back_populates="videos")
     manual_split_rule_videos: Mapped[list[ManualSplitRuleVideo]] = relationship(
         back_populates="video", cascade="all, delete-orphan",
@@ -145,6 +153,10 @@ class CatalogTitle(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     videos: Mapped[list[Video]] = relationship(back_populates="catalog_title")
+    video_variant_groups: Mapped[list[VideoVariantGroup]] = relationship(
+        back_populates="catalog_title",
+        cascade="all, delete-orphan",
+    )
     collection: Mapped[CatalogCollection | None] = relationship(back_populates="titles")
     manual_split_rule_videos: Mapped[list[ManualSplitRuleVideo]] = relationship(
         back_populates="catalog_title", cascade="all, delete-orphan",
@@ -190,6 +202,48 @@ class CatalogTitle(Base):
         ):
             return self.sort_order_manual
         return self.sort_order
+
+
+class VideoVariantGroup(Base):
+    """Manual-authority release/content lane scoped to one CatalogTitle."""
+
+    __tablename__ = "video_variant_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    catalog_title_id: Mapped[int] = mapped_column(
+        ForeignKey("catalog_titles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    manual_label: Mapped[str] = mapped_column(String, nullable=False)
+    release_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    content_variant: Mapped[str | None] = mapped_column(String, nullable=True)
+    verified_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    catalog_title: Mapped[CatalogTitle] = relationship(
+        back_populates="video_variant_groups"
+    )
+    videos: Mapped[list[Video]] = relationship(back_populates="video_variant_group")
+
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(manual_label)) > 0",
+            name="ck_video_variant_group_manual_label",
+        ),
+        CheckConstraint(
+            "release_source IS NULL OR release_source IN "
+            "('tv','bd','web','dvd','other')",
+            name="ck_video_variant_group_release_source",
+        ),
+        CheckConstraint(
+            "content_variant IS NULL OR content_variant IN "
+            "('censored','uncensored','other')",
+            name="ck_video_variant_group_content_variant",
+        ),
+    )
 
 
 class ManualSplitRuleVideo(Base):

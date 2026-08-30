@@ -35,6 +35,7 @@ from .models import (
     Video,
 )
 from .numbering import effective_video_numbering, is_nonprimary_duplicate_video
+from .video_variants import assign_video_catalog_title
 
 
 class ReconciliationAction(StrEnum):
@@ -338,6 +339,9 @@ def _load_state(
                 selectinload(CatalogCollection.titles).selectinload(
                     CatalogTitle.manual_split_rule_videos
                 ),
+                selectinload(CatalogCollection.titles).selectinload(
+                    CatalogTitle.video_variant_groups
+                ),
                 selectinload(CatalogCollection.videos),
             ).order_by(CatalogCollection.relative_root_path)
         ))
@@ -348,6 +352,7 @@ def _load_state(
                 selectinload(CatalogTitle.metadata_candidates),
                 selectinload(CatalogTitle.artwork),
                 selectinload(CatalogTitle.manual_split_rule_videos),
+                selectinload(CatalogTitle.video_variant_groups),
                 selectinload(CatalogTitle.videos),
                 selectinload(CatalogTitle.collection),
             ).order_by(CatalogTitle.relative_root_path)
@@ -445,6 +450,7 @@ def _state_fingerprint(
                 tuple(sorted(candidate.id for candidate in item.metadata_candidates)),
                 tuple(sorted(artwork.id for artwork in item.artwork)),
                 tuple(sorted(link.video_id for link in item.manual_split_rule_videos)),
+                tuple(sorted(group.id for group in item.video_variant_groups)),
             )
             for item in titles
         ],
@@ -469,6 +475,7 @@ def _state_fingerprint(
                 item.duplicate_status_manual,
                 item.duplicate_of_video_id,
                 item.duplicate_primary_missing,
+                item.video_variant_group_id,
             )
             for item in videos
         ],
@@ -496,6 +503,8 @@ def _title_protection_reasons(title: CatalogTitle) -> tuple[str, ...]:
         reasons.append("manual_hierarchy_fields")
     if title.manual_split_rule_videos:
         reasons.append("manual_split_video_authority")
+    if title.video_variant_groups:
+        reasons.append("video_variant_groups")
     if any(value is not None for value in (title.episode_start, title.episode_end)):
         reasons.append("manual_split_range")
     if title.episode_filename_pattern is not None:
@@ -1466,6 +1475,9 @@ def _reload_collections(session: Session) -> dict[str, CatalogCollection]:
                 selectinload(CatalogCollection.titles).selectinload(
                     CatalogTitle.manual_split_rule_videos
                 ),
+                selectinload(CatalogCollection.titles).selectinload(
+                    CatalogTitle.video_variant_groups
+                ),
                 selectinload(CatalogCollection.videos).selectinload(Video.catalog_title),
             )
         )
@@ -1599,10 +1611,10 @@ def apply_hierarchy_rebuild_plan(
                 collections_by_path[item.target_collection_path]
                 if item.target_collection_path is not None else None
             )
-            video.catalog_title = (
+            assign_video_catalog_title(video, (
                 titles_by_path[item.target_title_path]
                 if item.target_title_path is not None else None
-            )
+            ))
             if (
                 video.catalog_title is not None
                 and video.catalog_title.collection is not video.catalog_collection
@@ -1616,7 +1628,11 @@ def apply_hierarchy_rebuild_plan(
             if item.action != ReconciliationAction.REMOVE:
                 continue
             title = titles_by_path[item.relative_root_path]
-            if title.videos or title.manual_split_rule_videos:
+            if (
+                title.videos
+                or title.manual_split_rule_videos
+                or title.video_variant_groups
+            ):
                 raise HierarchyRebuildError(
                     f"Obsolete title už není prázdný: {item.relative_root_path}"
                 )

@@ -4168,6 +4168,84 @@ celá testovací sada                                   # 975 passed
 
 ---
 
+## 6.66 Video Variant – schema a základní invarianty
+
+První izolovaný schema krok přidává `VideoVariantGroup` jako explicitní
+manual-authority lane pod jedním `CatalogTitle` a nullable
+`Video.video_variant_group_id`. Group reprezentuje například celou TV lane přes
+E01, E02 a E03; není to jedna epizoda. Budoucí konkrétní legitimní varianta
+epizody bude kombinace logical episode identity a group. Samostatný `Episode`
+model tímto krokem nevznikl.
+
+Stabilní identitou group je její `id`. `manual_label` je povinný neprázdný
+uživatelský popis a lze jej měnit bez změny identity. Nullable `release_source`
+přijímá pouze `tv`, `bd`, `web`, `dvd`, `other`; nullable `content_variant`
+přijímá pouze `censored`, `uncensored`, `other`. Osy jsou nezávislé a `NULL`
+znamená unknown/unspecified. Neexistuje inference `BD → uncensored` ani
+`TV → censored`; validní je i group `A` s oběma taxonomy poli `NULL`.
+`verified_at` eviduje manuální potvrzení a nullable `note` zůstává doplňkovou
+poznámkou.
+
+Cross-title invariant je součástí sdílené doménové write vrstvy:
+
+```text
+Video.video_variant_group_id IS NULL
+OR Video.catalog_title_id = VideoVariantGroup.catalog_title_id
+```
+
+Přiřazení group z jiného title se odmítne bez tiché opravy. Společný helper pro
+změnu title membership zachová group pouze tehdy, když patří cílovému title.
+Při skutečném přesunu video → jiné `CatalogTitle` se starý assignment bezpečně
+vyčistí na `NULL`; group se neklonuje a v cílovém title se žádná odpovídající
+group nehádá. Helper současně dovoluje budoucímu atomickému workflow explicitně
+předat novou validní group a před jakoukoli mutací ji ověří. Scanner, startup,
+manual split, přesun do existující/nové části, root assignment a hierarchy
+rebuild používají stejnou title-assignment operaci.
+
+Schema je aditivní a idempotentní. Nová tabulka má FK
+`catalog_title_id → catalog_titles.id ON DELETE CASCADE` a index podle title;
+nový nullable FK videa používá `ON DELETE SET NULL` a vlastní index. Smazání
+videa group nemaže, smazání title odstraní jeho groups, prázdná group se po
+zmizení jednoho videa automaticky nemaže. Startup a hierarchy rebuild považují
+i prázdnou group za manual user state, takže automatický cleanup nesmí její
+title odstranit. Všechna existující videa migrují s `NULL` a žádný filename/path
+backfill ani automatická group nevzniká.
+
+`NULL` znamená neposouzeno / bez potvrzené variantní identity. Není to default
+group, standardní varianta ani autoritativní tvrzení, že video variantou není.
+Parserové `structural_variant` A/B a version hints `Ver.TV`, `UC`, `CZ`,
+`CZ END` se nezměnily a nejsou manual authority. Běžný rescan a startup zachová
+již validní group assignment, pokud se title membership nezmění.
+
+Tento krok záměrně nemění `video_numbering_identity()`, canonical numbering,
+logical/standard counts, unresolved duplicate grouping, confirmed
+`duplicate_of_video_id`, `duplicate_primary_missing`, manual `suspected`, Media
+Check ani external subtitle linking. All-`NULL` data proto dávají stejné výsledky
+jako před migrací. Variant-aware logical/duplicate counting bude následovat v
+samostatném commitu; veřejné group assignment UI, subtitle compatibility M:N a
+V6 filesystem layout nejsou součástí tohoto kroku.
+
+Testy pokrývají upgrade pre-variant DB a opakovanou migraci, FK/indexy a delete
+semantiku, vytvoření a změnu taxonomy bez změny ID, same-title assignment,
+cross-title rejection a atomicitu, clear na `NULL`, manual move, rescan/startup
+preservation, delete lifecycle, dosavadní duplicate/numbering chování a
+nezměněné A/B / `Ver.TV` / `UC` parser evidence.
+
+Automatická validace tohoto schema kroku:
+
+```text
+nové cílené VideoVariantGroup scénáře               # 13 passed
+migration/scanner/hierarchy/duplicate/numbering/
+Media Check/subtitle regresní sada                  # 347 passed
+celá testovací sada                                 # 988 passed
+compileall, 14/14 Jinja2 šablon, git diff --check   # prošlo
+```
+
+Změna neprovádí produkční scan, nemění produkční `data/anime.db` ani fyzická data
+na NASu a nezahajuje V6.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

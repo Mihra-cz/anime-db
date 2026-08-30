@@ -35,6 +35,7 @@ from app.models import (
 from app.numbering import recalculate_collection_numbering
 from app.probe import ProbeError, probe_video
 from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, safe_subtitle_matches
+from app.video_variants import assign_video_catalog_title
 
 logger = logging.getLogger(__name__)
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi"}
@@ -465,14 +466,14 @@ def _scan_library(
         if is_root_video(video):
             meaningful_collection = meaningful_root_collection(video)
             if meaningful_collection is None:
-                video.catalog_title = None
+                assign_video_catalog_title(video, None)
                 video.catalog_collection = None
             else:
                 if (
                     video.catalog_title
                     and video.catalog_title.collection is not meaningful_collection
                 ):
-                    video.catalog_title = None
+                    assign_video_catalog_title(video, None)
                 video.catalog_collection = meaningful_collection
             continue
         identity = hierarchy[video.relative_path]
@@ -507,7 +508,7 @@ def _scan_library(
         )
         existing_title = assigned_manual_title or reassigned_path_title
         if existing_title is not None:
-            video.catalog_title = existing_title
+            assign_video_catalog_title(video, existing_title)
             video.catalog_collection = existing_title.collection
             continue
         collection = collections.get(collection_data.relative_root_path)
@@ -545,7 +546,7 @@ def _scan_library(
             catalog_title.season_label = title_data.season_label
             catalog_title.original_folder_name = title_data.original_folder_name
             catalog_title.sort_order = title_data.sort_order
-        video.catalog_title = catalog_title
+        assign_video_catalog_title(video, catalog_title)
     session.flush()
     videos_by_collection_path: dict[str, list[Video]] = {}
     for video in current_videos:

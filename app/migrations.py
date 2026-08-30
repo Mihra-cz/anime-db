@@ -27,9 +27,10 @@ from .manual_split import (
 )
 from .models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    InternalSubtitle, TitleMetadata, Video,
+    InternalSubtitle, TitleMetadata, Video, VideoVariantGroup,
 )
 from .structural_inference import infer_automatic_structural_values
+from .video_variants import assign_video_catalog_title
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,10 @@ def migrate_schema(engine) -> None:
             ("manual_hardsub_verified_at", "DATETIME NULL"),
             ("czsk_availability_manual", "VARCHAR NULL"),
             ("catalog_title_id", "INTEGER NULL REFERENCES catalog_titles(id)"),
+            (
+                "video_variant_group_id",
+                "INTEGER NULL REFERENCES video_variant_groups(id) ON DELETE SET NULL",
+            ),
             ("catalog_collection_id", "INTEGER NULL REFERENCES catalog_collections(id)"),
             ("local_episode_number", "INTEGER NULL"),
             ("season_episode_number", "INTEGER NULL"),
@@ -197,6 +202,14 @@ def migrate_schema(engine) -> None:
             "ON videos(duplicate_status_manual)"
         ))
         connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_videos_video_variant_group_id "
+            "ON videos(video_variant_group_id)"
+        ))
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_video_variant_groups_catalog_title_id "
+            "ON video_variant_groups(catalog_title_id)"
+        ))
+        connection.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_catalog_collections_hierarchy_status "
             "ON catalog_collections(hierarchy_status)"
         ))
@@ -250,6 +263,9 @@ def migrate_schema(engine) -> None:
             title
             for title in original_titles
             if manual_hierarchy_snapshot_requires_preservation(title)
+        )
+        used_titles.update(
+            title for title in original_titles if title.video_variant_groups
         )
         for identity in identities_by_title_path.values():
             if identity.title.relative_root_path == ROOT_FOLDER:
@@ -378,7 +394,7 @@ def migrate_schema(engine) -> None:
             # Existující assignment zůstává na videu zachován, ale unassigned
             # video se nesmí před vyhodnocením připojit k prvnímu path title.
             if not manual_split_titles(collection):
-                video.catalog_title_id = title.id
+                assign_video_catalog_title(video, title)
 
         apply_collection_grouping_authority(session)
         videos_by_collection = {}
@@ -451,6 +467,7 @@ def migrate_schema(engine) -> None:
                         or title.episode_end is not None
                         or title.episode_start_offset is not None
                         or title.episode_filename_pattern
+                        or title.video_variant_groups
                     ):
                         continue
                     # Startup nejprve odvodí title z fyzické cesty. Pokud však
@@ -498,6 +515,7 @@ def migrate_schema(engine) -> None:
                 title.relative_root_path not in titles
                 or title.id in assigned_title_ids
                 or title.manual_split_rule_videos
+                or title.video_variant_groups
             ):
                 continue
             session.delete(title)
@@ -530,7 +548,10 @@ def migrate_schema(engine) -> None:
             has_links = session.scalar(select(ExternalTitleLink.id).where(
                 ExternalTitleLink.catalog_title_id == legacy.id
             )) is not None
-            if not has_metadata and not has_links:
+            has_variant_groups = session.scalar(select(VideoVariantGroup.id).where(
+                VideoVariantGroup.catalog_title_id == legacy.id
+            )) is not None
+            if not has_metadata and not has_links and not has_variant_groups:
                 session.delete(legacy)
                 continue
             matching_collection = next(

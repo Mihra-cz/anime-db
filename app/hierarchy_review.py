@@ -71,6 +71,7 @@ from .title_naming import (
     safe_catalog_title_local_title,
 )
 from .title_order import catalog_title_sort_key
+from .video_variants import assign_video_catalog_title
 
 
 logger = logging.getLogger(__name__)
@@ -2046,7 +2047,7 @@ def create_title_from_videos(
     _validate_split_season_structure(collection)
     replace_explicit_video_selector_authority(selected, title)
     for video in selected:
-        video.catalog_title = title
+        assign_video_catalog_title(video, title)
         video.catalog_collection = collection
     session.flush()
     refresh_collection_state(collection, recalculate=recalculate)
@@ -2251,7 +2252,7 @@ def assign_known_videos_to_title(
         if video.catalog_collection is not None
     }
     for video in selected:
-        video.catalog_title = target
+        assign_video_catalog_title(video, target)
         video.catalog_collection = target.collection
     replace_explicit_video_selector_authority(selected, target)
     session.flush()
@@ -2285,7 +2286,7 @@ def create_title_for_known_videos(
         if video.catalog_collection is not None
     }
     for video in selected:
-        video.catalog_title = None
+        assign_video_catalog_title(video, None)
         video.catalog_collection = collection
     session.flush()
     session.expire(collection, ["titles", "videos"])

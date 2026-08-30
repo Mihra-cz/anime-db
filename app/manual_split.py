@@ -6,6 +6,7 @@ import re
 
 from .catalog import derive_episode_number
 from .models import CatalogCollection, CatalogTitle, ManualSplitRuleVideo, Video
+from .video_variants import assign_video_catalog_title
 from .numbering import effective_video_numbering, is_nonprimary_duplicate_video
 from .title_order import catalog_title_sort_key
 
@@ -495,11 +496,9 @@ def apply_manual_split_decisions(
         decision.video.catalog_collection = collection
         if decision.kind == ManualSplitDecisionKind.UNIQUE:
             target = targets[decision.assigned_rule.index]
-            decision.video.catalog_title = target
-            decision.video.catalog_title_id = target.id
+            assign_video_catalog_title(decision.video, target)
         elif decision.kind in {
             ManualSplitDecisionKind.CONFLICT,
             ManualSplitDecisionKind.UNMATCHED,
         }:
-            decision.video.catalog_title = None
-            decision.video.catalog_title_id = None
+            assign_video_catalog_title(decision.video, None)

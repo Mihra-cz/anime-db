@@ -117,6 +117,7 @@ from .metadata.service import (
 )
 from .metadata.split import apply_metadata_split, evaluate_metadata_split
 from .title_order import catalog_title_sort_key
+from .video_variants import assign_video_catalog_title
 from .unassigned_videos import (
     InsufficientVideoAssignmentSummary,
     insufficient_video_assignment,
@@ -785,7 +786,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     session.rollback()
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
             else:
-                video.catalog_title = None
+                assign_video_catalog_title(video, None)
                 video.catalog_collection = None
                 replace_explicit_video_selector_authority([video], None)
                 session.flush()
@@ -848,7 +849,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 verified_at=utc_now(),
             )
             video.catalog_collection = collection
-            video.catalog_title = title
+            assign_video_catalog_title(video, title)
             session.flush()
             replace_explicit_video_selector_authority([video], title)
             finalize_hierarchy_write([
