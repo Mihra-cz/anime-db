@@ -1364,7 +1364,10 @@ def test_bungo_duplicate_groups_change_from_unresolved_to_confirmed_physical_war
 
     before = summarize_title_numbering(items, title)
     assert before.total == 26
-    assert before.standard_total == 26
+    assert before.physical_video_count == 26
+    assert before.logical_episode_count == before.standard_total == 13
+    assert before.confirmed_variant_instance_count == 0
+    assert before.unassigned_variant_video_count == 26
     assert before.duplicate_numbers == tuple(range(1, 14))
     assert len(unresolved_duplicate_groups(items)) == 13
     assert before.requires_review is True

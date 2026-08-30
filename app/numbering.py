@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -28,6 +27,9 @@ class TitleNumberingSummary:
     total: int
     standard_total: int
     numbered: int
+    unnumbered_standard: int
+    confirmed_variant_instance_count: int
+    unassigned_variant_video_count: int
     unknown: int
     nonstandard: int
     resolved_supplemental: int
@@ -37,12 +39,21 @@ class TitleNumberingSummary:
     duplicate_numbers: tuple[int, ...]
     confirmed_duplicates: int
     invalid_duplicate_references: int
+    variant_inconsistent_confirmed_duplicates: int
 
     supplemental: bool = False
 
     @property
-    def unnumbered_standard(self) -> int:
-        return self.standard_total - self.numbered
+    def physical_video_count(self) -> int:
+        return self.total
+
+    @property
+    def logical_episode_count(self) -> int:
+        return self.standard_total
+
+    @property
+    def confirmed_duplicate_count(self) -> int:
+        return self.confirmed_duplicates
 
     @property
     def requires_review(self) -> bool:
@@ -61,6 +72,9 @@ class EpisodeDuplicateGroup:
     primary: Video | None = None
     supplementary_type: str | None = None
     context_label: str | None = None
+    video_variant_group_id: int | None = None
+    video_variant_label: str | None = None
+    has_unassigned_variant: bool = False
 
     @property
     def display_label(self) -> str:
@@ -72,7 +86,11 @@ class EpisodeDuplicateGroup:
             }.get(self.supplementary_type, self.supplementary_type.upper())
             context = f" · {self.context_label}" if self.context_label else ""
             return f"{label} {self.episode_number:02d}{context}"
-        return f"E{self.episode_number:02d}"
+        variant = (
+            f" · varianta {self.video_variant_label}"
+            if self.video_variant_label else ""
+        )
+        return f"E{self.episode_number:02d}{variant}"
 
     @property
     def duplicate_copies(self) -> tuple[Video, ...]:
@@ -132,6 +150,42 @@ class VideoNumberingIdentity:
     context_key: str | None = None
     context_label: str | None = None
     context_season_number: int | None = None
+
+
+@dataclass(frozen=True)
+class LogicalEpisodeIdentity:
+    """One canonical standard episode inside exactly one CatalogTitle."""
+
+    catalog_title_key: tuple[str, int]
+    season_episode_number: int
+
+
+@dataclass(frozen=True)
+class ConfirmedVideoVariantPartition:
+    video_variant_group_id: int
+    videos: tuple[Video, ...]
+
+
+@dataclass(frozen=True)
+class LogicalEpisodePartition:
+    """Active physical representations partitioned by manual variant authority."""
+
+    identity: LogicalEpisodeIdentity
+    videos: tuple[Video, ...]
+    confirmed_variants: tuple[ConfirmedVideoVariantPartition, ...]
+    unassigned_videos: tuple[Video, ...]
+
+    @property
+    def unresolved_video_groups(self) -> tuple[tuple[Video, ...], ...]:
+        if self.unassigned_videos and len(self.videos) > 1:
+            # A NULL assignment can still be a copy of any known lane or another
+            # legitimate lane. Keep the whole collision visible for review.
+            return (self.videos,)
+        return tuple(
+            variant.videos
+            for variant in self.confirmed_variants
+            if len(variant.videos) > 1
+        )
 
 
 def _normalized_context_name(value: str) -> str:
@@ -247,14 +301,143 @@ def video_numbering_identity(
     return None
 
 
-def unresolved_duplicate_groups(videos: list[Video]) -> tuple[EpisodeDuplicateGroup, ...]:
+def _catalog_title_identity_key(
+    video: Video,
+    catalog_title: CatalogTitle | None = None,
+) -> tuple[str, int] | None:
+    title = catalog_title or video.catalog_title
+    title_id = title.id if title is not None else video.catalog_title_id
+    if title_id is not None:
+        return ("id", title_id)
+    if title is not None:
+        return ("object", id(title))
+    return None
+
+
+def logical_episode_identity(
+    video: Video,
+    *,
+    catalog_title: CatalogTitle | None = None,
+    title_names: dict[str, list[CatalogTitle]] | None = None,
+) -> LogicalEpisodeIdentity | None:
+    """Derive the single shared standard-episode identity, never a variant key."""
+    numbering = video_numbering_identity(video, title_names=title_names)
+    title_key = _catalog_title_identity_key(video, catalog_title)
+    if numbering is None or numbering.kind != "standard" or title_key is None:
+        return None
+    return LogicalEpisodeIdentity(title_key, numbering.number)
+
+
+def _video_variant_group_id(video: Video) -> int | None:
+    if video.video_variant_group_id is not None:
+        return video.video_variant_group_id
+    # Catalog/UI callers may intentionally evaluate detached rows. Reading the
+    # instance dictionary preserves an explicitly attached transient group
+    # without triggering a lazy load for the overwhelmingly common NULL case.
+    group = video.__dict__.get("video_variant_group")
+    return group.id if group is not None else None
+
+
+def logical_episode_partitions(
+    videos: list[Video],
+    *,
+    catalog_title: CatalogTitle | None = None,
+) -> tuple[LogicalEpisodePartition, ...]:
+    """Partition active standard videos by logical episode and confirmed lane.
+
+    Confirmed duplicate secondaries and missing-primary remnants are not active
+    representations. NULL stays an explicit unassigned bucket and never becomes
+    a default variant.
+    """
+    title_names = supplementary_context_map(videos)
+    by_identity: dict[LogicalEpisodeIdentity, list[Video]] = {}
+    for video in videos:
+        identity = logical_episode_identity(
+            video,
+            catalog_title=catalog_title,
+            title_names=title_names,
+        )
+        if identity is not None and not is_nonprimary_duplicate_video(video):
+            by_identity.setdefault(identity, []).append(video)
+
+    partitions = []
+    for identity, items in sorted(
+        by_identity.items(),
+        key=lambda item: (
+            item[0].catalog_title_key,
+            item[0].season_episode_number,
+        ),
+    ):
+        ordered = tuple(sorted(items, key=deterministic_video_order_key))
+        by_group: dict[int, list[Video]] = {}
+        unassigned = []
+        for video in ordered:
+            group_id = _video_variant_group_id(video)
+            if group_id is None:
+                unassigned.append(video)
+            else:
+                by_group.setdefault(group_id, []).append(video)
+        confirmed_variants = tuple(
+            ConfirmedVideoVariantPartition(group_id, tuple(group_videos))
+            for group_id, group_videos in sorted(by_group.items())
+        )
+        partitions.append(LogicalEpisodePartition(
+            identity=identity,
+            videos=ordered,
+            confirmed_variants=confirmed_variants,
+            unassigned_videos=tuple(unassigned),
+        ))
+    return tuple(partitions)
+
+
+def unresolved_duplicate_groups(
+    videos: list[Video],
+    *,
+    catalog_title: CatalogTitle | None = None,
+) -> tuple[EpisodeDuplicateGroup, ...]:
+    groups: list[EpisodeDuplicateGroup] = []
+    for partition in logical_episode_partitions(videos, catalog_title=catalog_title):
+        for items in partition.unresolved_video_groups:
+            group_ids = {
+                group_id
+                for video in items
+                if (group_id := _video_variant_group_id(video)) is not None
+            }
+            group_id = next(iter(group_ids)) if len(group_ids) == 1 else None
+            group_video = next(
+                (
+                    video for video in items
+                    if _video_variant_group_id(video) == group_id
+                    and video.__dict__.get("video_variant_group") is not None
+                ),
+                None,
+            ) if group_id is not None else None
+            group_label = (
+                group_video.__dict__["video_variant_group"].manual_label
+                if group_video is not None
+                else f"#{group_id}" if group_id is not None else None
+            )
+            groups.append(EpisodeDuplicateGroup(
+                partition.identity.season_episode_number,
+                items,
+                video_variant_group_id=group_id,
+                video_variant_label=group_label,
+                has_unassigned_variant=bool(partition.unassigned_videos),
+            ))
+
+    # Supplementary identity and collision semantics intentionally stay exactly
+    # as before Commit 2; variant lanes apply only to canonical standard episodes.
     by_identity: dict[VideoNumberingIdentity, list[Video]] = {}
     title_names = supplementary_context_map(videos)
     for video in videos:
         identity = video_numbering_identity(video, title_names=title_names)
-        if identity is not None and not is_confirmed_duplicate(video):
+        if (
+            identity is not None
+            and identity.kind == "supplementary"
+            and not is_confirmed_duplicate(video)
+        ):
             by_identity.setdefault(identity, []).append(video)
-    return tuple(
+    groups.extend(
         EpisodeDuplicateGroup(
             identity.number, tuple(sorted(items, key=deterministic_video_order_key)),
             supplementary_type=identity.supplementary_type,
@@ -268,6 +451,15 @@ def unresolved_duplicate_groups(videos: list[Video]) -> tuple[EpisodeDuplicateGr
             ),
         ) if len(items) > 1
     )
+    return tuple(sorted(
+        groups,
+        key=lambda group: (
+            group.supplementary_type or "",
+            group.context_label or "",
+            group.episode_number,
+            group.video_variant_group_id or 0,
+        ),
+    ))
 
 
 def confirmed_duplicate_groups(videos: list[Video]) -> tuple[EpisodeDuplicateGroup, ...]:
@@ -291,6 +483,20 @@ def confirmed_duplicate_groups(videos: list[Video]) -> tuple[EpisodeDuplicateGro
             context_label=identity.context_label if identity else None,
         ))
     return tuple(sorted(groups, key=lambda group: (group.episode_number, group.primary.id or 0)))
+
+
+def confirmed_duplicate_variant_conflicts(
+    videos: list[Video],
+) -> tuple[EpisodeDuplicateGroup, ...]:
+    """Return explicit duplicate relationships spanning distinct known lanes."""
+    return tuple(
+        group for group in confirmed_duplicate_groups(videos)
+        if len({
+            group_id
+            for video in group.videos
+            if (group_id := _video_variant_group_id(video)) is not None
+        }) > 1
+    )
 
 
 def set_duplicate_group_primary(videos: list[Video], primary: Video) -> None:
@@ -714,8 +920,10 @@ def summarize_title_numbering(
     )
     states = [effective_video_numbering(video, title) for video in videos]
     confirmed_duplicate = [is_nonprimary_duplicate_video(video) for video in videos]
-    standard_total = 0 if supplemental else sum(
-        state.is_standard and not is_duplicate
+    unnumbered_standard = 0 if supplemental else sum(
+        state.is_standard
+        and state.season_episode_number is None
+        and not is_duplicate
         for state, is_duplicate in zip(states, confirmed_duplicate)
     )
     nonstandard = 0 if supplemental else sum(
@@ -729,26 +937,39 @@ def summarize_title_numbering(
         ) and not is_duplicate
         for state, is_duplicate in zip(states, confirmed_duplicate)
     )
-    values = [] if supplemental else [
-        state.season_episode_number
-        for video, state in zip(videos, states)
-        if state.is_standard
-        and state.season_episode_number is not None
-        and not is_nonprimary_duplicate_video(video)
-    ]
-    unique_values = set(values)
+    partitions = () if supplemental else logical_episode_partitions(
+        videos,
+        catalog_title=title,
+    )
+    unique_values = {
+        partition.identity.season_episode_number for partition in partitions
+    }
     episode_min = min(unique_values) if unique_values else None
     episode_max = max(unique_values) if unique_values else None
     gaps = tuple(
         sorted(set(range(episode_min, episode_max + 1)) - unique_values)
     ) if episode_min is not None and episode_max is not None else ()
-    duplicates = tuple(sorted(
-        value for value, count in Counter(values).items() if count > 1
-    ))
+    duplicate_groups = () if supplemental else unresolved_duplicate_groups(
+        videos,
+        catalog_title=title,
+    )
+    duplicates = tuple(sorted({
+        group.episode_number
+        for group in duplicate_groups
+        if group.supplementary_type is None
+    }))
+    logical_episode_count = len(partitions)
     return TitleNumberingSummary(
         total=len(videos),
-        standard_total=standard_total,
-        numbered=len(values),
+        standard_total=logical_episode_count,
+        numbered=logical_episode_count,
+        unnumbered_standard=unnumbered_standard,
+        confirmed_variant_instance_count=sum(
+            len(partition.confirmed_variants) for partition in partitions
+        ),
+        unassigned_variant_video_count=sum(
+            len(partition.unassigned_videos) for partition in partitions
+        ),
         unknown=unknown,
         nonstandard=nonstandard,
         resolved_supplemental=(
@@ -761,6 +982,9 @@ def summarize_title_numbering(
         confirmed_duplicates=sum(is_confirmed_duplicate(video) for video in videos),
         invalid_duplicate_references=sum(
             bool(video.duplicate_primary_missing) for video in videos
+        ),
+        variant_inconsistent_confirmed_duplicates=len(
+            confirmed_duplicate_variant_conflicts(videos)
         ),
         supplemental=supplemental,
     )

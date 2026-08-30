@@ -936,7 +936,7 @@ def test_dxd_manual_e01_override_updates_effective_hierarchy_review_groups(tmp_p
 
     before = render()
     before_part = before.split(f'id="title-{title_id}"', 1)[1].split("</article>", 1)[0]
-    assert "Standardní epizody (12)" in before_part
+    assert "Standardní video reprezentace (12)" in before_part
     assert "Nestandardní obsah (1)" in before_part
     assert "Nestandardní epizoda: 00" in before_part
     assert "Vyžaduje zařazení" in before_part
@@ -960,7 +960,7 @@ def test_dxd_manual_e01_override_updates_effective_hierarchy_review_groups(tmp_p
     assert "<dt>Unknown</dt><dd>0</dd>" in after_part
     assert "<dt>Nestandardní</dt><dd>0</dd>" in after_part
     assert "Číslování vyřešeno" in after_part
-    assert "Standardní epizody (13)" in after_part
+    assert "Standardní video reprezentace (13)" in after_part
     assert "Nestandardní obsah" not in after_part
     assert "Vyžaduje zařazení" not in after_part
 

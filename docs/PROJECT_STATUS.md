@@ -4246,6 +4246,89 @@ na NASu a nezahajuje V6.
 
 ---
 
+## 6.67 Video Variant – logical identity a variant-aware duplicate evaluation
+
+Druhý izolovaný krok zavádí immutable derived `LogicalEpisodeIdentity` pro
+standardní canonical epizody. Identita je vždy kombinace právě jednoho
+`CatalogTitle` a `season_episode_number`; `VideoVariantGroup` v ní záměrně není.
+Nevznikla databázová `Episode` entita ani nové schema. Supplementary identita,
+fractional/zero/unknown význam, A/B `structural_variant`, absolute/external
+číslování a výpočet range/gaps zůstávají na dosavadních osách.
+
+Jedna sdílená partition funkce nyní rozkládá každou logical episode na
+potvrzené non-`NULL` variant lanes a explicitní neposouzený `NULL` bucket:
+
+```text
+E01 + group A, E01 + group B       -> dvě legitimní varianty, bez collision
+E01 + group A, E01 + group A       -> unresolved collision uvnitř group A
+E01 + NULL,    E01 + NULL          -> unresolved review zůstává
+E01 + group A, E01 + NULL          -> unresolved variant ambiguity zůstává
+E01 + A, E01 + B, E01 + A-copy     -> collision pouze A / A-copy
+```
+
+Pravidlo platí pouze pro standardní canonical epizody. Supplementary duplicate
+identity používá dále svůj subtype a bezpečný season/name context bez dělení
+podle variant group. `Ver.TV`, `UC` ani A/B parser evidence nevytváří group a
+nepotlačuje collision. Reálnému tvaru 25 fyzických videí s E01–E12 plain +
+`Ver.TV` a jedním E13 odpovídá po explicitním manual assignmentu 13 logical
+episodes a 25 confirmed variant instances; bez assignmentu zůstává 12
+unresolved collision groups.
+
+`TitleNumberingSummary` odděluje:
+
+- `physical_video_count` (kompatibilní `total`) – všechny fyzické Video rows,
+- `logical_episode_count` (opravený `standard_total`) – unikátní bezpečné
+  standardní logical identities,
+- `confirmed_variant_instance_count` – distinct non-`NULL`
+  `(LogicalEpisodeIdentity, VideoVariantGroup)` po vyloučení secondary copies,
+- `confirmed_duplicate_count` – explicitní secondary rows s
+  `duplicate_of_video_id`,
+- `unassigned_variant_video_count` – aktivní canonical fyzické reprezentace,
+  které stále mají group `NULL`.
+
+Změna významu `standard_total` je záměrná a auditovaná: Hierarchy Review jej už
+před tímto krokem prezentoval jako počet logických standardních epizod, zatímco
+implementace před potvrzením duplicity počítala fyzické kopie. Například 26
+all-`NULL` souborů ve 13 canonical collision groups nyní dává
+`physical_video_count=26`, `standard_total=logical_episode_count=13` a stále
+všech 13 blocking duplicate warnings. Globální homepage/katalogové statistiky,
+které výslovně inventarizují fyzická videa a jejich file type, se tímto krokem
+nemění.
+
+`duplicate_of_video_id` zůstává autoritou potvrzené duplicity a confirmation UI
+se neredesignovalo. Platná secondary kopie nezvyšuje logical ani confirmed
+variant count, ale zůstává ve fyzickém počtu a v neblokujícím cleanup backlogu.
+Existující potvrzený vztah mezi dvěma různými non-`NULL` groups se automaticky
+neruší ani neopravuje; evaluator jej navíc označí samostatným blocking issue
+`confirmed_duplicate_variant_conflict`. Chybějící primary zůstává nezávislým
+`duplicate_primary_missing` blockerem.
+
+Hierarchy Review nově zobrazuje fyzický, logical, confirmed-variant,
+unassigned a confirmed-duplicate počet. Pro dvě unresolved collisions téhož
+E čísla v různých groups používají stávající bulk formuláře group-aware klíč,
+takže se jejich vstupy neslijí. Nejde o variant management UI: create, assign,
+reassign, clear, A/B confirmation a taxonomy editace přijdou až v samostatném
+**Commitu 3 – Manual Video Variant authority UI**.
+
+Scanner/startup dál žádnou group nevytváří ani nemění a partition je čistě
+derived. Media Check zůstává per Video a subtitle persistence/linking se
+nezměnily. Tento krok nepřidává migraci, neprovádí produkční scan, nemění
+produkční `data/anime.db`, NAS ani V6 filesystem roadmapu.
+
+Automatická validace tohoto logical/duplicate kroku:
+
+```text
+nové cílené logical/variant/duplicate scénáře         # 13 passed
+numbering suite                                      # 90 passed
+hierarchy evaluation/diagnostics/review              # 174 passed
+VideoVariantGroup + scanner/startup/migration/move   # 165 passed
+Media Check / Media Part / subtitle / language       # 70 passed
+celá testovací sada                                  # 1001 passed
+compileall, 14/14 Jinja2 šablon, git diff --check    # prošlo
+```
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

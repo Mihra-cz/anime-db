@@ -28,6 +28,7 @@ from .manual_split import (
 from .models import CatalogCollection, CatalogTitle, Video, utc_now
 from .numbering import (
     confirmed_duplicate_groups,
+    confirmed_duplicate_variant_conflicts,
     effective_video_numbering,
     is_confirmed_duplicate,
     is_nonprimary_duplicate_video,
@@ -53,6 +54,10 @@ CONFIRMED_DUPLICATES_CLEANUP_NOTICE = (
 )
 MISSING_DUPLICATE_PRIMARY_REVIEW_REASON = (
     "Primární video potvrzené duplicity chybí; vztah vyžaduje novou ruční kontrolu."
+)
+CONFIRMED_DUPLICATE_VARIANT_CONFLICT_REVIEW_REASON = (
+    "Potvrzená duplicita propojuje dvě různé potvrzené video varianty; "
+    "vztah vyžaduje ruční kontrolu."
 )
 FILENAME_SEASON_CONFLICT_REVIEW_REASON = (
     "Season ve filename je v konfliktu s automaticky odvozenou season složkou."
@@ -87,6 +92,7 @@ class HierarchyIssueCode(StrEnum):
     NUMBERING_GAP = "numbering_gap"
     CANONICAL_DUPLICATE = "canonical_duplicate"
     CONFIRMED_DUPLICATE = "confirmed_duplicate"
+    CONFIRMED_DUPLICATE_VARIANT_CONFLICT = "confirmed_duplicate_variant_conflict"
     DUPLICATE_PRIMARY_MISSING = "duplicate_primary_missing"
     LONG_FLAT_SERIES = "long_flat_series"
     SOFT_LONG_FLAT_SERIES = "soft_long_flat_series"
@@ -265,6 +271,10 @@ def hierarchy_primary_note(
     priorities = (
         (HierarchyIssueCode.FILENAME_SEASON_CONFLICT, FILENAME_SEASON_CONFLICT_REVIEW_REASON),
         (HierarchyIssueCode.NONSTANDARD_NUMBERING, NONSTANDARD_NUMBERING_REVIEW_REASON),
+        (
+            HierarchyIssueCode.CONFIRMED_DUPLICATE_VARIANT_CONFLICT,
+            CONFIRMED_DUPLICATE_VARIANT_CONFLICT_REVIEW_REASON,
+        ),
         (HierarchyIssueCode.DUPLICATE_PRIMARY_MISSING, MISSING_DUPLICATE_PRIMARY_REVIEW_REASON),
         (HierarchyIssueCode.LONG_FLAT_SERIES, LONG_FLAT_SEQUENCE_REVIEW_REASON),
         (HierarchyIssueCode.RELATED_NAMED_CHILD, RELATED_NAMED_CHILD_REVIEW_REASON),
@@ -454,12 +464,16 @@ def evaluate_collection_hierarchy(
                 for group in unresolved_duplicate_groups(title_videos):
                     group_title = _common_catalog_title(group.videos) or title
                     represented_duplicate_numbers.add(group.episode_number)
+                    message = (
+                        f"Více videí sdílí {group.display_label} a alespoň jedno "
+                        "nemá potvrzenou video variantu; vztah vyžaduje kontrolu."
+                        if group.has_unassigned_variant else
+                        "Více videí má stejnou nepotvrzenou canonical identitu "
+                        f"{group.display_label}."
+                    )
                     add_issue(
                         HierarchyIssueCode.CANONICAL_DUPLICATE,
-                        (
-                            "Více videí má stejné nepotvrzené canonical číslo "
-                            f"{group.display_label}."
-                        ),
+                        message,
                         HierarchyIssueScope.VIDEO,
                         blocking=True,
                         title=group_title,
@@ -577,7 +591,12 @@ def evaluate_collection_hierarchy(
         )
 
     represented_confirmed_videos: set[Video] = set()
-    for group in confirmed_duplicate_groups(all_videos):
+    confirmed_groups = confirmed_duplicate_groups(all_videos)
+    variant_conflicts = confirmed_duplicate_variant_conflicts(all_videos)
+    conflicting_members = {
+        frozenset(group.videos) for group in variant_conflicts
+    }
+    for group in confirmed_groups:
         represented_confirmed_videos.update(group.videos)
         add_issue(
             HierarchyIssueCode.CONFIRMED_DUPLICATE,
@@ -587,6 +606,15 @@ def evaluate_collection_hierarchy(
             title=_common_catalog_title(group.videos),
             target_videos=group.videos,
         )
+        if frozenset(group.videos) in conflicting_members:
+            add_issue(
+                HierarchyIssueCode.CONFIRMED_DUPLICATE_VARIANT_CONFLICT,
+                CONFIRMED_DUPLICATE_VARIANT_CONFLICT_REVIEW_REASON,
+                HierarchyIssueScope.VIDEO,
+                blocking=True,
+                title=_common_catalog_title(group.videos),
+                target_videos=group.videos,
+            )
     for video in all_videos:
         if (
             is_confirmed_duplicate(video)

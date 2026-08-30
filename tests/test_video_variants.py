@@ -338,6 +338,14 @@ def test_group_assignment_survives_rescan_and_startup(tmp_path, monkeypatch):
         assign_video_variant_group(video, group)
         session.commit()
         video_id, group_id, title_id = video.id, group.id, video.catalog_title_id
+        expected_summary = summarize_title_numbering(
+            [video], video.catalog_title
+        )
+        assert (
+            expected_summary.physical_video_count,
+            expected_summary.logical_episode_count,
+            expected_summary.confirmed_variant_instance_count,
+        ) == (1, 1, 1)
 
     with sessions() as session:
         scan_library(session, tmp_path)
@@ -345,6 +353,8 @@ def test_group_assignment_survives_rescan_and_startup(tmp_path, monkeypatch):
         assert (video.catalog_title_id, video.video_variant_group_id) == (
             title_id, group_id,
         )
+        summary = summarize_title_numbering([video], video.catalog_title)
+        assert summary == expected_summary
 
     migrate_schema(engine)
     with sessions() as session:
@@ -355,6 +365,8 @@ def test_group_assignment_survives_rescan_and_startup(tmp_path, monkeypatch):
         assert session.scalar(
             select(func.count()).select_from(VideoVariantGroup)
         ) == 1
+        summary = summarize_title_numbering([video], video.catalog_title)
+        assert summary == expected_summary
 
 
 def test_startup_preserves_empty_title_that_owns_manual_variant_group(tmp_path):
@@ -465,7 +477,9 @@ def test_null_groups_leave_confirmed_duplicate_and_numbering_semantics_unchanged
     assert all(video.video_variant_group_id is None for video in (first, copy, second))
     assert copy.duplicate_of is first
     assert unresolved_after == ()
-    assert summary_before.standard_total == 3
+    assert summary_before.physical_video_count == 3
+    assert summary_before.logical_episode_count == summary_before.standard_total == 2
+    assert summary_before.unassigned_variant_video_count == 3
     assert summary_before.duplicate_numbers == (1,)
     assert summary_after.standard_total == 2
     assert summary_after.confirmed_duplicates == 1
