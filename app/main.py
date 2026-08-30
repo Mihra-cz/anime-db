@@ -117,7 +117,23 @@ from .metadata.service import (
 )
 from .metadata.split import apply_metadata_split, evaluate_metadata_split
 from .title_order import catalog_title_sort_key
-from .video_variants import assign_video_catalog_title
+from .video_variants import (
+    VIDEO_VARIANT_CONTENT_VARIANT_CHOICES,
+    VIDEO_VARIANT_RELEASE_SOURCE_CHOICES,
+    VariantGroupDraft,
+    apply_structural_ab_confirmation,
+    apply_video_variant_assignments,
+    assign_video_catalog_title,
+    create_video_variant_group_for_title,
+    delete_empty_video_variant_group,
+    parser_variant_suggestion,
+    preview_repeated_variant_lane,
+    preview_structural_ab_confirmation,
+    preview_video_variant_assignments,
+    repeated_variant_lane_proposal,
+    structural_ab_pair_proposals,
+    update_video_variant_group_for_title,
+)
 from .unassigned_videos import (
     InsufficientVideoAssignmentSummary,
     insufficient_video_assignment,
@@ -126,7 +142,7 @@ from .unassigned_videos import (
 )
 from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    TitleMetadata, UnresolvedExternalSubtitle, Video, utc_now,
+    TitleMetadata, UnresolvedExternalSubtitle, Video, VideoVariantGroup, utc_now,
 )
 from .numbering import (
     apply_sequential_numbering,
@@ -225,6 +241,9 @@ templates.env.globals.update(
     media_part_label=media_part_label,
     media_part_ordinal_warning=media_part_ordinal_warning,
     media_part_summary_label=media_part_summary_label,
+    parser_variant_suggestion=parser_variant_suggestion,
+    video_variant_release_source_choices=VIDEO_VARIANT_RELEASE_SOURCE_CHOICES,
+    video_variant_content_variant_choices=VIDEO_VARIANT_CONTENT_VARIANT_CHOICES,
 )
 METADATA_STATUS_LABELS = {
     "unlinked": "Bez metadat", "candidates_available": "Čeká na potvrzení",
@@ -393,6 +412,74 @@ def _video_display_rows(
 
 
 templates.env.globals.update(video_display_rows=_video_display_rows)
+
+
+def _variant_choice_from_form(form, key: str, *, allow_null: bool = False):
+    choice = str(form.get(f"group_choice_{key}") or "").strip()
+    if allow_null and choice == "null":
+        return "null", None
+    if choice == "new":
+        return key, VariantGroupDraft(
+            key=key,
+            manual_label=str(form.get(f"group_label_{key}") or ""),
+            release_source=str(form.get(f"group_source_{key}") or "") or None,
+            content_variant=str(form.get(f"group_content_{key}") or "") or None,
+            note=str(form.get(f"group_note_{key}") or "") or None,
+        )
+    try:
+        group_id = int(choice)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Vyberte existující variant group nebo vytvoření nové.") from exc
+    return key, VariantGroupDraft(key=key, existing_group_id=group_id)
+
+
+def _variant_preview_hidden_fields(preview, **extra) -> tuple[tuple[str, str], ...]:
+    fields = [
+        ("catalog_title_id", str(preview.catalog_title_id)),
+        ("workflow", preview.workflow),
+        ("expected_fingerprint", preview.fingerprint),
+    ]
+    fields.extend(
+        ("variant_assignment", f"{video_id}|{key}")
+        for video_id, key in preview.assignments
+    )
+    for draft in preview.drafts:
+        fields.extend((
+            ("draft_key", draft.key),
+            (f"draft_existing_{draft.key}", str(draft.existing_group_id or "")),
+            (f"draft_label_{draft.key}", draft.manual_label),
+            (f"draft_source_{draft.key}", draft.release_source or ""),
+            (f"draft_content_{draft.key}", draft.content_variant or ""),
+            (f"draft_note_{draft.key}", draft.note or ""),
+        ))
+    fields.extend((key, str(value)) for key, value in extra.items())
+    return tuple(fields)
+
+
+def _variant_preview_payload_from_form(form):
+    assignments = []
+    for raw in form.getlist("variant_assignment"):
+        try:
+            raw_video_id, key = str(raw).split("|", 1)
+            assignments.append((int(raw_video_id), key))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Náhled variant obsahuje neplatné video.") from exc
+    drafts = []
+    for key in dict.fromkeys(str(value) for value in form.getlist("draft_key")):
+        raw_existing = str(form.get(f"draft_existing_{key}") or "").strip()
+        try:
+            existing_group_id = int(raw_existing) if raw_existing else None
+        except ValueError as exc:
+            raise ValueError("Náhled obsahuje neplatnou variant group.") from exc
+        drafts.append(VariantGroupDraft(
+            key=key,
+            existing_group_id=existing_group_id,
+            manual_label=str(form.get(f"draft_label_{key}") or ""),
+            release_source=str(form.get(f"draft_source_{key}") or "") or None,
+            content_variant=str(form.get(f"draft_content_{key}") or "") or None,
+            note=str(form.get(f"draft_note_{key}") or "") or None,
+        ))
+    return tuple(assignments), tuple(drafts)
 
 
 def _metadata_template_values(
@@ -1299,12 +1386,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         preview=None, error: str | None = None, external_search_candidates=None,
         simple_rows=None, message: str | None = None,
         assignment_split_proposal=None,
+        variant_preview_state=None, structural_ab_preview_state=None,
     ):
         with sessions() as session:
             collection = session.scalar(select(CatalogCollection).options(
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+                selectinload(CatalogCollection.titles).selectinload(
+                    CatalogTitle.video_variant_groups
+                ).selectinload(VideoVariantGroup.videos),
                 selectinload(CatalogCollection.titles).selectinload(
                     CatalogTitle.manual_split_rule_videos
                 ),
@@ -1314,6 +1405,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(CatalogCollection.videos).selectinload(Video.internal_subtitles),
                 selectinload(CatalogCollection.videos).selectinload(Video.external_subtitles),
                 selectinload(CatalogCollection.videos).selectinload(Video.duplicate_of),
+                selectinload(CatalogCollection.videos).selectinload(
+                    Video.video_variant_group
+                ),
             ).where(CatalogCollection.id == collection_id))
             if collection is None:
                 raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
@@ -1357,6 +1451,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     video for video in videos if video.catalog_title_id == title.id
                 ]
                 title_card_issues = review_diagnostics.for_title_card(title)
+                variant_groups = tuple(sorted(
+                    title.video_variant_groups,
+                    key=lambda group: (group.manual_label.casefold(), group.id),
+                ))
+                duplicate_variant_labels = {
+                    group.manual_label.casefold()
+                    for group in variant_groups
+                    if sum(
+                        other.manual_label.casefold() == group.manual_label.casefold()
+                        for other in variant_groups
+                    ) > 1
+                }
                 title_numbering.append({
                     "title": title,
                     "summary": summarize_title_numbering(
@@ -1391,6 +1497,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "has_blocking_issue": any(
                         issue.blocking for issue in title_card_issues
                     ),
+                    "variant_groups": variant_groups,
+                    "duplicate_variant_labels": duplicate_variant_labels,
+                    "variant_lane_proposal": repeated_variant_lane_proposal(title),
+                    "structural_ab_proposals": structural_ab_pair_proposals(title),
                 })
             numbering_unknown = sum(
                 item["summary"].unknown for item in title_numbering
@@ -1489,6 +1599,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     existing_split_season_part_proposals(collection)
                 ),
                 "assignment_split_proposal": assignment_split_proposal,
+                "variant_preview_state": variant_preview_state,
+                "structural_ab_preview_state": structural_ab_preview_state,
             })
 
     @app.get("/hierarchy-review", response_class=HTMLResponse)
@@ -1761,6 +1873,334 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request, collection_id: int, message: str | None = None,
     ):
         return hierarchy_review_context(request, collection_id, message=message)
+
+    def variant_workflow_error(request: Request, collection_id: int, error: object):
+        response = hierarchy_review_context(request, collection_id, error=str(error))
+        response.status_code = 400
+        return response
+
+    @app.post("/hierarchy-review/{collection_id}/variants/groups")
+    async def hierarchy_review_variant_groups(request: Request, collection_id: int):
+        form = await request.form()
+        try:
+            title_id = int(str(form.get("catalog_title_id") or ""))
+            operation = str(form.get("operation") or "").strip()
+            with sessions() as session:
+                if operation == "create":
+                    create_video_variant_group_for_title(
+                        session,
+                        collection_id,
+                        title_id,
+                        manual_label=str(form.get("manual_label") or ""),
+                        release_source=str(form.get("release_source") or "") or None,
+                        content_variant=str(form.get("content_variant") or "") or None,
+                        note=str(form.get("note") or "") or None,
+                    )
+                    message = "Video variant group byla vytvořena."
+                elif operation == "update":
+                    update_video_variant_group_for_title(
+                        session,
+                        collection_id,
+                        title_id,
+                        int(str(form.get("group_id") or "")),
+                        manual_label=str(form.get("manual_label") or ""),
+                        release_source=str(form.get("release_source") or "") or None,
+                        content_variant=str(form.get("content_variant") or "") or None,
+                        note=str(form.get("note") or "") or None,
+                    )
+                    message = "Video variant group byla upravena; její identita zůstala stejná."
+                elif operation == "delete":
+                    if str(form.get("confirm_delete_group") or "").casefold() not in {
+                        "true", "on", "1",
+                    }:
+                        raise ValueError("Odstranění prázdné variant group je nutné potvrdit.")
+                    delete_empty_video_variant_group(
+                        session,
+                        collection_id,
+                        title_id,
+                        int(str(form.get("group_id") or "")),
+                    )
+                    message = "Prázdná video variant group byla odstraněna."
+                else:
+                    raise ValueError("Neplatná operace video variant group.")
+                session.commit()
+        except (TypeError, ValueError) as exc:
+            return variant_workflow_error(request, collection_id, exc)
+        return local_redirect_response(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#video-variants-{title_id}",
+        )
+
+    @app.post(
+        "/hierarchy-review/{collection_id}/variants/assignment-preview",
+        response_class=HTMLResponse,
+    )
+    async def hierarchy_review_variant_assignment_preview(
+        request: Request, collection_id: int,
+    ):
+        form = await request.form()
+        try:
+            title_id = int(str(form.get("catalog_title_id") or ""))
+            workflow = str(form.get("workflow") or "manual_bulk").strip()
+            video_ids = [int(value) for value in form.getlist("video_ids")]
+            if workflow == "manual_bulk":
+                key, draft = _variant_choice_from_form(form, "bulk", allow_null=True)
+                assignments = tuple((video_id, key) for video_id in video_ids)
+                drafts = (draft,) if draft is not None else ()
+                heading = "Náhled hromadné změny video varianty"
+            elif workflow == "collision":
+                assignments_list = []
+                drafts_list = []
+                for video_id in video_ids:
+                    key, draft = _variant_choice_from_form(form, f"video_{video_id}")
+                    assignments_list.append((video_id, key))
+                    assert draft is not None
+                    drafts_list.append(draft)
+                assignments, drafts = tuple(assignments_list), tuple(drafts_list)
+                heading = "Náhled potvrzení různých video variant"
+            else:
+                raise ValueError("Neplatný variant assignment workflow.")
+            with sessions() as session:
+                preview = preview_video_variant_assignments(
+                    session,
+                    collection_id,
+                    title_id,
+                    assignments=assignments,
+                    drafts=drafts,
+                    workflow=workflow,
+                    require_distinct=workflow == "collision",
+                )
+            state = {
+                "preview": preview,
+                "heading": heading,
+                "confirm_path": (
+                    f"/hierarchy-review/{collection_id}/variants/assignment-confirm"
+                ),
+                "hidden_fields": _variant_preview_hidden_fields(preview),
+                "confirmation_label": (
+                    "Potvrzuji, že jde o legitimní různé varianty stejné "
+                    "logické epizody."
+                    if workflow == "collision"
+                    else "Potvrzuji zobrazené hromadné změny video variant."
+                ),
+            }
+            return hierarchy_review_context(
+                request,
+                collection_id,
+                variant_preview_state=state,
+            )
+        except (TypeError, ValueError) as exc:
+            return variant_workflow_error(request, collection_id, exc)
+
+    @app.post("/hierarchy-review/{collection_id}/variants/assignment-confirm")
+    async def hierarchy_review_variant_assignment_confirm(
+        request: Request, collection_id: int,
+    ):
+        form = await request.form()
+        try:
+            if str(form.get("confirm_variant_assignment") or "").casefold() not in {
+                "true", "on", "1",
+            }:
+                raise ValueError("Variant assignment je nutné explicitně potvrdit.")
+            title_id = int(str(form.get("catalog_title_id") or ""))
+            workflow = str(form.get("workflow") or "").strip()
+            if workflow not in {"manual_bulk", "collision"}:
+                raise ValueError("Neplatný variant assignment workflow.")
+            assignments, drafts = _variant_preview_payload_from_form(form)
+            with sessions() as session:
+                apply_video_variant_assignments(
+                    session,
+                    collection_id,
+                    title_id,
+                    assignments=assignments,
+                    drafts=drafts,
+                    expected_fingerprint=str(form.get("expected_fingerprint") or ""),
+                    workflow=workflow,
+                    require_distinct=workflow == "collision",
+                )
+                session.commit()
+        except (TypeError, ValueError) as exc:
+            return variant_workflow_error(request, collection_id, exc)
+        message = (
+            "Canonical collision byla potvrzena jako legitimní různé video varianty."
+            if workflow == "collision"
+            else "Varianty vybraných videí byly atomicky změněny."
+        )
+        return local_redirect_response(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#video-variants-{title_id}",
+        )
+
+    @app.post(
+        "/hierarchy-review/{collection_id}/variants/lane-preview",
+        response_class=HTMLResponse,
+    )
+    async def hierarchy_review_variant_lane_preview(
+        request: Request, collection_id: int,
+    ):
+        form = await request.form()
+        try:
+            title_id = int(str(form.get("catalog_title_id") or ""))
+            _hinted_key, hinted_draft = _variant_choice_from_form(form, "hinted")
+            _plain_key, plain_draft = _variant_choice_from_form(form, "plain")
+            assert hinted_draft is not None and plain_draft is not None
+            proposal_fingerprint = str(form.get("proposal_fingerprint") or "")
+            with sessions() as session:
+                preview = preview_repeated_variant_lane(
+                    session,
+                    collection_id,
+                    title_id,
+                    hinted_draft=hinted_draft,
+                    plain_draft=plain_draft,
+                    expected_proposal_fingerprint=proposal_fingerprint,
+                )
+            state = {
+                "preview": preview,
+                "heading": "Náhled opakujícího se variantního lane",
+                "confirm_path": f"/hierarchy-review/{collection_id}/variants/lane-confirm",
+                "hidden_fields": _variant_preview_hidden_fields(
+                    preview,
+                    proposal_fingerprint=proposal_fingerprint,
+                ),
+                "confirmation_label": (
+                    "Potvrzuji, že tyto skupiny představují dvě legitimní "
+                    "varianty stejných logických epizod."
+                ),
+            }
+            return hierarchy_review_context(
+                request,
+                collection_id,
+                variant_preview_state=state,
+            )
+        except (TypeError, ValueError) as exc:
+            return variant_workflow_error(request, collection_id, exc)
+
+    @app.post("/hierarchy-review/{collection_id}/variants/lane-confirm")
+    async def hierarchy_review_variant_lane_confirm(
+        request: Request, collection_id: int,
+    ):
+        form = await request.form()
+        try:
+            if str(form.get("confirm_variant_assignment") or "").casefold() not in {
+                "true", "on", "1",
+            }:
+                raise ValueError("Hromadné potvrzení variant je nutné potvrdit checkboxem.")
+            title_id = int(str(form.get("catalog_title_id") or ""))
+            assignments, drafts = _variant_preview_payload_from_form(form)
+            drafts_by_key = {draft.key: draft for draft in drafts}
+            with sessions() as session:
+                current_preview = preview_repeated_variant_lane(
+                    session,
+                    collection_id,
+                    title_id,
+                    hinted_draft=drafts_by_key["hinted"],
+                    plain_draft=drafts_by_key["plain"],
+                    expected_proposal_fingerprint=str(
+                        form.get("proposal_fingerprint") or ""
+                    ),
+                )
+                expected = str(form.get("expected_fingerprint") or "")
+                if current_preview.fingerprint != expected:
+                    raise ValueError(
+                        "Hromadný náhled už neodpovídá aktuálnímu stavu."
+                    )
+                apply_video_variant_assignments(
+                    session,
+                    collection_id,
+                    title_id,
+                    assignments=assignments,
+                    drafts=drafts,
+                    expected_fingerprint=expected,
+                    workflow="repeated_lane",
+                    require_distinct=True,
+                )
+                session.commit()
+        except (KeyError, TypeError, ValueError) as exc:
+            return variant_workflow_error(request, collection_id, exc)
+        message = "Opakující se variantní lanes byly atomicky potvrzeny."
+        return local_redirect_response(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#video-variants-{title_id}",
+        )
+
+    @app.post(
+        "/hierarchy-review/{collection_id}/variants/ab-preview",
+        response_class=HTMLResponse,
+    )
+    async def hierarchy_review_variant_ab_preview(
+        request: Request, collection_id: int,
+    ):
+        form = await request.form()
+        try:
+            title_id = int(str(form.get("catalog_title_id") or ""))
+            video_a_id = int(str(form.get("video_a_id") or ""))
+            video_b_id = int(str(form.get("video_b_id") or ""))
+            _key_a, draft_a = _variant_choice_from_form(form, "a")
+            _key_b, draft_b = _variant_choice_from_form(form, "b")
+            assert draft_a is not None and draft_b is not None
+            proposal_fingerprint = str(form.get("proposal_fingerprint") or "")
+            with sessions() as session:
+                preview = preview_structural_ab_confirmation(
+                    session,
+                    collection_id,
+                    title_id,
+                    video_a_id=video_a_id,
+                    video_b_id=video_b_id,
+                    draft_a=draft_a,
+                    draft_b=draft_b,
+                    expected_proposal_fingerprint=proposal_fingerprint,
+                )
+            state = {
+                "preview": preview,
+                "confirm_path": f"/hierarchy-review/{collection_id}/variants/ab-confirm",
+                "hidden_fields": _variant_preview_hidden_fields(
+                    preview.assignment_preview,
+                    proposal_fingerprint=proposal_fingerprint,
+                    video_a_id=video_a_id,
+                    video_b_id=video_b_id,
+                ),
+            }
+            return hierarchy_review_context(
+                request,
+                collection_id,
+                structural_ab_preview_state=state,
+            )
+        except (TypeError, ValueError) as exc:
+            return variant_workflow_error(request, collection_id, exc)
+
+    @app.post("/hierarchy-review/{collection_id}/variants/ab-confirm")
+    async def hierarchy_review_variant_ab_confirm(
+        request: Request, collection_id: int,
+    ):
+        form = await request.form()
+        try:
+            if str(form.get("confirm_ab_variant") or "").casefold() not in {
+                "true", "on", "1",
+            }:
+                raise ValueError("A/B canonical potvrzení je nutné potvrdit checkboxem.")
+            title_id = int(str(form.get("catalog_title_id") or ""))
+            _assignments, drafts = _variant_preview_payload_from_form(form)
+            drafts_by_key = {draft.key: draft for draft in drafts}
+            with sessions() as session:
+                apply_structural_ab_confirmation(
+                    session,
+                    collection_id,
+                    title_id,
+                    video_a_id=int(str(form.get("video_a_id") or "")),
+                    video_b_id=int(str(form.get("video_b_id") or "")),
+                    draft_a=drafts_by_key["a"],
+                    draft_b=drafts_by_key["b"],
+                    expected_proposal_fingerprint=str(
+                        form.get("proposal_fingerprint") or ""
+                    ),
+                    expected_assignment_fingerprint=str(
+                        form.get("expected_fingerprint") or ""
+                    ),
+                )
+                session.commit()
+        except (KeyError, TypeError, ValueError) as exc:
+            return variant_workflow_error(request, collection_id, exc)
+        message = "A/B byla atomicky potvrzena jako dvě varianty stejné canonical epizody."
+        return local_redirect_response(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#video-variants-{title_id}",
+        )
 
     def current_grouping_suggestion(session, key: str):
         suggestion = next(

@@ -2,8 +2,8 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 28. srpna 2026
-> **Aktuální checkpoint:** Databázově idempotentní startup CatalogTitle
+> **Aktualizováno:** 30. srpna 2026
+> **Aktuální checkpoint:** Video Variant – Manual authority UI
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -4306,9 +4306,10 @@ neruší ani neopravuje; evaluator jej navíc označí samostatným blocking iss
 Hierarchy Review nově zobrazuje fyzický, logical, confirmed-variant,
 unassigned a confirmed-duplicate počet. Pro dvě unresolved collisions téhož
 E čísla v různých groups používají stávající bulk formuláře group-aware klíč,
-takže se jejich vstupy neslijí. Nejde o variant management UI: create, assign,
-reassign, clear, A/B confirmation a taxonomy editace přijdou až v samostatném
-**Commitu 3 – Manual Video Variant authority UI**.
+takže se jejich vstupy neslijí. Tento druhý krok sám variant management UI
+neobsahoval; create, assign, reassign, clear, A/B confirmation a taxonomy editace
+jsou implementované následným **Commitem 3 – Manual Video Variant authority UI**
+popsaným v části 6.68.
 
 Scanner/startup dál žádnou group nevytváří ani nemění a partition je čistě
 derived. Media Check zůstává per Video a subtitle persistence/linking se
@@ -4326,6 +4327,107 @@ Media Check / Media Part / subtitle / language       # 70 passed
 celá testovací sada                                  # 1001 passed
 compileall, 14/14 Jinja2 šablon, git diff --check    # prošlo
 ```
+
+---
+
+## 6.68 Video Variant – manual authority UI
+
+Třetí izolovaný krok zpřístupňuje již existující `VideoVariantGroup` jako
+bezpečnou ruční autoritu v raw Hierarchy Review. Každý `CatalogTitle` má vlastní
+sekci **Video varianty**, kde lze group vytvořit, upravit její `manual_label`,
+`release_source`, `content_variant` a poznámku bez změny stabilního ID a
+explicitně odstranit pouze prázdnou group. Neprázdná group se nikdy nemaže ani
+nečistí automaticky.
+
+Assignment workflow podporuje všechny vratné přechody `NULL → group`,
+`group A → group B` a `group → NULL`. Běžný uživatel vybírá filename, canonical
+pozici, presentation label a taxonomy; `Video.id` zůstává pouze hidden POST
+hodnotou. Ruční fallback dovoluje označit více videí jednoho title a přiřadit je
+do explicitně vybrané existující nebo nově potvrzené group. Cross-title group se
+serverově odmítne a obyčejný variant assignment nesmí změnit canonical
+numbering, duplicate vztah ani hierarchy membership.
+
+Po prvním produkčním smoke testu byl odstraněn UX blocker clear operace. Stejný
+title-level formulář je nyní veřejně pojmenovaný **Přiřadit, změnit nebo odebrat
+variantu u vybraných videí** a vedle existující/nové group nabízí explicitní cíl
+**Neurčeno / odebrat z varianty**. Každý checkbox řádek ukazuje současnou
+variantu. Clear používá stejný prospective preview, fingerprint, required
+confirmation a atomický confirm jako assign/reassign; v preview je vidět
+například `BD → neurčeno`. Mění pouze `Video.video_variant_group_id`, prázdnou
+manual-authority group automaticky nemaže a po clear lze group odstranit až
+samostatnou explicitní akcí.
+
+Bulk assignment i řešení canonical collision jsou dvoufázové. První POST vytvoří
+read-only prospective snapshot se seznamem filenames, současnou a výslednou
+variantou, počtem vytvořených groups, collisions před/po a případnými blockery.
+Snapshot nic nepersistuje. Potvrzovací POST vyžaduje checkbox, znovu ověří
+fingerprint aktuálního title i všechny invarianty a teprve potom zapíše jednu
+transakci. Stale preview se odmítne čitelnou chybou zpět v Hierarchy Review.
+
+Vedle existující volby primary a strukturální akce **Není duplicita / zařadit
+jinam** existuje samostatná akce **Potvrdit jako různé video varianty**. Distinct
+non-`NULL` groups odstraní canonical duplicate blocker, ale logická epizoda
+zůstává jedna. Dvě reprezentace ve stejné group zůstávají duplicate candidate;
+`NULL+known` i `NULL+NULL` se po reloadu dál zobrazují jako review. Vyčištění
+assignmentu proto legitimně vrátí dříve vyřešenou ambiguity.
+
+Konzervativní bulk detector nabízí opakující se hint/plain lane pouze pokud jsou
+všechny zahrnuté canonical identity bezpečné, každá má právě dva vysvětlitelné
+členy, discriminator hint je konzistentní a title neobsahuje confirmed duplicate
+vztah. Reálný tvar E01–E12 `Ver.TV` + plain tak dostane jeden preview. `Ver.TV`
+smí pouze předvyplnit label `TV` a source `tv`; plain lane zůstává bez labelu a
+taxonomy, dokud je nedoplní člověk. `BD` se neodvozuje z absence TV markeru,
+`TV` neznamená censored a samotné `UC` se bez další doménové autority nemapuje na
+`uncensored`. Parser suggestion sama nikdy nevytvoří group ani assignment.
+
+Pro bezpečnou dvojici `01A` / `01B` existuje zvláštní atomic preview. Operace
+znovu ověří stejný base number, přesné markery A/B, absenci ignorované třetí
+reprezentace, konfliktu manual numbering a confirmed duplicate vztahu. Jedna
+transakce potom přes existující manual numbering mechanismus nastaví oběma
+videím canonical E01, vytvoří nebo explicitně reuse zvolené groups A/B, přiřadí
+je a jednou spustí shared finalizer. Parser, filename a fyzická cesta se nemění;
+persistovaný mezistav `E01 NULL / E01 NULL` nevzniká. Stejné existující A/B groups
+lze explicitně použít u dalších bezpečných párů.
+
+`duplicate_of_video_id` zůstává samostatnou autoritou. Simple ani bulk write
+nesmí rozdělit primary a confirmed secondary do různých známých groups a zobrazí
+pokyn nejprve upravit duplicate vztah. Vztah se variant assignmentem nikdy
+automaticky neruší. Stable assignment i explicitně potvrzené `NULL` přežijí
+startup, rescan a hierarchy rebuild; title move dál používá Commit 1 helper a
+neplatnou group starého title vyčistí bez klonování.
+
+Tento krok nemění schema ani migrace, parser persistence, subtitle model, Media
+Check evaluator nebo NAS layout. Subtitle compatibility M:N a variant-aware
+Media Check completion zůstávají samostatné následující commity.
+
+Automatická validace manual-authority UI kroku:
+
+```text
+targeted variant authority UI/write scénáře         # 19 passed
+Commit 1 + Commit 2 + manual-authority UI           # 45 passed
+numbering/hierarchy/duplicate/split/move regrese    # 597 passed
+scanner/startup/migration/rebuild regrese           # 137 passed
+Media Check/subtitle regrese                        # 27 passed
+celá testovací sada                                 # 1020 passed
+compileall, 14/14 Jinja2 šablon, git diff --check   # prošlo
+```
+
+Doporučený druhý smoke test clear cesty nad již ručně potvrzeným Nande stavem:
+
+1. V raw Hierarchy Review rozbalit u příslušného title **Přiřadit, změnit nebo
+   odebrat variantu u vybraných videí** a v seznamu ověřit `E06 plain` se
+   současnou variantou `BD`.
+2. Zaškrtnout pouze plain E06, jako výslednou variantu zvolit **Neurčeno /
+   odebrat z varianty**, otevřít preview a ověřit řádek `BD → neurčeno`; před
+   potvrzením se DB nemění.
+3. Zaškrtnout povinné potvrzení a uložit. Po reloadu musí zůstat canonical E06
+   oběma videím a logical count beze změny, `Ver.TV` musí zůstat v TV, plain musí
+   být neurčeno, BD count musí klesnout o jedna a `known + NULL` review se musí
+   vrátit.
+4. Stejným formulářem vybrat plain E06, zvolit existující group `BD`, zkontrolovat
+   preview `neurčeno → BD` a potvrdit. Ambiguity musí zmizet a BD count se musí
+   vrátit. Ani jeden krok nesmí měnit duplicate vztah, numbering, hierarchy,
+   metadata, titulky, filename ani fyzickou cestu.
 
 ---
 
