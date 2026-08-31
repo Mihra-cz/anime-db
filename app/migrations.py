@@ -10,6 +10,10 @@ from .catalog import (
     normalize_language, normalize_title,
 )
 from .database import Base
+from .external_subtitle_compatibility import (
+    backfill_legacy_external_subtitle_compatibilities,
+    consolidate_legacy_external_subtitle_assets,
+)
 from .hierarchy import derive_library_hierarchy
 from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .hierarchy_evaluation import finalize_collection_hierarchy
@@ -218,6 +222,16 @@ def migrate_schema(engine) -> None:
             "ON external_subtitles(match_method)"
         ))
         connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_external_subtitle_compatibilities_external_subtitle_id "
+            "ON external_subtitle_compatibilities(external_subtitle_id)"
+        ))
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_external_subtitle_compatibilities_video_id "
+            "ON external_subtitle_compatibilities(video_id)"
+        ))
+        connection.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_manual_split_rule_videos_video_id "
             "ON manual_split_rule_videos(video_id)"
         ))
@@ -229,6 +243,20 @@ def migrate_schema(engine) -> None:
             subtitle.normalized_language = normalize_language(subtitle.language, subtitle.title)
         for subtitle in session.scalars(select(ExternalSubtitle)):
             subtitle.normalized_language = normalize_language(subtitle.language)
+        created_compatibilities = (
+            backfill_legacy_external_subtitle_compatibilities(session)
+        )
+        if created_compatibilities:
+            logger.info(
+                "Migrace databáze: doplněno %d legacy subtitle compatibility vztahů",
+                created_compatibilities,
+            )
+        consolidated_subtitles = consolidate_legacy_external_subtitle_assets(session)
+        if consolidated_subtitles:
+            logger.info(
+                "Migrace databáze: sloučeno %d historických duplicit fyzických titulků",
+                consolidated_subtitles,
+            )
         videos = list(session.scalars(select(Video).order_by(Video.id)))
         hierarchy = derive_library_hierarchy([video.relative_path for video in videos])
         titles = {
@@ -588,3 +616,21 @@ def migrate_schema(engine) -> None:
                 collection_videos,
             )
         session.commit()
+
+    # Historical schemas constrained only (video_id, relative_path). Run this
+    # after the M:N backfill and physical-asset consolidation so old databases
+    # receive the same path identity invariant as a fresh schema.
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+        unique_path_exists = any(
+            item.get("column_names") == ["relative_path"]
+            for item in inspector.get_unique_constraints("external_subtitles")
+        ) or any(
+            item.get("unique") and item.get("column_names") == ["relative_path"]
+            for item in inspector.get_indexes("external_subtitles")
+        )
+        if not unique_path_exists:
+            connection.execute(text(
+                "CREATE UNIQUE INDEX ux_external_subtitles_relative_path "
+                "ON external_subtitles(relative_path)"
+            ))

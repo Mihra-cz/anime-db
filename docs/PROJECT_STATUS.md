@@ -4497,6 +4497,116 @@ compileall, 14/14 Jinja2 šablon, git diff --check   # prošlo
 
 ---
 
+## 6.70 External Subtitle Compatibility – M:N authority a bridge lifecycle
+
+`ExternalSubtitle` nyní jednoznačně reprezentuje fyzický asset. Jeho
+`relative_path`, codec, detected/normalized language a nullable manual language
+override nejsou vlastnosti jedné video varianty. Nová tabulka
+`ExternalSubtitleCompatibility` odděluje M:N vztah asset ↔ physical `Video` a
+má databázově unikátní pár `(external_subtitle_id, video_id)`, cascade FK,
+explicitní status, původ evidence, nullable lidský timestamp a poznámku.
+
+Persistované významy jsou úmyslně malé:
+
+```text
+no row                 → unknown / neposouzeno
+automatic_match        → současný bezpečný scanner match; verified_at = NULL
+confirmed_compatible   → ruční authority; verified_at != NULL
+confirmed_incompatible → ruční authority; verified_at != NULL
+```
+
+`match_method` je nezávislá osa `filename`, `manual` nebo
+`legacy_backfill`. Historický automatic legacy odkaz nelze zpětně vydávat za
+konkrétní dnešní matcher, proto dostává konzervativní `legacy_backfill`.
+Prokazatelně ruční přiřazení z unresolved workflow se backfilluje jako
+`confirmed_compatible / manual`; jeho `verified_at` je okamžik materializace
+historické authority při migraci, nikoli tvrzení o původním čase kliknutí.
+Opakovaný startup existující row, human status, poznámku ani timestamp nemění.
+Subtitle bez platného legacy `video_id` žádnou association nedostane.
+
+`ExternalSubtitle.video_id` zůstává v tomto commitu povinný legacy bridge.
+Scanner při dnešním jednoznačném single-video matchi udržuje jak starý field pro
+dosavadní consumers, tak `automatic_match / filename` association. Novou
+compatibility autoritou je association tabulka a confirmed human row má před
+legacy field přednost. Reverse sync z `video_id` lidské rozhodnutí nikdy
+nepřepisuje. Bridge včetně jeho dosavadního owner lifecycle bude možné odstranit
+až po převodu všech read consumers; tento commit jej nemění skrytým destructive
+schema rebuildem.
+
+Starší schema dovolovalo stejný fyzický `relative_path` jednou pro každého
+legacy video ownera. Idempotentní migrace nejprve backfilluje všechny jejich
+video vztahy, následně řádky sloučí do jediného physical assetu a doplní unique
+path index. Human relationship má před automatic přednost; protichůdná lidská
+rozhodnutí pro tentýž asset + Video migrace odmítne místo tiché ztráty dat.
+
+Scanner synchronizuje pouze svou automatic evidence. Bezpečný match na BD E01
+nevytváří vztah k TV E01, i když obě videa sdílejí `CatalogTitle`, canonical E01
+nebo `LogicalEpisodeIdentity`. Totéž platí pro A/B, known + `NULL`, same-group
+collision a confirmed duplicate secondary. Změna variant group, title move a
+hierarchy rebuild relationship ke stejnému physical Video neklonují ani
+nemažou. Zmizení subtitle assetu smaže jeho rows cascade; smazání ne-legacy
+target Video odstraní pouze jeho pair a fyzický asset ponechá. Legacy owner
+delete dál respektuje starý povinný `video_id` lifecycle a je známým bridge
+limitem pro následující consumer-migration krok.
+
+Media Check rozšiřuje existující external-subtitle panel o candidate Videos
+stejné bezpečné logical identity. Zobrazuje filename/path, asset language,
+canonical epizodu, kompaktní variant label/source/content, status, evidence,
+`verified_at` a note. Interní ID je pouze hidden POST hodnota. Každé rozhodnutí
+projde prospective preview, explicitním checkboxem, fingerprint/stale kontrolou,
+opakovanou same-title/logical validací a atomickým write. Uživatel může potvrdit
+compatible/incompatible nebo vrátit human decision na neurčeno. Clear obnoví
+`automatic_match` pouze tehdy, pokud aktuální persisted paths stále dávají pro
+tentýž pár jediný bezpečný filename match; jinak row odstraní a no-row znovu
+znamená unknown.
+
+Produkční smoke následně odhalil CPU-bound regresi v původní tvorbě tohoto
+read-only kontextu: pro každý z `S` subtitle assetů se znovu procházelo všech
+`V` Videos a opakovaně se parsovala jejich `LogicalEpisodeIdentity`. Konkrétní
+složitost byla `Θ(S × V × parser_cost)`; při 2 377 assetech a 3 100 Videos šlo
+o 7 371 077 výpočtů identity. Request nyní jednou vytvoří index
+`LogicalEpisodeIdentity → Videos` a candidate presentation sestaví pouze pro
+legacy owners v právě stránkovaných Media Check rows. Všechny výslovně uložené
+historické relationships zůstávají viditelné a duplicate-secondary filtr se
+nemění. Složitost GET cesty je nyní
+`O(V × parser_cost + S_page × (C + K log K))`, kde `K` je malý bucket jedné
+logical episode a `C` počet explicitních rows daného assetu.
+
+Syntetický production-scale builder (3 100 Videos / 2 377 assets) klesl z
+214,258 s na 0,162 s bez profileru (0,455 s pod profilerem) a z 7 371 077 na
+3 100 identity calls.
+GET nad read-only pracovní kopií produkčních dat trval bez profileru 1,404 s
+pro výchozí filtr a 1,441 s pro `subtitle=all`; obě odpovědi měly 36 SQL
+statements kvůli bounded `selectinload` dávkám nad 3 100 rows, nikoli per-asset
+N+1. Deterministický scale test nyní hlídá 480 identity calls pro 480 Videos a
+216 assets; stará implementace by provedla 103 896 calls. Optimalizace nemění
+scanner, persisted compatibility, human authority ani CZ/SK completion.
+
+Současný `VideoLanguageProfile`, hlavní CZ/SK/Bez CZ/SK counts a Media Check
+completion evaluator v tomto kroku záměrně dál čtou legacy per-Video assety.
+Confirmed compatible sibling proto ještě nemění completion a confirmed
+incompatible legacy owner jej ještě nepředefinuje. Následující samostatný commit
+převede completion consumers na M:N authority a vyřeší variant-aware CZ/SK bez
+míchání schema migrace se změnou uživatelského významu.
+
+Žádný physical subtitle file se nekopíruje, nepřesouvá ani nepřejmenovává. NAS
+layout a canonical numbering, Video Variant authority, duplicate authority,
+metadata i subtitle language persistence zůstávají beze změny.
+
+Automatická validace compatibility kroku:
+
+```text
+nové model/migration/scanner/manual UI scénáře        # 24 passed
+scanner/subtitle/language/Media Check regrese         # 100 passed
+Video Variant 1–3.5/numbering/duplicate/split regrese # 310 passed
+startup/rebuild/hierarchy parity regrese               # 165 passed
+celá testovací sada                                  # 1056 passed
+Media Check query budget (malá i scale fixture)       # 13 statements
+compileall, 15/15 Jinja2 šablon, git diff --check     # prošlo
+```
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

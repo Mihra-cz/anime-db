@@ -9,8 +9,9 @@ from app.database import Base
 from app.hierarchy_evaluation import HierarchyIssueCode, evaluate_collection_hierarchy
 from app.models import (
     AudioTrack, CatalogCollection, CatalogTitle, CollectionGroupingDecision,
-    ExternalSubtitle, ExternalTitleLink, InternalSubtitle, ManualSplitRuleVideo,
-    TitleMetadata, UnresolvedExternalSubtitle, Video,
+    ExternalSubtitle, ExternalSubtitleCompatibility, ExternalTitleLink,
+    InternalSubtitle, ManualSplitRuleVideo, TitleMetadata,
+    UnresolvedExternalSubtitle, Video,
 )
 from app.numbering import summarize_title_numbering
 
@@ -854,6 +855,7 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
 
     assert "collection_grouping_decisions" in inspect(engine).get_table_names()
     assert "unresolved_external_subtitles" in inspect(engine).get_table_names()
+    assert "external_subtitle_compatibilities" in inspect(engine).get_table_names()
 
     assert [
         column["name"] for column in inspect(engine).get_columns("videos")
@@ -903,6 +905,20 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         subtitle = session.scalar(select(ExternalSubtitle))
         assert subtitle.normalized_language == "en"
         assert subtitle.manual_language is None
+        compatibility = session.scalar(select(ExternalSubtitleCompatibility))
+        assert (
+            compatibility.external_subtitle_id,
+            compatibility.video_id,
+            compatibility.status,
+            compatibility.match_method,
+            compatibility.verified_at,
+        ) == (
+            subtitle.id,
+            video.id,
+            "automatic_match",
+            "legacy_backfill",
+            None,
+        )
         subtitle.manual_language = "cs"
         video.content_type_manual = "recap"
         video.duplicate_status_manual = "suspected"
@@ -955,12 +971,75 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
             123.5, "h265", 1280, 720,
         )
 
+    subtitle_indexes = inspect(engine).get_indexes("external_subtitles")
+    assert any(
+        item["unique"] and item["column_names"] == ["relative_path"]
+        for item in subtitle_indexes
+    )
+
     migrate_schema(engine)
     with Session(engine) as session:
         unresolved = session.scalar(select(UnresolvedExternalSubtitle))
         assert (unresolved.relative_path, unresolved.status) == (
             "Show/orphan.ass", "confirmed_no_match",
         )
+
+
+def test_migration_consolidates_historical_physical_path_duplicates(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-subtitle-assets.db'}")
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE videos (
+                id INTEGER PRIMARY KEY, relative_path VARCHAR UNIQUE NOT NULL,
+                root_folder VARCHAR NOT NULL, filename VARCHAR NOT NULL,
+                size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
+                duration FLOAT, video_codec VARCHAR, width INTEGER, height INTEGER
+            )
+        """))
+        connection.execute(text("""
+            CREATE TABLE external_subtitles (
+                id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL,
+                relative_path VARCHAR NOT NULL, codec VARCHAR NOT NULL,
+                language VARCHAR NOT NULL,
+                UNIQUE(video_id, relative_path)
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO videos
+                (id, relative_path, root_folder, filename, size, mtime_ns)
+            VALUES
+                (1, 'Show/Show - 01.mkv', 'Show', 'Show - 01.mkv', 1, 1),
+                (2, 'Show/Show - 01 TV.mkv', 'Show', 'Show - 01 TV.mkv', 2, 2)
+        """))
+        connection.execute(text("""
+            INSERT INTO external_subtitles
+                (id, video_id, relative_path, codec, language)
+            VALUES
+                (1, 1, 'Show/Show - 01.ass', 'ass', 'cze'),
+                (2, 2, 'Show/Show - 01.ass', 'ass', 'cze')
+        """))
+
+    migrate_schema(engine)
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        assets = list(session.scalars(select(ExternalSubtitle)))
+        rows = list(session.scalars(
+            select(ExternalSubtitleCompatibility).order_by(
+                ExternalSubtitleCompatibility.video_id
+            )
+        ))
+        assert len(assets) == 1
+        assert assets[0].relative_path == "Show/Show - 01.ass"
+        assert [(row.video_id, row.status, row.match_method) for row in rows] == [
+            (1, "automatic_match", "legacy_backfill"),
+            (2, "automatic_match", "legacy_backfill"),
+        ]
+        assert {row.external_subtitle_id for row in rows} == {assets[0].id}
+    assert any(
+        item["unique"] and item["column_names"] == ["relative_path"]
+        for item in inspect(engine).get_indexes("external_subtitles")
+    )
 
 
 def test_duplicate_relation_migration_is_idempotent_and_preserves_old_video_data(tmp_path):

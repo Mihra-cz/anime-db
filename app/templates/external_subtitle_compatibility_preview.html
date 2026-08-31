@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Náhled kompatibility titulků · AnimeDB{% endblock %}
+{% block content %}
+<p><a href="{{ return_to }}">← Zrušit a vrátit se do Kontroly médií</a></p>
+<h1>Náhled kompatibility externích titulků</h1>
+{% if error %}
+<section class="notice error"><h2>Změnu nelze provést</h2><p>{{ error }}</p></section>
+{% elif preview %}
+<section class="panel subtitle-compatibility-preview">
+  <h2>{{ preview.subtitle.relative_path.rsplit('/', 1)[-1] }}</h2>
+  <p class="technical-path">{{ preview.subtitle.relative_path }}</p>
+  <dl>
+    <dt>Jazyk fyzického assetu</dt><dd>{{ language_display_label(effective_external_subtitle_language(preview.subtitle)) }}</dd>
+    <dt>Cílové video</dt><dd><strong>{{ preview.target.video.filename }}</strong><small>{{ preview.target.episode_label }} · {{ preview.target.variant_label }}{% if preview.target.variant_details %} · {{ preview.target.variant_details|join(' · ') }}{% endif %}</small></dd>
+    <dt>Současný stav</dt><dd>{{ preview.current_label }}</dd>
+    <dt>Výsledný stav</dt><dd><strong>{{ preview.resulting_label }}</strong></dd>
+    <dt>Poznámka</dt><dd>{{ preview.note or '—' }}</dd>
+  </dl>
+  {% if preview.decision == 'unknown' %}<p class="notice soft-warning">Vrácení ručního rozhodnutí zachová <code>automatic_match</code>, pokud je pro tento pár stále platný dnešní jednoznačný filename match. Jinak se vztah odstraní a stav bude neurčený.</p>{% endif %}
+  <form method="post" action="/media-check/external-subtitles/{{ preview.subtitle.id }}/compatibility-confirm">
+    <input type="hidden" name="video_id" value="{{ preview.target.video.id }}">
+    <input type="hidden" name="decision" value="{{ preview.decision }}">
+    <input type="hidden" name="note" value="{{ preview.note or '' }}">
+    <input type="hidden" name="expected_fingerprint" value="{{ preview.fingerprint }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    <label><input type="checkbox" name="confirm_compatibility" value="true" required> Potvrzuji zobrazené rozhodnutí pro tento fyzický subtitle asset a konkrétní video.</label>
+    <button type="submit">Potvrdit kompatibilitu</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

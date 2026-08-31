@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .catalog import (
     SUPPLEMENTARY_SUBTYPE_TO_FILE_TYPE, detect_episode_number, normalize_language,
 )
+from .external_subtitle_compatibility import confirm_compatible
 from .models import ExternalSubtitle, UnresolvedExternalSubtitle, Video
 
 MAX_SUBTITLE_CANDIDATES = 12
@@ -228,6 +229,7 @@ def manually_link_subtitle(
         match_method="manual",
     )
     session.add(linked)
+    confirm_compatible(session, linked, video)
     session.delete(subtitle)
     return linked
 
@@ -237,6 +239,13 @@ def reopen_manual_subtitle_link(
 ) -> UnresolvedExternalSubtitle:
     if subtitle.match_method != "manual":
         raise ValueError("Automatické bezpečné přiřazení nelze vrátit touto akcí.")
+    if any(
+        row.video_id != subtitle.video_id for row in subtitle.compatibilities
+    ):
+        raise ValueError(
+            "Titulek má další ruční compatibility rozhodnutí. Nejprve je "
+            "vraťte na neurčeno."
+        )
     unresolved = UnresolvedExternalSubtitle(
         relative_path=subtitle.relative_path,
         filename=PurePosixPath(subtitle.relative_path).name,

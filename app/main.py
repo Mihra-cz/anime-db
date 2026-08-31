@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload, selectinload
 
 from .catalog import (
@@ -64,6 +65,14 @@ from .catalog_video_presentation import (
     video_variant_group_display,
 )
 from .database import Base, make_engine, make_session_factory
+from .external_subtitle_compatibility import (
+    apply_compatibility_decision,
+    build_compatibility_presentations,
+    compatibility_match_method_label,
+    compatibility_status_label,
+    external_subtitle_compatibility_status,
+    preview_compatibility_decision,
+)
 from .migrations import migrate_schema
 from .hierarchy_authority import activate_manual_hierarchy_snapshot
 from .hierarchy_evaluation import HierarchyIssueCode, finalize_hierarchy_write
@@ -147,8 +156,9 @@ from .unassigned_videos import (
     insufficient_video_assignments,
 )
 from .models import (
-    AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    TitleMetadata, UnresolvedExternalSubtitle, Video, VideoVariantGroup, utc_now,
+    AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
+    ExternalTitleLink, TitleMetadata,
+    UnresolvedExternalSubtitle, Video, VideoVariantGroup, utc_now,
 )
 from .numbering import (
     apply_sequential_numbering,
@@ -253,6 +263,9 @@ templates.env.globals.update(
     video_display_rows=ungrouped_presented_video_rows,
     video_variant_group_display=video_variant_group_display,
     video_variant_display_for_video=video_variant_display_for_video,
+    compatibility_status_label=compatibility_status_label,
+    compatibility_match_method_label=compatibility_match_method_label,
+    external_subtitle_compatibility_status=external_subtitle_compatibility_status,
 )
 METADATA_STATUS_LABELS = {
     "unlinked": "Bez metadat", "candidates_available": "Čeká na potvrzení",
@@ -305,7 +318,9 @@ def _load_videos(sessions) -> list[Video]:
     with sessions() as session:
         return list(session.scalars(select(Video).options(
             selectinload(Video.audio_tracks), selectinload(Video.internal_subtitles),
-            selectinload(Video.external_subtitles),
+            selectinload(Video.external_subtitles).selectinload(
+                ExternalSubtitle.compatibilities
+            ),
             selectinload(Video.catalog_title).selectinload(
                 CatalogTitle.collection
             ).selectinload(CatalogCollection.titles),
@@ -1693,6 +1708,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         message: str | None = None,
     ):
         videos = _load_videos(sessions)
+        try:
+            results = build_media_check_results(
+                videos,
+                subtitle_filter=subtitle,
+                audio_filter=audio,
+                query=q,
+                page=page,
+                title_name_preference=get_preferred_title_language(request),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        compatibility_presentations = build_compatibility_presentations(
+            videos,
+            presentation_videos=(row.video for row in results.rows),
+        )
         with sessions() as session:
             unresolved_subtitles = list(session.scalars(
                 select(UnresolvedExternalSubtitle).order_by(
@@ -1712,17 +1742,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     for item in unresolved_subtitles
                 ),
             }
-        try:
-            results = build_media_check_results(
-                videos,
-                subtitle_filter=subtitle,
-                audio_filter=audio,
-                query=q,
-                page=page,
-                title_name_preference=get_preferred_title_language(request),
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
         return templates.TemplateResponse(request, "media_check.html", {
             "results": results,
             "subtitle_filter_labels": SUBTITLE_FILTER_LABELS,
@@ -1738,6 +1757,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "message": message,
             "unresolved_subtitle_rows": unresolved_rows,
             "unresolved_subtitle_counts": unresolved_subtitle_counts,
+            "compatibility_presentations": compatibility_presentations,
         })
 
     @app.post("/media-check/external-subtitles/{subtitle_id}/assign")
@@ -1821,6 +1841,117 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         return local_redirect_response(form.get("return_to") or "/media-check")
+
+    def compatibility_preview_response(
+        request: Request,
+        *,
+        preview=None,
+        error: str | None = None,
+        return_to: object = "/media-check",
+        status_code: int = 200,
+    ):
+        response = templates.TemplateResponse(
+            request,
+            "external_subtitle_compatibility_preview.html",
+            {
+                "preview": preview,
+                "error": error,
+                "return_to": safe_local_redirect_target(return_to),
+            },
+        )
+        response.status_code = status_code
+        return response
+
+    @app.post(
+        "/media-check/external-subtitles/{subtitle_id}/compatibility-preview",
+        response_class=HTMLResponse,
+    )
+    async def preview_external_subtitle_compatibility(
+        request: Request, subtitle_id: int,
+    ):
+        form = await request.form()
+        return_to = form.get("return_to") or "/media-check"
+        try:
+            video_id = int(str(form.get("video_id") or ""))
+            decision = str(form.get("decision") or "")
+            note = str(form.get("note") or "")
+            videos = _load_videos(sessions)
+            with sessions() as session:
+                subtitle_row = session.scalar(select(ExternalSubtitle).options(
+                    selectinload(ExternalSubtitle.compatibilities)
+                ).where(ExternalSubtitle.id == subtitle_id))
+                if subtitle_row is None:
+                    raise ValueError("Fyzický externí titulek už neexistuje.")
+                preview = preview_compatibility_decision(
+                    subtitle_row,
+                    video_id,
+                    decision,
+                    note=note,
+                    videos=videos,
+                )
+            return compatibility_preview_response(
+                request, preview=preview, return_to=return_to
+            )
+        except (TypeError, ValueError) as exc:
+            return compatibility_preview_response(
+                request,
+                error=str(exc),
+                return_to=return_to,
+                status_code=400,
+            )
+
+    @app.post("/media-check/external-subtitles/{subtitle_id}/compatibility-confirm")
+    async def confirm_external_subtitle_compatibility(
+        request: Request, subtitle_id: int,
+    ):
+        form = await request.form()
+        return_to = form.get("return_to") or "/media-check"
+        try:
+            if str(form.get("confirm_compatibility") or "").casefold() not in {
+                "true", "on", "1",
+            }:
+                raise ValueError(
+                    "Změnu kompatibility je nutné explicitně potvrdit checkboxem."
+                )
+            video_id = int(str(form.get("video_id") or ""))
+            decision = str(form.get("decision") or "")
+            note = str(form.get("note") or "")
+            expected_fingerprint = str(form.get("expected_fingerprint") or "")
+            videos = _load_videos(sessions)
+            with sessions() as session:
+                subtitle_row = session.scalar(select(ExternalSubtitle).options(
+                    selectinload(ExternalSubtitle.compatibilities)
+                ).where(ExternalSubtitle.id == subtitle_id))
+                if subtitle_row is None:
+                    raise ValueError("Fyzický externí titulek už neexistuje.")
+                apply_compatibility_decision(
+                    session,
+                    subtitle_row,
+                    video_id,
+                    decision,
+                    note=note,
+                    videos=videos,
+                    expected_fingerprint=expected_fingerprint,
+                )
+                session.commit()
+        except (TypeError, ValueError) as exc:
+            return compatibility_preview_response(
+                request,
+                error=str(exc),
+                return_to=return_to,
+                status_code=400,
+            )
+        except IntegrityError:
+            return compatibility_preview_response(
+                request,
+                error=(
+                    "Kompatibilitu se nepodařilo atomicky uložit, protože se "
+                    "mezitím změnil cílový vztah. Načtěte náhled znovu."
+                ),
+                return_to=return_to,
+                status_code=409,
+            )
+        return local_redirect_response(return_to)
 
     @app.post("/media-check/czsk-availability")
     async def update_media_check_czsk_availability(request: Request):

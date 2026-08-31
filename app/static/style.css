@@ -663,6 +663,15 @@ summary {
 .subtitle-candidate small { display: block; }
 .subtitle-candidate-list { display: grid; gap: .5rem; margin: .75rem 0; }
 .subtitle-candidate { padding: .65rem; border: 1px solid #364258; border-radius: 8px; }
+.subtitle-compatibility { margin-top: .7rem; }
+.subtitle-compatibility-list { display: grid; gap: .65rem; margin-top: .7rem; }
+.subtitle-compatibility-target { display: grid; grid-template-columns: minmax(0, 1fr) minmax(15rem, 22rem); gap: .75rem; padding: .75rem; border: 1px solid #364258; border-radius: 8px; background: #151c27; }
+.subtitle-compatibility-target small { display: block; overflow-wrap: anywhere; }
+.subtitle-compatibility-target form { display: grid; gap: .45rem; margin: 0; }
+.subtitle-compatibility-target select, .subtitle-compatibility-target input { width: 100%; }
+.subtitle-compatibility-preview dl { display: grid; grid-template-columns: minmax(9rem, auto) 1fr; gap: .55rem 1rem; }
+.subtitle-compatibility-preview dt { font-weight: 700; }
+.subtitle-compatibility-preview dd { margin: 0; }
 .subtitle-candidate-actions form,
 .subtitle-review-actions form { margin: 0; }
 .media-pagination { display: flex; justify-content: center; align-items: center; gap: 1rem; margin: 1.5rem 0; }
@@ -694,6 +703,8 @@ summary {
   .unresolved-subtitle-card > header,
   .subtitle-candidate,
   .subtitle-review-actions { align-items: stretch; flex-direction: column; }
+  .subtitle-compatibility-target { grid-template-columns: 1fr; }
+  .subtitle-compatibility-preview dl { grid-template-columns: 1fr; }
   .media-pagination { text-align: center; }
 }
 

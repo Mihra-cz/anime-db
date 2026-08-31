@@ -16,6 +16,11 @@ from app.catalog import (
 from app.hierarchy import derive_library_hierarchy
 from app.hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from app.hierarchy_evaluation import finalize_collection_hierarchy
+from app.external_subtitle_compatibility import (
+    HUMAN_COMPATIBILITY_STATUSES,
+    remove_automatic_matches,
+    synchronize_automatic_match,
+)
 from app.hierarchy_review import (
     apply_collection_grouping_authority,
     collection_grouping_authority_targets,
@@ -176,7 +181,9 @@ def _sync_external_subtitles(
         videos_by_parent[absolute_path.parent].append(absolute_path)
 
     linked_by_path: dict[str, list[ExternalSubtitle]] = defaultdict(list)
-    for subtitle in session.scalars(select(ExternalSubtitle)).all():
+    for subtitle in session.scalars(select(ExternalSubtitle).options(
+        selectinload(ExternalSubtitle.compatibilities)
+    )).all():
         linked_by_path[subtitle.relative_path].append(subtitle)
     unresolved_by_path = {
         subtitle.relative_path: subtitle
@@ -206,6 +213,12 @@ def _sync_external_subtitles(
         }
         linked = linked_by_path.get(relative_path, [])
         manual = [row for row in linked if row.match_method == "manual"]
+        human_authority = [
+            row
+            for subtitle in linked
+            for row in subtitle.compatibilities
+            if row.status in HUMAN_COMPATIBILITY_STATUSES
+        ]
         unresolved = unresolved_by_path.get(relative_path)
 
         if manual:
@@ -240,11 +253,14 @@ def _sync_external_subtitles(
             if keep is None:
                 keep = ExternalSubtitle(video_id=video.id, relative_path=relative_path)
                 session.add(keep)
-            keep.video_id = video.id
+            if not human_authority:
+                keep.video_id = video.id
             keep.codec = data["codec"]
             keep.language = data["language"]
             keep.normalized_language = data["normalized_language"]
-            keep.match_method = "automatic"
+            if keep.match_method != "manual":
+                keep.match_method = "automatic"
+            synchronize_automatic_match(session, keep, video)
             for row in linked:
                 if row is not keep:
                     session.delete(row)
@@ -254,6 +270,19 @@ def _sync_external_subtitles(
                 "Externí titulek %s bezpečně přiřazen (%s) k %s",
                 relative_path, match_method, video.relative_path,
             )
+            continue
+
+        if linked and human_authority:
+            keep = min(linked, key=lambda row: row.id or 0)
+            keep.codec = data["codec"]
+            keep.language = data["language"]
+            keep.normalized_language = data["normalized_language"]
+            remove_automatic_matches(session, keep)
+            for row in linked:
+                if row is not keep:
+                    session.delete(row)
+            if unresolved is not None:
+                session.delete(unresolved)
             continue
 
         for row in linked:

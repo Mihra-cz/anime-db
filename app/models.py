@@ -64,7 +64,12 @@ class Video(Base):
 
     audio_tracks: Mapped[list[AudioTrack]] = relationship(cascade="all, delete-orphan")
     internal_subtitles: Mapped[list[InternalSubtitle]] = relationship(cascade="all, delete-orphan")
-    external_subtitles: Mapped[list[ExternalSubtitle]] = relationship(cascade="all, delete-orphan")
+    external_subtitles: Mapped[list[ExternalSubtitle]] = relationship(
+        back_populates="legacy_video", cascade="all, delete-orphan"
+    )
+    external_subtitle_compatibilities: Mapped[
+        list[ExternalSubtitleCompatibility]
+    ] = relationship(back_populates="video", cascade="all, delete-orphan")
     duplicate_of: Mapped[Video | None] = relationship(
         "Video", remote_side=[id], foreign_keys=[duplicate_of_video_id],
         back_populates="duplicate_copies", post_update=True,
@@ -414,11 +419,69 @@ class ExternalSubtitle(Base):
     match_method: Mapped[str] = mapped_column(
         String, default="automatic", server_default="automatic", index=True,
     )
+    legacy_video: Mapped[Video] = relationship(back_populates="external_subtitles")
+    compatibilities: Mapped[list[ExternalSubtitleCompatibility]] = relationship(
+        back_populates="external_subtitle", cascade="all, delete-orphan"
+    )
     __table_args__ = (
         UniqueConstraint("relative_path"),
         CheckConstraint(
             "match_method IN ('automatic','manual')",
             name="ck_external_subtitle_match_method",
+        ),
+    )
+
+
+class ExternalSubtitleCompatibility(Base):
+    """Compatibility authority between one physical subtitle asset and Video."""
+
+    __tablename__ = "external_subtitle_compatibilities"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    external_subtitle_id: Mapped[int] = mapped_column(
+        ForeignKey("external_subtitles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    video_id: Mapped[int] = mapped_column(
+        ForeignKey("videos.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    match_method: Mapped[str] = mapped_column(String, nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    external_subtitle: Mapped[ExternalSubtitle] = relationship(
+        back_populates="compatibilities"
+    )
+    video: Mapped[Video] = relationship(
+        back_populates="external_subtitle_compatibilities"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "external_subtitle_id",
+            "video_id",
+            name="uq_external_subtitle_compatibility_pair",
+        ),
+        CheckConstraint(
+            "status IN "
+            "('automatic_match','confirmed_compatible','confirmed_incompatible')",
+            name="ck_external_subtitle_compatibility_status",
+        ),
+        CheckConstraint(
+            "match_method IN ('filename','manual','legacy_backfill')",
+            name="ck_external_subtitle_compatibility_match_method",
+        ),
+        CheckConstraint(
+            "(status = 'automatic_match' AND verified_at IS NULL) OR "
+            "(status IN ('confirmed_compatible','confirmed_incompatible') "
+            "AND verified_at IS NOT NULL)",
+            name="ck_external_subtitle_compatibility_verification",
         ),
     )
 
