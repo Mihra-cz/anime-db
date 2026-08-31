@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 from fastapi import HTTPException
@@ -17,7 +18,8 @@ from app.media_check import (
 )
 from app.models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
-    InternalSubtitle, UnresolvedExternalSubtitle, Video,
+    ExternalSubtitleCompatibility, InternalSubtitle,
+    UnresolvedExternalSubtitle, Video,
 )
 from app.subtitle_review import build_unresolved_subtitle_rows
 
@@ -31,7 +33,7 @@ def _video(
     title: CatalogTitle | None = None,
     collection: CatalogCollection | None = None,
 ) -> Video:
-    return Video(
+    video = Video(
         id=number,
         relative_path=f"Anime/Media Show/Season 1/E{number:02}.mkv",
         root_folder="Anime",
@@ -66,6 +68,14 @@ def _video(
             for index, language in enumerate(external, 1)
         ],
     )
+    for subtitle in video.external_subtitles:
+        ExternalSubtitleCompatibility(
+            external_subtitle=subtitle,
+            video=video,
+            status="automatic_match",
+            match_method="filename",
+        )
+    return video
 
 
 def _collection() -> tuple[CatalogCollection, CatalogTitle]:
@@ -214,6 +224,50 @@ def test_media_check_summary_filters_search_and_pagination_share_evaluator():
             videos, subtitle_filter=filter_name, page_size=20,
         )
         assert filtered.total_filtered == count
+
+
+def test_confirmed_duplicate_copy_keeps_facts_without_new_completion_unit():
+    collection, title = _collection()
+    primary = _video(
+        1, external=("cs",), title=title, collection=collection,
+    )
+    copy = _video(2, title=title, collection=collection)
+    copy.season_episode_number = 1
+    copy.duplicate_of = primary
+    copy.duplicate_of_video_id = primary.id
+
+    results = build_media_check_results(
+        [primary, copy], subtitle_filter="all", page_size=10,
+    )
+    assert results.subtitle_counts == {
+        "all": 2,
+        "unresolved": 0,
+        "unresolved-internal-en": 0,
+        "unresolved-no-fallback": 0,
+        "unavailable": 0,
+        "available": 1,
+    }
+    copy_row = next(row for row in results.rows if row.video is copy)
+    assert copy_row.evaluation.completion_required is False
+    assert copy_row.evaluation.subtitle_status == "needs_cs_sk_no_fallback"
+
+    shared_asset = primary.external_subtitles[0]
+    shared_asset.id = 100
+    copy.external_subtitle_compatibilities.append(ExternalSubtitleCompatibility(
+        external_subtitle=shared_asset,
+        status="confirmed_compatible",
+        match_method="manual",
+        verified_at=datetime.now(timezone.utc),
+    ))
+    technical = build_media_check_results(
+        [primary, copy], subtitle_filter="all", page_size=10,
+    )
+    copy_row = next(row for row in technical.rows if row.video is copy)
+    assert copy_row.evaluation.subtitle_status == "available"
+    assert copy_row.external_subtitle_state.compatible_subtitles == (shared_asset,)
+    assert build_media_check_results(
+        [primary, copy], subtitle_filter="available", page_size=10,
+    ).total_filtered == 1
 
 
 def _request(web_app, path: str) -> Request:
@@ -535,7 +589,7 @@ def test_unresolved_subtitle_media_check_manual_workflow_is_persistent_and_scope
         _request(web_app, "/media-check"), subtitle="all", audio="all",
         q="", page=1, message=None,
     ).body.decode()
-    assert "ručně přiřazeno" in linked_media
+    assert "Ručně potvrzeno kompatibilní" in linked_media
 
     reopen_link_request = _post_request(
         web_app, f"/media-check/external-subtitles/{linked_id}/reopen-link", [],

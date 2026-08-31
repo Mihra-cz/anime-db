@@ -53,15 +53,24 @@ COMPATIBILITY_MATCH_METHODS = frozenset({
 
 STATUS_LABELS = {
     None: "Neurčeno",
-    AUTOMATIC_MATCH: "Automatický bezpečný match",
+    AUTOMATIC_MATCH: "Automaticky přiřazeno",
     CONFIRMED_COMPATIBLE: "Ručně potvrzeno kompatibilní",
     CONFIRMED_INCOMPATIBLE: "Ručně potvrzeno nekompatibilní",
 }
 MATCH_METHOD_LABELS = {
-    MATCH_METHOD_FILENAME: "filename evidence",
-    MATCH_METHOD_MANUAL: "ruční rozhodnutí",
-    MATCH_METHOD_LEGACY_BACKFILL: "legacy backfill",
+    MATCH_METHOD_FILENAME: "Automatické přiřazení podle názvu",
+    MATCH_METHOD_MANUAL: "Ruční rozhodnutí",
+    MATCH_METHOD_LEGACY_BACKFILL: "Historická automatická vazba",
 }
+MANUAL_DECISION_LABELS = {
+    "unknown": "Bez ručního rozhodnutí",
+    CONFIRMED_COMPATIBLE: "Potvrdit kompatibilitu",
+    CONFIRMED_INCOMPATIBLE: "Potvrdit nekompatibilitu",
+}
+POSITIVE_COMPATIBILITY_STATUSES = frozenset({
+    AUTOMATIC_MATCH,
+    CONFIRMED_COMPATIBLE,
+})
 
 
 @dataclass(frozen=True)
@@ -107,6 +116,10 @@ class CompatibilityDecisionPreview:
     def resulting_label(self) -> str:
         return STATUS_LABELS[self.resulting_status]
 
+    @property
+    def decision_label(self) -> str:
+        return MANUAL_DECISION_LABELS[self.decision]
+
 
 @dataclass(frozen=True)
 class CompatibilityCandidateIndex:
@@ -116,6 +129,15 @@ class CompatibilityCandidateIndex:
     videos_by_id: Mapping[int, Video]
     identity_by_video_id: Mapping[int, LogicalEpisodeIdentity | None]
     videos_by_identity: Mapping[LogicalEpisodeIdentity, tuple[Video, ...]]
+
+
+@dataclass(frozen=True)
+class VideoExternalSubtitleState:
+    """Read-only compatibility projection for one physical Video."""
+
+    compatible_subtitles: tuple[ExternalSubtitle, ...]
+    incompatible_subtitles: tuple[ExternalSubtitle, ...]
+    unknown_candidate_subtitles: tuple[ExternalSubtitle, ...]
 
 
 def compatibility_status_label(status: str | None) -> str:
@@ -134,6 +156,42 @@ def external_subtitle_compatibility_status(
 ) -> str | None:
     row = get_compatibility(subtitle, video)
     return row.status if row is not None else None
+
+
+def effective_external_subtitle_compatibilities_for_video(
+    video: Video,
+) -> tuple[ExternalSubtitleCompatibility, ...]:
+    """Return positive association authority; the legacy owner is irrelevant."""
+    return tuple(sorted(
+        (
+            row for row in video.external_subtitle_compatibilities
+            if row.status in POSITIVE_COMPATIBILITY_STATUSES
+        ),
+        key=lambda row: (
+            row.external_subtitle.relative_path.casefold(),
+            row.external_subtitle_id or 0,
+        ),
+    ))
+
+
+def effective_external_subtitles_for_video(
+    video: Video,
+) -> tuple[ExternalSubtitle, ...]:
+    """Resolve physical assets positively compatible with one Video.
+
+    No association is unknown, and ``confirmed_incompatible`` is negative
+    human authority. Neither state falls back to ``ExternalSubtitle.video_id``.
+    """
+    assets: dict[tuple[str, int | str], ExternalSubtitle] = {}
+    for row in effective_external_subtitle_compatibilities_for_video(video):
+        subtitle = row.external_subtitle
+        key = (
+            "id", subtitle.id
+        ) if subtitle.id is not None else ("object", str(id(subtitle)))
+        assets[key] = subtitle
+    return tuple(sorted(
+        assets.values(), key=lambda item: (item.relative_path.casefold(), item.id or 0)
+    ))
 
 
 def _same_pair(
@@ -577,12 +635,91 @@ def candidate_variant_videos(
     )
 
 
+def build_video_external_subtitle_states(
+    videos: Iterable[Video],
+    *,
+    candidate_index: CompatibilityCandidateIndex | None = None,
+) -> dict[int, VideoExternalSubtitleState]:
+    """Build compatible, incompatible and unknown candidate assets in one pass.
+
+    Positive and negative facts come directly from M:N authority. Unknown
+    candidates use the same bounded logical-episode scope as the manual
+    compatibility workflow and never imply compatibility.
+    """
+    index = candidate_index or build_compatibility_candidate_index(videos)
+    compatible: dict[int, dict[int, ExternalSubtitle]] = defaultdict(dict)
+    incompatible: dict[int, dict[int, ExternalSubtitle]] = defaultdict(dict)
+    unknown: dict[int, dict[int, ExternalSubtitle]] = defaultdict(dict)
+
+    for video_id, video in index.videos_by_id.items():
+        for row in video.external_subtitle_compatibilities:
+            subtitle = row.external_subtitle
+            if subtitle.id is None:
+                continue
+            if row.status in POSITIVE_COMPATIBILITY_STATUSES:
+                compatible[video_id][subtitle.id] = subtitle
+            elif row.status == CONFIRMED_INCOMPATIBLE:
+                incompatible[video_id][subtitle.id] = subtitle
+
+    seen_subtitle_ids: set[int] = set()
+    for legacy_video in index.videos:
+        for subtitle in legacy_video.external_subtitles:
+            if subtitle.id is None or subtitle.id in seen_subtitle_ids:
+                continue
+            seen_subtitle_ids.add(subtitle.id)
+            for candidate in candidate_variant_videos(subtitle, index):
+                video_id = candidate.video.id
+                if (
+                    video_id is not None
+                    and candidate.eligible
+                    and candidate.compatibility is None
+                ):
+                    unknown[video_id][subtitle.id] = subtitle
+
+    def ordered(items: dict[int, ExternalSubtitle]) -> tuple[ExternalSubtitle, ...]:
+        return tuple(sorted(
+            items.values(),
+            key=lambda subtitle: (
+                subtitle.relative_path.casefold(), subtitle.id or 0
+            ),
+        ))
+
+    return {
+        video_id: VideoExternalSubtitleState(
+            compatible_subtitles=ordered(compatible[video_id]),
+            incompatible_subtitles=ordered(incompatible[video_id]),
+            unknown_candidate_subtitles=ordered(unknown[video_id]),
+        )
+        for video_id in index.videos_by_id
+    }
+
+
 def build_compatibility_presentations(
     videos: Iterable[Video],
     *,
     presentation_videos: Iterable[Video] | None = None,
+    presentation_subtitles: Iterable[ExternalSubtitle] | None = None,
+    candidate_index: CompatibilityCandidateIndex | None = None,
 ) -> dict[int, SubtitleCompatibilityPresentation]:
-    index = build_compatibility_candidate_index(videos)
+    index = candidate_index or build_compatibility_candidate_index(videos)
+    if presentation_subtitles is not None:
+        subtitles = {
+            subtitle.id: subtitle
+            for subtitle in presentation_subtitles
+            if subtitle.id is not None
+        }
+        rows = {}
+        for subtitle in subtitles.values():
+            legacy_video = index.videos_by_id.get(subtitle.video_id)
+            if legacy_video is None:
+                continue
+            rows[subtitle.id] = SubtitleCompatibilityPresentation(
+                subtitle=subtitle,
+                legacy_video=legacy_video,
+                candidates=candidate_variant_videos(subtitle, index),
+            )
+        return rows
+
     owners = (
         index.videos
         if presentation_videos is None else tuple(presentation_videos)

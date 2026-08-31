@@ -13,9 +13,15 @@ from .catalog import (
     catalog_title_display_title,
     catalog_title_series_label,
     detect_episode_number,
+    effective_external_subtitle_language,
+    is_media_completion_video,
     manual_hardsub_state,
     natural_sort_key,
     normalize_search_query,
+)
+from .external_subtitle_compatibility import (
+    VideoExternalSubtitleState,
+    build_video_external_subtitle_states,
 )
 from .models import Video
 
@@ -27,6 +33,7 @@ MediaCheckSubtitleStatus = Literal[
     "available",
     "needs_cs_sk_internal_en",
     "needs_cs_sk_no_fallback",
+    "needs_cs_sk_compatibility_unknown",
     "known_unavailable_internal_en",
     "known_unavailable_no_fallback",
 ]
@@ -52,6 +59,9 @@ SUBTITLE_STATUS_LABELS: Mapping[MediaCheckSubtitleStatus, str] = {
     "available": "CZ/SK dostupné",
     "needs_cs_sk_internal_en": "Doplnit CZ/SK · Internal EN",
     "needs_cs_sk_no_fallback": "Doplnit CZ/SK · bez vhodných titulků",
+    "needs_cs_sk_compatibility_unknown": (
+        "Kompatibilita CZ/SK titulku neposouzena"
+    ),
     "known_unavailable_internal_en": "CZ/SK nyní nejsou dostupné · Internal EN",
     "known_unavailable_no_fallback": "CZ/SK nyní nejsou dostupné · bez fallbacku",
 }
@@ -80,6 +90,8 @@ class MediaCheckEvaluation:
     manual_unavailable_recorded: bool
     manual_unavailable_effective: bool
     hardsub_review_recommended: bool
+    completion_required: bool
+    has_unknown_cs_sk_candidate: bool
 
 
 @dataclass(frozen=True)
@@ -90,6 +102,7 @@ class MediaCheckRow:
     title_name: str
     hierarchy_label: str
     episode_label: str
+    external_subtitle_state: VideoExternalSubtitleState
 
 
 @dataclass(frozen=True)
@@ -125,11 +138,22 @@ def set_czsk_availability_manual(video: Video, value: str | None) -> None:
     video.czsk_availability_manual = CZSK_AVAILABILITY_UNAVAILABLE
 
 
-def build_media_check_evaluation(video: Video) -> MediaCheckEvaluation:
+def build_media_check_evaluation(
+    video: Video,
+    *,
+    external_subtitle_state: VideoExternalSubtitleState | None = None,
+) -> MediaCheckEvaluation:
     """Combine Commit-7 facts with the independent Media Check decision."""
     factual = build_video_language_profile(video)
     manual_recorded = (
         video.czsk_availability_manual == CZSK_AVAILABILITY_UNAVAILABLE
+    )
+    has_unknown_cs_sk_candidate = bool(
+        external_subtitle_state
+        and any(
+            effective_external_subtitle_language(subtitle) in {"cs", "sk"}
+            for subtitle in external_subtitle_state.unknown_candidate_subtitles
+        )
     )
     if factual.subtitle_status == "preferred":
         subtitle_status: MediaCheckSubtitleStatus = "available"
@@ -145,6 +169,11 @@ def build_media_check_evaluation(video: Video) -> MediaCheckEvaluation:
         severity = "info"
         is_open = False
         manual_effective = True
+    elif has_unknown_cs_sk_candidate:
+        subtitle_status = "needs_cs_sk_compatibility_unknown"
+        severity = "warning"
+        is_open = True
+        manual_effective = False
     elif factual.subtitle_status == "fallback_internal_en":
         subtitle_status = "needs_cs_sk_internal_en"
         severity = "warning"
@@ -167,11 +196,15 @@ def build_media_check_evaluation(video: Video) -> MediaCheckEvaluation:
             factual.subtitle_status != "preferred"
             and manual_hardsub_state(video) == "unknown"
         ),
+        completion_required=is_media_completion_video(video),
+        has_unknown_cs_sk_candidate=has_unknown_cs_sk_candidate,
     )
 
 
 def _subtitle_matches(evaluation: MediaCheckEvaluation, filter_name: str) -> bool:
     status = evaluation.subtitle_status
+    if filter_name != "all" and not evaluation.completion_required:
+        return False
     return {
         "all": True,
         "unresolved": evaluation.subtitle_is_open,
@@ -183,6 +216,8 @@ def _subtitle_matches(evaluation: MediaCheckEvaluation, filter_name: str) -> boo
 
 
 def _audio_matches(evaluation: MediaCheckEvaluation, filter_name: str) -> bool:
+    if filter_name != "all" and not evaluation.completion_required:
+        return False
     return filter_name == "all" or evaluation.factual.audio_status == filter_name
 
 
@@ -197,7 +232,11 @@ def _episode_label(video: Video) -> str:
     return detection.display_value
 
 
-def _build_row(video: Video, title_name_preference: object) -> MediaCheckRow:
+def _build_row(
+    video: Video,
+    title_name_preference: object,
+    external_subtitle_state: VideoExternalSubtitleState,
+) -> MediaCheckRow:
     title = video.catalog_title
     collection = title.collection if title is not None else video.catalog_collection
     collection_name = (
@@ -212,11 +251,14 @@ def _build_row(video: Video, title_name_preference: object) -> MediaCheckRow:
     )
     return MediaCheckRow(
         video=video,
-        evaluation=build_media_check_evaluation(video),
+        evaluation=build_media_check_evaluation(
+            video, external_subtitle_state=external_subtitle_state,
+        ),
         collection_name=collection_name,
         title_name=title_name,
         hierarchy_label=catalog_title_series_label(title) if title is not None else "—",
         episode_label=_episode_label(video),
+        external_subtitle_state=external_subtitle_state,
     )
 
 
@@ -233,6 +275,14 @@ def _row_matches_search(row: MediaCheckRow, query: str) -> bool:
             row.video.relative_path,
             row.hierarchy_label,
             row.episode_label,
+            *(
+                subtitle.relative_path
+                for subtitle in (
+                    row.external_subtitle_state.compatible_subtitles
+                    + row.external_subtitle_state.incompatible_subtitles
+                    + row.external_subtitle_state.unknown_candidate_subtitles
+                )
+            ),
         )
     )
 
@@ -279,6 +329,9 @@ def build_media_check_results(
     page: int = 1,
     page_size: int = MEDIA_CHECK_PAGE_SIZE,
     title_name_preference: object = "romaji",
+    external_subtitle_states: Mapping[
+        int, VideoExternalSubtitleState
+    ] | None = None,
 ) -> MediaCheckResults:
     """Build faceted counts, filtering and pagination from one workflow evaluator."""
     if subtitle_filter not in SUBTITLE_FILTER_LABELS:
@@ -289,10 +342,21 @@ def build_media_check_results(
         raise ValueError("Velikost stránky musí být kladná.")
 
     normalized_query = normalize_search_query(query)
+    states = (
+        external_subtitle_states
+        if external_subtitle_states is not None
+        else build_video_external_subtitle_states(videos)
+    )
+    empty_state = VideoExternalSubtitleState((), (), ())
     searched = sorted(
         (
             row for row in (
-                _build_row(video, title_name_preference) for video in videos
+                _build_row(
+                    video,
+                    title_name_preference,
+                    states.get(video.id, empty_state),
+                )
+                for video in videos
             )
             if _row_matches_search(row, normalized_query)
         ),

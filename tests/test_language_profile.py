@@ -12,7 +12,13 @@ from app.catalog import (
     set_manual_hardsub,
     translation_status,
 )
-from app.models import AudioTrack, ExternalSubtitle, InternalSubtitle, Video
+from app.models import (
+    AudioTrack,
+    ExternalSubtitle,
+    ExternalSubtitleCompatibility,
+    InternalSubtitle,
+    Video,
+)
 
 
 def _video(
@@ -21,7 +27,7 @@ def _video(
     internal: tuple[str, ...] = (),
     external: tuple[str, ...] = (),
 ) -> Video:
-    return Video(
+    video = Video(
         relative_path="Anime/Show/01.mkv",
         root_folder="Anime",
         filename="01.mkv",
@@ -51,6 +57,14 @@ def _video(
             for index, language in enumerate(external, 1)
         ],
     )
+    for subtitle in video.external_subtitles:
+        ExternalSubtitleCompatibility(
+            external_subtitle=subtitle,
+            video=video,
+            status="automatic_match",
+            match_method="filename",
+        )
+    return video
 
 
 @pytest.mark.parametrize("language", ["jpn", "ja", "japanese", "ja-JP"])

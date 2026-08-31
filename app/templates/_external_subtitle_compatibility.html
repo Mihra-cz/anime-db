@@ -1,0 +1,62 @@
+{% macro compatibility_control(subtitle, video, presentation, return_to) -%}
+{% if presentation %}
+<details class="subtitle-compatibility">
+  <summary>Kompatibilita s video variantami</summary>
+  <p>Jeden fyzický subtitle asset; každý řádek vyjadřuje samostatný stav pro konkrétní video. Chybějící vztah znamená neurčeno.</p>
+  <div class="subtitle-compatibility-list">
+  {% for candidate in presentation.candidates %}
+    <article class="subtitle-compatibility-target">
+      <div>
+        <strong>{{ candidate.episode_label }} · {{ candidate.variant_label }}</strong>
+        <small class="technical-filename">{{ candidate.video.filename }}</small>
+        {% if candidate.variant_details %}<small>{{ candidate.variant_details|join(' · ') }}</small>{% endif %}
+        <span class="status-badge severity-{{ 'success' if candidate.status == 'confirmed_compatible' else 'warning' if candidate.status == 'confirmed_incompatible' else 'info' }}">{{ candidate.status_label }}</span>
+        {% if candidate.compatibility %}<small>{{ compatibility_match_method_label(candidate.compatibility.match_method) }}{% if candidate.compatibility.verified_at %} · ověřeno {{ candidate.compatibility.verified_at.strftime('%Y-%m-%d %H:%M UTC') }}{% endif %}{% if candidate.compatibility.note %} · {{ candidate.compatibility.note }}{% endif %}</small>{% endif %}
+      </div>
+      {% if candidate.eligible %}
+      <form method="post" action="/media-check/external-subtitles/{{ subtitle.id }}/compatibility-preview">
+        <input type="hidden" name="video_id" value="{{ candidate.video.id }}">
+        <input type="hidden" name="return_to" value="{{ return_to }}#video-{{ video.id }}">
+        <label>Ruční rozhodnutí
+          <select name="decision">
+            <option value="unknown" {% if candidate.status is none or candidate.status == 'automatic_match' %}selected{% endif %}>Bez ručního rozhodnutí</option>
+            <option value="confirmed_compatible" {% if candidate.status == 'confirmed_compatible' %}selected{% endif %}>Potvrdit kompatibilitu</option>
+            <option value="confirmed_incompatible" {% if candidate.status == 'confirmed_incompatible' %}selected{% endif %}>Potvrdit nekompatibilitu</option>
+          </select>
+        </label>
+        <label>Poznámka k ručnímu rozhodnutí <input type="text" name="note" maxlength="1000" value="{{ candidate.compatibility.note if candidate.compatibility and candidate.compatibility.note else '' }}" placeholder="např. timing differs"></label>
+        <button type="submit">Zobrazit náhled</button>
+      </form>
+      {% else %}
+      <small class="warning">Historický vztah je mimo současný bezpečný title/episode context; zůstává zachován bez nabídky nového cross-title zápisu.</small>
+      {% endif %}
+    </article>
+  {% endfor %}
+  </div>
+</details>
+{% endif %}
+{%- endmacro %}
+
+{% macro asset_card(subtitle, video, presentation, return_to, kind) -%}
+<article class="media-track">
+  <p><strong>{{ subtitle.relative_path }}</strong><small>{{ subtitle.codec|upper }} · detekováno {{ language_display_label(detected_external_subtitle_language(subtitle)) }} · ručně {{ language_display_label(subtitle.manual_language) if subtitle.manual_language is not none else '—' }} · efektivně {{ language_display_label(effective_external_subtitle_language(subtitle)) }}</small></p>
+  {% if kind == 'available' %}
+    <span class="status-badge severity-success">{{ compatibility_status_label(external_subtitle_compatibility_status(subtitle, video)) }}</span>
+    {% if subtitle.video_id != video.id %}<small>Sdílený fyzický subtitle asset; legacy vazba ukazuje na jiné video.</small>{% endif %}
+    <form class="inline-form" method="post" action="/videos/{{ video.id }}/external-subtitles/{{ subtitle.id }}/language">
+      <select name="manual_language" aria-label="Ruční jazyk externích titulků {{ subtitle.relative_path }}"><option value="" {% if subtitle.manual_language is none %}selected{% endif %}>automaticky</option>{% for language, label in manual_language_choices %}<option value="{{ language }}" {% if subtitle.manual_language == language %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+      <input type="hidden" name="filter_name" value="all">
+      <input type="hidden" name="return_to" value="{{ return_to }}#video-{{ video.id }}">
+      <button type="submit">Uložit titulky</button>
+    </form>
+  {% elif kind == 'incompatible' %}
+    <span class="status-badge severity-warning">Ručně potvrzeno nekompatibilní</span>
+    <small>Asset není započítán do dostupných titulků tohoto videa.</small>
+  {% else %}
+    <span class="status-badge severity-info">Neurčeno</span>
+    <small>Kompatibilita s tímto videem dosud nebyla posouzena.</small>
+  {% endif %}
+  {{ compatibility_control(subtitle, video, presentation, return_to) }}
+  {% if subtitle.match_method == 'manual' and subtitle.video_id == video.id %}<form class="inline-form" method="post" action="/media-check/external-subtitles/{{ subtitle.id }}/reopen-link"><input type="hidden" name="return_to" value="/media-check"><button class="button-secondary" type="submit">Vrátit přiřazení k řešení</button></form>{% endif %}
+</article>
+{%- endmacro %}

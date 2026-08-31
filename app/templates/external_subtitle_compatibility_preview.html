@@ -12,11 +12,12 @@
   <dl>
     <dt>Jazyk fyzického assetu</dt><dd>{{ language_display_label(effective_external_subtitle_language(preview.subtitle)) }}</dd>
     <dt>Cílové video</dt><dd><strong>{{ preview.target.video.filename }}</strong><small>{{ preview.target.episode_label }} · {{ preview.target.variant_label }}{% if preview.target.variant_details %} · {{ preview.target.variant_details|join(' · ') }}{% endif %}</small></dd>
-    <dt>Současný stav</dt><dd>{{ preview.current_label }}</dd>
+    <dt>Aktuální stav</dt><dd>{{ preview.current_label }}</dd>
+    <dt>Ruční rozhodnutí</dt><dd>{{ preview.decision_label }}</dd>
     <dt>Výsledný stav</dt><dd><strong>{{ preview.resulting_label }}</strong></dd>
-    <dt>Poznámka</dt><dd>{{ preview.note or '—' }}</dd>
+    <dt>Poznámka k ručnímu rozhodnutí</dt><dd>{{ preview.note or '—' }}</dd>
   </dl>
-  {% if preview.decision == 'unknown' %}<p class="notice soft-warning">Vrácení ručního rozhodnutí zachová <code>automatic_match</code>, pokud je pro tento pár stále platný dnešní jednoznačný filename match. Jinak se vztah odstraní a stav bude neurčený.</p>{% endif %}
+  {% if preview.decision == 'unknown' %}<p class="notice soft-warning">Bez ručního rozhodnutí zůstane platné automatické přiřazení podle názvu, pokud pro tento pár stále existuje. Jinak bude výsledný stav neurčený.</p>{% endif %}
   <form method="post" action="/media-check/external-subtitles/{{ preview.subtitle.id }}/compatibility-confirm">
     <input type="hidden" name="video_id" value="{{ preview.target.video.id }}">
     <input type="hidden" name="decision" value="{{ preview.decision }}">

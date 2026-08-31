@@ -495,13 +495,25 @@ def effective_internal_subtitle_language(track: InternalSubtitle) -> str:
     return normalize_language(track.normalized_language, track.title)
 
 
+def effective_external_subtitles_for_video(
+    video: Video,
+) -> tuple[ExternalSubtitle, ...]:
+    """Read M:N compatibility authority without a legacy ``video_id`` fallback."""
+    # Local import avoids the catalog -> numbering -> catalog import cycle.
+    from .external_subtitle_compatibility import (
+        effective_external_subtitles_for_video as resolve,
+    )
+
+    return resolve(video)
+
+
 def subtitle_track_display(video: Video) -> list[SubtitleTrackDisplay]:
     """Sloučí interní a externí subtitle tracky do unikátních čitelných položek."""
     grouped: dict[tuple[str, str], list[str]] = {}
     tracks = [
         ("interní", track) for track in video.internal_subtitles
     ] + [
-        ("externí", track) for track in video.external_subtitles
+        ("externí", track) for track in effective_external_subtitles_for_video(video)
     ]
     for source, track in tracks:
         effective_language = (
@@ -565,7 +577,7 @@ def _build_subtitle_language_profile(video: Video) -> _SubtitleLanguageProfile:
     )
     external_languages = frozenset(
         effective_external_subtitle_language(track)
-        for track in video.external_subtitles
+        for track in effective_external_subtitles_for_video(video)
     )
 
     # translation_status() historicky započítává uložené ruční příznaky i u
@@ -680,7 +692,7 @@ def translation_status(video: Video) -> TranslationStatus:
     external = profile.external_languages
     detected_external = {
         detected_external_subtitle_language(track)
-        for track in video.external_subtitles
+        for track in effective_external_subtitles_for_video(video)
     }
     target = {"cs", "sk"}
     internal_target = bool(internal & target)
@@ -784,10 +796,11 @@ class SeriesSummary:
     sk: int = 0
     missing: int = 0
     matched: int = 0
+    translated_count: int = 0
 
     @property
     def translated(self) -> int:
-        return self.total - self.missing
+        return self.translated_count
 
     @property
     def parts(self) -> int:
@@ -884,11 +897,22 @@ def is_film_video(video: Video) -> bool:
     return effective_video_content_type(video) == "film"
 
 
+def is_media_completion_video(video: Video) -> bool:
+    """Confirmed duplicate copies are physical facts, not completion units."""
+    # Local import avoids the catalog <-> numbering import cycle.
+    from .numbering import is_nonprimary_duplicate_video
+
+    return not is_nonprimary_duplicate_video(video)
+
+
 def video_matches_filter(
     video: Video, filter_name: str, *,
     unresolved_duplicate_ids: set[int] | None = None,
 ) -> bool:
     status = translation_status(video)
+    if filter_name in {"only-cs", "only-sk", "both", "missing", "unknown"}:
+        if not is_media_completion_video(video):
+            return False
     predicates = {
         "all": True,
         "only-cs": status.has_cs and not status.has_sk,
@@ -986,6 +1010,10 @@ def video_matches_search(video: Video, query: str) -> bool:
         variant_group.manual_label if variant_group is not None else None,
         variant_group.release_source if variant_group is not None else None,
         variant_group.content_variant if variant_group is not None else None,
+        *(
+            subtitle.relative_path
+            for subtitle in effective_external_subtitles_for_video(video)
+        ),
     )
     return any(_contains_query(value, query) for value in values)
 
@@ -1048,10 +1076,12 @@ def build_catalog_results(
         summary.problematic += filter_match
         summary.episodes += video.file_type == "episode"
         summary.bonus += video.file_type != "episode"
-        summary.cs += status.has_cs
-        summary.sk += status.has_sk
-        summary.missing += not status.has_cs_or_sk
-        summary.unknown += status.has_unknown
+        if is_media_completion_video(video):
+            summary.cs += status.has_cs
+            summary.sk += status.has_sk
+            summary.missing += not status.has_cs_or_sk
+            summary.unknown += status.has_unknown
+            summary.translated_count += status.has_cs_or_sk
     # The public logical catalog counts canonical identities per CatalogTitle.
     # Filesystem/root rows without a safe title retain their physical fallback;
     # global inventory statistics are built elsewhere and remain unchanged.

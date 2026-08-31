@@ -4582,12 +4582,11 @@ N+1. Deterministický scale test nyní hlídá 480 identity calls pro 480 Videos
 216 assets; stará implementace by provedla 103 896 calls. Optimalizace nemění
 scanner, persisted compatibility, human authority ani CZ/SK completion.
 
-Současný `VideoLanguageProfile`, hlavní CZ/SK/Bez CZ/SK counts a Media Check
-completion evaluator v tomto kroku záměrně dál čtou legacy per-Video assety.
-Confirmed compatible sibling proto ještě nemění completion a confirmed
-incompatible legacy owner jej ještě nepředefinuje. Následující samostatný commit
-převede completion consumers na M:N authority a vyřeší variant-aware CZ/SK bez
-míchání schema migrace se změnou uživatelského významu.
+V době tohoto schema/authority kroku `VideoLanguageProfile`, hlavní
+CZ/SK/Bez CZ/SK counts a Media Check completion evaluator záměrně dál četly
+legacy per-Video assety. Převod těchto consumerů je oddělený v následující
+sekci, aby se migration a změna uživatelského významu nemíchaly do jednoho
+architektonického zásahu.
 
 Žádný physical subtitle file se nekopíruje, nepřesouvá ani nepřejmenovává. NAS
 layout a canonical numbering, Video Variant authority, duplicate authority,
@@ -4604,6 +4603,62 @@ celá testovací sada                                  # 1056 passed
 Media Check query budget (malá i scale fixture)       # 13 statements
 compileall, 15/15 Jinja2 šablon, git diff --check     # prošlo
 ```
+
+---
+
+## 6.71 Variant-aware Media Check a subtitle availability consumers
+
+Read/completion vrstva nyní používá jediný shared resolver nad
+`ExternalSubtitleCompatibility`. Pro konkrétní physical `Video` jsou pozitivní
+pouze vztahy `automatic_match` a `confirmed_compatible`.
+`confirmed_incompatible` dostupnost neposkytuje ani tehdy, když legacy
+`ExternalSubtitle.video_id` ukazuje na totéž video; absence association zůstává
+unknown, nikoli kompatibilní nebo potvrzeně nekompatibilní. Jeden fyzický asset
+se proto může zobrazit a započítat u více explicitně kompatibilních Videos bez
+kopie souboru nebo nového `ExternalSubtitle` row. Effective jazyk a manual
+language override zůstávají vlastností fyzického assetu.
+
+Stejnou pravdu sdílí `VideoLanguageProfile`, Media Check řádek, jeho subtitle
+filtry a search, title detail, technický duplicate detail a hlavní katalogové
+CZ/SK/Bez CZ/SK agregace. Internal subtitle a hardsub pravidla zůstala beze
+změny. Nullable manual marker „CZ/SK nyní nejsou dostupné“ se automaticky
+nemaže, ale pokud se objeví skutečná pozitivní CZ/SK evidence, prezentace
+pravdivě ukáže dostupnost a marker není efektivním filtrem. Relevantní no-row
+sibling asset se nezapočítá jako available a Media Check jej rozlišuje textem
+**Kompatibilita CZ/SK titulku neposouzena** od skutečně chybějícího kandidáta.
+
+Completion zůstává per physical video representation/variant. Explicitní
+compatibility může zpřístupnit tentýž asset BD i TV, ale žádná read logika ani
+scanner nevytváří BD↔TV, A↔B, known↔`NULL` nebo same-group propagation.
+Confirmed duplicate secondary je nadále viditelný physical audit row a jeho
+explicitní vztah je pravdivě prezentován, ale secondary nevytváří další
+povinnou Media Check completion jednotku ani katalogový CZ/SK požadavek.
+
+Compatibility UI nově odděluje skutečný relationship badge od zamýšlené
+ruční akce. Stavy jsou **Neurčeno**, **Automaticky přiřazeno**, **Ručně
+potvrzeno kompatibilní** a **Ručně potvrzeno nekompatibilní**. Selector
+**Ruční rozhodnutí** nabízí **Bez ručního rozhodnutí**, **Potvrdit
+kompatibilitu** a **Potvrdit nekompatibilitu**; preview používá stejné
+názvosloví. Clear semantics, verified timestamp, note, fingerprint, stale
+ochrana a atomický write se nezměnily. Evidence se zobrazuje uživatelsky jako
+**Automatické přiřazení podle názvu**, **Ruční rozhodnutí** nebo
+**Historická automatická vazba**, ne jako raw databázový enum.
+
+Request nejprve jednou vytvoří logical candidate index a z něj lineárním
+průchodem sestaví mapu `video_id → compatible/incompatible/unknown assets`.
+Filtrace a pagination proběhnou před sestavením detailních ovládacích panelů,
+které se nadále renderují jen pro assety aktuální stránky. Nevzniká
+subtitle×video scan ani per-row SQL. Deterministický scale test zachovává 480
+výpočtů `LogicalEpisodeIdentity` pro 480 Videos a 216 assets i při současném
+sestavení availability mapy a compatibility presentation.
+
+`ExternalSubtitle.video_id` nebyl odstraněn ani reverse-synchronizován podle
+nových M:N rozhodnutí. Zůstává povinný bridge pro scanner a existující asset
+lifecycle; převedené read/completion consumers z něj už availability pravdu
+neodvozují. Další krok je samostatný audit zbývajících lifecycle a legacy
+závislostí před bezpečným odstraněním fieldu, nikoli jeho odstranění v tomto
+kroku. Schema, scanner write semantics, duplicate authority, Video Variant
+authority, canonical numbering i NAS layout zůstaly beze změny.
 
 ---
 

@@ -34,10 +34,12 @@ from .catalog import (
     effective_video_content_display,
     effective_audio_track_language,
     effective_external_subtitle_language,
+    effective_external_subtitles_for_video,
     effective_internal_subtitle_language,
     group_videos_by_series,
     has_meaningful_root_assignment,
     is_film_video,
+    is_media_completion_video,
     is_root_video,
     manual_hardsub_state,
     detected_external_subtitle_language,
@@ -67,7 +69,9 @@ from .catalog_video_presentation import (
 from .database import Base, make_engine, make_session_factory
 from .external_subtitle_compatibility import (
     apply_compatibility_decision,
+    build_compatibility_candidate_index,
     build_compatibility_presentations,
+    build_video_external_subtitle_states,
     compatibility_match_method_label,
     compatibility_status_label,
     external_subtitle_compatibility_status,
@@ -157,6 +161,7 @@ from .unassigned_videos import (
 )
 from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
+    ExternalSubtitleCompatibility,
     ExternalTitleLink, TitleMetadata,
     UnresolvedExternalSubtitle, Video, VideoVariantGroup, utc_now,
 )
@@ -247,6 +252,7 @@ templates.env.globals.update(
     effective_internal_subtitle_language=effective_internal_subtitle_language,
     detected_external_subtitle_language=detected_external_subtitle_language,
     effective_external_subtitle_language=effective_external_subtitle_language,
+    effective_external_subtitles_for_video=effective_external_subtitles_for_video,
     language_display_label=language_display_label,
     manual_language_choices=MANUAL_LANGUAGE_CHOICES,
     manual_hardsub_state=manual_hardsub_state,
@@ -321,6 +327,9 @@ def _load_videos(sessions) -> list[Video]:
             selectinload(Video.external_subtitles).selectinload(
                 ExternalSubtitle.compatibilities
             ),
+            selectinload(Video.external_subtitle_compatibilities).joinedload(
+                ExternalSubtitleCompatibility.external_subtitle
+            ),
             selectinload(Video.catalog_title).selectinload(
                 CatalogTitle.collection
             ).selectinload(CatalogCollection.titles),
@@ -391,7 +400,7 @@ def _duplicate_video_details(video: Video) -> dict[str, str]:
     ) or "—"
     external = ", ".join(
         track.normalized_language or track.language or "unknown"
-        for track in video.external_subtitles
+        for track in effective_external_subtitles_for_video(video)
     ) or "—"
     hardsub = manual_hardsub_state(video)
     return {
@@ -612,6 +621,8 @@ def _add_video(
         stats["films"] += 1
     else:
         stats["episodes" if video.file_type == "episode" else "bonus"] += 1
+    if not is_media_completion_video(video):
+        return
     stats["cs"] += status.has_cs
     stats["sk"] += status.has_sk
     stats["only_cs"] += status.has_cs and not status.has_sk
@@ -695,6 +706,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with sessions() as session:
             videos = session.scalars(select(Video).options(
                 selectinload(Video.internal_subtitles), selectinload(Video.external_subtitles),
+                selectinload(Video.external_subtitle_compatibilities).joinedload(
+                    ExternalSubtitleCompatibility.external_subtitle
+                ),
                 selectinload(Video.catalog_title).selectinload(
                     CatalogTitle.collection
                 ).selectinload(CatalogCollection.titles),
@@ -1417,6 +1431,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(CatalogCollection.videos).selectinload(Video.audio_tracks),
                 selectinload(CatalogCollection.videos).selectinload(Video.internal_subtitles),
                 selectinload(CatalogCollection.videos).selectinload(Video.external_subtitles),
+                selectinload(CatalogCollection.videos).selectinload(
+                    Video.external_subtitle_compatibilities
+                ).joinedload(ExternalSubtitleCompatibility.external_subtitle),
                 selectinload(CatalogCollection.videos).selectinload(Video.duplicate_of),
                 selectinload(CatalogCollection.videos).selectinload(
                     Video.video_variant_group
@@ -1708,6 +1725,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         message: str | None = None,
     ):
         videos = _load_videos(sessions)
+        compatibility_candidate_index = build_compatibility_candidate_index(videos)
+        external_subtitle_states = build_video_external_subtitle_states(
+            videos, candidate_index=compatibility_candidate_index,
+        )
         try:
             results = build_media_check_results(
                 videos,
@@ -1716,12 +1737,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 query=q,
                 page=page,
                 title_name_preference=get_preferred_title_language(request),
+                external_subtitle_states=external_subtitle_states,
             )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         compatibility_presentations = build_compatibility_presentations(
             videos,
-            presentation_videos=(row.video for row in results.rows),
+            presentation_subtitles=(
+                subtitle_item
+                for row in results.rows
+                for subtitle_item in (
+                    row.external_subtitle_state.compatible_subtitles
+                    + row.external_subtitle_state.incompatible_subtitles
+                    + row.external_subtitle_state.unknown_candidate_subtitles
+                )
+            ),
+            candidate_index=compatibility_candidate_index,
         )
         with sessions() as session:
             unresolved_subtitles = list(session.scalars(
@@ -1973,7 +2004,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 select(Video).options(
                     selectinload(Video.audio_tracks),
                     selectinload(Video.internal_subtitles),
-                    selectinload(Video.external_subtitles),
+                    selectinload(Video.external_subtitle_compatibilities).joinedload(
+                        ExternalSubtitleCompatibility.external_subtitle
+                    ),
                 ).where(Video.id.in_(selected_ids)).order_by(Video.id)
             ).all())
             if {video.id for video in videos} != set(selected_ids):
@@ -3516,7 +3549,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with sessions() as session:
             video = session.get(Video, video_id)
             subtitle = session.get(ExternalSubtitle, subtitle_id)
-            if video is None or subtitle is None or subtitle.video_id != video.id:
+            compatible_subtitle_ids = (
+                {
+                    item.id
+                    for item in effective_external_subtitles_for_video(video)
+                    if item.id is not None
+                }
+                if video is not None else set()
+            )
+            if (
+                video is None
+                or subtitle is None
+                or subtitle.id not in compatible_subtitle_ids
+            ):
                 raise HTTPException(status_code=404, detail="Externí titulky nebyly nalezeny")
             try:
                 set_external_subtitle_manual_language(subtitle, manual_language)

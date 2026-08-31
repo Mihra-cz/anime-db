@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 from fastapi import Request
@@ -13,6 +14,7 @@ from app.models import (
     CatalogCollection,
     CatalogTitle,
     ExternalSubtitle,
+    ExternalSubtitleCompatibility,
     Video,
     VideoVariantGroup,
 )
@@ -55,6 +57,16 @@ def _video(collection, title, identifier, filename, episode, *, file_type="episo
         episode_number_source="filename",
         catalog_collection=collection,
         catalog_title=title,
+    )
+
+
+def _add_automatic_external(video, subtitle):
+    video.external_subtitles.append(subtitle)
+    ExternalSubtitleCompatibility(
+        external_subtitle=subtitle,
+        video=video,
+        status="automatic_match",
+        match_method="filename",
     )
 
 
@@ -231,7 +243,7 @@ def test_normal_title_keeps_physical_and_logical_counts_without_fake_variants():
     assert (group.total, group.episodes, group.variants, group.bonus) == (12, 12, 0, 0)
 
 
-def test_catalog_translation_counts_keep_existing_physical_variant_semantics():
+def test_catalog_translation_counts_use_positive_variant_compatibility():
     collection = _collection()
     title = _title(collection)
     tv = _group(title, 1, "TV", "tv", "censored")
@@ -240,16 +252,26 @@ def test_catalog_translation_counts_keep_existing_physical_variant_semantics():
     bd_video = _video(collection, title, 2, "Show - 01 BD.mkv", 1)
     _assign(tv_video, tv)
     _assign(bd_video, bd)
-    bd_video.external_subtitles.append(ExternalSubtitle(
+    subtitle = ExternalSubtitle(
         relative_path="Anime/Show/Season 1/Show - 01.cs.ass",
         codec="ass",
         language="cs",
         normalized_language="cs",
-    ))
+    )
+    _add_automatic_external(bd_video, subtitle)
 
     group = build_catalog_results([tv_video, bd_video], "all").groups[0]
 
     assert (group.cs, group.sk, group.missing) == (1, 0, 1)
+
+    tv_video.external_subtitle_compatibilities.append(ExternalSubtitleCompatibility(
+        external_subtitle=subtitle,
+        status="confirmed_compatible",
+        match_method="manual",
+        verified_at=datetime.now(timezone.utc),
+    ))
+    shared = build_catalog_results([tv_video, bd_video], "all").groups[0]
+    assert (shared.total, shared.cs, shared.sk, shared.missing) == (2, 2, 0, 0)
 
 
 def test_search_matches_filename_canonical_episode_and_variant_label():
@@ -324,7 +346,7 @@ def test_homepage_and_title_detail_render_counts_lanes_forms_and_search(tmp_path
                 bd_video.audio_tracks.append(AudioTrack(
                     stream_index=0, codec="aac", language="ja"
                 ))
-                bd_video.external_subtitles.append(ExternalSubtitle(
+                _add_automatic_external(bd_video, ExternalSubtitle(
                     relative_path="Anime/Nande/Season 1/Nande - 01.cs.ass",
                     codec="ass", language="cs", normalized_language="cs",
                 ))

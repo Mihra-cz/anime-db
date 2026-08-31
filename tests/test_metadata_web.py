@@ -36,8 +36,9 @@ from app.hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPE_CHOICES
 from app.metadata.providers.base import ProviderTitleMetadata
 from app.migrations import migrate_schema
 from app.models import (
-    AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    InternalSubtitle, ManualSplitRuleVideo, TitleMetadata, Video, utc_now,
+    AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
+    ExternalSubtitleCompatibility, ExternalTitleLink, InternalSubtitle,
+    ManualSplitRuleVideo, TitleMetadata, Video, utc_now,
 )
 from app.numbering import (
     recalculate_title_numbering, summarize_title_numbering,
@@ -3303,6 +3304,13 @@ def test_episode_table_prioritizes_readable_data_and_preserves_editing_and_value
             manual_language="sk",
         )],
     )
+    video.external_subtitle_compatibilities.append(
+        ExternalSubtitleCompatibility(
+            external_subtitle=video.external_subtitles[0],
+            status="automatic_match",
+            match_method="filename",
+        )
+    )
     status = type("Status", (), {
         "automatic_has_cs": False, "automatic_has_sk": False, "has_unknown": False,
     })()
@@ -3635,6 +3643,13 @@ def test_external_subtitle_language_override_web_workflow_sets_and_clears(tmp_pa
                 language="eng", normalized_language="en",
             )],
         )
+        video.external_subtitle_compatibilities.append(
+            ExternalSubtitleCompatibility(
+                external_subtitle=video.external_subtitles[0],
+                status="automatic_match",
+                match_method="filename",
+            )
+        )
         session.add(video)
         session.commit()
         video_id = video.id
@@ -3965,10 +3980,10 @@ def test_homepage_collection_identity_is_not_taken_from_supplementary_title(
     assert ">NC Metadata Romaji</a>" not in logical_homepage
     for name, title_id in film_ids.items():
         assert f'href="/titles/{title_id}">{name}</a>' in logical_homepage
-    # Logical episode aggregation needs the fixed collection-title context used
-    # by the shared LogicalEpisodeIdentity builder; the budget is independent
-    # of the number of videos and collections.
-    assert homepage_query_count == 11
+    # Logical episode aggregation and compatibility-aware subtitle availability
+    # each use one bounded select-in load; the budget remains independent of the
+    # number of videos, subtitle assets, and collections.
+    assert homepage_query_count == 12
 
     collection_detail = endpoints["/collections/{collection_id}"](
         get_request(f"/collections/{overlord_id}"), overlord_id,
@@ -4076,6 +4091,13 @@ def test_homepage_uses_logical_collections_and_simplifies_unambiguous_navigation
             relative_path="Anime/Two Seasons/Season 1.sk.srt",
             codec="srt", language="slk", normalized_language="sk",
         ))
+        multi_videos[0].external_subtitle_compatibilities.append(
+            ExternalSubtitleCompatibility(
+                external_subtitle=multi_videos[0].external_subtitles[0],
+                status="automatic_match",
+                match_method="filename",
+            )
+        )
         multi_videos[1].internal_subtitles.append(InternalSubtitle(
             stream_index=1, codec="ass", language="und",
             normalized_language="unknown",

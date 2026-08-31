@@ -21,22 +21,27 @@ from app.external_subtitle_compatibility import (
     MATCH_METHOD_MANUAL,
     apply_compatibility_decision,
     backfill_legacy_external_subtitle_compatibilities,
+    build_compatibility_candidate_index,
     build_compatibility_presentations,
+    build_video_external_subtitle_states,
     candidate_variant_videos,
     clear_manual_decision,
     confirm_compatible,
     confirm_incompatible,
+    compatibility_match_method_label,
     external_subtitle_compatibility_status,
+    effective_external_subtitles_for_video,
     get_compatibility,
     preview_compatibility_decision,
     synchronize_automatic_match,
 )
+from app.catalog import build_catalog_results, build_video_language_profile
 from app.hierarchy_rebuild import (
     apply_hierarchy_rebuild_plan,
     build_hierarchy_rebuild_plan,
 )
 from app.main import create_app
-from app.media_check import build_media_check_evaluation
+from app.media_check import build_media_check_evaluation, build_media_check_results
 from app.migrations import migrate_schema
 from app.models import (
     CatalogCollection,
@@ -64,6 +69,18 @@ PROBE_RESULT = {
     "audio": [],
     "subtitles": [],
 }
+
+
+def test_compatibility_evidence_uses_user_facing_czech_labels():
+    assert compatibility_match_method_label(MATCH_METHOD_FILENAME) == (
+        "Automatické přiřazení podle názvu"
+    )
+    assert compatibility_match_method_label(MATCH_METHOD_LEGACY_BACKFILL) == (
+        "Historická automatická vazba"
+    )
+    assert compatibility_match_method_label(MATCH_METHOD_MANUAL) == (
+        "Ruční rozhodnutí"
+    )
 
 
 def _catalog(session: Session, *, label: str = "Nande"):
@@ -840,13 +857,18 @@ def test_manual_preview_confirm_clear_stale_and_cross_title_rejection(tmp_path):
     assert "Nande - 01.ass" in rendered
     assert "E01 · BD · Uncensored" in rendered
     assert "E01 · TV · Censored" in rendered
-    assert "Automatický bezpečný match" in rendered
-    assert "Neurčeno / odstranit ruční rozhodnutí" in rendered
+    assert "Automaticky přiřazeno" in rendered
+    assert "Ruční rozhodnutí" in rendered
+    assert "Bez ručního rozhodnutí" in rendered
+    assert "Potvrdit kompatibilitu" in rendered
+    assert "Potvrdit nekompatibilitu" in rendered
+    assert "Historická automatická vazba" not in rendered
+    assert "Neurčeno / odstranit ruční rozhodnutí" not in rendered
     assert "Zobrazit náhled" in rendered
     title_detail = endpoints["/titles/{catalog_title_id}"](
         _request(web_app, f"/titles/{ids['title']}"), ids["title"]
     ).body.decode()
-    assert "compatibility: Automatický bezpečný match" in title_detail
+    assert "compatibility: Automaticky přiřazeno" in title_detail
     assert (
         f'action="/videos/{ids["bd"]}/external-subtitles/{ids["subtitle"]}/language"'
         in title_detail
@@ -865,6 +887,12 @@ def test_manual_preview_confirm_clear_stale_and_cross_title_rejection(tmp_path):
     preview_body = preview_response.body.decode()
     assert "Náhled kompatibility externích titulků" in preview_body
     assert "compatible despite release" in preview_body
+    assert "Aktuální stav" in preview_body
+    assert "Neurčeno" in preview_body
+    assert "Ruční rozhodnutí" in preview_body
+    assert "Potvrdit kompatibilitu" in preview_body
+    assert "Výsledný stav" in preview_body
+    assert "Ručně potvrzeno kompatibilní" in preview_body
     fingerprint = _preview_fingerprint(preview_body)
     with web_app.state.sessions() as session:
         assert session.scalar(select(func.count()).select_from(
@@ -902,6 +930,22 @@ def test_manual_preview_confirm_clear_stale_and_cross_title_rejection(tmp_path):
             "compatible despite release",
         )
         assert row.verified_at is not None
+
+    media_after = endpoints["/media-check"](
+        _request(web_app, "/media-check"),
+        subtitle="available", audio="all", q="", page=1, message=None,
+    ).body.decode()
+    assert "Ručně potvrzeno kompatibilní" in media_after
+    assert "Sdílený fyzický subtitle asset" in media_after
+    assert "Bez kompatibilních externích titulků" not in media_after
+    title_after = endpoints["/titles/{catalog_title_id}"](
+        _request(web_app, f"/titles/{ids['title']}"), ids["title"]
+    ).body.decode()
+    assert title_after.count("Nande - 01.ass") >= 2
+    assert (
+        f'action="/videos/{ids["tv"]}/external-subtitles/'
+        f'{ids["subtitle"]}/language"' in title_after
+    )
 
     stale_preview = _post_request(web_app, "", [
         ("video_id", str(ids["tv"])),
@@ -998,7 +1042,7 @@ def test_manual_clear_preserves_video_duplicate_hierarchy_metadata_and_media(tmp
         assert collection.id is not None
 
 
-def test_media_check_completion_still_uses_legacy_asset_only(tmp_path):
+def test_media_check_completion_uses_positive_compatibility_authority(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'media-semantics.db'}")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
@@ -1008,8 +1052,105 @@ def test_media_check_completion_still_uses_legacy_asset_only(tmp_path):
         confirm_compatible(session, subtitle, tv, note="new M:N authority")
         session.flush()
         assert build_media_check_evaluation(bd).subtitle_status == before_bd == "available"
-        assert build_media_check_evaluation(tv).subtitle_status == before_tv
         assert before_tv != "available"
+        assert build_media_check_evaluation(tv).subtitle_status == "available"
+
+
+def test_effective_read_authority_overrides_legacy_owner_and_exposes_unknown(
+    tmp_path,
+):
+    engine = make_engine(f"sqlite:///{tmp_path / 'effective-read.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, _, _, _, bd, tv, subtitle = _variant_asset(session)
+        states = build_video_external_subtitle_states([bd, tv])
+
+        assert effective_external_subtitles_for_video(bd) == (subtitle,)
+        assert effective_external_subtitles_for_video(tv) == ()
+        assert states[tv.id].unknown_candidate_subtitles == (subtitle,)
+        assert build_media_check_evaluation(
+            tv, external_subtitle_state=states[tv.id],
+        ).subtitle_status == "needs_cs_sk_compatibility_unknown"
+
+        legacy_only = ExternalSubtitle(
+            legacy_video=tv,
+            relative_path="Anime/Nande/Nande - 01 legacy-only.ass",
+            codec="ass",
+            language="unknown",
+            normalized_language="unknown",
+            match_method="automatic",
+        )
+        session.add(legacy_only)
+        session.flush()
+        assert legacy_only.video_id == tv.id
+        assert effective_external_subtitles_for_video(tv) == ()
+        assert build_video_language_profile(tv).has_cs_or_sk is False
+
+        legacy_row = get_compatibility(subtitle, bd)
+        confirm_incompatible(session, subtitle, bd, note="wrong timing")
+        session.flush()
+        assert subtitle.video_id == bd.id
+        assert get_compatibility(subtitle, bd) is legacy_row
+        assert effective_external_subtitles_for_video(bd) == ()
+        assert build_video_language_profile(bd).has_cs is False
+
+
+def test_one_physical_asset_can_complete_two_variants_and_catalog_filters(
+    tmp_path,
+):
+    engine = make_engine(f"sqlite:///{tmp_path / 'shared-read.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, _, _, _, bd, tv, subtitle = _variant_asset(session)
+        initial = build_catalog_results([bd, tv], "all").groups[0]
+        assert (initial.total, initial.cs, initial.missing) == (2, 1, 1)
+
+        confirm_compatible(session, subtitle, tv, note="same timing")
+        session.flush()
+        assert effective_external_subtitles_for_video(bd) == (subtitle,)
+        assert effective_external_subtitles_for_video(tv) == (subtitle,)
+        assert session.scalar(select(func.count()).select_from(ExternalSubtitle)) == 1
+
+        results = build_media_check_results(
+            [bd, tv], subtitle_filter="available", page_size=10,
+        )
+        assert {row.video.id for row in results.rows} == {bd.id, tv.id}
+        assert results.subtitle_counts["available"] == 2
+        assert results.subtitle_counts["unresolved"] == 0
+        assert build_media_check_results(
+            [bd, tv], subtitle_filter="unresolved", page_size=10,
+        ).total_filtered == 0
+
+        catalog = build_catalog_results([bd, tv], "all").groups[0]
+        assert (catalog.total, catalog.cs, catalog.sk, catalog.missing) == (2, 2, 0, 0)
+
+        subtitle.manual_language = "sk"
+        assert build_video_language_profile(bd).external_subtitle_languages == {"sk"}
+        assert build_video_language_profile(tv).external_subtitle_languages == {"sk"}
+
+
+def test_negative_asset_does_not_mask_another_positive_asset(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'multiple-assets.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, _, _, _, bd, tv, first = _variant_asset(session)
+        confirm_incompatible(session, first, tv)
+        second = ExternalSubtitle(
+            legacy_video=bd,
+            relative_path="Anime/Nande/Nande - 01 alternate.ass",
+            codec="ass",
+            language="cs",
+            normalized_language="cs",
+            match_method="manual",
+        )
+        session.add(second)
+        session.flush()
+        confirm_compatible(session, second, tv)
+        session.flush()
+
+        assert effective_external_subtitles_for_video(tv) == (second,)
+        assert build_video_language_profile(tv).has_cs is True
+        assert build_media_check_evaluation(tv).subtitle_status == "available"
 
 
 def test_compatibility_presentation_builder_indexes_library_once(
@@ -1089,12 +1230,19 @@ def test_compatibility_presentation_builder_indexes_library_once(
         monkeypatch.setattr(
             compatibility_module, "logical_episode_identity", count_identity
         )
-        presentations = build_compatibility_presentations(videos)
+        candidate_index = build_compatibility_candidate_index(videos)
+        presentations = build_compatibility_presentations(
+            videos, candidate_index=candidate_index,
+        )
+        subtitle_states = build_video_external_subtitle_states(
+            videos, candidate_index=candidate_index,
+        )
 
         assert len(videos) == 480
         assert len(subtitle_pairs) == 216
         assert len(presentations) == len(subtitle_pairs)
         assert identity_calls == len(videos)
+        assert len(subtitle_states) == len(videos)
         assert all(len(item.candidates) == 2 for item in presentations.values())
         assert sample is not None
         subtitle, bd_video, tv_video, duplicate = sample
@@ -1133,7 +1281,7 @@ def test_media_check_compatibility_loading_has_constant_statement_count(
         return count, response
 
     one_episode_count, _ = count_queries()
-    assert one_episode_count == 13
+    assert one_episode_count == 14
     with web_app.state.sessions() as session:
         title = session.get(CatalogTitle, ids["title"])
         collection = session.get(CatalogCollection, ids["collection"])

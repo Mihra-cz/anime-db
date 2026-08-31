@@ -35,9 +35,20 @@ from app.catalog import (
     video_matches_filter,
 )
 from app.models import (
-    CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    InternalSubtitle, TitleMetadata, Video, utc_now,
+    CatalogCollection, CatalogTitle, ExternalSubtitle,
+    ExternalSubtitleCompatibility, ExternalTitleLink, InternalSubtitle,
+    TitleMetadata, Video, utc_now,
 )
+
+
+def _add_automatic_external_compatibility(video: Video) -> None:
+    for subtitle in video.external_subtitles:
+        ExternalSubtitleCompatibility(
+            external_subtitle=subtitle,
+            video=video,
+            status="automatic_match",
+            match_method="filename",
+        )
 
 
 def test_normalizes_czech_variants():
@@ -721,6 +732,7 @@ def test_subtitle_track_display_merges_languages_and_preserves_known_formats():
         relative_path="Anime/Show/01.en.srt", codec="srt", language="eng",
         normalized_language="eng",
     )]
+    _add_automatic_external_compatibility(video)
 
     tracks = subtitle_track_display(video)
 
@@ -758,6 +770,7 @@ def test_video_can_have_czech_and_slovak_at_the_same_time():
             )
         ],
     )
+    _add_automatic_external_compatibility(video)
 
     status = translation_status(video)
 
@@ -1287,6 +1300,7 @@ def test_all_main_catalog_filters_return_grouped_title_summaries():
         relative_path="Anime/Both/01.sk.srt", codec="srt", language="sk",
         normalized_language="sk",
     )]
+    _add_automatic_external_compatibility(both)
     videos.append(both)
 
     for filter_name in ("only-cs", "only-sk", "both", "missing", "unknown", "episodes"):
