@@ -57,6 +57,12 @@ from .catalog import (
 )
 from .config import Settings, get_settings
 from .collection_presentation import build_collection_presentation
+from .catalog_video_presentation import (
+    build_catalog_title_video_presentation,
+    ungrouped_presented_video_rows,
+    video_variant_display_for_video,
+    video_variant_group_display,
+)
 from .database import Base, make_engine, make_session_factory
 from .migrations import migrate_schema
 from .hierarchy_authority import activate_manual_hierarchy_snapshot
@@ -244,6 +250,9 @@ templates.env.globals.update(
     parser_variant_suggestion=parser_variant_suggestion,
     video_variant_release_source_choices=VIDEO_VARIANT_RELEASE_SOURCE_CHOICES,
     video_variant_content_variant_choices=VIDEO_VARIANT_CONTENT_VARIANT_CHOICES,
+    video_display_rows=ungrouped_presented_video_rows,
+    video_variant_group_display=video_variant_group_display,
+    video_variant_display_for_video=video_variant_display_for_video,
 )
 METADATA_STATUS_LABELS = {
     "unlinked": "Bez metadat", "candidates_available": "Čeká na potvrzení",
@@ -303,6 +312,7 @@ def _load_videos(sessions) -> list[Video]:
             selectinload(Video.catalog_title).selectinload(CatalogTitle.metadata_record),
             selectinload(Video.catalog_collection).selectinload(CatalogCollection.titles),
             selectinload(Video.duplicate_of),
+            selectinload(Video.video_variant_group),
         ).order_by(Video.relative_path)).all())
 
 
@@ -381,37 +391,6 @@ def _duplicate_video_details(video: Video) -> dict[str, str]:
         "hardsub": {"yes": "ano", "no": "ne", "unknown": "neznámé"}[hardsub],
         "size": f"{video.size / (1024 ** 3):.2f} GiB",
     }
-
-
-def _video_display_rows(
-    videos: list[Video], known_video_ids: set[int] | None = None,
-) -> list[dict]:
-    included_video_ids = {video.id for video in videos}
-    available_video_ids = (
-        included_video_ids if known_video_ids is None else known_video_ids
-    )
-    duplicate_copies_by_primary: dict[int, list[Video]] = {}
-    for video in videos:
-        if video.duplicate_of_video_id in included_video_ids:
-            duplicate_copies_by_primary.setdefault(
-                video.duplicate_of_video_id, []
-            ).append(video)
-    return [
-        {
-            "video": video,
-            "duplicate_copies": duplicate_copies_by_primary.get(video.id, []),
-            "orphan_duplicate": bool(
-                video.duplicate_primary_missing
-                or video.duplicate_of_video_id is not None
-                and video.duplicate_of_video_id not in available_video_ids
-            ),
-        }
-        for video in videos
-        if video.duplicate_of_video_id not in included_video_ids
-    ]
-
-
-templates.env.globals.update(video_display_rows=_video_display_rows)
 
 
 def _variant_choice_from_form(form, key: str, *, allow_null: bool = False):
@@ -701,9 +680,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with sessions() as session:
             videos = session.scalars(select(Video).options(
                 selectinload(Video.internal_subtitles), selectinload(Video.external_subtitles),
-                selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
+                selectinload(Video.catalog_title).selectinload(
+                    CatalogTitle.collection
+                ).selectinload(CatalogCollection.titles),
                 selectinload(Video.catalog_title).selectinload(CatalogTitle.metadata_record),
                 selectinload(Video.catalog_collection),
+                selectinload(Video.duplicate_of),
+                selectinload(Video.video_variant_group),
             )).all()
             collection_titles = {
                 collection.id: tuple(collection.titles)
@@ -1127,6 +1110,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         videos, normalized_video_sort, normalized_video_direction = sort_title_videos(
             detail_videos, video_sort, video_direction
         )
+        title_video_presentation = (
+            build_catalog_title_video_presentation(
+                videos, catalog_title, known_videos=title_candidates
+            )
+            if catalog_title is not None else None
+        )
         if not videos and catalog_title is None:
             raise HTTPException(status_code=404, detail="Série nebyla nalezena")
         def video_sort_url(column: str) -> str:
@@ -1170,6 +1159,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 default_metadata_search_query(catalog_title) if catalog_title else ""
             ),
             "videos": videos,
+            "video_presentation_rows": (
+                title_video_presentation.display_rows
+                if title_video_presentation is not None
+                else ungrouped_presented_video_rows(
+                    videos,
+                    {video.id for video in title_candidates if video.id is not None},
+                )
+            ),
+            "title_video_presentation": title_video_presentation,
             "title_media_videos": title_candidates,
             "media_part_summary": media_part_summary_label(title_candidates),
             "media_part_sequence_warning": media_part_sequence_warning(

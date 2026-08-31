@@ -778,6 +778,7 @@ class SeriesSummary:
     problematic: int = 0
     unknown: int = 0
     episodes: int = 0
+    variants: int = 0
     bonus: int = 0
     cs: int = 0
     sk: int = 0
@@ -944,6 +945,7 @@ GROUP_SORT_FIELDS = {
     "title": lambda group: natural_sort_key(group.name),
     "total": lambda group: group.total,
     "episodes": lambda group: group.episodes,
+    "variants": lambda group: group.variants,
     "bonus": lambda group: group.bonus,
     "cs": lambda group: group.cs,
     "sk": lambda group: group.sk,
@@ -969,6 +971,8 @@ def video_matches_search(video: Video, query: str) -> bool:
         return True
     season = derive_season_info(video.relative_path)
     episode = derive_episode_number(video.filename)
+    canonical_episode = video.season_episode_number
+    variant_group = video.__dict__.get("video_variant_group")
     values = (
         video.filename,
         video.relative_path,
@@ -976,6 +980,12 @@ def video_matches_search(video: Video, query: str) -> bool:
         season.label,
         season.original,
         str(episode) if episode is not None else None,
+        str(canonical_episode) if canonical_episode is not None else None,
+        f"e{canonical_episode}" if canonical_episode is not None else None,
+        f"e{canonical_episode:02d}" if canonical_episode is not None else None,
+        variant_group.manual_label if variant_group is not None else None,
+        variant_group.release_source if variant_group is not None else None,
+        variant_group.content_variant if variant_group is not None else None,
     )
     return any(_contains_query(value, query) for value in values)
 
@@ -1042,6 +1052,33 @@ def build_catalog_results(
         summary.sk += status.has_sk
         summary.missing += not status.has_cs_or_sk
         summary.unknown += status.has_unknown
+    # The public logical catalog counts canonical identities per CatalogTitle.
+    # Filesystem/root rows without a safe title retain their physical fallback;
+    # global inventory statistics are built elsewhere and remain unchanged.
+    from .numbering import summarize_title_numbering
+
+    for title_path, title_videos_list in all_by_title.items():
+        summary = groups[title_path]
+        summary.episodes = 0
+        summary.variants = 0
+        videos_by_catalog_title: dict[tuple[str, int], list[Video]] = {}
+        titles_by_key: dict[tuple[str, int], CatalogTitle] = {}
+        unscoped_videos = []
+        for video in title_videos_list:
+            title = video.catalog_title
+            if title is None:
+                unscoped_videos.append(video)
+                continue
+            key = ("id", title.id) if title.id is not None else ("object", id(title))
+            titles_by_key[key] = title
+            videos_by_catalog_title.setdefault(key, []).append(video)
+        for key, scoped_videos in videos_by_catalog_title.items():
+            numbering = summarize_title_numbering(scoped_videos, titles_by_key[key])
+            summary.episodes += numbering.logical_episode_count
+            summary.variants += numbering.confirmed_variant_instance_count
+        summary.episodes += sum(
+            video.file_type == "episode" for video in unscoped_videos
+        )
     matches_by_title: dict[str, list[Video]] = {}
     for title_path, title_videos_list in all_by_title.items():
         first_title = title_videos_list[0].catalog_title

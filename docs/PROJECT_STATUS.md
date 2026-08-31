@@ -4431,6 +4431,72 @@ Doporučený druhý smoke test clear cesty nad již ručně potvrzeným Nande st
 
 ---
 
+## 6.69 Video Variant – variant-aware catalog presentation
+
+Navazující čistě read-only krok promítá potvrzenou variantní autoritu do
+běžného katalogu. V hlavním přehledu zůstává **Videa** fyzickým počtem
+`Video` rows, zatímco **Epizody** nově sčítají skutečné standardní
+`LogicalEpisodeIdentity` samostatně uvnitř každého `CatalogTitle`. Collection
+s několika titles proto jejich logical counts sečte, ale nikdy nesloučí stejné
+E01 z různých titles. **Bonusy** i globální filesystem inventory si zachovávají
+dosavadní význam.
+
+Samostatný sloupec **Varianty** agreguje confirmed variant instances po titles.
+Pokud collection nepoužívá žádnou potvrzenou group assignment, UI zobrazí `—`,
+nikoli matoucí nulu vydávanou za počet standardních variant. Referenční Nande
+dataset s 38 fyzickými videi, E01–E12 ve TV/BD lane, E13 pouze v BD a 13 bonusy
+se proto prezentuje jako 38 videí, 13 logických epizod, 25 potvrzených
+variantních instancí a 13 bonusů.
+
+Detail `CatalogTitle` používá jeden společný read-only presentation builder nad
+centrálním `LogicalEpisodeIdentity`:
+
+```text
+logical episode → VideoVariantGroup lane → physical Video
+                                      └→ confirmed duplicate copy
+```
+
+Distinct non-`NULL` groups jsou dvě lanes jedné epizody. Více videí ve stejné
+group se nesmí vydávat za více variant a zůstává viditelný unresolved duplicate
+candidate. Confirmed secondary copy nevytváří další logical episode ani lane,
+ale zůstává fyzickou podúrovní svého primary. Kombinace known + `NULL` zobrazuje
+explicitně lane **Varianta neurčena**; `NULL` není default. Běžná epizoda s
+jediným `NULL` videem si zachovává jednoduchý řádek bez zbytečné vnořené
+variantní vrstvy.
+
+Každé fyzické video dál zobrazuje vlastní délku, rozlišení, audio, interní i
+externí titulky, hardsub a Media Part a zachovává existující per-Video formuláře
+i POST routes. Standardní search nově vedle filename umí canonical `E01` a
+manual label/source/content varianty. Supplementary obsah se do standardního
+logical grouping modelu netlačí; pokud má group, zobrazí pouze její kompaktní
+label.
+
+Title detail eager-loaduje variant group a existující duplicate/media children
+pevným počtem dotazů. Regrese porovnává stejný query budget pro title s jednou a
+dvanácti epizodami; homepage má rovněž explicitně hlídaný statement budget.
+
+CZ, SK a Bez CZ/SK zůstávají v tomto kroku ve stávající per-Video semantice.
+Variant-aware completion patří až do samostatného kroku po ExternalSubtitle
+compatibility a variant-aware Media Check. Tento krok nemění jeho evaluator,
+subtitle persistence, schema, migrace, numbering, duplicate authority, variant
+assignment ani jinou write semantiku. Produkční DB, NAS a scanner nejsou součástí
+změny.
+
+Automatická validace variant-aware catalog presentation kroku:
+
+```text
+nové catalog presentation scénáře                 # 11 passed
+Commit 1–3 Video Variant + nová presentation sada   # 56 passed
+numbering/hierarchy/duplicate/split/move regrese     # 336 passed
+metadata/catalog/per-Video UI/responsive regrese     # 313 passed
+scanner/startup/migration/rebuild regrese            # 108 passed
+Media Check / Media Part / subtitle / language       # 70 passed
+celá testovací sada                                # 1031 passed
+compileall, 14/14 Jinja2 šablon, git diff --check   # prošlo
+```
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

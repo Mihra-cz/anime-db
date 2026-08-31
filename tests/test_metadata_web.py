@@ -3965,7 +3965,10 @@ def test_homepage_collection_identity_is_not_taken_from_supplementary_title(
     assert ">NC Metadata Romaji</a>" not in logical_homepage
     for name, title_id in film_ids.items():
         assert f'href="/titles/{title_id}">{name}</a>' in logical_homepage
-    assert homepage_query_count == 10
+    # Logical episode aggregation needs the fixed collection-title context used
+    # by the shared LogicalEpisodeIdentity builder; the budget is independent
+    # of the number of videos and collections.
+    assert homepage_query_count == 11
 
     collection_detail = endpoints["/collections/{collection_id}"](
         get_request(f"/collections/{overlord_id}"), overlord_id,
