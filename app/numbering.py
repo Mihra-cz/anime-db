@@ -2,13 +2,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
+import hashlib
+import json
+import re
+
+from sqlalchemy.orm import Session
 
 from .catalog import (
     EpisodeNumberDetection, FILE_TYPE_TO_SUPPLEMENTARY_SUBTYPE,
-    detect_episode_number, natural_sort_key, normalize_title,
+    detect_episode_number, effective_video_content_type, natural_sort_key,
+    normalize_title,
 )
 from .hierarchy_authority import manual_hierarchy_snapshot_uses_legacy_projection
-from .models import CatalogCollection, CatalogTitle, Video
+from .models import CatalogCollection, CatalogTitle, Video, utc_now
 
 NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
 
@@ -20,6 +27,75 @@ class SequentialNumberingRow:
     current_episode: int | None
     proposed_episode: int
     manual_conflict: bool
+
+
+@dataclass
+class BulkRenumberMetrics:
+    """Operation counts for the title-scoped linear proposal pass."""
+
+    logical_episodes_scanned: int = 0
+    physical_videos_scanned: int = 0
+
+
+@dataclass(frozen=True)
+class BulkRenumberPhysicalChange:
+    video_id: int
+    filename: str
+    current_episode: int
+    proposed_episode: int
+    manual_override: bool
+    confirmed_duplicate_secondary: bool
+    video_variant_group_id: int | None
+
+
+@dataclass(frozen=True)
+class BulkRenumberLogicalChange:
+    current_episode: int
+    proposed_episode: int
+    physical_changes: tuple[BulkRenumberPhysicalChange, ...]
+
+    @property
+    def has_manual_override(self) -> bool:
+        return any(change.manual_override for change in self.physical_changes)
+
+
+@dataclass(frozen=True)
+class DeterministicBulkRenumberProposal:
+    catalog_title_id: int
+    title_name: str
+    gap_start: int
+    gap_end: int
+    offset: int
+    recap_positions: tuple[str, ...]
+    rows: tuple[BulkRenumberLogicalChange, ...]
+    expected_episode_count: int | None
+    expected_count_authoritative: bool
+    warnings: tuple[str, ...]
+    fingerprint: str
+
+    @property
+    def logical_episode_count(self) -> int:
+        return len(self.rows)
+
+    @property
+    def physical_video_count(self) -> int:
+        return sum(len(row.physical_changes) for row in self.rows)
+
+    @property
+    def has_manual_overrides(self) -> bool:
+        return any(row.has_manual_override for row in self.rows)
+
+    @property
+    def gap_label(self) -> str:
+        if self.gap_start == self.gap_end:
+            return f"E{self.gap_start}"
+        return f"E{self.gap_start}–E{self.gap_end}"
+
+    @property
+    def suffix_label(self) -> str:
+        if len(self.rows) == 1:
+            return f"E{self.rows[0].current_episode}"
+        return f"E{self.rows[0].current_episode}–E{self.rows[-1].current_episode}"
 
 
 @dataclass(frozen=True)
@@ -67,7 +143,7 @@ class TitleNumberingSummary:
 
 @dataclass(frozen=True)
 class EpisodeDuplicateGroup:
-    episode_number: int
+    episode_number: int | Decimal
     videos: tuple[Video, ...]
     primary: Video | None = None
     supplementary_type: str | None = None
@@ -85,7 +161,17 @@ class EpisodeDuplicateGroup:
                 "bonus": "Bonus", "cm": "CM", "menu": "Menu",
             }.get(self.supplementary_type, self.supplementary_type.upper())
             context = f" · {self.context_label}" if self.context_label else ""
-            return f"{label} {self.episode_number:02d}{context}"
+            decimal_number = (
+                self.episode_number
+                if isinstance(self.episode_number, Decimal)
+                else Decimal(self.episode_number)
+            )
+            position = (
+                f"{int(decimal_number):02d}"
+                if decimal_number == decimal_number.to_integral_value()
+                else format_episode_position(decimal_number)
+            )
+            return f"{label} {position}{context}"
         variant = (
             f" · varianta {self.video_variant_label}"
             if self.video_variant_label else ""
@@ -105,12 +191,102 @@ def is_nonprimary_duplicate_video(video: Video) -> bool:
     return is_confirmed_duplicate(video) or video.duplicate_primary_missing
 
 
+RECAP_NUMBER_INPUT = re.compile(r"^(?P<base>[1-9]\d*)(?:\.(?P<digit>\d))?$")
+RECAP_NUMBER_ERROR = (
+    "Recap číslo musí být kladné celé číslo nebo hodnota s právě jedním "
+    "desetinným místem, například 14.5 nebo 24.9."
+)
+STANDARD_NUMBER_ERROR = "Standardní ruční číslo epizody musí být kladné celé číslo."
+
+
+def format_episode_position(value: int | Decimal) -> str:
+    """Format an exact canonical/supplementary position without float conversion."""
+    decimal_value = value if isinstance(value, Decimal) else Decimal(value)
+    if decimal_value == decimal_value.to_integral_value():
+        return str(int(decimal_value))
+    return format(decimal_value, ".1f")
+
+
+def manual_recap_episode_number(video: Video) -> Decimal | None:
+    """Return explicit Recap authority, including a legacy integer fallback."""
+    tenths = video.recap_episode_number_manual_tenths
+    if tenths is not None:
+        return Decimal(tenths) / Decimal(10)
+    if video.episode_number_manual_override is None:
+        return None
+    manual_type = (video.content_type_manual or "").strip().casefold()
+    loaded_title = video.__dict__.get("catalog_title")
+    title_type = (
+        loaded_title.effective_part_type if loaded_title is not None else None
+    )
+    if manual_type == "recap" or not manual_type and title_type == "recap":
+        # Before fractional Recap support an integer entered through the same UI
+        # lived in the canonical override column.  Read it as the old manual
+        # Recap position until the user explicitly replaces or clears it.
+        return Decimal(video.episode_number_manual_override)
+    return None
+
+
+def manual_episode_number_input_value(video: Video) -> str:
+    if effective_video_content_type(video) == "recap":
+        value = manual_recap_episode_number(video)
+        return format_episode_position(value) if value is not None else ""
+    value = video.episode_number_manual_override
+    return str(value) if value is not None else ""
+
+
+def _parse_recap_episode_tenths(raw_value: str) -> int | None:
+    normalized = raw_value.strip()
+    if not normalized:
+        return None
+    match = RECAP_NUMBER_INPUT.fullmatch(normalized)
+    if match is None:
+        raise ValueError(RECAP_NUMBER_ERROR)
+    base = int(match.group("base"))
+    digit = int(match.group("digit") or "0")
+    return base * 10 + digit
+
+
+def set_video_episode_number_from_input(video: Video, raw_value: str) -> None:
+    """Validate the submitted form value against the effective content type."""
+    if effective_video_content_type(video) == "recap":
+        tenths = _parse_recap_episode_tenths(raw_value)
+        video.recap_episode_number_manual_tenths = tenths
+        # Replacing/clearing the one visible manual field explicitly retires the
+        # legacy integer fallback.  It is never discarded by classification or
+        # background recalculation.
+        video.episode_number_manual_override = None
+        video.episode_number_verified_at = utc_now() if tenths is not None else None
+        return
+
+    normalized = raw_value.strip()
+    if normalized and not re.fullmatch(r"[1-9]\d*", normalized):
+        raise ValueError(STANDARD_NUMBER_ERROR)
+    value = int(normalized) if normalized else None
+    set_video_episode_override(video, value)
+
+
+def validate_recap_number_for_content_type(
+    video: Video,
+    content_type: str,
+) -> None:
+    """Prevent a Recap-only manual authority from becoming dormant/invalid."""
+    if (
+        content_type != "recap"
+        and video.recap_episode_number_manual_tenths is not None
+    ):
+        raise ValueError(
+            "Ruční Recap číslo je nutné před změnou typu výslovně odstranit "
+            "nebo upravit v detailu videa; hodnota nebude smazána automaticky."
+        )
+
+
 @dataclass(frozen=True)
 class SupplementaryNumberingHint:
     """Bezpečný automatický subtype a případné pořadí mimo canonical episodes."""
 
     supplementary_type: str
-    number: int | None
+    number: int | Decimal | None
 
 
 def automatic_supplementary_numbering(
@@ -145,7 +321,7 @@ def automatic_supplementary_numbering(
 @dataclass(frozen=True)
 class VideoNumberingIdentity:
     kind: str
-    number: int
+    number: int | Decimal
     supplementary_type: str | None = None
     context_key: str | None = None
     context_label: str | None = None
@@ -216,10 +392,15 @@ def video_numbering_identity(
 ) -> VideoNumberingIdentity | None:
     detection = detect_episode_number(video.filename)
     supplementary = automatic_supplementary_numbering(video, detection)
+    recap_position = manual_recap_episode_number(video)
+    if recap_position is not None:
+        supplementary = SupplementaryNumberingHint("recap", recap_position)
     use_supplementary_identity = bool(
         supplementary is not None
         and supplementary.number is not None
         and (
+            recap_position is not None
+            or
             detection.is_supplementary
             or video.episode_number_manual_override is None
         )
@@ -569,8 +750,13 @@ def recalculate_title_numbering(
         for video, local in zip(videos, local_values)
     ]
     effective_values = [
-        video.episode_number_manual_override
-        if video.episode_number_manual_override is not None else local
+        (
+            video.episode_number_manual_override
+            if video.episode_number_manual_override is not None
+            else local
+        )
+        if effective_video_content_type(video) != "recap"
+        else None
         for video, local in zip(videos, automatic_values)
     ]
     numeric_values = [value for value in effective_values if value is not None]
@@ -593,7 +779,9 @@ def recalculate_title_numbering(
             video.season_episode_number = None
             video.absolute_episode_number = None
             video.external_episode_number = None
-            if detection.is_supplementary:
+            if manual_recap_episode_number(video) is not None:
+                source = "manual_recap"
+            elif detection.is_supplementary:
                 source = f"supplementary_{detection.supplementary_type}"
             elif supplementary_hint is not None and not title_is_supplemental:
                 source = f"supplementary_{supplementary_hint.supplementary_type}"
@@ -831,7 +1019,7 @@ class EffectiveVideoNumbering:
     numbering_input: int | None
     manual_override: bool
     supplementary_type: str | None
-    supplementary_number: int | None
+    supplementary_number: int | Decimal | None
 
     @property
     def is_standard(self) -> bool:
@@ -868,6 +1056,9 @@ def effective_video_numbering(
         and effective_title.effective_part_type in SUPPLEMENTAL_PART_TYPES
     )
     supplementary_hint = automatic_supplementary_numbering(video, detection)
+    recap_position = manual_recap_episode_number(video)
+    if recap_position is not None:
+        supplementary_hint = SupplementaryNumberingHint("recap", recap_position)
     if video.content_type_manual or title_is_supplemental:
         classification = "supplementary"
     elif video.episode_number_manual_override is not None:
@@ -995,3 +1186,395 @@ def collection_requires_numbering_review(collection: CatalogCollection) -> bool:
         summarize_title_numbering(list(title.videos), title).requires_review
         for title in collection.titles
     )
+
+
+def effective_video_sort_position(
+    video: Video,
+    detection: EpisodeNumberDetection | None = None,
+) -> Decimal | None:
+    """Return the shared numeric presentation position, never a string key."""
+    recap = manual_recap_episode_number(video)
+    if recap is not None:
+        return recap
+    # Catalog presentation can sort ORM rows after their read-only session has
+    # closed.  Reuse an eagerly loaded relationship when present, but never
+    # trigger a lazy load merely to derive a numeric presentation key.
+    loaded_title = video.__dict__.get("catalog_title")
+    state = effective_video_numbering(
+        video,
+        title=loaded_title,
+        use_current_title=False,
+    )
+    if state.is_standard and state.season_episode_number is not None:
+        return Decimal(state.season_episode_number)
+    detection = detection or state.detection
+    return detection.sortable_episode_value
+
+
+def _confirmed_expected_episode_count(title: CatalogTitle) -> int | None:
+    """Use only manually confirmed primary metadata, never candidate guesses."""
+    metadata = title.metadata_record
+    if (
+        metadata is None
+        or metadata.episode_count is None
+        or metadata.episode_count <= 0
+        or title.metadata_status != "linked_manual"
+    ):
+        return None
+    confirmed_primary = any(
+        link.is_primary and link.is_manual and link.verified_at is not None
+        for link in title.external_links
+    )
+    return metadata.episode_count if confirmed_primary else None
+
+
+def _issue_code(issue: object) -> str:
+    code = getattr(issue, "code", "")
+    return str(getattr(code, "value", code))
+
+
+def _issues_for_title_from_evaluation(
+    title: CatalogTitle,
+    issues: tuple[object, ...],
+) -> tuple[object, ...]:
+    title_video_ids = {video.id for video in title.videos if video.id is not None}
+    return tuple(
+        issue for issue in issues
+        if getattr(issue, "catalog_title", None) is title
+        or getattr(getattr(issue, "catalog_title", None), "id", None) == title.id
+        or any(
+            getattr(video, "id", None) in title_video_ids
+            for video in getattr(issue, "videos", ())
+        )
+        or any(
+            getattr(related, "id", None) == title.id
+            for related in getattr(issue, "related_catalog_titles", ())
+        )
+    )
+
+
+def _default_title_issues(title: CatalogTitle) -> tuple[object, ...]:
+    collection = title.collection
+    if collection is None:
+        return ()
+    # Local import avoids numbering <-> hierarchy_evaluation import recursion.
+    from .hierarchy_evaluation import evaluate_collection_hierarchy
+
+    evaluation = evaluate_collection_hierarchy(
+        collection,
+        list(collection.videos),
+        include_legacy_fallback=False,
+    )
+    return _issues_for_title_from_evaluation(title, evaluation.issues)
+
+
+def _bulk_renumber_fingerprint(
+    title: CatalogTitle,
+    *,
+    gap_start: int,
+    gap_end: int,
+    offset: int,
+    expected_count: int | None,
+    issue_codes: tuple[str, ...],
+) -> str:
+    rows = [
+        (
+            video.id,
+            video.catalog_collection_id,
+            video.catalog_title_id,
+            video.relative_path,
+            video.file_type,
+            video.content_type_manual,
+            video.local_episode_number,
+            video.season_episode_number,
+            video.absolute_episode_number,
+            video.external_episode_number,
+            video.episode_number_manual_override,
+            video.recap_episode_number_manual_tenths,
+            video.video_variant_group_id,
+            video.duplicate_of_video_id,
+            bool(video.duplicate_primary_missing),
+        )
+        for video in sorted(title.videos, key=lambda item: (item.id or 0, item.relative_path))
+    ]
+    payload = (
+        title.id,
+        title.catalog_collection_id,
+        title.effective_part_type,
+        title.effective_season_number,
+        title.effective_part_number,
+        title.numbering_mode,
+        title.episode_start_offset,
+        title.hierarchy_manual_override,
+        title.part_type_manual,
+        title.season_number_manual,
+        title.part_number_manual,
+        title.metadata_status,
+        expected_count,
+        gap_start,
+        gap_end,
+        offset,
+        issue_codes,
+        rows,
+    )
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def deterministic_bulk_renumber_proposal(
+    title: CatalogTitle,
+    *,
+    issues: tuple[object, ...] | None = None,
+    metrics: BulkRenumberMetrics | None = None,
+) -> DeterministicBulkRenumberProposal | None:
+    """Detect one unambiguous Recap-induced shift over logical episodes.
+
+    The pass is title-scoped and linear after the shared logical partition index
+    has been built.  It never mutates numbering or other authority.
+    """
+    if (
+        title.id is None
+        or title.effective_part_type in SUPPLEMENTAL_PART_TYPES
+    ):
+        return None
+    title_videos_list = list(title.videos)
+    metrics = metrics or BulkRenumberMetrics()
+    metrics.physical_videos_scanned += len(title_videos_list)
+
+    title_issues = _default_title_issues(title) if issues is None else tuple(issues)
+    blocking_codes = {
+        _issue_code(issue)
+        for issue in title_issues
+        if bool(getattr(issue, "blocking", False))
+    }
+    if blocking_codes - {"numbering_gap"}:
+        return None
+
+    summary = summarize_title_numbering(title_videos_list, title)
+    if (
+        summary.unnumbered_standard
+        or summary.unknown
+        or summary.nonstandard
+        or summary.duplicate_numbers
+        or summary.invalid_duplicate_references
+        or summary.variant_inconsistent_confirmed_duplicates
+        or unresolved_duplicate_groups(title_videos_list, catalog_title=title)
+    ):
+        return None
+
+    partitions = logical_episode_partitions(
+        title_videos_list,
+        catalog_title=title,
+    )
+    metrics.logical_episodes_scanned += len(partitions)
+    numbers = [partition.identity.season_episode_number for partition in partitions]
+    if not numbers or numbers[0] != 1 or len(numbers) != len(set(numbers)):
+        return None
+    missing = sorted(set(range(numbers[0], numbers[-1] + 1)) - set(numbers))
+    if not missing or missing != list(range(missing[0], missing[-1] + 1)):
+        return None
+    gap_start, gap_end = missing[0], missing[-1]
+    suffix = [
+        partition for partition in partitions
+        if partition.identity.season_episode_number > gap_end
+    ]
+    if not suffix:
+        return None
+    suffix_numbers = [item.identity.season_episode_number for item in suffix]
+    if suffix_numbers != list(range(suffix_numbers[0], suffix_numbers[-1] + 1)):
+        return None
+    offset = gap_start - suffix_numbers[0]
+    if offset >= 0:
+        return None
+
+    gap_size = gap_end - gap_start + 1
+    anchor_tenths = sorted({
+        video.recap_episode_number_manual_tenths
+        for video in title_videos_list
+        if video.recap_episode_number_manual_tenths is not None
+        and effective_video_content_type(video) == "recap"
+        and video.recap_episode_number_manual_tenths % 10
+        and video.recap_episode_number_manual_tenths // 10 == gap_start - 1
+    })
+    # One inserted fractional Recap explains one shifted slot; multiple exact
+    # positions can safely explain a larger constant offset without hardcoding -1.
+    if len(anchor_tenths) != gap_size:
+        return None
+
+    prefix_numbers = [number for number in numbers if number < gap_start]
+    proposed_numbers = prefix_numbers + [number + offset for number in suffix_numbers]
+    if proposed_numbers != list(range(1, proposed_numbers[-1] + 1)):
+        return None
+
+    expected_count = _confirmed_expected_episode_count(title)
+    if expected_count is not None and (
+        len(proposed_numbers) != expected_count
+        or proposed_numbers[-1] != expected_count
+    ):
+        return None
+
+    by_primary_id: dict[int, list[Video]] = {}
+    for video in title_videos_list:
+        if video.duplicate_of_video_id is not None:
+            by_primary_id.setdefault(video.duplicate_of_video_id, []).append(video)
+
+    rows: list[BulkRenumberLogicalChange] = []
+    for partition in suffix:
+        current = partition.identity.season_episode_number
+        proposed = current + offset
+        members: dict[int, Video] = {}
+        for primary in partition.videos:
+            if primary.id is None:
+                return None
+            members[primary.id] = primary
+            for duplicate in by_primary_id.get(primary.id, ()):
+                if duplicate.id is None:
+                    return None
+                members[duplicate.id] = duplicate
+        physical_changes = []
+        for video in sorted(members.values(), key=deterministic_video_order_key):
+            if (
+                not (
+                    video.catalog_title is title
+                    or video.catalog_title_id == title.id
+                )
+                or video.season_episode_number != current
+                or effective_video_content_type(video) in SUPPLEMENTAL_PART_TYPES
+                or video.recap_episode_number_manual_tenths is not None
+            ):
+                return None
+            physical_changes.append(BulkRenumberPhysicalChange(
+                video_id=video.id,
+                filename=video.filename,
+                current_episode=current,
+                proposed_episode=proposed,
+                manual_override=video.episode_number_manual_override is not None,
+                confirmed_duplicate_secondary=(
+                    video.duplicate_of_video_id is not None
+                ),
+                video_variant_group_id=video.video_variant_group_id,
+            ))
+        if not physical_changes:
+            return None
+        rows.append(BulkRenumberLogicalChange(
+            current_episode=current,
+            proposed_episode=proposed,
+            physical_changes=tuple(physical_changes),
+        ))
+
+    if len({row.proposed_episode for row in rows}) != len(rows):
+        return None
+    if set(prefix_numbers) & {row.proposed_episode for row in rows}:
+        return None
+
+    warnings = tuple(
+        message for message in (
+            (
+                "Návrh přepíše existující ruční čísla pouze po samostatném potvrzení."
+                if any(row.has_manual_override for row in rows) else None
+            ),
+            (
+                "Autoritativní expected episode count není dostupný; jednoznačnost "
+                "vychází z lokální souvislé řady a explicitní fractional Recap pozice."
+                if expected_count is None else None
+            ),
+        )
+        if message is not None
+    )
+    issue_codes = tuple(sorted({_issue_code(issue) for issue in title_issues}))
+    return DeterministicBulkRenumberProposal(
+        catalog_title_id=title.id,
+        title_name=title.local_title,
+        gap_start=gap_start,
+        gap_end=gap_end,
+        offset=offset,
+        recap_positions=tuple(
+            format_episode_position(Decimal(tenths) / Decimal(10))
+            for tenths in anchor_tenths
+        ),
+        rows=tuple(rows),
+        expected_episode_count=expected_count,
+        expected_count_authoritative=expected_count is not None,
+        warnings=warnings,
+        fingerprint=_bulk_renumber_fingerprint(
+            title,
+            gap_start=gap_start,
+            gap_end=gap_end,
+            offset=offset,
+            expected_count=expected_count,
+            issue_codes=issue_codes,
+        ),
+    )
+
+
+def apply_deterministic_bulk_renumber(
+    session: Session,
+    catalog_title_id: int,
+    *,
+    expected_fingerprint: str,
+    confirm_manual_overrides: bool = False,
+) -> DeterministicBulkRenumberProposal:
+    """Revalidate and atomically apply one freshly confirmed proposal."""
+    title = session.get(CatalogTitle, catalog_title_id)
+    if title is None or title.collection is None:
+        raise ValueError("Část pro hromadné přečíslování nebyla nalezena.")
+
+    # One shared evaluation is reused by the resolver; no per-row/library scan.
+    from .hierarchy_evaluation import (
+        evaluate_collection_hierarchy,
+        finalize_hierarchy_write,
+    )
+
+    evaluation = evaluate_collection_hierarchy(
+        title.collection,
+        list(title.collection.videos),
+        include_legacy_fallback=False,
+    )
+    title_issues = _issues_for_title_from_evaluation(title, evaluation.issues)
+    proposal = deterministic_bulk_renumber_proposal(title, issues=title_issues)
+    if (
+        proposal is None
+        or not expected_fingerprint
+        or proposal.fingerprint != expected_fingerprint
+    ):
+        raise ValueError(
+            "Náhled přečíslování je zastaralý nebo již není jednoznačný; "
+            "načtěte nový návrh."
+        )
+    if proposal.has_manual_overrides and not confirm_manual_overrides:
+        raise ValueError(
+            "Přepsání existujících ručních čísel je nutné samostatně potvrdit."
+        )
+
+    videos_by_id = {video.id: video for video in title.videos}
+    expected_final_numbers = tuple(
+        range(1, proposal.rows[-1].proposed_episode + 1)
+    )
+    with session.begin_nested():
+        for row in proposal.rows:
+            for change in row.physical_changes:
+                video = videos_by_id.get(change.video_id)
+                if video is None:
+                    raise ValueError("Membership návrhu se během potvrzení změnil.")
+                set_video_episode_override(video, change.proposed_episode)
+        session.flush()
+        finalize_hierarchy_write([title.collection])
+        session.flush()
+
+        final_partitions = logical_episode_partitions(
+            list(title.videos), catalog_title=title
+        )
+        final_numbers = tuple(
+            partition.identity.season_episode_number
+            for partition in final_partitions
+        )
+        if final_numbers != expected_final_numbers:
+            raise ValueError(
+                "Výsledná canonical řada neodpovídá potvrzenému náhledu; "
+                "operace byla vrácena zpět."
+            )
+        if unresolved_duplicate_groups(list(title.videos), catalog_title=title):
+            raise ValueError(
+                "Přečíslování by vytvořilo canonical collision; operace byla vrácena zpět."
+            )
+    return proposal

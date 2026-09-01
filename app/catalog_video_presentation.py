@@ -240,43 +240,61 @@ def build_catalog_title_video_presentation(
         )
         episodes_with_order.append((min(order for order, _lane in lanes_with_order), episode))
 
+    ordered_episodes_with_order = sorted(
+        episodes_with_order,
+        key=lambda item: (item[0], item[1].identity.season_episode_number),
+    )
     logical_episodes = tuple(
-        episode for _order, episode in sorted(
-            episodes_with_order,
-            key=lambda item: (item[0], item[1].identity.season_episode_number),
-        )
+        episode for _order, episode in ordered_episodes_with_order
     )
     other_visible = tuple(
         video for video in visible if video.id not in consumed_visible_ids
     )
     other_rows = physical_video_rows(other_visible, known_ids)
 
+    # Merge grouped logical episodes and non-standard/supplementary rows in the
+    # caller's numeric presentation order.  A manual Recap 14.5 can therefore
+    # sit between logical E14 and E15 without dissolving variant/duplicate groups.
+    display_units = [
+        (order, 0, episode)
+        for order, episode in ordered_episodes_with_order
+    ] + [
+        (
+            visible_order.get(physical.video.id, len(visible)),
+            1,
+            physical,
+        )
+        for physical in other_rows
+    ]
     display_rows = []
-    for episode in logical_episodes:
-        first_episode_row = True
-        for lane in episode.lanes:
-            first_lane_row = True
-            for physical in lane.physical_rows:
-                display_rows.append(PresentedVideoRow(
-                    physical=physical,
-                    episode_heading=(
-                        episode
-                        if episode.show_variant_lanes and first_episode_row else None
-                    ),
-                    variant_heading=(
-                        lane if episode.show_variant_lanes and first_lane_row else None
-                    ),
-                ))
-                first_episode_row = False
-                first_lane_row = False
-    for physical in other_rows:
-        group = _loaded_variant_group(physical.video)
-        display_rows.append(PresentedVideoRow(
-            physical=physical,
-            compact_variant_label=(
-                video_variant_group_display(group) if group is not None else None
-            ),
-        ))
+    for _order, kind, unit in sorted(display_units, key=lambda item: item[:2]):
+        if kind == 0:
+            episode = unit
+            first_episode_row = True
+            for lane in episode.lanes:
+                first_lane_row = True
+                for physical in lane.physical_rows:
+                    display_rows.append(PresentedVideoRow(
+                        physical=physical,
+                        episode_heading=(
+                            episode
+                            if episode.show_variant_lanes and first_episode_row else None
+                        ),
+                        variant_heading=(
+                            lane if episode.show_variant_lanes and first_lane_row else None
+                        ),
+                    ))
+                    first_episode_row = False
+                    first_lane_row = False
+        else:
+            physical = unit
+            group = _loaded_variant_group(physical.video)
+            display_rows.append(PresentedVideoRow(
+                physical=physical,
+                compact_variant_label=(
+                    video_variant_group_display(group) if group is not None else None
+                ),
+            ))
     return CatalogTitleVideoPresentation(
         logical_episodes=logical_episodes,
         other_physical_rows=other_rows,

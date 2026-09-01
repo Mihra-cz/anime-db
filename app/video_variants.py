@@ -324,6 +324,20 @@ def assign_video_catalog_title(
     Without an explicit new group, an existing assignment survives only when it
     belongs to the target title. No corresponding group is inferred or cloned.
     """
+    # Local import keeps the central membership helper free of an import cycle.
+    from .hierarchy_types import SUPPLEMENTARY_PART_TYPES
+    from .numbering import validate_recap_number_for_content_type
+
+    target_title_type = (
+        catalog_title.effective_part_type
+        if catalog_title is not None
+        and catalog_title.effective_part_type in SUPPLEMENTARY_PART_TYPES
+        else None
+    )
+    validate_recap_number_for_content_type(
+        video,
+        video.content_type_manual or target_title_type or video.file_type,
+    )
     if video_variant_group is _UNSPECIFIED_GROUP:
         current_group = video.video_variant_group
         target_group = (

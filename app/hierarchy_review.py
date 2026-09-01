@@ -58,7 +58,8 @@ from .models import (
 from .numbering import (
     clear_duplicate_group, effective_video_numbering, is_nonprimary_duplicate_video,
     set_duplicate_group_primary,
-    supplementary_context_map, video_numbering_identity,
+    supplementary_context_map, validate_recap_number_for_content_type,
+    video_numbering_identity,
 )
 from .structural_inference import (
     GENERIC_TITLE_REVIEW_REASON,
@@ -1576,6 +1577,20 @@ def set_manual_title_hierarchy(
         _validate_structural_numbers(
             snapshot_type, snapshot_season_number, snapshot_part_number,
         )
+        for video in title.videos:
+            projected_title_type = (
+                snapshot_type
+                if snapshot_type in SUPPLEMENTAL_PART_TYPES
+                else None
+            )
+            projected_content_type = (
+                video.content_type_manual
+                or projected_title_type
+                or video.file_type
+            )
+            validate_recap_number_for_content_type(
+                video, projected_content_type
+            )
         if title.collection is not None:
             _validate_split_season_structure(
                 title.collection,
@@ -1609,6 +1624,17 @@ def set_manual_title_hierarchy(
             verified_at=utc_now(),
         )
     else:
+        for video in title.videos:
+            projected_title_type = (
+                title.part_type
+                if title.part_type in SUPPLEMENTAL_PART_TYPES else None
+            )
+            validate_recap_number_for_content_type(
+                video,
+                video.content_type_manual
+                or projected_title_type
+                or video.file_type,
+            )
         clear_manual_hierarchy_snapshot(title)
     if title.collection is not None:
         refresh_collection_state(title.collection)
@@ -1911,6 +1937,14 @@ def classify_videos_in_place(
     collection = _load_collection_for_assignment(session, collection_id)
     selected = _selected_videos(collection, video_ids)
     for video in selected:
+        title_type = (
+            video.catalog_title.effective_part_type
+            if video.catalog_title is not None else None
+        )
+        projected_type = normalized_type or (
+            title_type if title_type in SUPPLEMENTAL_PART_TYPES else video.file_type
+        )
+        validate_recap_number_for_content_type(video, projected_type)
         video.content_type_manual = normalized_type
     session.flush()
     refresh_collection_state(collection)

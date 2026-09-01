@@ -167,10 +167,12 @@ from .models import (
     UnresolvedExternalSubtitle, Video, VideoVariantGroup, utc_now,
 )
 from .numbering import (
-    apply_sequential_numbering,
+    apply_deterministic_bulk_renumber, apply_sequential_numbering,
     confirmed_duplicate_groups, preview_sequential_numbering,
-    effective_video_numbering,
-    recalculate_title_numbering, set_title_numbering, set_video_episode_override,
+    deterministic_bulk_renumber_proposal, effective_video_numbering,
+    effective_video_sort_position, manual_episode_number_input_value,
+    recalculate_title_numbering, set_title_numbering,
+    set_video_episode_number_from_input,
     summarize_title_numbering, unresolved_duplicate_groups,
 )
 from .scanner import LibrarySafetyError, scan_library
@@ -276,6 +278,7 @@ templates.env.globals.update(
     compatibility_status_label=compatibility_status_label,
     compatibility_match_method_label=compatibility_match_method_label,
     external_subtitle_compatibility_status=external_subtitle_compatibility_status,
+    manual_episode_number_input_value=manual_episode_number_input_value,
 )
 METADATA_STATUS_LABELS = {
     "unlinked": "Bez metadat", "candidates_available": "Čeká na potvrzení",
@@ -361,13 +364,14 @@ def _load_catalog_title(session, catalog_title_id: int | None):
 
 def _hierarchy_video_groups(videos: list[Video]) -> dict[str, list]:
     standard, supplemental, nonstandard, unknown, duplicates = [], [], [], [], []
+
+    def sort_key(item: Video):
+        position = effective_video_sort_position(item)
+        return position is None, position or 0, item.filename.casefold()
+
     for video in sorted(
         videos,
-        key=lambda item: (
-            item.season_episode_number is None,
-            item.season_episode_number or 0,
-            item.filename.casefold(),
-        ),
+        key=sort_key,
     ):
         numbering = effective_video_numbering(video)
         detection = numbering.detection
@@ -1531,6 +1535,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "duplicate_variant_labels": duplicate_variant_labels,
                     "variant_lane_proposal": repeated_variant_lane_proposal(title),
                     "structural_ab_proposals": structural_ab_pair_proposals(title),
+                    "bulk_renumber_proposal": deterministic_bulk_renumber_proposal(
+                        title,
+                        issues=title_card_issues,
+                    ),
                 })
             numbering_unknown = sum(
                 item["summary"].unknown for item in title_numbering
@@ -3071,6 +3079,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#assignment",
         )
 
+    @app.post("/hierarchy-review/{collection_id}/bulk-renumber-confirm")
+    async def hierarchy_review_bulk_renumber_confirm(
+        request: Request,
+        collection_id: int,
+    ):
+        form = await request.form()
+        if str(form.get("confirm_bulk_renumber") or "").casefold() not in {
+            "true", "on", "1",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="Navržené hromadné přečíslování je nutné explicitně potvrdit.",
+            )
+        try:
+            catalog_title_id = int(str(form.get("catalog_title_id") or ""))
+            confirm_manual = str(
+                form.get("confirm_manual_overrides") or ""
+            ).casefold() in {"true", "on", "1"}
+            with sessions() as session:
+                proposal = apply_deterministic_bulk_renumber(
+                    session,
+                    catalog_title_id,
+                    expected_fingerprint=str(
+                        form.get("expected_fingerprint") or ""
+                    ),
+                    confirm_manual_overrides=confirm_manual,
+                )
+                if proposal.catalog_title_id != catalog_title_id:
+                    raise ValueError("Scope návrhu se během potvrzení změnil.")
+                session.commit()
+        except (TypeError, ValueError, IntegrityError) as exc:
+            return hierarchy_review_context(
+                request,
+                collection_id,
+                error=(
+                    str(exc)
+                    if not isinstance(exc, IntegrityError)
+                    else (
+                        "Přečíslování narazilo na databázovou kolizi; "
+                        "nebyla použita žádná část návrhu. Načtěte nový náhled."
+                    )
+                ),
+            )
+        message = (
+            f"Atomicky bylo přečíslováno {proposal.logical_episode_count} "
+            "logických standardních epizod; doplňkový obsah ani NAS se nezměnily."
+        )
+        return local_redirect_response(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}"
+            f"#title-{catalog_title_id}",
+        )
+
     @app.post("/hierarchy-review/{collection_id}/confirm-part")
     def hierarchy_review_confirm_part(
         collection_id: int, part_type_manual: str = Form(...),
@@ -3636,15 +3696,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         video_id: int, manual_episode_number: str = Form(""),
         filter_name: str = Form("all"), q: str = Form(""), sort: str = Form(""),
         direction: str = Form(""), detail_sort: str = Form(""),
-        detail_direction: str = Form(""),
+        detail_direction: str = Form(""), return_to: str = Form(""),
     ):
         with sessions() as session:
             video = session.get(Video, video_id)
             if video is None or video.catalog_title_id is None:
                 raise HTTPException(status_code=404, detail="Video nebylo nalezeno")
             try:
-                value = int(manual_episode_number) if manual_episode_number.strip() else None
-                set_video_episode_override(video, value)
+                set_video_episode_number_from_input(video, manual_episode_number)
                 title = video.catalog_title
                 if title.collection is not None:
                     refresh_collection_state(title.collection)
@@ -3654,6 +3713,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if isinstance(return_to, str) and return_to.strip():
+            return local_redirect_response(return_to)
         return local_redirect_response(
             metadata_return_url(
                 filter_name, video.catalog_title_id, q, sort, direction,

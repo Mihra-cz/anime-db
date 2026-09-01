@@ -1577,8 +1577,14 @@ def effective_video_content_display(video: Video) -> VideoContentDisplay:
         else value
     )
     detection = detect_episode_number(video.filename)
+    # Local import avoids the catalog -> numbering -> catalog module cycle.
+    from .numbering import format_episode_position, manual_recap_episode_number
+
+    recap_position = manual_recap_episode_number(video)
     noncanonical_position = (
-        detection.display_value if detection.is_nonstandard else None
+        format_episode_position(recap_position)
+        if value == "recap" and recap_position is not None
+        else detection.display_value if detection.is_nonstandard else None
     )
     return VideoContentDisplay(
         value=value,
@@ -1610,7 +1616,11 @@ def video_sort_key(video: Video):
     else:
         season_key = (2, 0, season.casefold())
     detection = detect_episode_number(video.filename)
-    episode = detection.sortable_episode_value
+    # Manual Recap authority and canonical numbering must drive presentation
+    # before filename evidence.  The resolver returns Decimal, never a string.
+    from .numbering import effective_video_sort_position
+
+    episode = effective_video_sort_position(video, detection)
     filename_has_episode_position = episode is not None
     return (
         not filename_has_episode_position and video.file_type != "episode",
@@ -1648,7 +1658,9 @@ def sort_title_videos(
 
     def field(video: Video):
         season = derive_season_info(video.relative_path).label or ""
-        episode = detect_episode_number(video.filename).sortable_episode_value
+        from .numbering import effective_video_sort_position
+
+        episode = effective_video_sort_position(video)
         fields = {
             "season": natural_sort_key(season),
             "episode": (episode is None, episode or Decimal(0)),

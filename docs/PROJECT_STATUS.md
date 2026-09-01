@@ -2,8 +2,8 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 30. srpna 2026
-> **Aktuální checkpoint:** Video Variant – Manual authority UI
+> **Aktualizováno:** 1. září 2026
+> **Aktuální checkpoint:** Recap fractional numbering a deterministic bulk renumber proposal
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -4730,6 +4730,97 @@ catalog/title/language/Media Check/responsive            # 406 passed
 celá testovací sada                                    # 1063 passed
 malé query budgety: Media Check / homepage / title       # 13 / 11 / 20
 compileall, 16/16 Jinja2 šablon, git diff --check        # prošlo
+```
+
+---
+
+## 6.73 Recap fractional numbering a deterministic bulk renumber proposal
+
+Ruční canonical číslo standardní epizody zůstává integer-only. Pouze video,
+jehož effective klasifikace je `recap`, může přes detail titulu nebo raw
+Hierarchy Review uložit přesnou pozici s jednou desetinnou číslicí, například
+`14.5`, `24.5` nebo `24.9`; dosavadní integer Recap zůstává platný. Backend
+provádí tutéž validaci nezávisle na browseru. Hodnota se ukládá odděleně jako
+integer počet desetin v nullable `Video.recap_episode_number_manual_tenths`,
+takže DB → Python `Decimal` → formulář → save nepoužije `float` a `24.9` se
+nezmění zaokrouhlením.
+
+Fractional Recap je supplementary pozice, nikoli canonical standard episode.
+`season_episode_number`, absolute/external číslo i logical standard identity
+zůstávají prázdné, `standard_total` se nezvýší a pořadí se porovnává numericky.
+Katalog i Hierarchy Review proto zobrazí `E14 → Recap 14.5 → E15` a současně
+správně seřadí `E24 → Recap 24.5 → Recap 24.9 → E25`. Standard, OVA, Special,
+Bonus, Preview, Film a ostatní typy tímto checkpointem fractional ruční vstup
+nedostaly. Při pokusu změnit Recap s uloženou hodnotou na jiný typ server změnu
+odmítne; uživatel musí číslo nejprve výslovně smazat a žádná authority se
+nezahazuje potichu.
+
+Po takové ruční opravě může raw Hierarchy Review u stejného `CatalogTitle`
+zobrazit read-only **Navrženou opravu číslování**. Resolver pracuje nad
+centrálním `LogicalEpisodeIdentity`, ne nad počtem fyzických `Video` rows.
+Proposal existuje pouze při jediné souvislé mezeře, jediném souvislém suffixu,
+explicitní fractional Recap anchor pozici a jediném konstantním integer offsetu,
+který vytvoří řadu od E01 bez collision. Případ Sword Art Online II
+`1..14, Recap 14.5, 16..25` proto nabídne deset logical změn
+`E16→E15 ... E25→E24` s offsetem `-1`. Dvě Recap pozice `24.5` a `24.9` vedle
+existující `E24, E25` samy žádný návrh nevytvoří.
+
+Pokud má title `linked_manual` metadata, ručně potvrzený primary
+`ExternalTitleLink` a kladný `TitleMetadata.episode_count`, musí výsledný počet
+i maximum s touto autoritou souhlasit. Automatic link, metadata candidate a
+jiný nepotvrzený guess se nepoužijí jako lidská authority. Bez confirmed countu
+smí proposal vzniknout jen z jinak plně jednoznačné lokální struktury a preview
+na tuto skutečnost upozorní.
+
+Návrh nevznikne při více mezerách, přerušovaném suffixu, neznámém či
+nestandardním numbering stavu, unresolved nebo nekonzistentní duplicitě,
+variantním konfliktu, chybějícím primary, jiném blocking hierarchy problému,
+neodpovídajícím Recap anchoru, manual-numbering konfliktu, membership konfliktu
+nebo možné collision. Scope tvoří pouze standardní logical episodes stejného
+title/season/part za mezerou. Recap a OVA/Special/Bonus/Preview/Film ani jiný
+supplementary obsah se do změn nepřidají.
+
+Každý logical řádek preview obsahuje původní a nové číslo i všechny jeho
+physical representations. Distinct `VideoVariantGroup` lanes zůstávají jednou
+logical episode a při potvrzení dostanou stejné nové canonical číslo. Confirmed
+duplicate secondary není další logical episode, ale její uložená physical
+reprezentace se mění spolu s primary, aby historická vazba nezůstala číselně
+nekonzistentní. Existing manual overrides jsou v preview viditelné a vyžadují
+druhý samostatný checkbox; background resolver je nikdy sám nepřepisuje.
+
+Apply je dostupný až po povinném explicitním potvrzení přesného preview. SHA-256
+fingerprint pokrývá title scope, hierarchy/metadata authority, issue codes,
+membership, všechna relevantní čísla, variant groups i duplicate relationships.
+Confirm proposal celý znovu sestaví a stale nebo nově kolidující stav odmítne.
+Samotný write běží v jedné databázové savepoint transakci, po shared hierarchy
+finalizeru znovu kontroluje přesnou výslednou řadu a unresolved collisions;
+chyba uprostřed vrátí všechny suffix změny zpět.
+
+Proposal pass je omezený na právě renderovaný title. Vlastní scan a kontroly
+jsou lineární; existující deterministické řazení shared logical partitions dává
+celku nejvýše `O(V log V)`, nikdy `O(V²)`. Render neprovádí full-library scan pro
+každý řádek. `BulkRenumberMetrics` má deterministickou operation-count regresi
+pro SAO fixture. Parserová fractional heuristika,
+scanner/rescan authority, Video Variant a duplicate význam se nezměnily.
+Idempotentní migrace nový nullable sloupec pouze přidá a nic nebackfilluje.
+Tento workflow mění jen databázovou logickou autoritu; neprovádí rename, move,
+copy ani delete na NASu.
+
+Automatická validace tohoto checkpointu:
+
+```text
+nové Recap/proposal/apply/UI/migration scénáře          # 29 passed
+parser fractional + Recap regrese                      # 18 passed
+shared hierarchy numbering/evaluator                   # 155 passed
+duplicate + Video Variant průřez                       # 57 passed
+split/move/assignment průřez                           # 72 passed
+Hierarchy Review + variant authority + responsive UI   # 140 passed
+catalog a logical presentation                         # 307 passed
+metadata                                               # 143 passed
+Media Check/subtitle/language                          # 101 passed
+startup/migration/scanner/rebuild authority            # 106 passed
+celá testovací sada                                    # 1092 passed
+compileall, 16/16 Jinja2 šablon, git diff --check      # prošlo
 ```
 
 ---

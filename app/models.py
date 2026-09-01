@@ -38,6 +38,12 @@ class Video(Base):
     episode_number_source: Mapped[str] = mapped_column(String, default="unknown", server_default="unknown")
     episode_number_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     episode_number_manual_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Recap positions use exact integer tenths (14.5 -> 145).  Keeping this
+    # authority separate preserves the integer-only canonical episode axis and
+    # avoids SQLite/float rounding in every DB/backend/form round-trip.
+    recap_episode_number_manual_tenths: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     episode_number_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     content_type_manual: Mapped[str | None] = mapped_column(String, nullable=True)
     media_part_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
