@@ -336,9 +336,13 @@ def _load_videos(sessions) -> list[Video]:
             ).selectinload(ExternalSubtitle.compatibilities),
             selectinload(Video.catalog_title).selectinload(
                 CatalogTitle.collection
-            ).selectinload(CatalogCollection.titles),
+            ).selectinload(CatalogCollection.titles).joinedload(
+                CatalogTitle.metadata_record
+            ),
             selectinload(Video.catalog_title).selectinload(CatalogTitle.metadata_record),
-            selectinload(Video.catalog_collection).selectinload(CatalogCollection.titles),
+            selectinload(Video.catalog_collection).selectinload(
+                CatalogCollection.titles
+            ).joinedload(CatalogTitle.metadata_record),
             selectinload(Video.duplicate_of),
             selectinload(Video.video_variant_group),
         ).order_by(Video.relative_path)).all())

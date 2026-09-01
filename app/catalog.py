@@ -348,10 +348,17 @@ def catalog_collection_display_title(
 
     candidates: dict[tuple[str, int], CatalogTitle] = {}
     for title in collection.titles if titles is None else titles:
+        # Callers can intentionally pass a detached read model.  The persisted
+        # FK is sufficient for membership; the instance dictionary preserves
+        # transient/pending object identity without initiating a lazy load.
+        loaded_collection = title.__dict__.get("collection")
         belongs_to_collection = (
-            title.collection is collection
-            or collection.id is not None
-            and title.catalog_collection_id == collection.id
+            (
+                collection.id is not None
+                and title.catalog_collection_id is not None
+                and title.catalog_collection_id == collection.id
+            )
+            or loaded_collection is collection
         )
         if not belongs_to_collection:
             continue

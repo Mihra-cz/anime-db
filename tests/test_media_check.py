@@ -4,7 +4,7 @@ from urllib.parse import urlencode
 
 from fastapi import HTTPException
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from starlette.requests import Request
 
 from app.catalog import set_manual_hardsub
@@ -19,7 +19,7 @@ from app.media_check import (
 from app.models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
     ExternalSubtitleCompatibility, InternalSubtitle,
-    UnresolvedExternalSubtitle, Video,
+    TitleMetadata, UnresolvedExternalSubtitle, Video,
 )
 from app.subtitle_review import build_unresolved_subtitle_rows
 
@@ -368,6 +368,64 @@ def _media_app(tmp_path):
         external_subtitle_id = _external_assets(videos[11])[0].id
         collection_id = collection.id
     return web_app, ids, audio_track_id, external_subtitle_id, collection_id
+
+
+def test_media_check_get_handles_detached_sibling_title_without_n_plus_one(
+    tmp_path,
+):
+    web_app, _ids, _audio_id, _subtitle_id, collection_id = _media_app(tmp_path)
+    engine = web_app.state.sessions.kw["bind"]
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/media-check"
+    )
+
+    def get_with_query_count():
+        statements = 0
+
+        def increment(*_args):
+            nonlocal statements
+            statements += 1
+
+        event.listen(engine, "before_cursor_execute", increment)
+        try:
+            response = endpoint(
+                _request(web_app, "/media-check"),
+                subtitle="all",
+                audio="all",
+                q="",
+                page=1,
+                message=None,
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", increment)
+        return response, statements
+
+    baseline_response, baseline_statements = get_with_query_count()
+    assert baseline_response.status_code == 200
+    assert baseline_statements == 12
+
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        collection.titles.append(CatalogTitle(
+            local_title="Season 2",
+            normalized_local_title="season 2",
+            relative_root_path="Anime/Partial Translation/Season 2",
+            part_type="season",
+            season_number=2,
+            season_label="S2",
+            sort_order=2,
+            metadata_record=TitleMetadata(
+                display_title="Detached Sibling",
+                title_romaji="Detached Sibling",
+            ),
+        ))
+        session.commit()
+
+    response, statements = get_with_query_count()
+    assert response.status_code == 200
+    assert "Detached Sibling" in response.body.decode()
+    assert statements == baseline_statements == 12
 
 
 def test_partial_translation_bulk_set_clear_is_atomic_and_hierarchy_isolated(tmp_path):
