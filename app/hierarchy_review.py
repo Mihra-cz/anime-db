@@ -150,6 +150,7 @@ class HierarchyReviewDiagnostics:
     issues: tuple[HierarchyReviewIssue, ...]
     collection_issues: tuple[HierarchyReviewIssue, ...]
     title_issues: Mapping[int, tuple[HierarchyReviewIssue, ...]]
+    card_title_issues: Mapping[int, tuple[HierarchyReviewIssue, ...]]
     video_issues: Mapping[int, tuple[HierarchyReviewIssue, ...]]
 
     @property
@@ -218,6 +219,8 @@ class HierarchyReviewDiagnostics:
         self, title: CatalogTitle | int,
     ) -> tuple[HierarchyReviewIssue, ...]:
         title_id = title if isinstance(title, int) else title.id
+        if title_id is not None:
+            return self.card_title_issues.get(title_id, ())
         direct = list(self.for_title(title))
         seen = {id(issue) for issue in direct}
         for issue in self.issues:
@@ -1179,6 +1182,7 @@ def hierarchy_review_diagnostics(
     ]
     collection_issues: list[HierarchyReviewIssue] = []
     title_issues: dict[int, list[HierarchyReviewIssue]] = {}
+    card_title_issues: dict[int, list[HierarchyReviewIssue]] = {}
     video_issues: dict[int, list[HierarchyReviewIssue]] = {}
     for issue in issues:
         if issue.scope == HierarchyIssueScope.COLLECTION.value:
@@ -1191,6 +1195,21 @@ def hierarchy_review_diagnostics(
         elif issue.scope == HierarchyIssueScope.VIDEO.value:
             for video_id in issue.video_ids:
                 video_issues.setdefault(video_id, []).append(issue)
+        card_title_ids = {
+            title_id
+            for title_id in (
+                issue.title_id,
+                *(title.id for title in issue.related_catalog_titles),
+                *(
+                    video.catalog_title_id
+                    for video in issue.videos
+                    if video.catalog_title_id is not None
+                ),
+            )
+            if title_id is not None
+        }
+        for title_id in card_title_ids:
+            card_title_issues.setdefault(title_id, []).append(issue)
 
     return HierarchyReviewDiagnostics(
         evaluation=evaluation,
@@ -1198,6 +1217,10 @@ def hierarchy_review_diagnostics(
         collection_issues=tuple(collection_issues),
         title_issues={
             title_id: tuple(items) for title_id, items in title_issues.items()
+        },
+        card_title_issues={
+            title_id: tuple(items)
+            for title_id, items in card_title_issues.items()
         },
         video_issues={
             video_id: tuple(items) for video_id, items in video_issues.items()

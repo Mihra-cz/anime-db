@@ -4,7 +4,11 @@ from hashlib import sha256
 from sqlalchemy import create_engine, event, func, inspect, select, text
 from sqlalchemy.orm import Session
 
-from app.migrations import migrate_schema
+from app.migrations import (
+    STARTUP_COMPATIBILITY_VERSION,
+    migrate_schema,
+    migrate_schema_at_startup,
+)
 from app.database import Base
 from app.hierarchy_evaluation import HierarchyIssueCode, evaluate_collection_hierarchy
 from app.models import (
@@ -44,6 +48,59 @@ def _record_catalog_title_updates(engine):
 
     event.listen(engine, "before_cursor_execute", record)
     return statements, record
+
+
+def _semantic_database_snapshot(engine):
+    """Return persisted application rows without SQLite storage metadata."""
+    with engine.connect() as connection:
+        return tuple(
+            (
+                table.name,
+                tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        table.select().order_by(*table.primary_key.columns)
+                    )
+                ),
+            )
+            for table in sorted(Base.metadata.tables.values(), key=lambda item: item.name)
+        )
+
+
+def test_stable_application_startup_skips_compatibility_rebuild_and_writes(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'startup-version.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Video(
+            relative_path="Anime/Stable/Stable - 01.mkv",
+            root_folder="Anime",
+            filename="Stable - 01.mkv",
+            size=1,
+            mtime_ns=1,
+        ))
+        session.commit()
+
+    assert migrate_schema_at_startup(engine) is True
+    with engine.connect() as connection:
+        assert connection.scalar(text("PRAGMA user_version")) == (
+            STARTUP_COMPATIBILITY_VERSION
+        )
+    before = _semantic_database_snapshot(engine)
+    writes = []
+
+    def record(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            writes.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        Base.metadata.create_all(engine)
+        assert migrate_schema_at_startup(engine) is False
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert writes == []
+    assert _semantic_database_snapshot(engine) == before
 
 
 def test_stable_startup_does_not_touch_catalog_titles(tmp_path):

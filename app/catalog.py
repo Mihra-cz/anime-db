@@ -6,6 +6,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 import re
+from types import MappingProxyType
 from typing import Literal
 import unicodedata
 
@@ -656,6 +657,31 @@ def build_video_language_profile(video: Video) -> VideoLanguageProfile:
         )
         for track in sorted(video.audio_tracks, key=lambda item: item.stream_index)
     )
+    return build_video_language_profile_from_evidence(
+        video,
+        audio_tracks=audio_tracks,
+        internal_languages=(
+            effective_internal_subtitle_language(track)
+            for track in video.internal_subtitles
+        ),
+        external_languages=(
+            effective_external_subtitle_language(track)
+            for track in effective_external_subtitles_for_video(video)
+        ),
+    )
+
+
+def build_video_language_profile_from_evidence(
+    video: Video,
+    *,
+    audio_tracks: Iterable[AudioLanguageTrack],
+    internal_languages: Iterable[str],
+    external_languages: Iterable[str],
+) -> VideoLanguageProfile:
+    """Build a language profile from request-batched scalar evidence."""
+    audio_tracks = tuple(sorted(
+        audio_tracks, key=lambda track: track.stream_index,
+    ))
     audio_languages = tuple(dict.fromkeys(
         track.effective_language for track in audio_tracks
     ))
@@ -670,26 +696,59 @@ def build_video_language_profile(video: Video) -> VideoLanguageProfile:
     else:
         audio_status = "other_known"
 
-    subtitle = _build_subtitle_language_profile(video)
+    internal = frozenset(internal_languages)
+    external = frozenset(external_languages)
+    hardsub = frozenset(
+        language
+        for language, enabled in (
+            ("cs", video.manual_hardsub_cs),
+            ("sk", video.manual_hardsub_sk),
+        )
+        if enabled
+    )
+    mutable_sources: dict[str, set[SubtitleSource]] = {}
+    for language in internal:
+        mutable_sources.setdefault(language, set()).add("internal")
+    for language in external:
+        mutable_sources.setdefault(language, set()).add("external")
+    for language in hardsub:
+        mutable_sources.setdefault(language, set()).add("hardsub")
+    sources = {
+        language: frozenset(values)
+        for language, values in mutable_sources.items()
+    }
+    has_cs = "cs" in sources
+    has_sk = "sk" in sources
+    has_cs_or_sk = has_cs or has_sk
+    has_en = "en" in internal
+    has_unknown = "unknown" in internal or "unknown" in external
+    subtitle_status: SubtitleStatus = (
+        "preferred" if has_cs_or_sk
+        else "fallback_internal_en" if has_en
+        else "missing"
+    )
+    priority: CsSkSubtitlePriority = (
+        "none" if has_cs_or_sk else "normal" if has_en else "high"
+    )
 
     return VideoLanguageProfile(
         audio_tracks=audio_tracks,
         audio_languages=audio_languages,
         audio_status=audio_status,
         has_japanese_audio=audio_status == "japanese",
-        internal_subtitle_languages=subtitle.internal_languages,
-        external_subtitle_languages=subtitle.external_languages,
-        hardsub_languages=subtitle.hardsub_languages,
-        sources_by_language=subtitle.sources_by_language,
-        has_cs=subtitle.has_cs,
-        has_sk=subtitle.has_sk,
-        has_cs_or_sk=subtitle.has_cs_or_sk,
-        has_en=subtitle.has_en,
-        has_internal_english_subtitles=subtitle.has_en,
-        has_unknown_subtitle_language=subtitle.has_unknown,
-        subtitle_status=subtitle.status,
-        needs_cs_sk_subtitles=subtitle.needs_cs_sk,
-        cs_sk_subtitle_priority=subtitle.priority,
+        internal_subtitle_languages=internal,
+        external_subtitle_languages=external,
+        hardsub_languages=hardsub,
+        sources_by_language=sources,
+        has_cs=has_cs,
+        has_sk=has_sk,
+        has_cs_or_sk=has_cs_or_sk,
+        has_en=has_en,
+        has_internal_english_subtitles=has_en,
+        has_unknown_subtitle_language=has_unknown,
+        subtitle_status=subtitle_status,
+        needs_cs_sk_subtitles=not has_cs_or_sk,
+        cs_sk_subtitle_priority=priority,
     )
 
 
@@ -715,6 +774,50 @@ def translation_status(video: Video) -> TranslationStatus:
         has_unknown=profile.has_unknown,
         automatic_has_cs=automatic_has_cs,
         automatic_has_sk=automatic_has_sk,
+    )
+
+
+def translation_status_from_language_evidence(
+    video: Video,
+    *,
+    internal_languages: Iterable[str],
+    external_languages: Iterable[str],
+    detected_external_languages: Iterable[str],
+) -> TranslationStatus:
+    """Build the same read model from batched scalar query evidence.
+
+    Catalog overview pages do not need thousands of subtitle ORM objects.  This
+    projection preserves the public/manual language semantics while allowing a
+    request to load only the few scalar columns used by its counters/search.
+    """
+    internal = frozenset(internal_languages)
+    external = frozenset(external_languages)
+    detected_external = frozenset(detected_external_languages)
+    hardsub = {
+        language
+        for language, enabled in (
+            ("cs", video.manual_hardsub_cs),
+            ("sk", video.manual_hardsub_sk),
+        )
+        if enabled
+    }
+    effective = internal | external | hardsub
+    internal_target = bool(internal & {"cs", "sk"})
+    external_target = bool(external & {"cs", "sk"})
+    source = (
+        "both" if internal_target and external_target
+        else "internal" if internal_target
+        else "external" if external_target
+        else None
+    )
+    return TranslationStatus(
+        has_cs="cs" in effective,
+        has_sk="sk" in effective,
+        has_cs_or_sk=bool(effective & {"cs", "sk"}),
+        subtitle_source=source,
+        has_unknown="unknown" in internal or "unknown" in external,
+        automatic_has_cs="cs" in internal or "cs" in detected_external,
+        automatic_has_sk="sk" in internal or "sk" in detected_external,
     )
 
 
@@ -831,6 +934,46 @@ class CatalogResults:
         return sum(len(videos) for videos in self.videos_by_title.values())
 
 
+@dataclass(frozen=True)
+class CatalogRequestIndex:
+    """Immutable derived facts shared by one catalog-style request."""
+
+    detections: Mapping[Video, EpisodeNumberDetection]
+    translation_statuses: Mapping[Video, TranslationStatus]
+    external_subtitle_paths: Mapping[Video, tuple[str, ...]]
+
+
+def build_catalog_request_index(
+    videos: Iterable[Video],
+    *,
+    translation_statuses: Mapping[Video, TranslationStatus] | None = None,
+    external_subtitle_paths: Mapping[Video, tuple[str, ...]] | None = None,
+) -> CatalogRequestIndex:
+    """Parse and resolve language state once per physical Video for this request."""
+    video_list = tuple(videos)
+    return CatalogRequestIndex(
+        detections=MappingProxyType({
+            video: detect_episode_number(video.filename) for video in video_list
+        }),
+        translation_statuses=MappingProxyType(
+            dict(translation_statuses)
+            if translation_statuses is not None else {
+                video: translation_status(video) for video in video_list
+            }
+        ),
+        external_subtitle_paths=MappingProxyType(
+            dict(external_subtitle_paths)
+            if external_subtitle_paths is not None else {
+                video: tuple(
+                    subtitle.relative_path
+                    for subtitle in effective_external_subtitles_for_video(video)
+                )
+                for video in video_list
+            }
+        ),
+    )
+
+
 FILTER_LABELS = {
     "all": "Všechna videa",
     "only-cs": "Pouze CZ",
@@ -915,8 +1058,9 @@ def is_media_completion_video(video: Video) -> bool:
 def video_matches_filter(
     video: Video, filter_name: str, *,
     unresolved_duplicate_ids: set[int] | None = None,
+    status: TranslationStatus | None = None,
 ) -> bool:
-    status = translation_status(video)
+    status = status or translation_status(video)
     if filter_name in {"only-cs", "only-sk", "both", "missing", "unknown"}:
         if not is_media_completion_video(video):
             return False
@@ -997,11 +1141,16 @@ def _contains_query(value: str | None, query: str) -> bool:
     return query in (value or "").casefold()
 
 
-def video_matches_search(video: Video, query: str) -> bool:
+def video_matches_search(
+    video: Video, query: str,
+    *, detection: EpisodeNumberDetection | None = None,
+    external_subtitle_paths: Iterable[str] | None = None,
+) -> bool:
     if not query:
         return True
     season = derive_season_info(video.relative_path)
-    episode = derive_episode_number(video.filename)
+    detection = detection or detect_episode_number(video.filename)
+    episode = detection.number if detection.is_standard else None
     canonical_episode = video.season_episode_number
     variant_group = video.__dict__.get("video_variant_group")
     values = (
@@ -1018,8 +1167,11 @@ def video_matches_search(video: Video, query: str) -> bool:
         variant_group.release_source if variant_group is not None else None,
         variant_group.content_variant if variant_group is not None else None,
         *(
-            subtitle.relative_path
-            for subtitle in effective_external_subtitles_for_video(video)
+            external_subtitle_paths
+            if external_subtitle_paths is not None else (
+                subtitle.relative_path
+                for subtitle in effective_external_subtitles_for_video(video)
+            )
         ),
     )
     return any(_contains_query(value, query) for value in values)
@@ -1029,8 +1181,10 @@ def build_catalog_results(
     videos: Iterable[Video], filter_name: str, query: str | None = None,
     sort: str | None = None, direction: str | None = None,
     title_name_preference: object = "romaji",
+    *, request_index: CatalogRequestIndex | None = None,
 ) -> CatalogResults:
     video_list = list(videos)
+    derived = request_index or build_catalog_request_index(video_list)
     unresolved_duplicate_ids = (
         unresolved_duplicate_video_ids(video_list)
         if filter_name == "all-duplicates" else None
@@ -1039,6 +1193,7 @@ def build_catalog_results(
     folded_query = query_text.casefold()
     groups: dict[str, SeriesSummary] = {}
     all_by_title: dict[str, list[Video]] = {}
+    initial_collection_names: dict[tuple[str, int], str] = {}
     for video in video_list:
         catalog_title = video.catalog_title
         collection = catalog_title.collection if catalog_title else video.catalog_collection
@@ -1053,11 +1208,19 @@ def build_catalog_results(
             ROOT_FOLDER if is_unassigned_root
             else collection.relative_root_path if collection else identity.relative_path
         )
-        group_name = (
-            ROOT_VIDEO_GROUP_LABEL if is_unassigned_root
-            else catalog_collection_display_title(collection, titles=())
-            if collection else identity.name
-        )
+        if is_unassigned_root:
+            group_name = ROOT_VIDEO_GROUP_LABEL
+        elif collection is not None:
+            collection_key = (
+                ("id", collection.id)
+                if collection.id is not None else ("object", id(collection))
+            )
+            group_name = initial_collection_names.get(collection_key)
+            if group_name is None:
+                group_name = catalog_collection_display_title(collection, titles=())
+                initial_collection_names[collection_key] = group_name
+        else:
+            group_name = identity.name
         all_by_title.setdefault(group_path, []).append(video)
         summary = groups.setdefault(
             group_path,
@@ -1075,10 +1238,11 @@ def build_catalog_results(
             if catalog_title.metadata_status in {"linked_auto", "linked_manual"}:
                 summary.linked_part_ids.add(catalog_title.id)
         summary.total += 1
-        status = translation_status(video)
+        status = derived.translation_statuses.get(video) or translation_status(video)
         filter_match = video_matches_filter(
             video, filter_name,
             unresolved_duplicate_ids=unresolved_duplicate_ids,
+            status=status,
         )
         summary.problematic += filter_match
         summary.episodes += video.file_type == "episode"
@@ -1110,7 +1274,9 @@ def build_catalog_results(
             titles_by_key[key] = title
             videos_by_catalog_title.setdefault(key, []).append(video)
         for key, scoped_videos in videos_by_catalog_title.items():
-            numbering = summarize_title_numbering(scoped_videos, titles_by_key[key])
+            numbering = summarize_title_numbering(
+                scoped_videos, titles_by_key[key], detections=derived.detections,
+            )
             summary.episodes += numbering.logical_episode_count
             summary.variants += numbering.confirmed_variant_instance_count
         summary.episodes += sum(
@@ -1150,6 +1316,10 @@ def build_catalog_results(
             if video_matches_filter(
                 video, filter_name,
                 unresolved_duplicate_ids=unresolved_duplicate_ids,
+                status=(
+                    derived.translation_statuses.get(video)
+                    or translation_status(video)
+                ),
             )
         ]
         title_matches = bool(folded_query) and (
@@ -1161,10 +1331,19 @@ def build_catalog_results(
             )
         )
         matched_videos = filtered if not folded_query or title_matches else [
-            video for video in filtered if video_matches_search(video, folded_query)
+            video for video in filtered
+            if video_matches_search(
+                video, folded_query, detection=derived.detections.get(video),
+                external_subtitle_paths=derived.external_subtitle_paths.get(video),
+            )
         ]
         if matched_videos:
-            matches_by_title[title_path] = sorted(matched_videos, key=video_sort_key)
+            matches_by_title[title_path] = sorted(
+                matched_videos,
+                key=lambda video: video_sort_key(
+                    video, detection=derived.detections.get(video),
+                ),
+            )
             groups[title_path].matched = len(matched_videos)
 
     normalized_sort, normalized_direction = normalize_group_sort(sort, direction, query_text)
@@ -1614,7 +1793,9 @@ TYPE_ORDER = {
 }
 
 
-def video_sort_key(video: Video):
+def video_sort_key(
+    video: Video, *, detection: EpisodeNumberDetection | None = None,
+):
     season = derive_season_info(video.relative_path).label
     if season and (match := re.fullmatch(r"S(\d+)", season)):
         season_key = (0, int(match.group(1)), "")
@@ -1622,7 +1803,7 @@ def video_sort_key(video: Video):
         season_key = (1, 0, "")
     else:
         season_key = (2, 0, season.casefold())
-    detection = detect_episode_number(video.filename)
+    detection = detection or detect_episode_number(video.filename)
     # Manual Recap authority and canonical numbering must drive presentation
     # before filename evidence.  The resolver returns Decimal, never a string.
     from .numbering import effective_video_sort_position
@@ -1656,18 +1837,28 @@ def normalize_video_sort(sort: str | None, direction: str | None) -> tuple[str, 
 
 
 def sort_title_videos(
-    videos: Iterable[Video], sort: str | None = None, direction: str | None = None
+    videos: Iterable[Video], sort: str | None = None, direction: str | None = None,
+    *, detections: Mapping[Video, EpisodeNumberDetection] | None = None,
 ) -> tuple[list[Video], str, str]:
     normalized_sort, normalized_direction = normalize_video_sort(sort, direction)
     values = list(videos)
     if normalized_sort == "default":
-        return sorted(values, key=video_sort_key), normalized_sort, normalized_direction
+        return sorted(
+            values,
+            key=lambda video: video_sort_key(
+                video,
+                detection=detections.get(video) if detections is not None else None,
+            ),
+        ), normalized_sort, normalized_direction
 
     def field(video: Video):
         season = derive_season_info(video.relative_path).label or ""
         from .numbering import effective_video_sort_position
 
-        episode = effective_video_sort_position(video)
+        episode = effective_video_sort_position(
+            video,
+            detections.get(video) if detections is not None else None,
+        )
         fields = {
             "season": natural_sort_key(season),
             "episode": (episode is None, episode or Decimal(0)),

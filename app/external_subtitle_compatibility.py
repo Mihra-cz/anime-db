@@ -11,6 +11,7 @@ from typing import Iterable, Mapping
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .catalog import EpisodeNumberDetection
 from .catalog_video_presentation import (
     video_variant_display_for_video,
     video_variant_group_technical_details,
@@ -566,6 +567,7 @@ def _candidate_sort_key(video: Video) -> tuple:
 
 def build_compatibility_candidate_index(
     videos: Iterable[Video],
+    *, detections: Mapping[Video, EpisodeNumberDetection] | None = None,
 ) -> CompatibilityCandidateIndex:
     """Calculate central logical identities once for the whole request."""
     known = tuple(videos)
@@ -575,7 +577,10 @@ def build_compatibility_candidate_index(
     identity_by_video_id: dict[int, LogicalEpisodeIdentity | None] = {}
     identity_buckets: dict[LogicalEpisodeIdentity, list[Video]] = {}
     for video_id, video in videos_by_id.items():
-        identity = logical_episode_identity(video)
+        identity = logical_episode_identity(
+            video,
+            detection=detections.get(video) if detections is not None else None,
+        )
         identity_by_video_id[video_id] = identity
         if identity is not None:
             identity_buckets.setdefault(identity, []).append(video)

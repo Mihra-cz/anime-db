@@ -4825,6 +4825,81 @@ compileall, 16/16 Jinja2 šablon, git diff --check      # prošlo
 
 ---
 
+## 6.74 V5 performance a scalability pass
+
+Profil production-like kopie s 3 100 Videos ukázal tři hlavní zdroje práce:
+každý stabilní startup znovu spouštěl celou compatibility/hierarchy pipeline,
+title detail načítal všechna Videos knihovny a katalogové stránky opakovaly
+parser i logical-numbering výpočty mezi souhrnem, řazením a prezentací. Media
+Check už neměl subtitle × video scan, ale načítal širší ORM graph, než potřeboval
+pro jazykovou evidence a zobrazenou stránku.
+
+SQLite startup nyní používá versioned compatibility checkpoint v
+`PRAGMA user_version`. První start nové compatibility verze stále provede celý
+existující idempotentní rebuild a až po úspěchu uloží marker. Stabilní další
+start provede pouze `create_all` schema inspection a kontrolu markeru; na
+production-like kopii klesl z přibližně 7,90 s / 4 470 SQL / 51 transientních
+DML na 0,006 s / 16 PRAGMA / 0 DML. Aplikační logical dump před a po
+jednorázovém průchodu byl shodný. Explicitní `migrate_schema()` zůstává plnou
+maintenance operací a scanner ani žádná write authority se tím nemění.
+
+Homepage a `/catalog/all` používají jeden immutable request-local index
+`Video → parser detection / TranslationStatus / external subtitle paths`.
+Jazyková evidence se načítá několika scalar dotazy místo tisíců track ORM
+objektů a strukturální homepage presentation už nesestavuje video detail pro
+každou část. Title detail omezuje hlavní Video query na zvolený
+`CatalogTitle`; collection detail obdobně na aktuální collection. Numbering
+summary znovu používá již vytvořené logical partitions a sort resolver skutečně
+přebírá předpočítanou detection. Katalog proto na 3 100 Videos klesl z
+35 SQL / 18 160 parser calls / 5 874 identity calls na 5 SQL / 3 150 parser
+calls / 2 937 identity calls. Homepage má 7 SQL a bounded query-count test
+potvrzuje stejný počet pro 1 i 201 Videos.
+
+Media Check načítá compatibility authority eager/batch způsobem, ale audio a
+interní subtitle evidence i editovatelné track údaje používá jako explicitní
+read-only scalar projection. Naming se řeší jednou za title/collection a stejná
+parser detection se sdílí s compatibility indexem, řazením a řádkem. Na
+produkčním vzorku klesl ORM load přibližně z 16 457 na 8 292 objektů a SQL z 36
+na 18; `LogicalEpisodeIdentity` zůstává přesně 3 100 výpočtů pro 3 100 Videos.
+Unresolved subtitle workflow používá stejný request-local parser index a
+adresářové/title/collection/root mapy; každý asset už znovu neprochází celou
+knihovnu jen kvůli nalezení stejného candidate scope.
+Scale query-count roste pouze po SQLAlchemy `selectinload` batches daných SQLite
+parameter limitem, ne o jeden dotaz na řádek. Existing test s 243 Videos drží
+stejných 8 statementů jako malá fixture.
+
+Hierarchy Review detail předindexuje Videos podle title a diagnostika vytváří
+title-card issue map v jednom průchodu. Bulk proposal zůstává title-local.
+Reverse confirmed-duplicate relationship se načítá jedním `selectinload`
+batchem místo lazy query pro každý fyzický řádek; production-like detail tím
+klesl z 82 na 17 SQL statementů a query-count zůstává stejný pro 1 i 201 Videos.
+Globální Hierarchy Review je stále plný workbench, ale jeho parser a identity
+práce roste lineárně, nikoli jako titles × Videos. Metadata Check zůstává
+read-only a při dnešní malé cardinalitě titles nepřidává zbytečný index na
+`metadata_status`; query plan pro Video/title/collection/variant/duplicate,
+compatibility obě FK osy, hierarchy status, external links i TitleMetadata
+používá existující indexy nebo PK.
+
+Syntetické trendové měření zahrnulo collections, titles, standardní i
+supplementary Videos, variants, confirmed duplicates, audio/internal/external
+subtitle evidence, compatibility a metadata links. Pro 3k / 10k / 25k byly
+časy homepage 0,92 / 2,94 / 7,26 s, katalogu 0,89 / 2,65 / 6,73 s, title detailu
+0,35 / 0,36 / 0,35 s, Hierarchy Review 0,70 / 1,70 / 4,17 s, Metadata Check
+0,22 / 0,60 / 1,34 s a Media Check 1,06 / 3,25 / 7,84 s. Parser i identity
+operation counts jsou lineární podle Videos; title detail zůstává konstantní
+podle velikosti zvoleného titulu. Wall-clock je informativní, CI invariants
+hlídají operation/query counts a semantic no-write stav.
+
+Regression testy explicitně ověřují nulové sémantické změny a nulové DML pro
+stabilní startup i GET `/`, Hierarchy Review, Metadata Check a Media Check.
+Requesty nemění `updated_at`, `verified_at`, hierarchy, numbering, metadata,
+compatibility, duplicate ani manual authority. Neexistuje globální mutable ani
+persistentní cache, schema tabulek/sloupců/indexů se nezměnilo a parser,
+Catalog, Hierarchy, Metadata, Media Check, Video Variant, duplicate i subtitle
+compatibility semantics zůstaly stejné.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

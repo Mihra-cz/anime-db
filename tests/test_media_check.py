@@ -403,7 +403,7 @@ def test_media_check_get_handles_detached_sibling_title_without_n_plus_one(
 
     baseline_response, baseline_statements = get_with_query_count()
     assert baseline_response.status_code == 200
-    assert baseline_statements == 12
+    assert baseline_statements <= 8
 
     with web_app.state.sessions() as session:
         collection = session.get(CatalogCollection, collection_id)
@@ -425,7 +425,7 @@ def test_media_check_get_handles_detached_sibling_title_without_n_plus_one(
     response, statements = get_with_query_count()
     assert response.status_code == 200
     assert "Detached Sibling" in response.body.decode()
-    assert statements == baseline_statements == 12
+    assert statements == baseline_statements
 
 
 def test_partial_translation_bulk_set_clear_is_atomic_and_hierarchy_isolated(tmp_path):

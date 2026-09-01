@@ -5,12 +5,15 @@ from difflib import SequenceMatcher
 import json
 from pathlib import PurePosixPath
 import re
+from types import MappingProxyType
+from typing import Mapping
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .catalog import (
-    SUPPLEMENTARY_SUBTYPE_TO_FILE_TYPE, detect_episode_number, normalize_language,
+    EpisodeNumberDetection, SUPPLEMENTARY_SUBTYPE_TO_FILE_TYPE,
+    detect_episode_number, normalize_language,
 )
 from .external_subtitle_compatibility import confirm_compatible
 from .models import ExternalSubtitle, UnresolvedExternalSubtitle, Video
@@ -35,6 +38,18 @@ class UnresolvedSubtitleRow:
     rejected_count: int
 
 
+@dataclass(frozen=True)
+class SubtitleCandidateIndex:
+    """Immutable request-local paths and parser facts for unresolved assets."""
+
+    by_directory: Mapping[PurePosixPath, tuple[Video, ...]]
+    by_title_root: Mapping[str, tuple[Video, ...]]
+    by_collection_root: Mapping[str, tuple[Video, ...]]
+    by_root_folder: Mapping[str, tuple[Video, ...]]
+    detections: Mapping[Video, EpisodeNumberDetection]
+    normalized_stems: Mapping[Video, str]
+
+
 def rejected_video_ids(subtitle: UnresolvedExternalSubtitle) -> set[int]:
     try:
         values = json.loads(subtitle.rejected_video_ids_json or "[]")
@@ -52,52 +67,70 @@ def _store_rejected_video_ids(
     subtitle.rejected_video_ids_json = json.dumps(sorted(video_ids))
 
 
-def _is_below(path: PurePosixPath, root: str) -> bool:
-    root_path = PurePosixPath(root)
-    return path == root_path or root_path in path.parents
+def build_subtitle_candidate_index(
+    videos: list[Video],
+    *, detections: Mapping[Video, EpisodeNumberDetection] | None = None,
+) -> SubtitleCandidateIndex:
+    by_directory: dict[PurePosixPath, list[Video]] = {}
+    by_title_root: dict[str, list[Video]] = {}
+    by_collection_root: dict[str, list[Video]] = {}
+    by_root_folder: dict[str, list[Video]] = {}
+    for video in videos:
+        by_directory.setdefault(
+            PurePosixPath(video.relative_path).parent, []
+        ).append(video)
+        if video.catalog_title is not None:
+            by_title_root.setdefault(
+                video.catalog_title.relative_root_path, []
+            ).append(video)
+        if video.catalog_collection is not None:
+            by_collection_root.setdefault(
+                video.catalog_collection.relative_root_path, []
+            ).append(video)
+        by_root_folder.setdefault(video.root_folder, []).append(video)
+    resolved_detections = dict(detections) if detections is not None else {
+        video: detect_episode_number(video.filename) for video in videos
+    }
+    return SubtitleCandidateIndex(
+        by_directory=MappingProxyType({
+            key: tuple(values) for key, values in by_directory.items()
+        }),
+        by_title_root=MappingProxyType({
+            key: tuple(values) for key, values in by_title_root.items()
+        }),
+        by_collection_root=MappingProxyType({
+            key: tuple(values) for key, values in by_collection_root.items()
+        }),
+        by_root_folder=MappingProxyType({
+            key: tuple(values) for key, values in by_root_folder.items()
+        }),
+        detections=MappingProxyType(resolved_detections),
+        normalized_stems=MappingProxyType({
+            video: _normalized_stem(video.filename) for video in videos
+        }),
+    )
 
 
 def _candidate_pool(
-    subtitle: UnresolvedExternalSubtitle, videos: list[Video],
+    subtitle: UnresolvedExternalSubtitle, index: SubtitleCandidateIndex,
 ) -> tuple[str, list[Video]]:
     subtitle_path = PurePosixPath(subtitle.relative_path)
-    same_directory = [
-        video for video in videos
-        if PurePosixPath(video.relative_path).parent == subtitle_path.parent
-    ]
+    same_directory = index.by_directory.get(subtitle_path.parent, ())
     if same_directory:
-        return "stejný adresář", same_directory
+        return "stejný adresář", list(same_directory)
 
-    title_roots = {
-        video.catalog_title.relative_root_path
-        for video in videos
-        if video.catalog_title is not None
-        and _is_below(subtitle_path, video.catalog_title.relative_root_path)
-    }
-    if title_roots:
-        root = max(title_roots, key=lambda value: len(PurePosixPath(value).parts))
-        return "stejná část anime", [
-            video for video in videos
-            if video.catalog_title is not None
-            and video.catalog_title.relative_root_path == root
-        ]
+    for parent in subtitle_path.parents:
+        title_videos = index.by_title_root.get(str(parent))
+        if title_videos:
+            return "stejná část anime", list(title_videos)
 
-    collection_roots = {
-        video.catalog_collection.relative_root_path
-        for video in videos
-        if video.catalog_collection is not None
-        and _is_below(subtitle_path, video.catalog_collection.relative_root_path)
-    }
-    if collection_roots:
-        root = max(collection_roots, key=lambda value: len(PurePosixPath(value).parts))
-        return "stejná kolekce", [
-            video for video in videos
-            if video.catalog_collection is not None
-            and video.catalog_collection.relative_root_path == root
-        ]
+    for parent in subtitle_path.parents:
+        collection_videos = index.by_collection_root.get(str(parent))
+        if collection_videos:
+            return "stejná kolekce", list(collection_videos)
 
     root_folder = subtitle_path.parts[0] if len(subtitle_path.parts) > 1 else "."
-    same_root = [video for video in videos if video.root_folder == root_folder]
+    same_root = list(index.by_root_folder.get(root_folder, ()))
     return ("stejný kořen anime", same_root) if same_root else ("bez kandidátů", [])
 
 
@@ -107,14 +140,14 @@ def _normalized_stem(filename: str) -> str:
 
 def _rank_candidate(
     subtitle: UnresolvedExternalSubtitle, video: Video, scope: str,
+    *, subtitle_number: EpisodeNumberDetection,
+    video_number: EpisodeNumberDetection,
+    video_stem: str,
 ) -> SubtitleCandidate:
     subtitle_stem = _normalized_stem(subtitle.filename)
-    video_stem = _normalized_stem(video.filename)
     similarity = SequenceMatcher(None, subtitle_stem, video_stem).ratio()
     score = similarity
     reasons = [scope, f"podobnost názvu {round(similarity * 100)} %"]
-    subtitle_number = detect_episode_number(subtitle.filename)
-    video_number = detect_episode_number(video.filename)
     if (
         subtitle_number.sortable_episode_value is not None
         and subtitle_number.sortable_episode_value == video_number.sortable_episode_value
@@ -127,8 +160,10 @@ def _rank_candidate(
 
 def subtitle_candidates(
     subtitle: UnresolvedExternalSubtitle, videos: list[Video],
+    *, candidate_index: SubtitleCandidateIndex | None = None,
 ) -> tuple[str, tuple[SubtitleCandidate, ...], int]:
-    scope, pool = _candidate_pool(subtitle, videos)
+    index = candidate_index or build_subtitle_candidate_index(videos)
+    scope, pool = _candidate_pool(subtitle, index)
     subtitle_number = detect_episode_number(subtitle.filename)
     if subtitle_number.is_supplementary and subtitle_number.supplementary_type:
         expected_file_type = SUPPLEMENTARY_SUBTYPE_TO_FILE_TYPE[
@@ -141,7 +176,7 @@ def subtitle_candidates(
     elif subtitle_number.sortable_episode_value is not None:
         same_number = [
             video for video in pool
-            if detect_episode_number(video.filename).sortable_episode_value
+            if index.detections[video].sortable_episode_value
             == subtitle_number.sortable_episode_value
         ]
         if same_number:
@@ -150,7 +185,12 @@ def subtitle_candidates(
     rejected = rejected_video_ids(subtitle)
     ranked = sorted(
         (
-            _rank_candidate(subtitle, video, scope)
+            _rank_candidate(
+                subtitle, video, scope,
+                subtitle_number=subtitle_number,
+                video_number=index.detections[video],
+                video_stem=index.normalized_stems[video],
+            )
             for video in pool
             if video.id not in rejected
         ),
@@ -165,10 +205,14 @@ def subtitle_candidates(
 
 def build_unresolved_subtitle_rows(
     subtitles: list[UnresolvedExternalSubtitle], videos: list[Video],
+    *, candidate_index: SubtitleCandidateIndex | None = None,
 ) -> tuple[UnresolvedSubtitleRow, ...]:
+    index = candidate_index or build_subtitle_candidate_index(videos)
     rows = []
     for subtitle in sorted(subtitles, key=lambda item: item.relative_path.casefold()):
-        scope, candidates, count = subtitle_candidates(subtitle, videos)
+        scope, candidates, count = subtitle_candidates(
+            subtitle, videos, candidate_index=index,
+        )
         if candidates:
             video = candidates[0].video
             if video.catalog_title is not None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -389,8 +390,9 @@ def supplementary_context_map(videos: list[Video]) -> dict[str, list[CatalogTitl
 
 def video_numbering_identity(
     video: Video, *, title_names: dict[str, list[CatalogTitle]] | None = None,
+    detection: EpisodeNumberDetection | None = None,
 ) -> VideoNumberingIdentity | None:
-    detection = detect_episode_number(video.filename)
+    detection = detection or detect_episode_number(video.filename)
     supplementary = automatic_supplementary_numbering(video, detection)
     recap_position = manual_recap_episode_number(video)
     if recap_position is not None:
@@ -500,9 +502,12 @@ def logical_episode_identity(
     *,
     catalog_title: CatalogTitle | None = None,
     title_names: dict[str, list[CatalogTitle]] | None = None,
+    detection: EpisodeNumberDetection | None = None,
 ) -> LogicalEpisodeIdentity | None:
     """Derive the single shared standard-episode identity, never a variant key."""
-    numbering = video_numbering_identity(video, title_names=title_names)
+    numbering = video_numbering_identity(
+        video, title_names=title_names, detection=detection,
+    )
     title_key = _catalog_title_identity_key(video, catalog_title)
     if numbering is None or numbering.kind != "standard" or title_key is None:
         return None
@@ -523,6 +528,7 @@ def logical_episode_partitions(
     videos: list[Video],
     *,
     catalog_title: CatalogTitle | None = None,
+    detections: Mapping[Video, EpisodeNumberDetection] | None = None,
 ) -> tuple[LogicalEpisodePartition, ...]:
     """Partition active standard videos by logical episode and confirmed lane.
 
@@ -537,6 +543,7 @@ def logical_episode_partitions(
             video,
             catalog_title=catalog_title,
             title_names=title_names,
+            detection=detections.get(video) if detections is not None else None,
         )
         if identity is not None and not is_nonprimary_duplicate_video(video):
             by_identity.setdefault(identity, []).append(video)
@@ -1043,9 +1050,10 @@ def effective_video_numbering(
     title: CatalogTitle | None = None,
     *,
     use_current_title: bool = True,
+    detection: EpisodeNumberDetection | None = None,
 ) -> EffectiveVideoNumbering:
     """Sjednotí manual/content/title autoritu nad automatickým filename parserem."""
-    detection = detect_episode_number(video.filename)
+    detection = detection or detect_episode_number(video.filename)
     effective_title = (
         title
         if title is not None or not use_current_title
@@ -1105,11 +1113,21 @@ def effective_video_numbering(
 
 def summarize_title_numbering(
     videos: list[Video], title: CatalogTitle | None = None,
+    *, detections: Mapping[Video, EpisodeNumberDetection] | None = None,
 ) -> TitleNumberingSummary:
+    resolved_detections = detections or {
+        video: detect_episode_number(video.filename) for video in videos
+    }
     supplemental = bool(
         title is not None and title.effective_part_type in SUPPLEMENTAL_PART_TYPES
     )
-    states = [effective_video_numbering(video, title) for video in videos]
+    states = [
+        effective_video_numbering(
+            video, title,
+            detection=resolved_detections.get(video),
+        )
+        for video in videos
+    ]
     confirmed_duplicate = [is_nonprimary_duplicate_video(video) for video in videos]
     unnumbered_standard = 0 if supplemental else sum(
         state.is_standard
@@ -1131,6 +1149,7 @@ def summarize_title_numbering(
     partitions = () if supplemental else logical_episode_partitions(
         videos,
         catalog_title=title,
+        detections=resolved_detections,
     )
     unique_values = {
         partition.identity.season_episode_number for partition in partitions
@@ -1140,14 +1159,13 @@ def summarize_title_numbering(
     gaps = tuple(
         sorted(set(range(episode_min, episode_max + 1)) - unique_values)
     ) if episode_min is not None and episode_max is not None else ()
-    duplicate_groups = () if supplemental else unresolved_duplicate_groups(
-        videos,
-        catalog_title=title,
-    )
-    duplicates = tuple(sorted({
-        group.episode_number
-        for group in duplicate_groups
-        if group.supplementary_type is None
+    # Reuse the already-built logical partitions.  Calling the public duplicate
+    # resolver here used to partition the same title a second time, doubling
+    # parser and LogicalEpisodeIdentity work on every catalog/review summary.
+    duplicates = () if supplemental else tuple(sorted({
+        partition.identity.season_episode_number
+        for partition in partitions
+        if partition.unresolved_video_groups
     }))
     logical_episode_count = len(partitions)
     return TitleNumberingSummary(
@@ -1204,6 +1222,7 @@ def effective_video_sort_position(
         video,
         title=loaded_title,
         use_current_title=False,
+        detection=detection,
     )
     if state.is_standard and state.season_episode_number is not None:
         return Decimal(state.season_episode_number)

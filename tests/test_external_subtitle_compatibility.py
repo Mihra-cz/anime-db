@@ -1351,7 +1351,7 @@ def test_media_check_compatibility_loading_has_constant_statement_count(
         return count, response
 
     one_episode_count, _ = count_queries()
-    assert one_episode_count == 13
+    assert one_episode_count <= 8
     with web_app.state.sessions() as session:
         title = session.get(CatalogTitle, ids["title"])
         collection = session.get(CatalogCollection, ids["collection"])

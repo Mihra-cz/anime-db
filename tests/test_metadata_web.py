@@ -3981,10 +3981,10 @@ def test_homepage_collection_identity_is_not_taken_from_supplementary_title(
     assert ">NC Metadata Romaji</a>" not in logical_homepage
     for name, title_id in film_ids.items():
         assert f'href="/titles/{title_id}">{name}</a>' in logical_homepage
-    # Logical episode aggregation and compatibility-aware subtitle availability
-    # each use one bounded select-in load; the budget remains independent of the
-    # number of videos, subtitle assets, and collections.
-    assert homepage_query_count == 11
+    # The overview reads subtitle language/path evidence through two scalar
+    # batches and keeps the remaining title/collection graph bounded.  Leave a
+    # ceiling rather than coupling the regression to loader batching details.
+    assert homepage_query_count <= 7
 
     collection_detail = endpoints["/collections/{collection_id}"](
         get_request(f"/collections/{overlord_id}"), overlord_id,

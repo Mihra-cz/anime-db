@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload, selectinload
 
 from .catalog import (
+    AudioLanguageTrack,
     MANUAL_LANGUAGE_CHOICES,
     FILTER_LABELS,
     PHYSICAL_ROOT_VIDEO_GROUP_LABEL,
@@ -23,6 +24,8 @@ from .catalog import (
     ROOT_VIDEO_GROUP_LABEL,
     TITLE_NAME_PREFERENCE_LABELS,
     build_catalog_results,
+    build_catalog_request_index,
+    build_video_language_profile_from_evidence,
     build_video_language_profile,
     catalog_title_display_title,
     catalog_title_series_label,
@@ -45,6 +48,7 @@ from .catalog import (
     detected_external_subtitle_language,
     language_display_label,
     normalize_search_query,
+    normalize_language,
     normalize_title_name_preference,
     normalize_title,
     set_manual_hardsub,
@@ -54,6 +58,7 @@ from .catalog import (
     subtitle_track_display,
     title_videos,
     translation_status,
+    translation_status_from_language_evidence,
     unresolved_duplicate_video_ids,
     video_matches_filter,
     video_matches_search,
@@ -68,6 +73,7 @@ from .catalog_video_presentation import (
 )
 from .database import Base, make_engine, make_session_factory
 from .external_subtitle_compatibility import (
+    POSITIVE_COMPATIBILITY_STATUSES,
     apply_compatibility_decision,
     build_compatibility_candidate_index,
     build_compatibility_presentations,
@@ -78,7 +84,7 @@ from .external_subtitle_compatibility import (
     external_subtitle_is_shared,
     preview_compatibility_decision,
 )
-from .migrations import migrate_schema
+from .migrations import migrate_schema_at_startup
 from .hierarchy_authority import activate_manual_hierarchy_snapshot
 from .hierarchy_evaluation import HierarchyIssueCode, finalize_hierarchy_write
 from .hierarchy_review import (
@@ -122,6 +128,7 @@ from .media_parts import (
 )
 from .media_check import (
     AUDIO_FILTER_LABELS, AUDIO_STATUS_LABELS, AUDIO_STATUS_SEVERITY,
+    MediaAudioTrack, MediaInternalSubtitle,
     SUBTITLE_FILTER_LABELS, SUBTITLE_STATUS_LABELS,
     build_media_check_evaluation, build_media_check_results,
     set_czsk_availability_manual,
@@ -163,7 +170,7 @@ from .unassigned_videos import (
 from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
     ExternalSubtitleCompatibility,
-    ExternalTitleLink, TitleMetadata,
+    ExternalTitleLink, InternalSubtitle, TitleMetadata,
     UnresolvedExternalSubtitle, Video, VideoVariantGroup, utc_now,
 )
 from .numbering import (
@@ -177,7 +184,8 @@ from .numbering import (
 )
 from .scanner import LibrarySafetyError, scan_library
 from .subtitle_review import (
-    build_unresolved_subtitle_rows, confirm_subtitle_no_match,
+    build_subtitle_candidate_index, build_unresolved_subtitle_rows,
+    confirm_subtitle_no_match,
     can_reopen_manual_subtitle_link, manually_link_subtitle,
     reopen_manual_subtitle_link, reopen_subtitle_review,
     set_subtitle_candidate_rejected, subtitle_candidates,
@@ -292,18 +300,20 @@ def _homepage_collection_rows(
     videos: list[Video],
     collection_titles: dict[int, tuple[CatalogTitle, ...]],
     title_name_preference: object = "romaji",
+    *, request_index=None,
 ) -> list[dict]:
     """Sestaví navigační homepage nad uloženou logickou hierarchií."""
     results = build_catalog_results(
         videos, "all", sort="title", direction="asc",
         title_name_preference=title_name_preference,
+        request_index=request_index,
     )
     rows = []
     for group in results.groups:
         if group.is_root_group or group.catalog_collection_id is None:
             continue
         titles = collection_titles.get(group.catalog_collection_id, ())
-        presentation = build_collection_presentation(titles)
+        presentation = build_collection_presentation(titles, include_videos=False)
         group_videos = results.videos_by_title[group.relative_path]
         direct_title = presentation.direct_title
         has_unambiguous_title = bool(
@@ -327,9 +337,13 @@ def _homepage_collection_rows(
     return rows
 
 
-def _load_videos(sessions) -> list[Video]:
+def _load_videos(
+    sessions, *,
+    catalog_title_id: int | None = None,
+    catalog_collection_id: int | None = None,
+) -> list[Video]:
     with sessions() as session:
-        return list(session.scalars(select(Video).options(
+        statement = select(Video).options(
             selectinload(Video.audio_tracks), selectinload(Video.internal_subtitles),
             selectinload(Video.external_subtitle_compatibilities).joinedload(
                 ExternalSubtitleCompatibility.external_subtitle
@@ -344,8 +358,197 @@ def _load_videos(sessions) -> list[Video]:
                 CatalogCollection.titles
             ).joinedload(CatalogTitle.metadata_record),
             selectinload(Video.duplicate_of),
+            selectinload(Video.duplicate_copies),
             selectinload(Video.video_variant_group),
-        ).order_by(Video.relative_path)).all())
+        )
+        if catalog_title_id is not None:
+            statement = statement.where(Video.catalog_title_id == catalog_title_id)
+        if catalog_collection_id is not None:
+            statement = statement.where(
+                Video.catalog_collection_id == catalog_collection_id
+            )
+        return list(session.scalars(statement.order_by(Video.relative_path)).all())
+
+
+def _load_catalog_overview(sessions):
+    """Load catalog rows plus batched scalar subtitle evidence, without track ORM graphs."""
+    with sessions() as session:
+        videos = list(session.scalars(select(Video).options(
+            joinedload(Video.catalog_title).joinedload(
+                CatalogTitle.collection
+            ).selectinload(CatalogCollection.titles).joinedload(
+                CatalogTitle.metadata_record
+            ),
+            joinedload(Video.catalog_title).joinedload(CatalogTitle.metadata_record),
+            joinedload(Video.catalog_collection).selectinload(
+                CatalogCollection.titles
+            ).joinedload(CatalogTitle.metadata_record),
+            joinedload(Video.duplicate_of),
+            joinedload(Video.video_variant_group),
+        ).order_by(Video.relative_path)).unique().all())
+        internal_rows = session.execute(select(
+            InternalSubtitle.video_id,
+            InternalSubtitle.normalized_language,
+            InternalSubtitle.title,
+        )).all()
+        external_rows = session.execute(select(
+            ExternalSubtitleCompatibility.video_id,
+            ExternalSubtitle.normalized_language,
+            ExternalSubtitle.manual_language,
+            ExternalSubtitle.relative_path,
+        ).join(
+            ExternalSubtitle,
+            ExternalSubtitle.id
+            == ExternalSubtitleCompatibility.external_subtitle_id,
+        ).where(
+            ExternalSubtitleCompatibility.status.in_(
+                POSITIVE_COMPATIBILITY_STATUSES
+            )
+        )).all()
+
+    internal_by_video: dict[int, set[str]] = {}
+    effective_external_by_video: dict[int, set[str]] = {}
+    detected_external_by_video: dict[int, set[str]] = {}
+    external_paths_by_video_id: dict[int, list[str]] = {}
+    for video_id, language, title in internal_rows:
+        internal_by_video.setdefault(video_id, set()).add(
+            normalize_language(language, title)
+        )
+    for video_id, detected_language, manual_language, relative_path in external_rows:
+        detected = normalize_language(detected_language)
+        detected_external_by_video.setdefault(video_id, set()).add(detected)
+        effective_external_by_video.setdefault(video_id, set()).add(
+            normalize_language(manual_language)
+            if manual_language is not None else detected
+        )
+        external_paths_by_video_id.setdefault(video_id, []).append(relative_path)
+
+    statuses = {
+        video: translation_status_from_language_evidence(
+            video,
+            internal_languages=internal_by_video.get(video.id, ()),
+            external_languages=effective_external_by_video.get(video.id, ()),
+            detected_external_languages=detected_external_by_video.get(video.id, ()),
+        )
+        for video in videos
+    }
+    external_paths = {
+        video: tuple(sorted(
+            set(external_paths_by_video_id.get(video.id, ())), key=str.casefold,
+        ))
+        for video in videos
+    }
+    return videos, build_catalog_request_index(
+        videos,
+        translation_statuses=statuses,
+        external_subtitle_paths=external_paths,
+    )
+
+
+def _load_media_check_data(sessions):
+    """Load compatibility authority plus scalar audio/subtitle track evidence."""
+    with sessions() as session:
+        videos = list(session.scalars(select(Video).options(
+            selectinload(Video.external_subtitle_compatibilities).joinedload(
+                ExternalSubtitleCompatibility.external_subtitle
+            ).selectinload(ExternalSubtitle.compatibilities),
+            joinedload(Video.catalog_title).joinedload(
+                CatalogTitle.collection
+            ).selectinload(CatalogCollection.titles).joinedload(
+                CatalogTitle.metadata_record
+            ),
+            joinedload(Video.catalog_title).joinedload(CatalogTitle.metadata_record),
+            joinedload(Video.catalog_collection).selectinload(
+                CatalogCollection.titles
+            ).joinedload(CatalogTitle.metadata_record),
+            joinedload(Video.duplicate_of),
+            joinedload(Video.video_variant_group),
+        ).order_by(Video.relative_path)).unique().all())
+        audio_rows = session.execute(select(
+            AudioTrack.id,
+            AudioTrack.video_id,
+            AudioTrack.stream_index,
+            AudioTrack.codec,
+            AudioTrack.language,
+            AudioTrack.manual_language,
+        )).all()
+        internal_rows = session.execute(select(
+            InternalSubtitle.id,
+            InternalSubtitle.video_id,
+            InternalSubtitle.stream_index,
+            InternalSubtitle.codec,
+            InternalSubtitle.language,
+            InternalSubtitle.normalized_language,
+            InternalSubtitle.title,
+        )).all()
+
+    audio_by_video: dict[int, list[MediaAudioTrack]] = {}
+    internal_by_video: dict[int, set[str]] = {}
+    internal_rows_by_video: dict[int, list[MediaInternalSubtitle]] = {}
+    for track_id, video_id, stream_index, codec, raw_language, manual_language in audio_rows:
+        audio_by_video.setdefault(video_id, []).append(MediaAudioTrack(
+            id=track_id,
+            stream_index=stream_index,
+            codec=codec,
+            language=raw_language or "unknown",
+            manual_language=manual_language,
+        ))
+    for (
+        subtitle_id, video_id, stream_index, codec, raw_language,
+        language, title,
+    ) in internal_rows:
+        internal_by_video.setdefault(video_id, set()).add(
+            normalize_language(language, title)
+        )
+        internal_rows_by_video.setdefault(video_id, []).append(
+            MediaInternalSubtitle(
+                id=subtitle_id,
+                stream_index=stream_index,
+                codec=codec,
+                language=raw_language or "unknown",
+                normalized_language=language or "unknown",
+                title=title,
+            )
+        )
+
+    profiles = {
+        video: build_video_language_profile_from_evidence(
+            video,
+            audio_tracks=(
+                AudioLanguageTrack(
+                    stream_index=track.stream_index,
+                    codec=track.codec,
+                    raw_language=track.language,
+                    detected_language=normalize_language(track.language),
+                    manual_language=track.manual_language,
+                    effective_language=(
+                        normalize_language(track.manual_language)
+                        if track.manual_language is not None
+                        else normalize_language(track.language)
+                    ),
+                )
+                for track in audio_by_video.get(video.id, ())
+            ),
+            internal_languages=internal_by_video.get(video.id, ()),
+            external_languages=(
+                effective_external_subtitle_language(subtitle)
+                for subtitle in effective_external_subtitles_for_video(video)
+            ),
+        )
+        for video in videos
+    }
+    return (
+        videos,
+        profiles,
+        {
+            video_id: tuple(tracks)
+            for video_id, tracks in audio_by_video.items()
+        },
+        {
+            video_id: tuple(subtitles)
+            for video_id, subtitles in internal_rows_by_video.items()
+        },
+    )
 
 
 def _load_catalog_title(session, catalog_title_id: int | None):
@@ -623,8 +826,9 @@ def _empty_stats() -> dict[str, int]:
 
 def _add_video(
     stats: dict[str, int], video: Video, *, separate_films: bool = False,
+    status=None,
 ) -> None:
-    status = translation_status(video)
+    status = status or translation_status(video)
     stats["total"] += 1
     if separate_films and is_film_video(video):
         stats["films"] += 1
@@ -650,7 +854,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         Base.metadata.create_all(engine)
-        migrate_schema(engine)
+        migrate_schema_at_startup(engine)
         logger.info("AnimeDB spuštěno; knihovna=%s", settings.anime_path)
         yield
         engine.dispose()
@@ -712,26 +916,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         confirm_deletions: bool = False,
         q: str = "",
     ):
+        videos, request_index = _load_catalog_overview(sessions)
         with sessions() as session:
-            videos = session.scalars(select(Video).options(
-                selectinload(Video.internal_subtitles),
-                selectinload(Video.external_subtitle_compatibilities).joinedload(
-                    ExternalSubtitleCompatibility.external_subtitle
-                ),
-                selectinload(Video.catalog_title).selectinload(
-                    CatalogTitle.collection
-                ).selectinload(CatalogCollection.titles),
-                selectinload(Video.catalog_title).selectinload(CatalogTitle.metadata_record),
-                selectinload(Video.catalog_collection),
-                selectinload(Video.duplicate_of),
-                selectinload(Video.video_variant_group),
-            )).all()
             collection_titles = {
                 collection.id: tuple(collection.titles)
                 for collection in session.scalars(select(CatalogCollection).options(
-                    selectinload(CatalogCollection.titles).selectinload(
-                        CatalogTitle.videos
-                    )
+                    selectinload(CatalogCollection.titles)
                 )).all()
             }
         folders: dict[str, dict[str, int]] = {}
@@ -740,11 +930,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             videos,
             collection_titles,
             get_preferred_title_language(request),
+            request_index=request_index,
         )
         totals["anime_titles"] = len(collection_rows)
         for video in videos:
             folder_stats = folders.setdefault(video.root_folder, _empty_stats())
-            _add_video(folder_stats, video)
+            status = request_index.translation_statuses[video]
+            _add_video(folder_stats, video, status=status)
             if is_root_video(video):
                 key = (
                     "logical_unassigned"
@@ -752,7 +944,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     else "logical_assigned"
                 )
                 folder_stats[key] = folder_stats.get(key, 0) + 1
-            _add_video(totals, video, separate_films=True)
+            _add_video(totals, video, separate_films=True, status=status)
         return templates.TemplateResponse(request, "index.html", {
             "collections": collection_rows,
             "folders": sorted(folders.items()), "totals": totals, "message": message,
@@ -1033,10 +1225,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
-        videos = _load_videos(sessions)
+        videos, request_index = _load_catalog_overview(sessions)
         results = build_catalog_results(
             videos, filter_name, q, sort, direction,
             title_name_preference=get_preferred_title_language(request),
+            request_index=request_index,
         )
         def sort_url(column: str) -> str:
             return catalog_state_url(
@@ -1073,11 +1266,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
-        all_videos = _load_videos(sessions)
-        results = build_catalog_results(
-            all_videos, filter_name, q, sort, direction,
-            title_name_preference=get_preferred_title_language(request),
-        )
         with sessions() as session:
             catalog_title = _load_catalog_title(session, catalog_title_id)
             if catalog_title is None and series_path:
@@ -1108,6 +1296,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return local_redirect_response(
                 f"/titles/{catalog_title.id}?{urlencode(parameters)}", status_code=307
             )
+        all_videos = (
+            _load_videos(sessions, catalog_title_id=catalog_title.id)
+            if catalog_title is not None else _load_videos(sessions)
+        )
+        detail_request_index = build_catalog_request_index(all_videos)
+        results = build_catalog_results(
+            all_videos, filter_name, q, sort, direction,
+            title_name_preference=get_preferred_title_language(request),
+            request_index=detail_request_index,
+        )
         primary_presentation = None
         if catalog_title and catalog_title.collection is not None:
             collection_presentation = build_collection_presentation(
@@ -1131,6 +1329,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if video_matches_filter(
                 video, filter_name,
                 unresolved_duplicate_ids=detail_unresolved_duplicate_ids,
+                status=detail_request_index.translation_statuses.get(video),
             )
         ]
         folded_query = results.query.casefold()
@@ -1143,10 +1342,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         detail_videos = (
             filtered_candidates
             if not folded_query or title_query_match
-            else [video for video in filtered_candidates if video_matches_search(video, folded_query)]
+            else [
+                video for video in filtered_candidates
+                if video_matches_search(
+                    video, folded_query,
+                    detection=detail_request_index.detections.get(video),
+                )
+            ]
         )
         videos, normalized_video_sort, normalized_video_direction = sort_title_videos(
-            detail_videos, video_sort, video_direction
+            detail_videos, video_sort, video_direction,
+            detections=detail_request_index.detections,
         )
         title_video_presentation = (
             build_catalog_title_video_presentation(
@@ -1238,10 +1444,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "catalog_title_series_label": catalog_title_series_label,
             "subtitle_track_display": subtitle_track_display,
             "manual_hardsub_state": manual_hardsub_state,
-            "translation_status": translation_status,
+            "translation_status": lambda video: (
+                detail_request_index.translation_statuses.get(video)
+                or translation_status(video)
+            ),
             "video_matches_filter": lambda video, selected_filter: video_matches_filter(
                 video, selected_filter,
                 unresolved_duplicate_ids=detail_unresolved_duplicate_ids,
+                status=(
+                    detail_request_index.translation_statuses.get(video)
+                    or translation_status(video)
+                ),
             ),
             "unresolved_duplicate_video_ids": detail_unresolved_duplicate_ids,
             "title_video_ids": {
@@ -1329,7 +1542,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ).where(CatalogCollection.id == collection_id))
         if collection is None:
             raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
-        all_videos = _load_videos(sessions)
+        all_videos = _load_videos(
+            sessions, catalog_collection_id=collection.id,
+        )
+        collection_request_index = build_catalog_request_index(all_videos)
         all_unresolved_duplicate_ids = unresolved_duplicate_video_ids(all_videos)
         videos_by_part: dict[int, list[Video]] = {}
         for video in all_videos:
@@ -1349,12 +1565,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             title_videos_list = videos_by_part.get(title.id, [])
             stats = _empty_stats()
             for video in title_videos_list:
-                _add_video(stats, video)
+                _add_video(
+                    stats, video,
+                    status=collection_request_index.translation_statuses.get(video),
+                )
             filtered = [
                 video for video in title_videos_list
                 if video_matches_filter(
                     video, filter_name,
                     unresolved_duplicate_ids=all_unresolved_duplicate_ids,
+                    status=collection_request_index.translation_statuses.get(video),
                 )
             ]
             title_query_match = bool(folded_query) and (
@@ -1363,7 +1583,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             matched = (
                 filtered if not folded_query or collection_query_match or title_query_match
-                else [video for video in filtered if video_matches_search(video, folded_query)]
+                else [
+                    video for video in filtered
+                    if video_matches_search(
+                        video, folded_query,
+                        detection=collection_request_index.detections.get(video),
+                    )
+                ]
             )
             parts_by_title_id[title.id] = {
                 "title": title, "stats": stats, "metadata": title.metadata_record,
@@ -1444,6 +1670,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ).joinedload(ExternalSubtitleCompatibility.external_subtitle),
                 selectinload(CatalogCollection.videos).selectinload(Video.duplicate_of),
                 selectinload(CatalogCollection.videos).selectinload(
+                    Video.duplicate_copies
+                ),
+                selectinload(CatalogCollection.videos).selectinload(
                     Video.video_variant_group
                 ),
             ).where(CatalogCollection.id == collection_id))
@@ -1477,6 +1706,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for title in collection.titles
                 if title.metadata_record or title.external_links
             ]
+            videos_by_title: dict[int | None, list[Video]] = {}
+            for video in videos:
+                videos_by_title.setdefault(video.catalog_title_id, []).append(video)
             title_numbering = []
             for title in sorted(
                 collection.titles,
@@ -1485,9 +1717,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     value.local_title.casefold(),
                 ),
             ):
-                title_videos_list = [
-                    video for video in videos if video.catalog_title_id == title.id
-                ]
+                title_videos_list = videos_by_title.get(title.id, [])
                 title_card_issues = review_diagnostics.for_title_card(title)
                 variant_groups = tuple(sorted(
                     title.video_variant_groups,
@@ -1552,9 +1782,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for video in videos
                 if (state := effective_video_numbering(video)).is_nonstandard
             ]
-            unassigned_videos = _hierarchy_video_groups([
-                video for video in videos if video.catalog_title_id is None
-            ])
+            unassigned_videos = _hierarchy_video_groups(
+                videos_by_title.get(None, [])
+            )
             part_confirmation = single_title_confirmation_suggestion(collection)
             part_confirmation_summary = next((
                 item["summary"] for item in title_numbering
@@ -1736,8 +1966,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         page: int = 1,
         message: str | None = None,
     ):
-        videos = _load_videos(sessions)
-        compatibility_candidate_index = build_compatibility_candidate_index(videos)
+        (
+            videos, language_profiles, media_audio_tracks,
+            media_internal_subtitles,
+        ) = _load_media_check_data(sessions)
+        detections = {
+            video: detect_episode_number(video.filename) for video in videos
+        }
+        compatibility_candidate_index = build_compatibility_candidate_index(
+            videos, detections=detections,
+        )
         external_subtitle_states = build_video_external_subtitle_states(
             videos, candidate_index=compatibility_candidate_index,
         )
@@ -1750,6 +1988,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 page=page,
                 title_name_preference=get_preferred_title_language(request),
                 external_subtitle_states=external_subtitle_states,
+                detections=detections,
+                language_profiles=language_profiles,
+                audio_tracks=media_audio_tracks,
+                internal_subtitles=media_internal_subtitles,
             )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1774,6 +2016,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ).all())
             unresolved_rows = build_unresolved_subtitle_rows(
                 unresolved_subtitles, videos,
+                candidate_index=build_subtitle_candidate_index(
+                    videos, detections=detections,
+                ),
             )
             unresolved_subtitle_counts = {
                 "all": len(unresolved_subtitles),

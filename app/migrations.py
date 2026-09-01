@@ -39,6 +39,12 @@ from .video_variants import assign_video_catalog_title
 logger = logging.getLogger(__name__)
 
 
+# SQLite's native application-version marker separates one-time compatibility
+# reconstruction from ordinary stable startup.  Increment this only when the
+# compatibility pipeline itself changes and must run once on existing data.
+STARTUP_COMPATIBILITY_VERSION = 1
+
+
 AutomaticStructuralInput = tuple[str, int | None, int | None, str | None]
 
 
@@ -733,3 +739,26 @@ def migrate_schema(engine) -> None:
             ))
 
     _retire_external_subtitle_video_id(engine)
+
+
+def migrate_schema_at_startup(engine) -> bool:
+    """Run compatibility reconstruction once, then keep stable startup read-only.
+
+    Explicit callers of ``migrate_schema`` still request the full idempotent
+    reconstruction used by migration/lifecycle tests and maintenance tools.
+    The application lifespan uses this version-gated entry point so every
+    ordinary restart does not rebuild and transiently rewrite the whole library.
+    """
+    if engine.dialect.name != "sqlite":
+        migrate_schema(engine)
+        return True
+    with engine.connect() as connection:
+        current = int(connection.scalar(text("PRAGMA user_version")) or 0)
+    if current >= STARTUP_COMPATIBILITY_VERSION:
+        return False
+    migrate_schema(engine)
+    with engine.begin() as connection:
+        connection.execute(text(
+            f"PRAGMA user_version = {STARTUP_COMPATIBILITY_VERSION}"
+        ))
+    return True

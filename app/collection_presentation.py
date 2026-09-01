@@ -109,18 +109,25 @@ class CollectionPresentation:
         )
 
 
-def _title_presentation(title: CatalogTitle) -> TitlePresentation:
-    videos, _, _ = sort_title_videos(title.videos)
+def _title_presentation(
+    title: CatalogTitle, *, include_videos: bool,
+) -> TitlePresentation:
+    videos, _, _ = (
+        sort_title_videos(title.videos) if include_videos else ([], "default", "asc")
+    )
     return TitlePresentation(title=title, videos=tuple(videos))
 
 
 def _supplementary_groups(
     titles: Iterable[CatalogTitle],
+    *, include_videos: bool,
 ) -> tuple[SupplementaryGroupPresentation, ...]:
     grouped: dict[str, list[TitlePresentation]] = {}
     for title in titles:
         part_type = title.effective_part_type
-        grouped.setdefault(part_type, []).append(_title_presentation(title))
+        grouped.setdefault(part_type, []).append(_title_presentation(
+            title, include_videos=include_videos,
+        ))
     return tuple(
         SupplementaryGroupPresentation(
             part_type=part_type,
@@ -135,6 +142,7 @@ def _supplementary_groups(
 
 def build_collection_presentation(
     titles: Iterable[CatalogTitle],
+    *, include_videos: bool = True,
 ) -> CollectionPresentation:
     """Nest only supplementary titles with one exact persisted season match.
 
@@ -179,11 +187,13 @@ def build_collection_presentation(
                 title=title,
                 supplementary_groups=_supplementary_groups(
                     attached.get(id(title), ()),
+                    include_videos=include_videos,
                 ),
             )
             for title in primary_titles
         ),
         anime_level_parts=tuple(
-            _title_presentation(title) for title in anime_level
+            _title_presentation(title, include_videos=include_videos)
+            for title in anime_level
         ),
     )

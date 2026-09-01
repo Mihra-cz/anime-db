@@ -6,7 +6,7 @@ from math import ceil
 from typing import Literal, Mapping
 
 from .catalog import (
-    AudioStatus,
+    AudioStatus, EpisodeNumberDetection,
     VideoLanguageProfile,
     build_video_language_profile,
     catalog_collection_display_title,
@@ -95,6 +95,29 @@ class MediaCheckEvaluation:
 
 
 @dataclass(frozen=True)
+class MediaAudioTrack:
+    """Read-only track fields rendered by Media Check."""
+
+    id: int
+    stream_index: int
+    codec: str | None
+    language: str
+    manual_language: str | None
+
+
+@dataclass(frozen=True)
+class MediaInternalSubtitle:
+    """Read-only internal-subtitle fields rendered by Media Check."""
+
+    id: int
+    stream_index: int
+    codec: str | None
+    language: str
+    normalized_language: str
+    title: str | None
+
+
+@dataclass(frozen=True)
 class MediaCheckRow:
     video: Video
     evaluation: MediaCheckEvaluation
@@ -103,6 +126,8 @@ class MediaCheckRow:
     hierarchy_label: str
     episode_label: str
     external_subtitle_state: VideoExternalSubtitleState
+    audio_tracks: tuple[MediaAudioTrack, ...]
+    internal_subtitles: tuple[MediaInternalSubtitle, ...]
 
 
 @dataclass(frozen=True)
@@ -142,9 +167,10 @@ def build_media_check_evaluation(
     video: Video,
     *,
     external_subtitle_state: VideoExternalSubtitleState | None = None,
+    language_profile: VideoLanguageProfile | None = None,
 ) -> MediaCheckEvaluation:
     """Combine Commit-7 facts with the independent Media Check decision."""
-    factual = build_video_language_profile(video)
+    factual = language_profile or build_video_language_profile(video)
     manual_recorded = (
         video.czsk_availability_manual == CZSK_AVAILABILITY_UNAVAILABLE
     )
@@ -221,10 +247,12 @@ def _audio_matches(evaluation: MediaCheckEvaluation, filter_name: str) -> bool:
     return filter_name == "all" or evaluation.factual.audio_status == filter_name
 
 
-def _episode_label(video: Video) -> str:
+def _episode_label(
+    video: Video, detection: EpisodeNumberDetection | None = None,
+) -> str:
     if video.season_episode_number is not None:
         return f"E{video.season_episode_number}"
-    detection = detect_episode_number(video.filename)
+    detection = detection or detect_episode_number(video.filename)
     if detection.display_value is None:
         return "—"
     if detection.kind in {"standard", "fractional", "zero"}:
@@ -236,29 +264,42 @@ def _build_row(
     video: Video,
     title_name_preference: object,
     external_subtitle_state: VideoExternalSubtitleState,
+    *,
+    collection_name: str | None = None,
+    title_name: str | None = None,
+    detection: EpisodeNumberDetection | None = None,
+    language_profile: VideoLanguageProfile | None = None,
+    audio_tracks: tuple[MediaAudioTrack, ...] = (),
+    internal_subtitles: tuple[MediaInternalSubtitle, ...] = (),
 ) -> MediaCheckRow:
     title = video.catalog_title
     collection = title.collection if title is not None else video.catalog_collection
-    collection_name = (
-        catalog_collection_display_title(
-            collection, title_name_preference, titles=collection.titles,
+    if collection_name is None:
+        collection_name = (
+            catalog_collection_display_title(
+                collection, title_name_preference, titles=collection.titles,
+            )
+            if collection is not None else video.root_folder
         )
-        if collection is not None else video.root_folder
-    )
-    title_name = (
-        catalog_title_display_title(title, title_name_preference, videos=())
-        if title is not None else "Nezařazené video"
-    )
+    if title_name is None:
+        title_name = (
+            catalog_title_display_title(title, title_name_preference, videos=())
+            if title is not None else "Nezařazené video"
+        )
     return MediaCheckRow(
         video=video,
         evaluation=build_media_check_evaluation(
-            video, external_subtitle_state=external_subtitle_state,
+            video,
+            external_subtitle_state=external_subtitle_state,
+            language_profile=language_profile,
         ),
         collection_name=collection_name,
         title_name=title_name,
         hierarchy_label=catalog_title_series_label(title) if title is not None else "—",
-        episode_label=_episode_label(video),
+        episode_label=_episode_label(video, detection),
         external_subtitle_state=external_subtitle_state,
+        audio_tracks=audio_tracks,
+        internal_subtitles=internal_subtitles,
     )
 
 
@@ -287,8 +328,10 @@ def _row_matches_search(row: MediaCheckRow, query: str) -> bool:
     )
 
 
-def _row_sort_key(row: MediaCheckRow) -> tuple:
-    detection = detect_episode_number(row.video.filename)
+def _row_sort_key(
+    row: MediaCheckRow, detection: EpisodeNumberDetection | None = None,
+) -> tuple:
+    detection = detection or detect_episode_number(row.video.filename)
     episode_value = (
         Decimal(row.video.season_episode_number)
         if row.video.season_episode_number is not None
@@ -332,6 +375,12 @@ def build_media_check_results(
     external_subtitle_states: Mapping[
         int, VideoExternalSubtitleState
     ] | None = None,
+    detections: Mapping[Video, EpisodeNumberDetection] | None = None,
+    language_profiles: Mapping[Video, VideoLanguageProfile] | None = None,
+    audio_tracks: Mapping[int, tuple[MediaAudioTrack, ...]] | None = None,
+    internal_subtitles: Mapping[
+        int, tuple[MediaInternalSubtitle, ...]
+    ] | None = None,
 ) -> MediaCheckResults:
     """Build faceted counts, filtering and pagination from one workflow evaluator."""
     if subtitle_filter not in SUBTITLE_FILTER_LABELS:
@@ -348,19 +397,69 @@ def build_media_check_results(
         else build_video_external_subtitle_states(videos)
     )
     empty_state = VideoExternalSubtitleState((), (), ())
+    detection_by_video = detections or {
+        video: detect_episode_number(video.filename) for video in videos
+    }
+    collection_names: dict[tuple[str, int | str], str] = {}
+    title_names: dict[tuple[str, int], str] = {}
+
+    def row_for(video: Video) -> MediaCheckRow:
+        title = video.catalog_title
+        collection = title.collection if title is not None else video.catalog_collection
+        collection_key = (
+            ("id", collection.id)
+            if collection is not None and collection.id is not None
+            else ("object", id(collection))
+            if collection is not None else ("root", video.root_folder)
+        )
+        cached_collection_name = collection_names.get(collection_key)
+        if cached_collection_name is None:
+            cached_collection_name = (
+                catalog_collection_display_title(
+                    collection,
+                    title_name_preference,
+                    titles=collection.titles,
+                )
+                if collection is not None else video.root_folder
+            )
+            collection_names[collection_key] = cached_collection_name
+        title_key = (
+            ("id", title.id)
+            if title is not None and title.id is not None
+            else ("object", id(title))
+        )
+        cached_title_name = title_names.get(title_key)
+        if cached_title_name is None:
+            cached_title_name = (
+                catalog_title_display_title(
+                    title, title_name_preference, videos=(),
+                )
+                if title is not None else "Nezařazené video"
+            )
+            title_names[title_key] = cached_title_name
+        return _build_row(
+            video,
+            title_name_preference,
+            states.get(video.id, empty_state),
+            collection_name=cached_collection_name,
+            title_name=cached_title_name,
+            detection=detection_by_video.get(video),
+            language_profile=(
+                language_profiles.get(video)
+                if language_profiles is not None else None
+            ),
+            audio_tracks=(audio_tracks or {}).get(video.id, ()),
+            internal_subtitles=(internal_subtitles or {}).get(video.id, ()),
+        )
+
     searched = sorted(
         (
-            row for row in (
-                _build_row(
-                    video,
-                    title_name_preference,
-                    states.get(video.id, empty_state),
-                )
-                for video in videos
-            )
+            row for row in (row_for(video) for video in videos)
             if _row_matches_search(row, normalized_query)
         ),
-        key=_row_sort_key,
+        key=lambda row: _row_sort_key(
+            row, detection=detection_by_video.get(row.video),
+        ),
     )
     subtitle_basis = [
         row for row in searched if _audio_matches(row.evaluation, audio_filter)
