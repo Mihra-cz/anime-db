@@ -33,6 +33,15 @@ def _video(
     title: CatalogTitle | None = None,
     collection: CatalogCollection | None = None,
 ) -> Video:
+    external_subtitles = [
+        ExternalSubtitle(
+            relative_path=f"Anime/Media Show/Season 1/E{number:02}.{index}.ass",
+            codec="ass",
+            language=language,
+            normalized_language=language,
+        )
+        for index, language in enumerate(external, 1)
+    ]
     video = Video(
         id=number,
         relative_path=f"Anime/Media Show/Season 1/E{number:02}.mkv",
@@ -58,17 +67,8 @@ def _video(
             )
             for index, language in enumerate(internal, 10)
         ],
-        external_subtitles=[
-            ExternalSubtitle(
-                relative_path=f"Anime/Media Show/Season 1/E{number:02}.{index}.ass",
-                codec="ass",
-                language=language,
-                normalized_language=language,
-            )
-            for index, language in enumerate(external, 1)
-        ],
     )
-    for subtitle in video.external_subtitles:
+    for subtitle in external_subtitles:
         ExternalSubtitleCompatibility(
             external_subtitle=subtitle,
             video=video,
@@ -76,6 +76,13 @@ def _video(
             match_method="filename",
         )
     return video
+
+
+def _external_assets(video: Video) -> list[ExternalSubtitle]:
+    return [
+        row.external_subtitle
+        for row in video.external_subtitle_compatibilities
+    ]
 
 
 def _collection() -> tuple[CatalogCollection, CatalogTitle]:
@@ -251,7 +258,7 @@ def test_confirmed_duplicate_copy_keeps_facts_without_new_completion_unit():
     assert copy_row.evaluation.completion_required is False
     assert copy_row.evaluation.subtitle_status == "needs_cs_sk_no_fallback"
 
-    shared_asset = primary.external_subtitles[0]
+    shared_asset = _external_assets(primary)[0]
     shared_asset.id = 100
     copy.external_subtitle_compatibilities.append(ExternalSubtitleCompatibility(
         external_subtitle=shared_asset,
@@ -358,7 +365,7 @@ def _media_app(tmp_path):
         session.commit()
         ids = {video.season_episode_number: video.id for video in videos}
         audio_track_id = videos[8].audio_tracks[0].id
-        external_subtitle_id = videos[11].external_subtitles[0].id
+        external_subtitle_id = _external_assets(videos[11])[0].id
         collection_id = collection.id
     return web_app, ids, audio_track_id, external_subtitle_id, collection_id
 
@@ -581,7 +588,11 @@ def test_unresolved_subtitle_media_check_manual_workflow_is_persistent_and_scope
         linked = session.scalar(select(ExternalSubtitle).where(
             ExternalSubtitle.relative_path.endswith("E1.ass")
         ))
-        assert (linked.video_id, linked.match_method) == (ids[1], "manual")
+        assert linked.match_method == "manual"
+        assert [
+            (row.video_id, row.status, row.match_method)
+            for row in linked.compatibilities
+        ] == [(ids[1], "confirmed_compatible", "manual")]
         linked_id = linked.id
         assert session.get(UnresolvedExternalSubtitle, unresolved_id) is None
 

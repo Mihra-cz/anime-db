@@ -27,6 +27,15 @@ def _video(
     internal: tuple[str, ...] = (),
     external: tuple[str, ...] = (),
 ) -> Video:
+    external_subtitles = [
+        ExternalSubtitle(
+            relative_path=f"Anime/Show/01.{index}.ass",
+            codec="ass",
+            language=language,
+            normalized_language=language,
+        )
+        for index, language in enumerate(external, 1)
+    ]
     video = Video(
         relative_path="Anime/Show/01.mkv",
         root_folder="Anime",
@@ -47,17 +56,8 @@ def _video(
             )
             for index, language in enumerate(internal, 10)
         ],
-        external_subtitles=[
-            ExternalSubtitle(
-                relative_path=f"Anime/Show/01.{index}.ass",
-                codec="ass",
-                language=language,
-                normalized_language=language,
-            )
-            for index, language in enumerate(external, 1)
-        ],
     )
-    for subtitle in video.external_subtitles:
+    for subtitle in external_subtitles:
         ExternalSubtitleCompatibility(
             external_subtitle=subtitle,
             video=video,
@@ -65,6 +65,13 @@ def _video(
             match_method="filename",
         )
     return video
+
+
+def _external_assets(video: Video) -> list[ExternalSubtitle]:
+    return [
+        row.external_subtitle
+        for row in video.external_subtitle_compatibilities
+    ]
 
 
 @pytest.mark.parametrize("language", ["jpn", "ja", "japanese", "ja-JP"])
@@ -301,7 +308,7 @@ def test_clearing_audio_manual_language_restores_detected_language():
 
 def test_unknown_external_manual_czech_override_is_preferred():
     video = _video(external=("unknown",))
-    subtitle = video.external_subtitles[0]
+    subtitle = _external_assets(video)[0]
 
     set_external_subtitle_manual_language(subtitle, "cze")
     profile = build_video_language_profile(video)
@@ -315,7 +322,7 @@ def test_unknown_external_manual_czech_override_is_preferred():
 
 def test_automatic_external_english_manual_slovak_override_is_preferred():
     video = _video(external=("eng",))
-    subtitle = video.external_subtitles[0]
+    subtitle = _external_assets(video)[0]
 
     set_external_subtitle_manual_language(subtitle, "slk")
     profile = build_video_language_profile(video)
@@ -328,7 +335,7 @@ def test_automatic_external_english_manual_slovak_override_is_preferred():
 
 def test_clearing_external_manual_language_restores_automatic_language():
     video = _video(external=("eng",))
-    subtitle = video.external_subtitles[0]
+    subtitle = _external_assets(video)[0]
     set_external_subtitle_manual_language(subtitle, "sk")
 
     set_external_subtitle_manual_language(subtitle, "")

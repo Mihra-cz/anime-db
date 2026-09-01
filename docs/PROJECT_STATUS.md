@@ -4662,6 +4662,78 @@ authority, canonical numbering i NAS layout zůstaly beze změny.
 
 ---
 
+## 6.72 External Subtitle legacy bridge retirement
+
+Audit všech read, write, scanner, migration, delete/cascade, unresolved a
+testových závislostí potvrdil, že `ExternalSubtitle.video_id` už není potřeba.
+`ExternalSubtitle` je nyní čistý owner-less fyzický asset s unikátním
+`relative_path`; nemá FK ani ORM owner relationship na `Video`. Veškeré vztahy
+k Videos jsou pouze v `ExternalSubtitleCompatibility`. Asset smí mít nula až N
+relationships a no-row dál znamená unknown, nikoli nepotřebný soubor nebo
+oprávnění ke garbage collection.
+
+Scanner identifikuje fyzický asset cestou a při jediném bezpečném filename
+matchi synchronizuje `automatic_match / filename`. Nevytváří owner state ani
+cross-variant vztah. Při nejednoznačném nebo chybějícím matchi zachovává
+dosavadní unresolved workflow; human-confirmed kompatibilitu, nekompatibilitu,
+poznámku ani `verified_at` nepřepisuje. Clear ruční authority znovu vyhodnotí
+skutečné filename evidence z cest: platný stejný target obnoví automatic row,
+jinak pair odstraní. `legacy_backfill` zůstává pravdivou historickou evidence a
+nemění se zpětně na `filename`.
+
+Ruční přiřazení unresolved titulku vytváří owner-less asset a
+`confirmed_compatible / manual` relationship. Reopen bezpečně přesune
+jednoznačný ručně založený asset zpět do existujícího unresolved backlogu;
+asset s více explicitními relationships nejprve vyžaduje jejich samostatné
+vyřešení. Compatibility candidate anchor se určuje z explicitního relationship,
+preferuje pozitivní vztah a zůstává omezený na stejný `CatalogTitle` a
+`LogicalEpisodeIdentity`. Asset bez relationship nenabízí celou knihovnu.
+
+Smazání Video cascade odstraní pouze jeho compatibility rows. Sdílený fyzický
+asset i asset po smazání posledního related Video zůstává v databázi. Smazání
+skutečně zmizelého `ExternalSubtitle` assetu naopak odstraní jeho relationships
+cascade podle dosavadního scanner inventory lifecycle; commit nepřidává žádné
+fyzické delete operace. Title move, změna `VideoVariantGroup`, hierarchy rebuild
+ani duplicate workflow relationship ke stejnému physical Video neklonují,
+nepřesměrovávají ani nemažou.
+
+Migrace staré SQLite DB nejprve načte legacy links mimo cílový ORM, idempotentně
+doplní chybějící compatibility pairs, zachová human authority, note,
+`verified_at`, language, manual language, asset ID i `relative_path`, sloučí
+historické per-video duplicity stejné fyzické cesty a potom atomicky rebuildne
+tabulku `external_subtitles` bez `video_id`. Foreign keys se po rebuildu znovu
+ověří přes `PRAGMA foreign_key_check`. Fresh DB vzniká rovnou v témže finálním
+schématu; druhý startup nic sémanticky nemění.
+
+Media Check availability a filtry, katalogové CZ/SK counts, title/folder
+detail, subtitle search a language form nadále používají shared compatibility
+resolver z předchozího kroku. Positive jsou pouze `automatic_match` a
+`confirmed_compatible`; `confirmed_incompatible` je negativní a no-row unknown.
+Internal subtitle, hardsub, manual-unavailable, duplicate, Video Variant,
+numbering a hierarchy semantics se tímto krokem nemění. Žádný subtitle file se
+na NAS nekopíruje, nepřesouvá, nepřejmenovává ani nemaže.
+
+Migration smoke nad pracovní kopií produkční DB zachoval 2 377 fyzických
+assetů a 2 379 compatibility rows (2 377 `automatic_match / legacy_backfill`
+a 2 `confirmed_compatible / manual`). Oba human timestamps přežily, schema po
+prvním běhu neobsahovalo `video_id`, `integrity_check` i `foreign_key_check`
+prošly a druhý běh zachoval stejný logical dump. Production-like read smoke nad
+3 100 Videos provedl přesně 3 100 identity calculations; Media Check trval
+1,536 s / 36 SQL a varianta `subtitle=all` 1,402 s / 36 SQL.
+
+Automatická validace bridge-retirement kroku:
+
+```text
+model/migration/scanner/unresolved/Media Check targety  # 95 passed
+Video Variant/numbering/hierarchy/duplicate/move        # 474 passed
+catalog/title/language/Media Check/responsive            # 406 passed
+celá testovací sada                                    # 1063 passed
+malé query budgety: Media Check / homepage / title       # 13 / 11 / 20
+compileall, 16/16 Jinja2 šablon, git diff --check        # prošlo
+```
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

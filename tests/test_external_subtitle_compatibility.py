@@ -20,7 +20,6 @@ from app.external_subtitle_compatibility import (
     MATCH_METHOD_LEGACY_BACKFILL,
     MATCH_METHOD_MANUAL,
     apply_compatibility_decision,
-    backfill_legacy_external_subtitle_compatibilities,
     build_compatibility_candidate_index,
     build_compatibility_presentations,
     build_video_external_subtitle_states,
@@ -158,7 +157,6 @@ def _variant_asset(session: Session):
         group=tv_group,
     )
     subtitle = ExternalSubtitle(
-        legacy_video=bd_video,
         relative_path="Anime/Nande/Nande - 01.ass",
         codec="ass",
         language="cs",
@@ -271,7 +269,6 @@ def test_model_is_true_many_to_many_and_language_stays_on_asset(tmp_path):
 
         confirm_compatible(session, subtitle, tv, note="same timing")
         second = ExternalSubtitle(
-            legacy_video=bd,
             relative_path="Anime/Nande/Nande - 01.cs.srt",
             codec="srt",
             language="sk",
@@ -287,6 +284,34 @@ def test_model_is_true_many_to_many_and_language_stays_on_asset(tmp_path):
         assert subtitle.normalized_language == "cs"
         assert get_compatibility(subtitle, tv).note == "same timing"
         assert not hasattr(ExternalSubtitleCompatibility, "language")
+
+
+def test_ownerless_physical_asset_can_exist_without_compatibility(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'ownerless-asset.db'}")
+    Base.metadata.create_all(engine)
+    assert not hasattr(ExternalSubtitle, "video_id")
+    assert "video_id" not in {
+        column["name"] for column in inspect(engine).get_columns(
+            "external_subtitles"
+        )
+    }
+    with Session(engine) as session:
+        subtitle = ExternalSubtitle(
+            relative_path="Anime/Orphan/01.ass",
+            codec="ass",
+            language="unknown",
+            normalized_language="unknown",
+            manual_language="cs",
+        )
+        session.add(subtitle)
+        session.commit()
+        subtitle_id = subtitle.id
+
+    with Session(engine) as session:
+        subtitle = session.get(ExternalSubtitle, subtitle_id)
+        assert subtitle is not None
+        assert subtitle.manual_language == "cs"
+        assert subtitle.compatibilities == []
 
 
 def test_pair_unique_status_constraints_and_human_timestamps(tmp_path):
@@ -387,7 +412,7 @@ def test_clear_human_decision_restores_only_current_filename_evidence(tmp_path):
         ) is None
         session.flush()
         assert get_compatibility(subtitle, tv) is None
-        assert subtitle.video_id == bd.id
+        assert not hasattr(ExternalSubtitle, "video_id")
         assert (bd.catalog_title_id, tv.catalog_title_id) == (title.id, title.id)
         assert bd.video_variant_group_id is not None
         assert tv.video_variant_group_id is not None
@@ -410,7 +435,6 @@ def test_legacy_backfill_is_truthful_and_idempotent(
         collection, title, _, _ = _catalog(session)
         video = _video(title, collection, filename="Nande - 01.mkv")
         subtitle = ExternalSubtitle(
-            legacy_video=video,
             relative_path="Anime/Nande/Nande - 01.ass",
             codec="ass",
             language="cs",
@@ -419,18 +443,34 @@ def test_legacy_backfill_is_truthful_and_idempotent(
         )
         session.add_all([video, subtitle])
         session.commit()
-        assert backfill_legacy_external_subtitle_compatibilities(session) == 1
-        session.flush()
+        subtitle_id = subtitle.id
+        video_id = video.id
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "ALTER TABLE external_subtitles ADD COLUMN video_id INTEGER"
+        )
+        connection.exec_driver_sql(
+            "UPDATE external_subtitles SET video_id = ? WHERE id = ?",
+            (video_id, subtitle_id),
+        )
+    migrate_schema(engine)
+    with Session(engine) as session:
         row = session.scalar(select(ExternalSubtitleCompatibility))
         assert (row.status, row.match_method) == (expected_status, expected_method)
         assert (row.verified_at is not None) is verified
         original_verified_at = row.verified_at
-        assert backfill_legacy_external_subtitle_compatibilities(session) == 0
-        session.flush()
+
+    migrate_schema(engine)
+    with Session(engine) as session:
+        row = session.scalar(select(ExternalSubtitleCompatibility))
         assert session.scalar(select(func.count()).select_from(
             ExternalSubtitleCompatibility
         )) == 1
         assert row.verified_at == original_verified_at
+    assert "video_id" not in {
+        column["name"] for column in inspect(engine).get_columns("external_subtitles")
+    }
 
 
 def test_migration_preserves_confirmed_authority_note_and_is_stable(tmp_path):
@@ -446,7 +486,16 @@ def test_migration_preserves_confirmed_authority_note_and_is_stable(tmp_path):
         row.verified_at = fixed
         row.note = "do not overwrite"
         session.commit()
-        row_id = row.id
+        row_id, subtitle_id, legacy_video_id = row.id, subtitle.id, bd.id
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "ALTER TABLE external_subtitles ADD COLUMN video_id INTEGER"
+        )
+        connection.exec_driver_sql(
+            "UPDATE external_subtitles SET video_id = ? WHERE id = ?",
+            (legacy_video_id, subtitle_id),
+        )
 
     migrate_schema(engine)
     migrate_schema(engine)
@@ -461,6 +510,11 @@ def test_migration_preserves_confirmed_authority_note_and_is_stable(tmp_path):
         assert session.scalar(select(func.count()).select_from(
             ExternalSubtitleCompatibility
         )) == 1
+    assert "video_id" not in {
+        column["name"] for column in inspect(engine).get_columns(
+            "external_subtitles"
+        )
+    }
 
     statements: list[str] = []
 
@@ -481,18 +535,14 @@ def test_unresolved_and_invalid_legacy_state_invent_no_relationship(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'invalid-legacy.db'}")
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
-        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        connection.exec_driver_sql(
+            "ALTER TABLE external_subtitles ADD COLUMN video_id INTEGER"
+        )
         connection.exec_driver_sql(
             "INSERT INTO external_subtitles "
             "(id, video_id, relative_path, codec, language, normalized_language, match_method) "
             "VALUES (1, 9999, 'Ghost/01.ass', 'ass', 'unknown', 'unknown', 'automatic')"
         )
-        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
-    with Session(engine) as session:
-        assert backfill_legacy_external_subtitle_compatibilities(session) == 0
-        assert session.scalar(select(func.count()).select_from(
-            ExternalSubtitleCompatibility
-        )) == 0
     # Unresolved assets live in a separate table and therefore cannot receive
     # an invented pair during the legacy backfill.
     migrate_schema(engine)
@@ -500,6 +550,9 @@ def test_unresolved_and_invalid_legacy_state_invent_no_relationship(tmp_path):
         assert session.scalar(select(func.count()).select_from(
             ExternalSubtitleCompatibility
         )) == 0
+    assert "video_id" not in {
+        column["name"] for column in inspect(engine).get_columns("external_subtitles")
+    }
 
 
 def _scan_nande(tmp_path, monkeypatch):
@@ -519,7 +572,7 @@ def _scan_nande(tmp_path, monkeypatch):
     return engine, sessions, plain, tv, subtitle
 
 
-def test_scanner_writes_bridge_and_one_automatic_pair_without_variant_propagation(
+def test_scanner_writes_ownerless_asset_and_one_automatic_pair_without_variant_propagation(
     tmp_path, monkeypatch,
 ):
     engine, sessions, _, _, _ = _scan_nande(tmp_path, monkeypatch)
@@ -530,7 +583,7 @@ def test_scanner_writes_bridge_and_one_automatic_pair_without_variant_propagatio
         videos = list(session.scalars(select(Video).order_by(Video.filename)))
         plain = next(video for video in videos if video.filename == "Nande - 01.mkv")
         tv = next(video for video in videos if "Ver.TV" in video.filename)
-        assert subtitle.video_id == plain.id
+        assert not hasattr(subtitle, "video_id")
         assert [(row.video_id, row.status, row.match_method, row.verified_at)
                 for row in subtitle.compatibilities] == [
             (plain.id, AUTOMATIC_MATCH, MATCH_METHOD_FILENAME, None)
@@ -662,7 +715,6 @@ def test_rescan_preserves_historical_match_to_confirmed_duplicate_secondary(
         subtitle_id, secondary_id = subtitle.id, secondary.id
         scan_library(session, tmp_path)
         subtitle = session.get(ExternalSubtitle, subtitle_id)
-        assert subtitle.video_id == secondary_id
         assert [(row.video_id, row.status) for row in subtitle.compatibilities] == [
             (secondary_id, AUTOMATIC_MATCH)
         ]
@@ -837,6 +889,30 @@ def test_target_video_delete_removes_only_its_pair_and_keeps_physical_asset(tmp_
         assert [(row.video_id, row.status) for row in rows] == [
             (bd_id, AUTOMATIC_MATCH)
         ]
+        session.delete(session.get(Video, bd_id))
+        session.commit()
+        assert session.get(ExternalSubtitle, subtitle_id) is not None
+        assert session.scalar(select(func.count()).select_from(
+            ExternalSubtitleCompatibility
+        )) == 0
+
+
+def test_physical_asset_delete_cascades_pairs_but_keeps_videos(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'asset-delete.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, _, _, _, bd, tv, subtitle = _variant_asset(session)
+        confirm_compatible(session, subtitle, tv)
+        session.commit()
+        bd_id, tv_id = bd.id, tv.id
+        session.delete(subtitle)
+        session.commit()
+
+        assert session.get(Video, bd_id) is not None
+        assert session.get(Video, tv_id) is not None
+        assert session.scalar(select(func.count()).select_from(
+            ExternalSubtitleCompatibility
+        )) == 0
 
 
 def test_manual_preview_confirm_clear_stale_and_cross_title_rejection(tmp_path):
@@ -1017,7 +1093,6 @@ def test_manual_clear_preserves_video_duplicate_hierarchy_metadata_and_media(tmp
             tv.filename,
             len(tv.internal_subtitles),
             len(title.external_links),
-            subtitle.video_id,
             subtitle.manual_language,
         )
         clear_manual_decision(session, subtitle, tv, videos=[bd, tv])
@@ -1035,7 +1110,6 @@ def test_manual_clear_preserves_video_duplicate_hierarchy_metadata_and_media(tmp
             tv.filename,
             len(tv.internal_subtitles),
             len(title.external_links),
-            subtitle.video_id,
             subtitle.manual_language,
         ) == snapshot
         assert session.get(ExternalSubtitleCompatibility, row.id) is None
@@ -1056,7 +1130,7 @@ def test_media_check_completion_uses_positive_compatibility_authority(tmp_path):
         assert build_media_check_evaluation(tv).subtitle_status == "available"
 
 
-def test_effective_read_authority_overrides_legacy_owner_and_exposes_unknown(
+def test_effective_read_authority_uses_only_associations_and_exposes_unknown(
     tmp_path,
 ):
     engine = make_engine(f"sqlite:///{tmp_path / 'effective-read.db'}")
@@ -1072,24 +1146,22 @@ def test_effective_read_authority_overrides_legacy_owner_and_exposes_unknown(
             tv, external_subtitle_state=states[tv.id],
         ).subtitle_status == "needs_cs_sk_compatibility_unknown"
 
-        legacy_only = ExternalSubtitle(
-            legacy_video=tv,
+        unassociated = ExternalSubtitle(
             relative_path="Anime/Nande/Nande - 01 legacy-only.ass",
             codec="ass",
             language="unknown",
             normalized_language="unknown",
             match_method="automatic",
         )
-        session.add(legacy_only)
+        session.add(unassociated)
         session.flush()
-        assert legacy_only.video_id == tv.id
+        assert candidate_variant_videos(unassociated, [bd, tv]) == ()
         assert effective_external_subtitles_for_video(tv) == ()
         assert build_video_language_profile(tv).has_cs_or_sk is False
 
         legacy_row = get_compatibility(subtitle, bd)
         confirm_incompatible(session, subtitle, bd, note="wrong timing")
         session.flush()
-        assert subtitle.video_id == bd.id
         assert get_compatibility(subtitle, bd) is legacy_row
         assert effective_external_subtitles_for_video(bd) == ()
         assert build_video_language_profile(bd).has_cs is False
@@ -1136,7 +1208,6 @@ def test_negative_asset_does_not_mask_another_positive_asset(tmp_path):
         _, _, _, _, bd, tv, first = _variant_asset(session)
         confirm_incompatible(session, first, tv)
         second = ExternalSubtitle(
-            legacy_video=bd,
             relative_path="Anime/Nande/Nande - 01 alternate.ass",
             codec="ass",
             language="cs",
@@ -1183,7 +1254,6 @@ def test_compatibility_presentation_builder_indexes_library_once(
                     group=tv_group,
                 )
                 subtitle = ExternalSubtitle(
-                    legacy_video=bd_video,
                     relative_path=f"Anime/{label}/{label} - {episode:02d}.ass",
                     codec="ass",
                     language="cs",
@@ -1215,8 +1285,8 @@ def test_compatibility_presentation_builder_indexes_library_once(
             session.add(normal_video)
             videos.append(normal_video)
         session.flush()
-        for subtitle, legacy_video in subtitle_pairs:
-            synchronize_automatic_match(session, subtitle, legacy_video)
+        for subtitle, matched_video in subtitle_pairs:
+            synchronize_automatic_match(session, subtitle, matched_video)
         session.flush()
 
         original_identity = compatibility_module.logical_episode_identity
@@ -1281,7 +1351,7 @@ def test_media_check_compatibility_loading_has_constant_statement_count(
         return count, response
 
     one_episode_count, _ = count_queries()
-    assert one_episode_count == 14
+    assert one_episode_count == 13
     with web_app.state.sessions() as session:
         title = session.get(CatalogTitle, ids["title"])
         collection = session.get(CatalogCollection, ids["collection"])
@@ -1296,7 +1366,6 @@ def test_media_check_compatibility_loading_has_constant_statement_count(
                 group=bd_group,
             )
             subtitle = ExternalSubtitle(
-                legacy_video=video,
                 relative_path=f"Anime/Nande/Nande - {episode:02d}.ass",
                 codec="ass",
                 language="cs",
@@ -1332,7 +1401,11 @@ def test_media_check_compatibility_loading_has_constant_statement_count(
     expected_page_subtitles = {
         item.id
         for row in results.rows
-        for item in row.video.external_subtitles
+        for item in (
+            row.external_subtitle_state.compatible_subtitles
+            + row.external_subtitle_state.incompatible_subtitles
+            + row.external_subtitle_state.unknown_candidate_subtitles
+        )
     }
     assert large_count == one_episode_count
     assert video_count == 243

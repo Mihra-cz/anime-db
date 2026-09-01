@@ -75,6 +75,7 @@ from .external_subtitle_compatibility import (
     compatibility_match_method_label,
     compatibility_status_label,
     external_subtitle_compatibility_status,
+    external_subtitle_is_shared,
     preview_compatibility_decision,
 )
 from .migrations import migrate_schema
@@ -175,7 +176,8 @@ from .numbering import (
 from .scanner import LibrarySafetyError, scan_library
 from .subtitle_review import (
     build_unresolved_subtitle_rows, confirm_subtitle_no_match,
-    manually_link_subtitle, reopen_manual_subtitle_link, reopen_subtitle_review,
+    can_reopen_manual_subtitle_link, manually_link_subtitle,
+    reopen_manual_subtitle_link, reopen_subtitle_review,
     set_subtitle_candidate_rejected, subtitle_candidates,
 )
 
@@ -253,6 +255,8 @@ templates.env.globals.update(
     detected_external_subtitle_language=detected_external_subtitle_language,
     effective_external_subtitle_language=effective_external_subtitle_language,
     effective_external_subtitles_for_video=effective_external_subtitles_for_video,
+    external_subtitle_is_shared=external_subtitle_is_shared,
+    can_reopen_manual_subtitle_link=can_reopen_manual_subtitle_link,
     language_display_label=language_display_label,
     manual_language_choices=MANUAL_LANGUAGE_CHOICES,
     manual_hardsub_state=manual_hardsub_state,
@@ -324,12 +328,9 @@ def _load_videos(sessions) -> list[Video]:
     with sessions() as session:
         return list(session.scalars(select(Video).options(
             selectinload(Video.audio_tracks), selectinload(Video.internal_subtitles),
-            selectinload(Video.external_subtitles).selectinload(
-                ExternalSubtitle.compatibilities
-            ),
             selectinload(Video.external_subtitle_compatibilities).joinedload(
                 ExternalSubtitleCompatibility.external_subtitle
-            ),
+            ).selectinload(ExternalSubtitle.compatibilities),
             selectinload(Video.catalog_title).selectinload(
                 CatalogTitle.collection
             ).selectinload(CatalogCollection.titles),
@@ -705,7 +706,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         with sessions() as session:
             videos = session.scalars(select(Video).options(
-                selectinload(Video.internal_subtitles), selectinload(Video.external_subtitles),
+                selectinload(Video.internal_subtitles),
                 selectinload(Video.external_subtitle_compatibilities).joinedload(
                     ExternalSubtitleCompatibility.external_subtitle
                 ),
@@ -1430,7 +1431,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.artwork),
                 selectinload(CatalogCollection.videos).selectinload(Video.audio_tracks),
                 selectinload(CatalogCollection.videos).selectinload(Video.internal_subtitles),
-                selectinload(CatalogCollection.videos).selectinload(Video.external_subtitles),
                 selectinload(CatalogCollection.videos).selectinload(
                     Video.external_subtitle_compatibilities
                 ).joinedload(ExternalSubtitleCompatibility.external_subtitle),

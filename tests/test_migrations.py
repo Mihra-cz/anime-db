@@ -971,11 +971,22 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
             123.5, "h265", 1280, 720,
         )
 
-    subtitle_indexes = inspect(engine).get_indexes("external_subtitles")
+    subtitle_inspector = inspect(engine)
+    subtitle_indexes = subtitle_inspector.get_indexes("external_subtitles")
+    subtitle_uniques = subtitle_inspector.get_unique_constraints(
+        "external_subtitles"
+    )
     assert any(
+        item["column_names"] == ["relative_path"]
+        for item in subtitle_uniques
+    ) or any(
         item["unique"] and item["column_names"] == ["relative_path"]
         for item in subtitle_indexes
     )
+    assert "video_id" not in {
+        column["name"]
+        for column in subtitle_inspector.get_columns("external_subtitles")
+    }
 
     migrate_schema(engine)
     with Session(engine) as session:
@@ -1036,9 +1047,15 @@ def test_migration_consolidates_historical_physical_path_duplicates(tmp_path):
             (2, "automatic_match", "legacy_backfill"),
         ]
         assert {row.external_subtitle_id for row in rows} == {assets[0].id}
+    subtitle_inspector = inspect(engine)
     assert any(
+        item["column_names"] == ["relative_path"]
+        for item in subtitle_inspector.get_unique_constraints(
+            "external_subtitles"
+        )
+    ) or any(
         item["unique"] and item["column_names"] == ["relative_path"]
-        for item in inspect(engine).get_indexes("external_subtitles")
+        for item in subtitle_inspector.get_indexes("external_subtitles")
     )
 
 

@@ -755,7 +755,9 @@ def test_scanner_fractional_exact_match_is_single_and_ambiguous_stem_is_unresolv
         linked = session.scalar(select(ExternalSubtitle))
         assert linked.relative_path == "Show/Title - 05.5.ass"
         assert linked.match_method == "automatic"
-        assert session.get(Video, linked.video_id).filename == "Title - 05.5.mkv"
+        assert [row.video.filename for row in linked.compatibilities] == [
+            "Title - 05.5.mkv"
+        ]
         assert session.scalar(select(func.count()).select_from(UnresolvedExternalSubtitle)) == 0
 
     (show / "Title - 05.5.ass").unlink()
@@ -802,7 +804,9 @@ def test_unresolved_manual_decisions_and_rejections_survive_rescan(
         scan_library(session, tmp_path)
         linked = session.scalar(select(ExternalSubtitle))
         assert linked.match_method == "manual"
-        assert linked.video_id == video.id
+        assert [(row.video_id, row.status) for row in linked.compatibilities] == [
+            (video.id, "confirmed_compatible")
+        ]
         assert session.scalar(select(func.count()).select_from(UnresolvedExternalSubtitle)) == 0
 
         scan_library(session, tmp_path)

@@ -247,14 +247,10 @@ def _sync_external_subtitles(
         )
         if len(candidates) == 1:
             video = video_by_relative[candidates[0].relative_to(library_root).as_posix()]
-            keep = next((row for row in linked if row.video_id == video.id), None)
-            if keep is None and linked:
-                keep = min(linked, key=lambda row: row.id or 0)
+            keep = min(linked, key=lambda row: row.id or 0) if linked else None
             if keep is None:
-                keep = ExternalSubtitle(video_id=video.id, relative_path=relative_path)
+                keep = ExternalSubtitle(relative_path=relative_path)
                 session.add(keep)
-            if not human_authority:
-                keep.video_id = video.id
             keep.codec = data["codec"]
             keep.language = data["language"]
             keep.normalized_language = data["normalized_language"]

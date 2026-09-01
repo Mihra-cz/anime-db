@@ -332,7 +332,7 @@ def test_attached_film_classification_keeps_main_and_hierarchy_presentations(
     assert "<small>other</small>" not in film_item
     # Compatibility-aware external subtitles add one bounded association load;
     # the detached season-detail budget remains independent of row count.
-    assert detail_query_count == 21
+    assert detail_query_count == 20
 
     hierarchy = endpoints["/hierarchy-review/{collection_id}"](
         _request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,

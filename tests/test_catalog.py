@@ -41,8 +41,10 @@ from app.models import (
 )
 
 
-def _add_automatic_external_compatibility(video: Video) -> None:
-    for subtitle in video.external_subtitles:
+def _add_automatic_external_compatibility(
+    video: Video, *subtitles: ExternalSubtitle,
+) -> None:
+    for subtitle in subtitles:
         ExternalSubtitleCompatibility(
             external_subtitle=subtitle,
             video=video,
@@ -728,11 +730,11 @@ def test_subtitle_track_display_merges_languages_and_preserves_known_formats():
     video.internal_subtitles = [InternalSubtitle(
         stream_index=2, codec="ass", language="cze", normalized_language="cs",
     )]
-    video.external_subtitles = [ExternalSubtitle(
+    external = ExternalSubtitle(
         relative_path="Anime/Show/01.en.srt", codec="srt", language="eng",
         normalized_language="eng",
-    )]
-    _add_automatic_external_compatibility(video)
+    )
+    _add_automatic_external_compatibility(video, external)
 
     tracks = subtitle_track_display(video)
 
@@ -757,20 +759,18 @@ def test_internal_czech_marks_video_as_translated():
 
 
 def test_video_can_have_czech_and_slovak_at_the_same_time():
+    external = ExternalSubtitle(
+        relative_path="Show/02.sk.srt", codec="srt", language="sk",
+        normalized_language="sk",
+    )
     video = Video(
         relative_path="Show/02.mkv", root_folder="Show", filename="02.mkv",
         size=1, mtime_ns=1, file_type="episode",
         internal_subtitles=[
             InternalSubtitle(stream_index=2, codec="ass", language="cze", normalized_language="cs")
         ],
-        external_subtitles=[
-            ExternalSubtitle(
-                relative_path="Show/02.sk.srt", codec="srt", language="sk",
-                normalized_language="sk",
-            )
-        ],
     )
-    _add_automatic_external_compatibility(video)
+    _add_automatic_external_compatibility(video, external)
 
     status = translation_status(video)
 
@@ -1296,11 +1296,11 @@ def test_all_main_catalog_filters_return_grouped_title_summaries():
         _video("Anime/Unknown/01.mkv", language="unknown"),
     ]
     both = _video("Anime/Both/01.mkv", language="cs")
-    both.external_subtitles = [ExternalSubtitle(
+    external = ExternalSubtitle(
         relative_path="Anime/Both/01.sk.srt", codec="srt", language="sk",
         normalized_language="sk",
-    )]
-    _add_automatic_external_compatibility(both)
+    )
+    _add_automatic_external_compatibility(both, external)
     videos.append(both)
 
     for filter_name in ("only-cs", "only-sk", "both", "missing", "unknown", "episodes"):

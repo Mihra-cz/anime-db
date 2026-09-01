@@ -64,9 +64,6 @@ class Video(Base):
 
     audio_tracks: Mapped[list[AudioTrack]] = relationship(cascade="all, delete-orphan")
     internal_subtitles: Mapped[list[InternalSubtitle]] = relationship(cascade="all, delete-orphan")
-    external_subtitles: Mapped[list[ExternalSubtitle]] = relationship(
-        back_populates="legacy_video", cascade="all, delete-orphan"
-    )
     external_subtitle_compatibilities: Mapped[
         list[ExternalSubtitleCompatibility]
     ] = relationship(back_populates="video", cascade="all, delete-orphan")
@@ -410,7 +407,6 @@ class InternalSubtitle(Base):
 class ExternalSubtitle(Base):
     __tablename__ = "external_subtitles"
     id: Mapped[int] = mapped_column(primary_key=True)
-    video_id: Mapped[int] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
     relative_path: Mapped[str] = mapped_column(String)
     codec: Mapped[str] = mapped_column(String)
     language: Mapped[str] = mapped_column(String, default="unknown")
@@ -419,7 +415,6 @@ class ExternalSubtitle(Base):
     match_method: Mapped[str] = mapped_column(
         String, default="automatic", server_default="automatic", index=True,
     )
-    legacy_video: Mapped[Video] = relationship(back_populates="external_subtitles")
     compatibilities: Mapped[list[ExternalSubtitleCompatibility]] = relationship(
         back_populates="external_subtitle", cascade="all, delete-orphan"
     )

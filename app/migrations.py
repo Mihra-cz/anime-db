@@ -42,6 +42,98 @@ logger = logging.getLogger(__name__)
 AutomaticStructuralInput = tuple[str, int | None, int | None, str | None]
 
 
+def _legacy_external_subtitle_links(engine) -> tuple[tuple[int, int | None, str], ...]:
+    """Read the old owner bridge without requiring it in the target ORM."""
+    with engine.connect() as connection:
+        columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("external_subtitles")
+        }
+        if "video_id" not in columns:
+            return ()
+        return tuple(
+            (int(row.id), row.video_id, str(row.match_method or "automatic"))
+            for row in connection.execute(text(
+                "SELECT id, video_id, match_method FROM external_subtitles "
+                "ORDER BY id"
+            ))
+        )
+
+
+def _retire_external_subtitle_video_id(engine) -> bool:
+    """Atomically rebuild the SQLite asset table without the owner FK."""
+    with engine.connect() as connection:
+        columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("external_subtitles")
+        }
+    if "video_id" not in columns:
+        return False
+    if engine.dialect.name != "sqlite":
+        raise RuntimeError(
+            "Odstranění ExternalSubtitle.video_id je implementováno pouze pro SQLite."
+        )
+
+    dbapi_connection = engine.raw_connection()
+    try:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=OFF")
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute(
+                "CREATE TABLE external_subtitles_ownerless_migration ("
+                "id INTEGER NOT NULL, "
+                "relative_path VARCHAR NOT NULL, "
+                "codec VARCHAR NOT NULL, "
+                "language VARCHAR NOT NULL, "
+                "normalized_language VARCHAR NOT NULL DEFAULT 'unknown', "
+                "manual_language VARCHAR NULL, "
+                "match_method VARCHAR NOT NULL DEFAULT 'automatic', "
+                "PRIMARY KEY (id), "
+                "UNIQUE (relative_path), "
+                "CONSTRAINT ck_external_subtitle_match_method "
+                "CHECK (match_method IN ('automatic','manual'))"
+                ")"
+            )
+            cursor.execute(
+                "INSERT INTO external_subtitles_ownerless_migration "
+                "(id, relative_path, codec, language, normalized_language, "
+                "manual_language, match_method) "
+                "SELECT id, relative_path, codec, language, normalized_language, "
+                "manual_language, match_method FROM external_subtitles"
+            )
+            cursor.execute("DROP TABLE external_subtitles")
+            cursor.execute(
+                "ALTER TABLE external_subtitles_ownerless_migration "
+                "RENAME TO external_subtitles"
+            )
+            cursor.execute(
+                "CREATE INDEX ix_external_subtitles_match_method "
+                "ON external_subtitles(match_method)"
+            )
+            dbapi_connection.commit()
+        except BaseException:
+            dbapi_connection.rollback()
+            raise
+        finally:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+    finally:
+        dbapi_connection.close()
+
+    with engine.connect() as connection:
+        violations = list(connection.execute(text("PRAGMA foreign_key_check")))
+    if violations:
+        raise RuntimeError(
+            "Migrace owner-less externích titulků porušila FK invarianty: "
+            f"{violations[:3]}"
+        )
+    logger.info(
+        "Migrace databáze: ExternalSubtitle.video_id byl bezpečně odstraněn"
+    )
+    return True
+
+
 def _set_catalog_title_structural_values(
     title: CatalogTitle,
     values: AutomaticStructuralInput,
@@ -236,6 +328,8 @@ def migrate_schema(engine) -> None:
             "ON manual_split_rule_videos(video_id)"
         ))
 
+    legacy_external_subtitle_links = _legacy_external_subtitle_links(engine)
+
     with Session(engine) as session:
         for video in session.scalars(select(Video)):
             video.file_type = classify_video(video.relative_path)
@@ -244,7 +338,9 @@ def migrate_schema(engine) -> None:
         for subtitle in session.scalars(select(ExternalSubtitle)):
             subtitle.normalized_language = normalize_language(subtitle.language)
         created_compatibilities = (
-            backfill_legacy_external_subtitle_compatibilities(session)
+            backfill_legacy_external_subtitle_compatibilities(
+                session, legacy_external_subtitle_links
+            )
         )
         if created_compatibilities:
             logger.info(
@@ -634,3 +730,5 @@ def migrate_schema(engine) -> None:
                 "CREATE UNIQUE INDEX ux_external_subtitles_relative_path "
                 "ON external_subtitles(relative_path)"
             ))
+
+    _retire_external_subtitle_video_id(engine)

@@ -61,13 +61,11 @@ def _video(collection, title, identifier, filename, episode, *, file_type="episo
 
 
 def _add_automatic_external(video, subtitle):
-    video.external_subtitles.append(subtitle)
-    ExternalSubtitleCompatibility(
+    video.external_subtitle_compatibilities.append(ExternalSubtitleCompatibility(
         external_subtitle=subtitle,
-        video=video,
         status="automatic_match",
         match_method="filename",
-    )
+    ))
 
 
 def _group(title, identifier, label, source=None, content=None):

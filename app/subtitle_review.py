@@ -219,7 +219,6 @@ def manually_link_subtitle(
     if existing is not None:
         raise ValueError("Tento fyzický soubor titulků už je přiřazen.")
     linked = ExternalSubtitle(
-        video_id=video.id,
         relative_path=subtitle.relative_path,
         codec=subtitle.extension.lstrip("."),
         language=subtitle.language,
@@ -239,9 +238,7 @@ def reopen_manual_subtitle_link(
 ) -> UnresolvedExternalSubtitle:
     if subtitle.match_method != "manual":
         raise ValueError("Automatické bezpečné přiřazení nelze vrátit touto akcí.")
-    if any(
-        row.video_id != subtitle.video_id for row in subtitle.compatibilities
-    ):
+    if len(subtitle.compatibilities) > 1:
         raise ValueError(
             "Titulek má další ruční compatibility rozhodnutí. Nejprve je "
             "vraťte na neurčeno."
@@ -257,3 +254,8 @@ def reopen_manual_subtitle_link(
     session.add(unresolved)
     session.delete(subtitle)
     return unresolved
+
+
+def can_reopen_manual_subtitle_link(subtitle: ExternalSubtitle) -> bool:
+    """Mirror reopen validation for an owner-less physical asset."""
+    return subtitle.match_method == "manual" and len(subtitle.compatibilities) <= 1

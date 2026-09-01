@@ -94,7 +94,6 @@ class CompatibilityCandidate:
 @dataclass(frozen=True)
 class SubtitleCompatibilityPresentation:
     subtitle: ExternalSubtitle
-    legacy_video: Video
     candidates: tuple[CompatibilityCandidate, ...]
 
 
@@ -158,6 +157,11 @@ def external_subtitle_compatibility_status(
     return row.status if row is not None else None
 
 
+def external_subtitle_is_shared(subtitle: ExternalSubtitle) -> bool:
+    """Return whether one physical asset has relationships to multiple Videos."""
+    return len({row.video_id for row in subtitle.compatibilities}) > 1
+
+
 def effective_external_subtitle_compatibilities_for_video(
     video: Video,
 ) -> tuple[ExternalSubtitleCompatibility, ...]:
@@ -180,7 +184,7 @@ def effective_external_subtitles_for_video(
     """Resolve physical assets positively compatible with one Video.
 
     No association is unknown, and ``confirmed_incompatible`` is negative
-    human authority. Neither state falls back to ``ExternalSubtitle.video_id``.
+    human authority. Physical assets have no owning Video.
     """
     assets: dict[tuple[str, int | str], ExternalSubtitle] = {}
     for row in effective_external_subtitle_compatibilities_for_video(video):
@@ -312,8 +316,16 @@ def remove_automatic_matches(
             _remove_pair(session, subtitle, row)
 
 
-def backfill_legacy_external_subtitle_compatibilities(session: Session) -> int:
-    """Add one truthful bridge row per valid legacy association, idempotently."""
+def backfill_legacy_external_subtitle_compatibilities(
+    session: Session,
+    legacy_links: Iterable[tuple[int, int | None, str]],
+) -> int:
+    """Convert captured legacy owners to compatibility authority once.
+
+    ``legacy_links`` is read from the old table before its ``video_id`` column
+    is removed. Existing association rows always win, so human authority and
+    its timestamp/note are never overwritten.
+    """
     valid_video_ids = set(session.scalars(select(Video.id)))
     existing_pairs = {
         (row.external_subtitle_id, row.video_id)
@@ -321,19 +333,22 @@ def backfill_legacy_external_subtitle_compatibilities(session: Session) -> int:
     }
     created = 0
     verified_at = utc_now()
-    for subtitle in session.scalars(select(ExternalSubtitle).order_by(ExternalSubtitle.id)):
-        pair = (subtitle.id, subtitle.video_id)
+    valid_subtitle_ids = set(session.scalars(select(ExternalSubtitle.id)))
+    for subtitle_id, video_id, asset_match_method in sorted(
+        legacy_links, key=lambda item: (item[0], item[1] or 0, item[2])
+    ):
+        pair = (subtitle_id, video_id)
         if (
-            subtitle.id is None
-            or subtitle.video_id is None
-            or subtitle.video_id not in valid_video_ids
+            subtitle_id not in valid_subtitle_ids
+            or video_id is None
+            or video_id not in valid_video_ids
             or pair in existing_pairs
         ):
             continue
-        is_manual = subtitle.match_method == "manual"
+        is_manual = asset_match_method == "manual"
         session.add(ExternalSubtitleCompatibility(
-            external_subtitle_id=subtitle.id,
-            video_id=subtitle.video_id,
+            external_subtitle_id=subtitle_id,
+            video_id=video_id,
             status=CONFIRMED_COMPATIBLE if is_manual else AUTOMATIC_MATCH,
             match_method=(
                 MATCH_METHOD_MANUAL if is_manual else MATCH_METHOD_LEGACY_BACKFILL
@@ -589,9 +604,18 @@ def candidate_variant_videos(
         row.video_id: row for row in subtitle.compatibilities
         if row.video_id is not None
     }
-    anchor = index.videos_by_id.get(subtitle.video_id)
-    if anchor is None and compat_by_video_id:
-        anchor = index.videos_by_id.get(next(iter(sorted(compat_by_video_id))))
+    anchor_video_ids = sorted(
+        compat_by_video_id,
+        key=lambda video_id: (
+            compat_by_video_id[video_id].status not in POSITIVE_COMPATIBILITY_STATUSES,
+            compat_by_video_id[video_id].status == CONFIRMED_INCOMPATIBLE,
+            video_id,
+        ),
+    )
+    anchor = (
+        index.videos_by_id.get(anchor_video_ids[0])
+        if anchor_video_ids else None
+    )
     if anchor is None:
         return ()
 
@@ -661,20 +685,21 @@ def build_video_external_subtitle_states(
             elif row.status == CONFIRMED_INCOMPATIBLE:
                 incompatible[video_id][subtitle.id] = subtitle
 
-    seen_subtitle_ids: set[int] = set()
-    for legacy_video in index.videos:
-        for subtitle in legacy_video.external_subtitles:
-            if subtitle.id is None or subtitle.id in seen_subtitle_ids:
-                continue
-            seen_subtitle_ids.add(subtitle.id)
-            for candidate in candidate_variant_videos(subtitle, index):
-                video_id = candidate.video.id
-                if (
-                    video_id is not None
-                    and candidate.eligible
-                    and candidate.compatibility is None
-                ):
-                    unknown[video_id][subtitle.id] = subtitle
+    subtitles = {
+        row.external_subtitle.id: row.external_subtitle
+        for video in index.videos
+        for row in video.external_subtitle_compatibilities
+        if row.external_subtitle.id is not None
+    }
+    for subtitle in subtitles.values():
+        for candidate in candidate_variant_videos(subtitle, index):
+            video_id = candidate.video.id
+            if (
+                video_id is not None
+                and candidate.eligible
+                and candidate.compatibility is None
+            ):
+                unknown[video_id][subtitle.id] = subtitle
 
     def ordered(items: dict[int, ExternalSubtitle]) -> tuple[ExternalSubtitle, ...]:
         return tuple(sorted(
@@ -710,12 +735,8 @@ def build_compatibility_presentations(
         }
         rows = {}
         for subtitle in subtitles.values():
-            legacy_video = index.videos_by_id.get(subtitle.video_id)
-            if legacy_video is None:
-                continue
             rows[subtitle.id] = SubtitleCompatibilityPresentation(
                 subtitle=subtitle,
-                legacy_video=legacy_video,
                 candidates=candidate_variant_videos(subtitle, index),
             )
         return rows
@@ -725,15 +746,17 @@ def build_compatibility_presentations(
         if presentation_videos is None else tuple(presentation_videos)
     )
     rows = {}
-    for legacy_video in owners:
-        for subtitle in legacy_video.external_subtitles:
-            if subtitle.id is None:
-                continue
-            rows[subtitle.id] = SubtitleCompatibilityPresentation(
-                subtitle=subtitle,
-                legacy_video=legacy_video,
-                candidates=candidate_variant_videos(subtitle, index),
-            )
+    subtitles = {
+        relation.external_subtitle.id: relation.external_subtitle
+        for video in owners
+        for relation in video.external_subtitle_compatibilities
+        if relation.external_subtitle.id is not None
+    }
+    for subtitle in subtitles.values():
+        rows[subtitle.id] = SubtitleCompatibilityPresentation(
+            subtitle=subtitle,
+            candidates=candidate_variant_videos(subtitle, index),
+        )
     return rows
 
 
@@ -784,7 +807,6 @@ def _decision_fingerprint(
         "subtitle": (
             subtitle.id,
             subtitle.relative_path,
-            subtitle.video_id,
             subtitle.match_method,
             subtitle.language,
             subtitle.normalized_language,

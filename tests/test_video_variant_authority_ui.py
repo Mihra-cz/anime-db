@@ -15,9 +15,11 @@ from app.models import (
     CatalogCollection,
     CatalogTitle,
     ExternalSubtitle,
+    ExternalSubtitleCompatibility,
     TitleMetadata,
     Video,
     VideoVariantGroup,
+    utc_now,
 )
 from app.numbering import summarize_title_numbering, unresolved_duplicate_groups
 from app.video_variants import (
@@ -367,20 +369,28 @@ def test_clear_changes_only_variant_fk_and_preserves_manual_authorities(tmp_path
         selected.content_type_manual = "episode"
         selected.manual_hardsub_cs = True
         selected.czsk_availability_manual = "unavailable"
-        selected.external_subtitles.append(ExternalSubtitle(
+        subtitle = ExternalSubtitle(
             relative_path="Anime/Show/Season 1/Show - 01 copy.cs.ass",
             codec="ass",
             language="cs",
             normalized_language="cs",
             manual_language="cs",
             match_method="manual",
-        ))
+        )
+        selected.external_subtitle_compatibilities.append(
+            ExternalSubtitleCompatibility(
+                external_subtitle=subtitle,
+                status="confirmed_compatible",
+                match_method="manual",
+                verified_at=utc_now(),
+            )
+        )
         session.commit()
 
     def snapshots(session):
         video = session.get(Video, video_ids[0])
         title = session.get(CatalogTitle, title_id)
-        subtitle = video.external_subtitles[0]
+        subtitle = video.external_subtitle_compatibilities[0].external_subtitle
         return (
             (
                 video.relative_path,
@@ -416,7 +426,6 @@ def test_clear_changes_only_variant_fk_and_preserves_manual_authorities(tmp_path
             ),
             (
                 subtitle.id,
-                subtitle.video_id,
                 subtitle.relative_path,
                 subtitle.codec,
                 subtitle.language,

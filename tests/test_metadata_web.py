@@ -48,6 +48,19 @@ from app.scanner import scan_library
 from starlette.requests import Request
 
 
+def _attach_external_subtitle(
+    video: Video, subtitle: ExternalSubtitle,
+) -> ExternalSubtitle:
+    video.external_subtitle_compatibilities.append(
+        ExternalSubtitleCompatibility(
+            external_subtitle=subtitle,
+            status="automatic_match",
+            match_method="filename",
+        )
+    )
+    return subtitle
+
+
 class RecordingMetadataProvider:
     def __init__(self, results):
         self.results = list(results)
@@ -3281,6 +3294,12 @@ def test_episode_table_prioritizes_readable_data_and_preserves_editing_and_value
         episode_start_offset=3, manual_display_title="Manual Show",
         metadata_record=TitleMetadata(display_title="Metadata Show"),
     )
+    external_subtitle = ExternalSubtitle(
+        id=7,
+        relative_path="Anime/Show/Season 1/Title - 01.en.srt",
+        codec="srt", language="eng", normalized_language="en",
+        manual_language="sk",
+    )
     video = Video(
         id=1, relative_path="Anime/Show/Season 1/Title - 01.mkv",
         root_folder="Anime", filename="Title - 01.mkv", size=1, mtime_ns=1,
@@ -3297,20 +3316,8 @@ def test_episode_table_prioritizes_readable_data_and_preserves_editing_and_value
         internal_subtitles=[InternalSubtitle(
             stream_index=2, codec="ass", language="cze", normalized_language="cs",
         )],
-        external_subtitles=[ExternalSubtitle(
-            id=7,
-            relative_path="Anime/Show/Season 1/Title - 01.en.srt",
-            codec="srt", language="eng", normalized_language="en",
-            manual_language="sk",
-        )],
     )
-    video.external_subtitle_compatibilities.append(
-        ExternalSubtitleCompatibility(
-            external_subtitle=video.external_subtitles[0],
-            status="automatic_match",
-            match_method="filename",
-        )
-    )
+    _attach_external_subtitle(video, external_subtitle)
     status = type("Status", (), {
         "automatic_has_cs": False, "automatic_has_sk": False, "has_unknown": False,
     })()
@@ -3632,29 +3639,23 @@ def test_external_subtitle_language_override_web_workflow_sets_and_clears(tmp_pa
     ))
     with web_app.state.sessions() as session:
         Base.metadata.create_all(session.get_bind())
+        subtitle = ExternalSubtitle(
+            relative_path="Anime/Show/E01.srt", codec="srt",
+            language="eng", normalized_language="en",
+        )
         video = Video(
             relative_path="Anime/Show/E01.mkv", root_folder="Anime",
             filename="E01.mkv", size=1, mtime_ns=1,
             audio_tracks=[AudioTrack(
                 stream_index=1, codec="aac", language="unknown",
             )],
-            external_subtitles=[ExternalSubtitle(
-                relative_path="Anime/Show/E01.srt", codec="srt",
-                language="eng", normalized_language="en",
-            )],
         )
-        video.external_subtitle_compatibilities.append(
-            ExternalSubtitleCompatibility(
-                external_subtitle=video.external_subtitles[0],
-                status="automatic_match",
-                match_method="filename",
-            )
-        )
+        _attach_external_subtitle(video, subtitle)
         session.add(video)
         session.commit()
         video_id = video.id
         audio_track_id = video.audio_tracks[0].id
-        subtitle_id = video.external_subtitles[0].id
+        subtitle_id = subtitle.id
 
     endpoints = {
         route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")
@@ -3983,7 +3984,7 @@ def test_homepage_collection_identity_is_not_taken_from_supplementary_title(
     # Logical episode aggregation and compatibility-aware subtitle availability
     # each use one bounded select-in load; the budget remains independent of the
     # number of videos, subtitle assets, and collections.
-    assert homepage_query_count == 12
+    assert homepage_query_count == 11
 
     collection_detail = endpoints["/collections/{collection_id}"](
         get_request(f"/collections/{overlord_id}"), overlord_id,
@@ -4087,17 +4088,10 @@ def test_homepage_uses_logical_collections_and_simplifies_unambiguous_navigation
         multi_videos[0].internal_subtitles.append(InternalSubtitle(
             stream_index=1, codec="ass", language="cze", normalized_language="cs",
         ))
-        multi_videos[0].external_subtitles.append(ExternalSubtitle(
+        _attach_external_subtitle(multi_videos[0], ExternalSubtitle(
             relative_path="Anime/Two Seasons/Season 1.sk.srt",
             codec="srt", language="slk", normalized_language="sk",
         ))
-        multi_videos[0].external_subtitle_compatibilities.append(
-            ExternalSubtitleCompatibility(
-                external_subtitle=multi_videos[0].external_subtitles[0],
-                status="automatic_match",
-                match_method="filename",
-            )
-        )
         multi_videos[1].internal_subtitles.append(InternalSubtitle(
             stream_index=1, codec="ass", language="und",
             normalized_language="unknown",
@@ -4197,7 +4191,9 @@ def test_homepage_uses_logical_collections_and_simplifies_unambiguous_navigation
             selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
             selectinload(Video.catalog_collection),
             selectinload(Video.internal_subtitles),
-            selectinload(Video.external_subtitles),
+            selectinload(Video.external_subtitle_compatibilities).joinedload(
+                ExternalSubtitleCompatibility.external_subtitle
+            ),
         )).all())
         search_groups = build_catalog_results(loaded_videos, "all")
         logical_search_names = {
@@ -4437,7 +4433,9 @@ def test_created_root_titles_survive_refresh_restart_and_scan(tmp_path):
             selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
             selectinload(Video.catalog_collection),
             selectinload(Video.internal_subtitles),
-            selectinload(Video.external_subtitles),
+            selectinload(Video.external_subtitle_compatibilities).joinedload(
+                ExternalSubtitleCompatibility.external_subtitle
+            ),
         ).order_by(Video.id)).all())
         results = build_catalog_results(loaded_videos, "all")
         assert {group.name for group in results.groups} == {
