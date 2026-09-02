@@ -14,6 +14,7 @@ from .catalog import (
     catalog_title_series_label,
     detect_episode_number,
     effective_external_subtitle_language,
+    effective_video_content_type,
     is_media_completion_video,
     manual_hardsub_state,
     natural_sort_key,
@@ -31,6 +32,7 @@ MEDIA_CHECK_PAGE_SIZE = 50
 
 MediaCheckSubtitleStatus = Literal[
     "available",
+    "not_required",
     "needs_cs_sk_internal_en",
     "needs_cs_sk_no_fallback",
     "needs_cs_sk_compatibility_unknown",
@@ -57,6 +59,7 @@ AUDIO_FILTER_LABELS: Mapping[str, str] = {
 }
 SUBTITLE_STATUS_LABELS: Mapping[MediaCheckSubtitleStatus, str] = {
     "available": "CZ/SK dostupné",
+    "not_required": "Titulky nejsou požadované",
     "needs_cs_sk_internal_en": "Doplnit CZ/SK · Internal EN",
     "needs_cs_sk_no_fallback": "Doplnit CZ/SK · bez vhodných titulků",
     "needs_cs_sk_compatibility_unknown": (
@@ -87,11 +90,14 @@ class MediaCheckEvaluation:
     subtitle_status: MediaCheckSubtitleStatus
     subtitle_severity: MediaCheckSeverity
     subtitle_is_open: bool
+    subtitle_required: bool
     manual_unavailable_recorded: bool
     manual_unavailable_effective: bool
     hardsub_review_recommended: bool
     completion_required: bool
     has_unknown_cs_sk_candidate: bool
+    audio_severity: MediaCheckSeverity
+    audio_requires_review: bool
 
 
 @dataclass(frozen=True)
@@ -163,6 +169,23 @@ def set_czsk_availability_manual(video: Video, value: str | None) -> None:
     video.czsk_availability_manual = CZSK_AVAILABILITY_UNAVAILABLE
 
 
+OPENING_ENDING_CONTENT_TYPES = frozenset({"op", "ed", "ncop", "nced"})
+
+
+def _media_check_content_type(video: Video) -> str:
+    """Resolve the narrow Media Check requirement classification.
+
+    A video-level manual decision remains authoritative.  Without one, an exact
+    physical OP/ED subtype controls this policy independently of the logical
+    CatalogTitle container.  Every other video keeps the shared resolver.
+    """
+    if video.content_type_manual is not None:
+        return effective_video_content_type(video)
+    if video.file_type in OPENING_ENDING_CONTENT_TYPES:
+        return video.file_type
+    return effective_video_content_type(video)
+
+
 def build_media_check_evaluation(
     video: Video,
     *,
@@ -171,6 +194,10 @@ def build_media_check_evaluation(
 ) -> MediaCheckEvaluation:
     """Combine Commit-7 facts with the independent Media Check decision."""
     factual = language_profile or build_video_language_profile(video)
+    subtitle_required = (
+        _media_check_content_type(video) not in OPENING_ENDING_CONTENT_TYPES
+    )
+    completion_required = is_media_completion_video(video)
     manual_recorded = (
         video.czsk_availability_manual == CZSK_AVAILABILITY_UNAVAILABLE
     )
@@ -181,7 +208,12 @@ def build_media_check_evaluation(
             for subtitle in external_subtitle_state.unknown_candidate_subtitles
         )
     )
-    if factual.subtitle_status == "preferred":
+    if not subtitle_required:
+        subtitle_status: MediaCheckSubtitleStatus = "not_required"
+        severity: MediaCheckSeverity = "info"
+        is_open = False
+        manual_effective = False
+    elif factual.subtitle_status == "preferred":
         subtitle_status: MediaCheckSubtitleStatus = "available"
         severity: MediaCheckSeverity = "success"
         is_open = False
@@ -216,14 +248,28 @@ def build_media_check_evaluation(
         subtitle_status=subtitle_status,
         subtitle_severity=severity,
         subtitle_is_open=is_open,
+        subtitle_required=subtitle_required,
         manual_unavailable_recorded=manual_recorded,
         manual_unavailable_effective=manual_effective,
         hardsub_review_recommended=(
-            factual.subtitle_status != "preferred"
+            subtitle_required
+            and factual.subtitle_status != "preferred"
             and manual_hardsub_state(video) == "unknown"
         ),
-        completion_required=is_media_completion_video(video),
+        completion_required=completion_required,
         has_unknown_cs_sk_candidate=has_unknown_cs_sk_candidate,
+        audio_severity=(
+            "info"
+            if not subtitle_required and factual.audio_status == "unknown"
+            else AUDIO_STATUS_SEVERITY[factual.audio_status]
+        ),
+        audio_requires_review=(
+            completion_required
+            and factual.audio_status in {"unknown", "no_audio"}
+            and not (
+                not subtitle_required and factual.audio_status == "unknown"
+            )
+        ),
     )
 
 
@@ -243,6 +289,8 @@ def _subtitle_matches(evaluation: MediaCheckEvaluation, filter_name: str) -> boo
 
 def _audio_matches(evaluation: MediaCheckEvaluation, filter_name: str) -> bool:
     if filter_name != "all" and not evaluation.completion_required:
+        return False
+    if filter_name == "unknown" and not evaluation.audio_requires_review:
         return False
     return filter_name == "all" or evaluation.factual.audio_status == filter_name
 

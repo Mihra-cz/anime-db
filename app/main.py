@@ -127,7 +127,7 @@ from .media_parts import (
     media_part_sequence_warning, media_part_summary_label, set_media_part_number,
 )
 from .media_check import (
-    AUDIO_FILTER_LABELS, AUDIO_STATUS_LABELS, AUDIO_STATUS_SEVERITY,
+    AUDIO_FILTER_LABELS, AUDIO_STATUS_LABELS,
     MediaAudioTrack, MediaInternalSubtitle,
     SUBTITLE_FILTER_LABELS, SUBTITLE_STATUS_LABELS,
     build_media_check_evaluation, build_media_check_results,
@@ -2036,7 +2036,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "audio_filter_labels": AUDIO_FILTER_LABELS,
             "subtitle_status_labels": SUBTITLE_STATUS_LABELS,
             "audio_status_labels": AUDIO_STATUS_LABELS,
-            "audio_status_severity": AUDIO_STATUS_SEVERITY,
             "media_check_url": media_check_state_url,
             "return_to": media_check_state_url(
                 results.subtitle_filter, results.audio_filter,
@@ -2269,12 +2268,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if {video.id for video in videos} != set(selected_ids):
                 raise HTTPException(status_code=404, detail="Některé vybrané video neexistuje.")
             try:
+                evaluations = tuple(
+                    build_media_check_evaluation(video) for video in videos
+                )
                 if action == "unavailable" and any(
-                    build_media_check_evaluation(video).factual.has_cs_or_sk
-                    for video in videos
+                    evaluation.factual.has_cs_or_sk
+                    for evaluation in evaluations
                 ):
                     raise ValueError(
                         "CZ/SK nelze označit jako nedostupné u videa, které je skutečně obsahuje."
+                    )
+                if action == "unavailable" and any(
+                    not evaluation.subtitle_required
+                    for evaluation in evaluations
+                ):
+                    raise ValueError(
+                        "CZ/SK nelze označit jako nedostupné u obsahu, pro který titulky nejsou požadované."
                     )
                 for video in videos:
                     set_czsk_availability_manual(

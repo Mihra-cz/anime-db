@@ -4900,6 +4900,51 @@ compatibility semantics zůstaly stejné.
 
 ---
 
+## 6.75 Media Check policy pro OP/ED/NCOP/NCED
+
+Media Check nyní odděluje faktický jazykový profil od požadavku na překlad také
+pro opening/ending obsah. Efektivně rozpoznané `op`, `ed`, `ncop` a `nced` mají
+workflow stav **Titulky nejsou požadované**. Absence CZ/SK, Internal EN,
+externího titulku ani potvrzeného hardsubu proto nevytváří subtitle warning,
+hardsub review nebo `CZ/SK unavailable` úkol. Existující interní a externí
+stopy, M:N compatibility, hardsub i jejich effective jazyky zůstávají ve
+faktickém profilu a UI beze změny.
+
+Úzký Media Check resolver používá prioritu explicitní
+`Video.content_type_manual` → přesný raw `Video.file_type` OP/ED/NCOP/NCED →
+shared `effective_video_content_type()`. Title-level typ zde popisuje logický
+kontejner, a proto přesný fyzický opening/ending nepřekryje ani Bonus, Special,
+Season nebo jiný `CatalogTitle.effective_part_type`. Non-`NULL` ruční
+klasifikace konkrétního Video naopak zůstává autoritativní a parser ji nikdy
+nepřebije. Obecný Bonus/NC bez přesného OP/ED/NCOP/NCED subtype výjimku
+nedostává; Film, OVA, Special, Recap a Preview dál vyžadují titulky u videí,
+která sama nejsou takovým přesným opening/ending obsahem.
+
+Audio profil se nemění. `unknown` u tohoto opening/ending obsahu zůstává
+pravdivě viditelný, ale má neutrální severity a nevstupuje do filtru ani souhrnu
+**Jazyk audia neurčen**. Známé jazyky se zobrazují a filtrují beze změny;
+`no_audio` zůstává technický problém. Subtitle a audio `all` nadále počítají
+fyzická videa, zatímco zásahové facety počítají jen skutečné workflow jednotky.
+Běžné epizody, Film, OVA, Special, Recap a Preview zachovávají dosavadní CZ/SK
+semantiku. UI u nepožadovaných titulků nenabízí vytvoření unavailable markeru a
+POST endpoint stejný invariant ověřuje i serverově; starší marker se nemaže
+automaticky a lze jej explicitně vyčistit.
+
+Read-only audit produkční DB 2. září 2026 našel 52 parserově přesných řádků:
+`OP=9`, `ED=5`, `NCOP=18`, `NCED=20`. Všech 52 je nyní
+subtitle-not-required (`40 missing`, `12 Internal EN fallback`); 51 má JP audio
+a jedno factual `unknown`. Žádný z těchto produkčních řádků nemá non-`NULL`
+`content_type_manual`. Všech šest NCOP/NCED pod effective Special je nově také
+subtitle-not-required. Produkční DB byla otevřena pouze v SQLite `mode=ro`;
+audit ani implementace ji neměnily a NAS nebyl procházen ani zapisován.
+
+Rozšířený read-only audit všech 3 100 videí, úplná classification matrix,
+oddělené automatic/manual mismatch kandidáty a inventura všech 52 OP/ED/NC
+položek jsou v `docs/CONTENT_CLASSIFICATION_AUDIT_2026-09-02.md`. Jde pouze o
+podklad pro budoucí ruční Hierarchy Review; audit neprovedl žádnou opravu dat.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

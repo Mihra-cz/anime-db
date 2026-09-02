@@ -30,6 +30,8 @@ def _video(
     audio: tuple[str, ...] = ("ja",),
     internal: tuple[str, ...] = (),
     external: tuple[str, ...] = (),
+    file_type: str = "episode",
+    content_type_manual: str | None = None,
     title: CatalogTitle | None = None,
     collection: CatalogCollection | None = None,
 ) -> Video:
@@ -49,7 +51,8 @@ def _video(
         filename=f"E{number:02}.mkv",
         size=number,
         mtime_ns=number,
-        file_type="episode",
+        file_type=file_type,
+        content_type_manual=content_type_manual,
         local_episode_number=number,
         season_episode_number=number,
         catalog_title=title,
@@ -164,6 +167,243 @@ def test_clear_manual_unavailable_returns_to_factual_workflow():
     assert build_media_check_evaluation(video).subtitle_status == (
         "needs_cs_sk_internal_en"
     )
+
+
+@pytest.mark.parametrize(
+    ("file_type", "title_type", "manual_type"),
+    [
+        ("episode", "season", None),
+        ("other", "film", None),
+        ("other", "ova", None),
+        ("other", "special", None),
+        ("episode", "season", "recap"),
+        ("other", "preview", None),
+    ],
+    ids=("episode", "film", "ova", "special", "recap", "preview"),
+)
+def test_dialogue_content_still_requires_czsk_subtitles(
+    file_type, title_type, manual_type,
+):
+    title = CatalogTitle(
+        id=10,
+        local_title=title_type,
+        normalized_local_title=title_type,
+        relative_root_path=f"Anime/Required/{title_type}",
+        part_type=title_type,
+    )
+    video = _video(
+        1,
+        file_type=file_type,
+        content_type_manual=manual_type,
+        title=title,
+    )
+
+    evaluation = build_media_check_evaluation(video)
+
+    assert evaluation.subtitle_required is True
+    assert evaluation.subtitle_status == "needs_cs_sk_no_fallback"
+    assert evaluation.subtitle_is_open is True
+
+    set_czsk_availability_manual(video, "unavailable")
+    evaluation = build_media_check_evaluation(video)
+    assert evaluation.subtitle_status == "known_unavailable_no_fallback"
+    assert evaluation.manual_unavailable_effective is True
+
+
+@pytest.mark.parametrize("file_type", ("op", "ed", "ncop", "nced"))
+def test_opening_ending_without_subtitles_is_not_a_media_check_problem(file_type):
+    video = _video(1, file_type=file_type)
+
+    evaluation = build_media_check_evaluation(video)
+
+    assert evaluation.factual.subtitle_status == "missing"
+    assert evaluation.subtitle_required is False
+    assert evaluation.subtitle_status == "not_required"
+    assert evaluation.subtitle_severity == "info"
+    assert evaluation.subtitle_is_open is False
+    assert evaluation.hardsub_review_recommended is False
+
+
+@pytest.mark.parametrize(
+    ("file_type", "container_type"),
+    [
+        ("ncop", "special"),
+        ("nced", "special"),
+        ("op", "bonus"),
+        ("ed", "bonus"),
+        ("op", "season"),
+        ("ed", "season"),
+    ],
+)
+def test_exact_opening_ending_subtype_overrides_title_container(
+    file_type, container_type,
+):
+    title = CatalogTitle(
+        id=10,
+        local_title=container_type,
+        normalized_local_title=container_type,
+        relative_root_path=f"Anime/Show/{container_type}",
+        part_type=container_type,
+    )
+
+    evaluation = build_media_check_evaluation(
+        _video(1, file_type=file_type, title=title),
+    )
+
+    assert evaluation.subtitle_required is False
+    assert evaluation.subtitle_status == "not_required"
+
+
+@pytest.mark.parametrize(
+    ("file_type", "manual_type"),
+    [
+        ("ncop", "special"),
+        ("nced", "special"),
+        ("ncop", "preview"),
+        ("nced", "ova"),
+    ],
+)
+def test_manual_video_authority_overrides_opening_parser_evidence(
+    file_type, manual_type,
+):
+    video = _video(
+        1, file_type=file_type, content_type_manual=manual_type,
+    )
+
+    evaluation = build_media_check_evaluation(video)
+
+    assert evaluation.subtitle_required is True
+    assert evaluation.subtitle_status == "needs_cs_sk_no_fallback"
+
+
+def test_generic_bonus_or_nc_item_is_not_implicitly_exempt():
+    title = CatalogTitle(
+        id=10,
+        local_title="NC",
+        normalized_local_title="nc",
+        relative_root_path="Anime/Show/NC",
+        part_type="bonus",
+    )
+
+    evaluation = build_media_check_evaluation(
+        _video(1, file_type="other", title=title),
+    )
+
+    assert evaluation.subtitle_required is True
+    assert evaluation.subtitle_status == "needs_cs_sk_no_fallback"
+
+
+@pytest.mark.parametrize(
+    ("file_type", "internal", "external", "factual_status"),
+    [
+        ("op", ("cs",), ("en",), "preferred"),
+        ("ed", ("en",), (), "fallback_internal_en"),
+    ],
+)
+def test_opening_ending_keeps_existing_subtitle_facts(
+    file_type, internal, external, factual_status,
+):
+    video = _video(
+        1, file_type=file_type, internal=internal, external=external,
+    )
+
+    evaluation = build_media_check_evaluation(video)
+
+    assert evaluation.subtitle_status == "not_required"
+    assert evaluation.factual.subtitle_status == factual_status
+    assert evaluation.factual.internal_subtitle_languages == frozenset(internal)
+    assert evaluation.factual.external_subtitle_languages == frozenset(external)
+
+
+@pytest.mark.parametrize(
+    ("audio", "factual_status", "severity", "requires_review"),
+    [
+        (("unknown",), "unknown", "info", False),
+        (("ja",), "japanese", "success", False),
+    ],
+)
+def test_opening_ending_keeps_audio_facts_without_false_language_review(
+    audio, factual_status, severity, requires_review,
+):
+    evaluation = build_media_check_evaluation(
+        _video(1, file_type="op", audio=audio),
+    )
+
+    assert evaluation.factual.audio_status == factual_status
+    assert evaluation.factual.audio_languages == audio
+    assert evaluation.audio_severity == severity
+    assert evaluation.audio_requires_review is requires_review
+
+
+@pytest.mark.parametrize("file_type", ("op", "ed", "ncop", "nced"))
+def test_opening_ending_under_special_keeps_facts_out_of_unknown_audio_queue(
+    file_type,
+):
+    title = CatalogTitle(
+        id=10,
+        local_title="Specials",
+        normalized_local_title="specials",
+        relative_root_path="Anime/Show/Specials",
+        part_type="special",
+    )
+    video = _video(
+        1,
+        file_type=file_type,
+        title=title,
+        audio=("unknown",),
+        internal=("cs",),
+        external=("en",),
+    )
+
+    evaluation = build_media_check_evaluation(video)
+    unknown_audio = build_media_check_results(
+        [video],
+        subtitle_filter="all",
+        audio_filter="unknown",
+        page_size=10,
+    )
+
+    assert evaluation.subtitle_status == "not_required"
+    assert evaluation.factual.audio_status == "unknown"
+    assert evaluation.factual.audio_languages == ("unknown",)
+    assert evaluation.factual.internal_subtitle_languages == frozenset({"cs"})
+    assert evaluation.factual.external_subtitle_languages == frozenset({"en"})
+    assert evaluation.audio_severity == "info"
+    assert evaluation.audio_requires_review is False
+    assert unknown_audio.total_filtered == 0
+    assert unknown_audio.audio_counts["unknown"] == 0
+
+
+def test_opening_ending_is_excluded_from_subtitle_and_unknown_audio_queues():
+    episode = _video(1, audio=("unknown",))
+    opening = _video(2, file_type="op", audio=("unknown",))
+    ending = _video(3, file_type="ed", audio=("ja",), internal=("cs",))
+
+    all_results = build_media_check_results(
+        [episode, opening, ending], subtitle_filter="all", page_size=10,
+    )
+
+    assert all_results.subtitle_counts == {
+        "all": 3,
+        "unresolved": 1,
+        "unresolved-internal-en": 0,
+        "unresolved-no-fallback": 1,
+        "unavailable": 0,
+        "available": 0,
+    }
+    assert all_results.audio_counts["all"] == 3
+    assert all_results.audio_counts["unknown"] == 1
+    assert build_media_check_results(
+        [episode, opening, ending],
+        subtitle_filter="unresolved",
+        page_size=10,
+    ).rows == (all_results.rows[0],)
+    assert build_media_check_results(
+        [episode, opening, ending],
+        subtitle_filter="all",
+        audio_filter="unknown",
+        page_size=10,
+    ).rows == (all_results.rows[0],)
 
 
 def test_media_check_summary_filters_search_and_pagination_share_evaluator():
@@ -573,6 +813,58 @@ def test_media_check_page_navigation_controls_and_existing_review_pages(tmp_path
         assert build_media_check_evaluation(audio_video).factual.audio_status == "japanese"
         assert build_media_check_evaluation(subtitle_video).subtitle_status == "available"
         assert build_media_check_evaluation(hardsub_video).subtitle_status == "available"
+
+
+def test_opening_media_check_ui_is_neutral_and_rejects_unavailable_marker(tmp_path):
+    web_app, ids, _, _, _ = _media_app(tmp_path)
+    with web_app.state.sessions() as session:
+        translated_opening = session.get(Video, ids[1])
+        unknown_audio_opening = session.get(Video, ids[9])
+        translated_opening.file_type = "op"
+        unknown_audio_opening.file_type = "op"
+        session.commit()
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    response = endpoints["/media-check"](
+        _request(web_app, "/media-check"),
+        subtitle="all",
+        audio="all",
+        q="",
+        page=1,
+        message=None,
+    )
+    rendered = response.body.decode()
+    translated_row = rendered.split(
+        f'id="video-{ids[1]}"', 1,
+    )[1].split("</tr>", 1)[0]
+    unknown_audio_row = rendered.split(
+        f'id="video-{ids[9]}"', 1,
+    )[1].split("</tr>", 1)[0]
+
+    assert "Titulky nejsou požadované" in translated_row
+    assert "Fakticky: CZ/SK" in translated_row
+    assert "JP audio" in translated_row
+    assert "Stream 10" in translated_row
+    assert "Titulky nejsou požadované" in unknown_audio_row
+    assert "Jazyk audia neurčen" in unknown_audio_row
+    assert "severity-info" in unknown_audio_row
+    assert "Vhodné ověřit" not in unknown_audio_row
+    assert 'type="checkbox"' in unknown_audio_row
+    assert "disabled" in unknown_audio_row
+    assert "CZ/SK nyní nejsou dostupné</button>" not in unknown_audio_row
+
+    request = _post_request(web_app, "/media-check/czsk-availability", [
+        ("video_ids", str(ids[9])),
+        ("action", "unavailable"),
+    ])
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(endpoints["/media-check/czsk-availability"](request))
+    assert exc_info.value.status_code == 400
+    with web_app.state.sessions() as session:
+        assert session.get(Video, ids[9]).czsk_availability_manual is None
 
 
 def test_unresolved_subtitle_media_check_manual_workflow_is_persistent_and_scoped(tmp_path):
