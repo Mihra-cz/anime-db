@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -10,6 +11,7 @@ from app.catalog import detect_episode_number
 from app.hierarchy_evaluation import catalog_title_hierarchy_is_verified
 from app.hierarchy_review import create_title_from_videos, refresh_collection_state
 from app.hierarchy_types import PART_TYPE_LABELS, PART_TYPES
+from app.media_parts import media_part_total
 from app.manual_split import (
     ManualSplitDecisionKind,
     evaluate_persisted_manual_split,
@@ -18,10 +20,15 @@ from app.models import (
     CatalogCollection, CatalogTitle, ExternalTitleLink, TitleMetadata, Video,
 )
 from app.numbering import (
+    SUPPLEMENTAL_PART_TYPES,
     effective_video_numbering,
+    is_nonprimary_duplicate_video,
     recalculate_title_numbering,
+    summarize_title_numbering,
 )
 from app.title_naming import safe_catalog_title_local_title
+
+from .candidates import EpisodeCountComparison, compare_episode_count
 
 
 class MetadataSplitStatus(StrEnum):
@@ -87,6 +94,16 @@ class MetadataSplitEvaluation:
             season_label=self.title.effective_season_label,
             source_title=self.title,
         )
+
+
+@dataclass(frozen=True)
+class MetadataRangePresentation:
+    """Read-only count presentation kept separate from physical split safety."""
+
+    comparison: EpisodeCountComparison
+    split_evaluation: MetadataSplitEvaluation | None = None
+    information: str | None = None
+    warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -262,6 +279,182 @@ def evaluate_metadata_split(
         matching,
         remaining,
     )
+
+
+def _media_part_logical_total(
+    title: CatalogTitle,
+    videos: tuple[Video, ...],
+    comparison: EpisodeCountComparison,
+) -> int | None:
+    """Return N only for one complete, non-conflicting logical Media Part set."""
+    if comparison.local.count != 1 or any(
+        video.duplicate_primary_missing for video in videos
+    ):
+        return None
+    active = tuple(
+        video for video in videos if not is_nonprimary_duplicate_video(video)
+    )
+    total = media_part_total(active)
+    if total is None or total != len(active):
+        return None
+
+    # Media Part is manual authority, but two independently confirmed release
+    # lanes must not be collapsed into one physical segment set by presentation.
+    variant_groups = {
+        video.video_variant_group_id
+        if video.video_variant_group_id is not None
+        else getattr(video.__dict__.get("video_variant_group"), "id", None)
+        for video in active
+    }
+    if len(variant_groups) != 1:
+        return None
+
+    known_identities: set[tuple[str, object]] = set()
+    for video in active:
+        state = effective_video_numbering(video, title)
+        # A user can explicitly confirm both physical segments as E1 while a
+        # legacy filename suffix P1/P2 remains visible to the supplementary
+        # parser.  The manual episode authority identifies the logical item;
+        # the independent Media Part ordinal identifies its physical segment.
+        if video.episode_number_manual_override is not None:
+            known_identities.add((
+                "manual_episode", video.episode_number_manual_override,
+            ))
+        elif state.is_supplementary and state.supplementary_number is not None:
+            known_identities.add((
+                state.supplementary_type or title.effective_part_type,
+                state.supplementary_number,
+            ))
+        elif state.is_standard and state.numbering_input is not None:
+            known_identities.add(("standard", state.numbering_input))
+        elif video.season_episode_number is not None:
+            known_identities.add((
+                title.effective_part_type, video.season_episode_number,
+            ))
+    return total if len(known_identities) <= 1 else None
+
+
+def _supplementary_information(
+    title: CatalogTitle, videos: tuple[Video, ...],
+) -> str | None:
+    if title.effective_part_type in SUPPLEMENTAL_PART_TYPES:
+        return None
+    count = sum(
+        effective_video_numbering(video, title).is_supplementary
+        for video in videos
+        if not is_nonprimary_duplicate_video(video)
+    )
+    if count == 1:
+        detail = (
+            "1 bezpečně klasifikovanou doplňkovou položku, která se do "
+            "standardního počtu epizod nezapočítává."
+        )
+    elif 2 <= count <= 4:
+        detail = (
+            f"{count} bezpečně klasifikované doplňkové položky, které se do "
+            "standardního počtu epizod nezapočítávají."
+        )
+    elif count:
+        detail = (
+            f"{count} bezpečně klasifikovaných doplňkových položek, které se do "
+            "standardního počtu epizod nezapočítávají."
+        )
+    else:
+        return None
+    return f"Metadata rozsah odpovídá. Lokální část navíc obsahuje {detail}"
+
+
+def evaluate_metadata_range_presentation(
+    title: CatalogTitle,
+    *,
+    videos: Iterable[Video] | None = None,
+) -> MetadataRangePresentation | None:
+    """Explain provider coverage without weakening physical subset validation."""
+    metadata = title.metadata_record
+    if (
+        metadata is None
+        or metadata.episode_count is None
+        or metadata.episode_count <= 0
+    ):
+        return None
+    video_list = tuple(title.videos if videos is None else videos)
+    comparison = compare_episode_count(
+        title, metadata.episode_count, videos=video_list,
+    )
+    split_evaluation = evaluate_metadata_split(title)
+    has_media_parts = any(
+        video.media_part_number is not None for video in video_list
+    )
+    if has_media_parts:
+        media_part_total_value = _media_part_logical_total(
+            title, video_list, comparison,
+        )
+        if comparison.matches is True and media_part_total_value is not None:
+            noun = (
+                "potvrzené části média"
+                if 2 <= media_part_total_value <= 4
+                else "potvrzených částí média"
+            )
+            return MetadataRangePresentation(
+                comparison,
+                information=(
+                    "Metadata rozsah odpovídá. Jedna logická epizoda je lokálně "
+                    f"rozdělena na {media_part_total_value} {noun}."
+                ),
+            )
+        return MetadataRangePresentation(
+            comparison,
+            split_evaluation=split_evaluation,
+            warning=(
+                "Lokální Media Parts netvoří jednu úplnou a nekonfliktní "
+                "potvrzenou sadu 1..N pro jedinou logickou epizodu."
+            ),
+        )
+
+    summary = summarize_title_numbering(list(video_list), title)
+    if (
+        summary.invalid_duplicate_references
+        or summary.variant_inconsistent_confirmed_duplicates
+        or any(video.duplicate_primary_missing for video in video_list)
+    ):
+        return MetadataRangePresentation(
+            comparison,
+            split_evaluation=split_evaluation,
+            warning=(
+                "Lokální skupina obsahuje poškozenou nebo konfliktní duplicate "
+                "vazbu; metadata rozsah proto zůstává nevyřešený."
+            ),
+        )
+    if summary.duplicate_numbers:
+        return MetadataRangePresentation(
+            comparison,
+            split_evaluation=split_evaluation,
+            warning=(
+                "Lokální skupina obsahuje nevyřešenou logickou identitu epizody; "
+                "metadata rozsah proto zůstává nevyřešený."
+            ),
+        )
+    if comparison.matches is True:
+        return MetadataRangePresentation(
+            comparison,
+            information=_supplementary_information(title, video_list),
+        )
+    if split_evaluation is not None:
+        return MetadataRangePresentation(
+            comparison, split_evaluation=split_evaluation,
+        )
+    if comparison.local.count is None:
+        warning = (
+            "Lokální logický počet nelze bezpečně určit; metadata rozsah proto "
+            "zůstává nevyřešený."
+        )
+    else:
+        warning = (
+            f"Provider uvádí {metadata.episode_count} epizod, bezpečný lokální "
+            f"logický počet je {comparison.local.count}. Tento rozdíl nelze ze "
+            "structured metadat automaticky vysvětlit."
+        )
+    return MetadataRangePresentation(comparison, warning=warning)
 
 
 def _load_split_source(session: Session, title_id: int) -> CatalogTitle:

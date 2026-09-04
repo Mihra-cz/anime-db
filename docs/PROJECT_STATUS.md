@@ -2,8 +2,8 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 1. září 2026
-> **Aktuální checkpoint:** Recap fractional numbering a deterministic bulk renumber proposal
+> **Aktualizováno:** 5. září 2026
+> **Aktuální checkpoint:** Metadata candidate scoring a logical metadata-range presentation
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -4942,6 +4942,53 @@ Rozšířený read-only audit všech 3 100 videí, úplná classification matrix
 oddělené automatic/manual mismatch kandidáty a inventura všech 52 OP/ED/NC
 položek jsou v `docs/CONTENT_CLASSIFICATION_AUDIT_2026-09-02.md`. Jde pouze o
 podklad pro budoucí ruční Hierarchy Review; audit neprovedl žádnou opravu dat.
+
+---
+
+## 6.76 Metadata candidate scoring audit a episode-count evidence
+
+Candidate scoring byl auditován bez změny vah nebo thresholdů. Nadále jde o
+aditivní confidence s pevným maximem `1.0`: exact title `0.58`, exact Romaji
+bonus `0.08`, exact English bonus `0.10`, season token v provider názvu `0.08`,
+čtyřciferný rok v lokálním názvu `0.06`, episode delta `0.06/0.04/0.02` a
+format match `0.04`. Neexistuje záporná penalizace. Chybějící evidence nepřidá
+body a denominator nesnižuje. Testovatelný `CandidateScoreBreakdown` nyní u
+každé komponenty rozlišuje match, partial, conflict a unavailable a uvádí raw,
+fixed maximum, applicable maximum i výsledné score. Typických `86 %` proto
+znamená exact Romaji+English, format a episode match bez použitelného
+season/year bonusu; nejde o cap.
+
+Původní candidate episode delta používala fyzický počet řádků
+`Video.file_type == episode`. Nyní candidate i potvrzený metadata detail používají
+jeden read-only resolver. Season/Part/title vychází z centrálního
+`LogicalEpisodeIdentity`; confirmed duplicate secondary a více variant stejné
+canonical epizody počet nezvýší a správně klasifikovaný Recap či jiný
+supplementary obsah uvnitř Season se ignoruje. Samostatné OVA/Special/Film
+používají pouze bezpečně známé unikátní supplementary ordinaly; kompletní sada
+Media Parts reprezentuje jednu logickou položku. Nejednoznačná skupina vrací
+unavailable namísto fyzického odhadu.
+
+Presentation metadata rozsahu je oddělena od bezpečnosti write splitu.
+Kompletní nekonfliktní manual Media Part sada jedné logické epizody a bezpečně
+klasifikovaný supplementary obsah navíc se při shodném logical countu zobrazují
+jako neutrální vysvětlení, nikoli jako nevyřešený metadata-range warning.
+U Media Parts má explicitní ruční episode authority přednost před legacy
+filename hintem `P1/P2`; ten dál označuje fyzický segment a nesmí z jedné ručně
+potvrzené E1 vytvořit dvě supplementary episode identity.
+`evaluate_metadata_split()` přitom zůstává beze změny jako přísný gate pro
+jednoznačný fyzický subset a znovu se volá před POST zápisem. Neúplné nebo
+konfliktní Media Parts, poškozené duplicate vazby, unresolved identity a
+provider/local mismatch zůstávají warning; samostatný Special Episode 0 se bez
+nové `covered-by-parent` authority nikdy nepřičítá k Season countu.
+
+Porovnání zůstává informativní. AniList `episode_count` může zahrnout Episode 0
+nebo kombinovat standardní shorts a SP, zatímco lokální model je může mít v
+samostatném `CatalogTitle`. Description se neparsuje a žádná nová
+`covered-by-parent` authority nebyla přidána. Legacy `Z/J/L/Pxx` zůstává pouze
+`CatalogCollection.local_period_hint`; scoring ji nepoužívá, protože současný
+model nerozliší počáteční release hint, multi-cour pokračování a historický
+překlep. Auto-confirm threshold i neaktivní auto-confirm konfigurace zůstaly
+beze změny a scoring sám nic nepersistuje.
 
 ---
 

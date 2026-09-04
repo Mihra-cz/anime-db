@@ -8,8 +8,8 @@ from app.catalog import build_catalog_request_index, build_catalog_results
 from app.database import Base
 from app.main import create_app
 from app.models import (
-    AudioTrack, CatalogCollection, CatalogTitle, UnresolvedExternalSubtitle,
-    Video,
+    AudioTrack, CatalogCollection, CatalogTitle, TitleMetadata,
+    UnresolvedExternalSubtitle, Video,
 )
 from app.subtitle_review import build_unresolved_subtitle_rows
 
@@ -130,6 +130,44 @@ def test_stable_get_endpoints_are_semantically_read_only(
         event.remove(engine, "before_cursor_execute", record)
 
     assert response.status_code == 200
+    assert writes == []
+    assert _semantic_snapshot(engine) == before
+
+
+def test_title_detail_count_comparison_is_semantically_read_only(performance_app):
+    web_app, ids = performance_app
+    engine = web_app.state.sessions.kw["bind"]
+    with Session(engine) as session:
+        title = session.get(CatalogTitle, ids["title"])
+        title.metadata_record = TitleMetadata(
+            display_title="Performance Show",
+            episode_count=1,
+            metadata_provider="anilist",
+            metadata_external_id="1",
+        )
+        session.commit()
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+    )
+    before = _semantic_snapshot(engine)
+    writes = []
+
+    def record(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            writes.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        response = endpoint(
+            _request(web_app, f"/titles/{ids['title']}"), ids["title"],
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert response.status_code == 200
+    assert "Lokálně: 1 logických položek (shoda)" in response.body.decode()
     assert writes == []
     assert _semantic_snapshot(engine) == before
 

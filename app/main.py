@@ -119,8 +119,8 @@ from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
 from .metadata.artwork import ArtworkCacheError, cache_cover
 from .metadata.candidates import (
-    LOW_SCORE_THRESHOLD, batch_search_candidates, decode_match_reasons, search_and_store_candidates,
-    set_candidate_rejected,
+    LOW_SCORE_THRESHOLD, batch_search_candidates,
+    decode_match_reasons, search_and_store_candidates, set_candidate_rejected,
 )
 from .media_parts import (
     MEDIA_PART_NUMBER_ERROR, media_part_label, media_part_ordinal_warning,
@@ -142,7 +142,10 @@ from .metadata.service import (
     default_metadata_search_query, normalize_metadata_search_query, refresh_title_metadata,
     set_manual_display_title, unlink_title_metadata,
 )
-from .metadata.split import apply_metadata_split, evaluate_metadata_split
+from .metadata.split import (
+    apply_metadata_split, evaluate_metadata_range_presentation,
+    evaluate_metadata_split,
+)
 from .title_order import catalog_title_sort_key
 from .video_variants import (
     VIDEO_VARIANT_CONTENT_VARIANT_CHOICES,
@@ -702,8 +705,13 @@ def _metadata_template_values(
     allow_remote_images: bool,
     show_rejected: bool = False,
     show_candidates: bool = False,
+    title_videos: list[Video] | None = None,
 ) -> dict:
     metadata = title.metadata_record if title else None
+    range_presentation = (
+        evaluate_metadata_range_presentation(title, videos=title_videos)
+        if title is not None else None
+    )
     def decoded(value: str | None) -> list:
         try:
             result = json.loads(value or "[]")
@@ -727,6 +735,18 @@ def _metadata_template_values(
         "metadata_genres": decoded(metadata.genres_json if metadata else None),
         "metadata_tags": decoded(metadata.tags_json if metadata else None),
         "metadata_synonyms": decoded(metadata.synonyms_json if metadata else None),
+        "confirmed_episode_count_comparison": (
+            range_presentation.comparison if range_presentation else None
+        ),
+        "metadata_split_evaluation": (
+            range_presentation.split_evaluation if range_presentation else None
+        ),
+        "metadata_range_information": (
+            range_presentation.information if range_presentation else None
+        ),
+        "metadata_range_warning": (
+            range_presentation.warning if range_presentation else None
+        ),
         "primary_external_link": primary_external_link,
         "metadata_candidates": stored_candidates if show_candidates else [],
         "candidate_reasons": {
@@ -1426,9 +1446,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 + len(catalog_title.artwork)
                 if catalog_title else 0
             ),
-            "metadata_split_evaluation": (
-                evaluate_metadata_split(catalog_title) if catalog_title else None
-            ),
             "supplementary_groups": (
                 primary_presentation.supplementary_groups
                 if primary_presentation is not None else ()
@@ -1501,6 +1518,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.metadata_allow_remote_images,
             show_rejected,
             show_metadata_candidates,
+            title_candidates,
         ))
         return templates.TemplateResponse(request, "series.html", context)
 
@@ -2756,26 +2774,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             titles = list(session.scalars(select(CatalogTitle).options(
                 selectinload(CatalogTitle.collection), selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogTitle.metadata_candidates), selectinload(CatalogTitle.artwork),
-                selectinload(CatalogTitle.external_links), selectinload(CatalogTitle.videos),
+                selectinload(CatalogTitle.external_links),
+                selectinload(CatalogTitle.videos).selectinload(Video.duplicate_of),
             ).order_by(CatalogTitle.local_title)).all())
-        rows = []
-        for title in titles:
-            active = [candidate for candidate in title.metadata_candidates if candidate.rejected_at is None]
-            best = max((candidate.match_score or 0 for candidate in active), default=None)
-            split_evaluation = evaluate_metadata_split(title) if status == "split" else None
-            include = {
-                "without": title.metadata_status in {"unlinked", "unavailable", "error"},
-                "pending": title.metadata_status == "candidates_available",
-                "manual": title.metadata_status == "linked_manual",
-                "conflict": title.metadata_status == "conflict",
-                "missing-artwork": title.metadata_status == "linked_manual" and not any(item.is_primary for item in title.artwork),
-                "low-score": any((candidate.match_score or 0) < LOW_SCORE_THRESHOLD for candidate in active),
-                "split": split_evaluation is not None,
-            }[status]
-            if include:
-                rows.append({"title": title, "candidate_count": len(active), "best_score": best,
-                             "last_search": max((candidate.updated_at for candidate in title.metadata_candidates), default=None),
-                             "split_evaluation": split_evaluation})
+            rows = []
+            for title in titles:
+                active = [candidate for candidate in title.metadata_candidates if candidate.rejected_at is None]
+                best = max((candidate.match_score or 0 for candidate in active), default=None)
+                range_presentation = (
+                    evaluate_metadata_range_presentation(title)
+                    if status == "split" else None
+                )
+                split_evaluation = (
+                    range_presentation.split_evaluation
+                    if range_presentation is not None else None
+                )
+                include = {
+                    "without": title.metadata_status in {"unlinked", "unavailable", "error"},
+                    "pending": title.metadata_status == "candidates_available",
+                    "manual": title.metadata_status == "linked_manual",
+                    "conflict": title.metadata_status == "conflict",
+                    "missing-artwork": title.metadata_status == "linked_manual" and not any(item.is_primary for item in title.artwork),
+                    "low-score": any((candidate.match_score or 0) < LOW_SCORE_THRESHOLD for candidate in active),
+                    "split": split_evaluation is not None,
+                }[status]
+                if include:
+                    rows.append({"title": title, "candidate_count": len(active), "best_score": best,
+                                 "last_search": max((candidate.updated_at for candidate in title.metadata_candidates), default=None),
+                                 "split_evaluation": split_evaluation})
         return templates.TemplateResponse(request, "metadata_review.html", {
             "rows": rows, "status": status, "batch_result": batch_result,
             "default_batch_limit": settings.metadata_batch_search_limit,

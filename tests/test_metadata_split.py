@@ -13,7 +13,10 @@ from app.hierarchy_review import (
     supplementary_video_suggestions,
 )
 from app.main import create_app
-from app.metadata.split import apply_metadata_split, evaluate_metadata_split
+from app.metadata.split import (
+    apply_metadata_split, evaluate_metadata_range_presentation,
+    evaluate_metadata_split,
+)
 from app.migrations import migrate_schema
 from app.models import (
     Artwork,
@@ -24,6 +27,7 @@ from app.models import (
     MetadataCandidate,
     TitleMetadata,
     Video,
+    VideoVariantGroup,
     utc_now,
 )
 from app.scanner import scan_library
@@ -134,6 +138,43 @@ def attach_confirmed_metadata(
     ))
 
 
+def season_title(
+    episode_count: int,
+) -> tuple[CatalogCollection, CatalogTitle, list[Video]]:
+    collection = CatalogCollection(
+        local_title="Example Show",
+        normalized_local_title="example show",
+        relative_root_path="Anime/Example Show",
+        hierarchy_status="verified",
+        hierarchy_verified_at=utc_now(),
+    )
+    title = CatalogTitle(
+        collection=collection,
+        local_title="Season 1",
+        normalized_local_title="season 1",
+        relative_root_path="Anime/Example Show/Season 1",
+        part_type="season",
+        season_number=1,
+        season_label="S1",
+    )
+    videos = [
+        Video(
+            id=number,
+            relative_path=f"{title.relative_root_path}/E{number:02}.mkv",
+            root_folder="Anime",
+            filename=f"E{number:02}.mkv",
+            size=number,
+            mtime_ns=number,
+            file_type="episode",
+            season_episode_number=number,
+            catalog_title=title,
+            catalog_collection=collection,
+        )
+        for number in range(1, episode_count + 1)
+    ]
+    return collection, title, videos
+
+
 def test_verified_special_and_bonus_do_not_reopen_generic_hierarchy_split():
     _, special, special_videos = supplementary_title([
         f"Special {number:02}.mkv" for number in range(1, 7)
@@ -190,6 +231,277 @@ def test_metadata_split_requires_confirmed_metadata_and_skips_full_coverage():
     attach_confirmed_metadata(title, 6)
 
     assert evaluate_metadata_split(title) is None
+
+
+def test_complete_media_parts_are_neutral_logical_match_but_not_split_mapping():
+    _, title, videos = supplementary_title(
+        [
+            "Arifureta Shokugyou de Sekai Saikyou S2 - OVA P1.mkv",
+            "Arifureta Shokugyou de Sekai Saikyou S2 - OVA P2.mkv",
+        ],
+        part_type="ova",
+    )
+    for number, video in enumerate(videos, 1):
+        video.media_part_number = number
+        video.season_episode_number = 1
+        video.external_episode_number = 1
+        video.episode_number_source = "manual"
+        video.episode_number_confidence = 1.0
+        video.episode_number_manual_override = 1
+        video.episode_number_verified_at = utc_now()
+    attach_confirmed_metadata(title, 1)
+
+    strict_split = evaluate_metadata_split(title)
+    presentation = evaluate_metadata_range_presentation(title)
+
+    assert strict_split is not None and strict_split.is_ambiguous
+    assert presentation is not None
+    assert presentation.comparison.local.count == 1
+    assert presentation.comparison.matches is True
+    assert presentation.split_evaluation is None
+    assert presentation.warning is None
+    assert presentation.information == (
+        "Metadata rozsah odpovídá. Jedna logická epizoda je lokálně rozdělena "
+        "na 2 potvrzené části média."
+    )
+
+
+def test_incomplete_media_parts_keep_range_warning():
+    _, title, videos = supplementary_title(
+        ["OVA segment A.mkv"], part_type="ova",
+    )
+    videos[0].media_part_number = 1
+    videos[0].season_episode_number = 1
+    attach_confirmed_metadata(title, 1)
+
+    presentation = evaluate_metadata_range_presentation(title)
+
+    assert presentation is not None
+    assert presentation.comparison.matches is True
+    assert presentation.information is None
+    assert "úplnou a nekonfliktní" in presentation.warning
+
+
+def test_conflicting_media_part_ordinals_keep_range_warning():
+    _, title, videos = supplementary_title(
+        ["OVA segment A.mkv", "OVA segment B.mkv"], part_type="ova",
+    )
+    for video in videos:
+        video.media_part_number = 1
+        video.season_episode_number = 1
+    attach_confirmed_metadata(title, 1)
+
+    presentation = evaluate_metadata_range_presentation(title)
+
+    assert presentation is not None
+    assert presentation.comparison.matches is True
+    assert presentation.information is None
+    assert presentation.split_evaluation is not None
+    assert presentation.split_evaluation.is_ambiguous
+    assert "úplnou a nekonfliktní" in presentation.warning
+
+
+def test_complete_media_part_ordinals_with_two_episode_identities_keep_warning():
+    _, title, videos = supplementary_title(
+        ["OVA episode 1.mkv", "OVA episode 2.mkv"], part_type="ova",
+    )
+    for number, video in enumerate(videos, 1):
+        video.media_part_number = number
+        video.season_episode_number = number
+        video.episode_number_source = "manual"
+        video.episode_number_manual_override = number
+        video.episode_number_verified_at = utc_now()
+    attach_confirmed_metadata(title, 1)
+
+    presentation = evaluate_metadata_range_presentation(title)
+
+    assert presentation is not None
+    assert presentation.comparison.matches is True
+    assert presentation.information is None
+    assert "jedinou logickou epizodu" in presentation.warning
+
+
+def test_complete_media_parts_with_conflicting_variant_lanes_keep_warning():
+    _, title, videos = supplementary_title(
+        ["OVA segment A.mkv", "OVA segment B.mkv"], part_type="ova",
+    )
+    for number, video in enumerate(videos, 1):
+        video.media_part_number = number
+        video.season_episode_number = 1
+        video.episode_number_source = "manual"
+        video.episode_number_manual_override = 1
+        video.episode_number_verified_at = utc_now()
+        video.video_variant_group = VideoVariantGroup(
+            id=number, catalog_title=title, manual_label=f"Lane {number}",
+        )
+    attach_confirmed_metadata(title, 1)
+
+    presentation = evaluate_metadata_range_presentation(title)
+
+    assert presentation is not None
+    assert presentation.comparison.matches is True
+    assert presentation.information is None
+    assert "nekonfliktní" in presentation.warning
+
+
+def test_media_parts_with_damaged_duplicate_reference_keep_warning():
+    _, title, videos = supplementary_title(
+        ["OVA segment A.mkv", "OVA segment B.mkv"], part_type="ova",
+    )
+    for number, video in enumerate(videos, 1):
+        video.media_part_number = number
+        video.season_episode_number = 1
+        video.episode_number_source = "manual"
+        video.episode_number_manual_override = 1
+        video.episode_number_verified_at = utc_now()
+    videos[1].duplicate_primary_missing = True
+    attach_confirmed_metadata(title, 1)
+
+    presentation = evaluate_metadata_range_presentation(title)
+
+    assert presentation is not None
+    assert presentation.comparison.matches is True
+    assert presentation.information is None
+    assert "úplnou a nekonfliktní" in presentation.warning
+
+
+def test_fractional_recap_is_neutral_information_for_matching_standard_count():
+    _, title, _ = season_title(13)
+    Video(
+        id=14,
+        relative_path=f"{title.relative_root_path}/Recap 5.5.mkv",
+        root_folder="Anime",
+        filename="Recap 5.5.mkv",
+        size=14,
+        mtime_ns=14,
+        file_type="other",
+        content_type_manual="recap",
+        recap_episode_number_manual_tenths=55,
+        catalog_title=title,
+        catalog_collection=title.collection,
+    )
+    attach_confirmed_metadata(title, 13)
+
+    strict_split = evaluate_metadata_split(title)
+    presentation = evaluate_metadata_range_presentation(title)
+
+    assert strict_split is not None and strict_split.is_ambiguous
+    assert presentation is not None
+    assert presentation.comparison.local.count == 13
+    assert presentation.comparison.matches is True
+    assert presentation.split_evaluation is None
+    assert presentation.warning is None
+    assert presentation.information == (
+        "Metadata rozsah odpovídá. Lokální část navíc obsahuje 1 bezpečně "
+        "klasifikovanou doplňkovou položku, která se do standardního počtu "
+        "epizod nezapočítává."
+    )
+
+
+def test_confirmed_duplicate_does_not_create_metadata_range_warning():
+    _, title, videos = season_title(12)
+    Video(
+        id=13,
+        relative_path=f"{title.relative_root_path}/E01-copy.mkv",
+        root_folder="Anime",
+        filename="E01-copy.mkv",
+        size=13,
+        mtime_ns=13,
+        file_type="episode",
+        season_episode_number=1,
+        duplicate_of_video_id=videos[0].id,
+        duplicate_of=videos[0],
+        catalog_title=title,
+        catalog_collection=title.collection,
+    )
+    attach_confirmed_metadata(title, 12)
+
+    presentation = evaluate_metadata_range_presentation(title)
+
+    assert presentation is not None
+    assert presentation.comparison.matches is True
+    assert presentation.split_evaluation is None
+    assert presentation.warning is None
+
+
+def test_confirmed_variants_do_not_create_metadata_range_warning():
+    _, title, videos = season_title(12)
+    videos[0].video_variant_group = VideoVariantGroup(
+        id=1, catalog_title=title, manual_label="TV",
+    )
+    Video(
+        id=13,
+        relative_path=f"{title.relative_root_path}/E01-BD.mkv",
+        root_folder="Anime",
+        filename="E01-BD.mkv",
+        size=13,
+        mtime_ns=13,
+        file_type="episode",
+        season_episode_number=1,
+        video_variant_group=VideoVariantGroup(
+            id=2, catalog_title=title, manual_label="BD",
+        ),
+        catalog_title=title,
+        catalog_collection=title.collection,
+    )
+    attach_confirmed_metadata(title, 12)
+
+    presentation = evaluate_metadata_range_presentation(title)
+
+    assert presentation is not None
+    assert presentation.comparison.matches is True
+    assert presentation.split_evaluation is None
+    assert presentation.warning is None
+
+
+def test_provider_episode_zero_model_stays_unresolved_with_separate_special():
+    collection, season, _ = season_title(12)
+    special = CatalogTitle(
+        collection=collection,
+        local_title="Special Episode 0",
+        normalized_local_title="special episode 0",
+        relative_root_path="Anime/Example Show/Special Episode 0",
+        part_type="special",
+        season_number=1,
+    )
+    Video(
+        id=13,
+        relative_path=f"{special.relative_root_path}/Episode 0.mkv",
+        root_folder="Anime",
+        filename="Episode 0.mkv",
+        size=13,
+        mtime_ns=13,
+        file_type="special",
+        content_type_manual="special",
+        catalog_title=special,
+        catalog_collection=collection,
+    )
+    attach_confirmed_metadata(season, 13)
+
+    presentation = evaluate_metadata_range_presentation(season)
+
+    assert presentation is not None
+    assert presentation.comparison.local.count == 12
+    assert presentation.comparison.matches is False
+    assert presentation.information is None
+    assert presentation.split_evaluation is None
+    assert "Provider uvádí 13 epizod" in presentation.warning
+    assert "automaticky vysvětlit" in presentation.warning
+
+
+def test_ambiguous_supplementary_group_keeps_range_warning():
+    _, title, _ = supplementary_title(
+        ["Clip A.mkv", "Clip B.mkv"], part_type="special",
+    )
+    attach_confirmed_metadata(title, 1)
+
+    presentation = evaluate_metadata_range_presentation(title)
+
+    assert presentation is not None
+    assert presentation.comparison.local.count is None
+    assert presentation.information is None
+    assert presentation.split_evaluation is not None
+    assert presentation.split_evaluation.is_ambiguous
 
 
 def test_confirmed_metadata_exact_subset_is_read_only_recommendation():
@@ -515,6 +827,166 @@ def test_metadata_check_renders_safe_split_and_hierarchy_review_keeps_all_title_
             for video in session.scalars(select(Video)).all()
             if video.id in before_assignments
         } == before_assignments
+
+
+def test_metadata_detail_renders_complete_media_parts_as_neutral_information(
+    tmp_path: Path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'metadata-media-parts-web.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection, title, videos = supplementary_title(
+            [
+                "Arifureta Shokugyou de Sekai Saikyou S2 - OVA P1.mkv",
+                "Arifureta Shokugyou de Sekai Saikyou S2 - OVA P2.mkv",
+            ],
+            part_type="ova",
+        )
+        for number, video in enumerate(videos, 1):
+            video.media_part_number = number
+            video.season_episode_number = 1
+            video.external_episode_number = 1
+            video.episode_number_source = "manual"
+            video.episode_number_confidence = 1.0
+            video.episode_number_manual_override = 1
+            video.episode_number_verified_at = utc_now()
+        attach_confirmed_metadata(title, 1, display_title="Arifureta S2 OVA")
+        session.add(collection)
+        session.commit()
+        title_id = title.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+    ).body.decode()
+    metadata_review = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/metadata-review"
+    )(
+        web_request(web_app, "/metadata-review"), status="split",
+    ).body.decode()
+
+    assert "Lokálně: 1 logických položek (shoda)" in rendered
+    assert (
+        "Metadata rozsah odpovídá. Jedna logická epizoda je lokálně "
+        "rozdělena na 2 potvrzené části média."
+    ) in rendered
+    assert "Metadata rozsah nelze bezpečně namapovat" not in rendered
+    assert "Rozdělit podle potvrzených metadat" not in rendered
+    assert "V tomto přehledu nejsou žádné tituly." in metadata_review
+
+
+def test_metadata_detail_renders_fractional_recap_as_neutral_information(
+    tmp_path: Path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'metadata-recap-web.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection, title, _ = season_title(13)
+        Video(
+            relative_path=f"{title.relative_root_path}/Recap 5.5.mkv",
+            root_folder="Anime",
+            filename="Recap 5.5.mkv",
+            size=14,
+            mtime_ns=14,
+            file_type="other",
+            content_type_manual="recap",
+            recap_episode_number_manual_tenths=55,
+            catalog_title=title,
+            catalog_collection=collection,
+        )
+        attach_confirmed_metadata(title, 13, display_title="Arifureta S1")
+        session.add(collection)
+        session.commit()
+        title_id = title.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/titles/{title_id}"), title_id,
+    ).body.decode()
+    metadata_review = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/metadata-review"
+    )(
+        web_request(web_app, "/metadata-review"), status="split",
+    ).body.decode()
+
+    assert "Lokálně: 13 logických položek (shoda)" in rendered
+    assert (
+        "Metadata rozsah odpovídá. Lokální část navíc obsahuje 1 bezpečně "
+        "klasifikovanou doplňkovou položku"
+    ) in rendered
+    assert "Metadata rozsah nelze bezpečně namapovat" not in rendered
+    assert "Rozdělit podle potvrzených metadat" not in rendered
+    assert "V tomto přehledu nejsou žádné tituly." in metadata_review
+
+
+def test_metadata_detail_keeps_provider_episode_zero_mismatch_unresolved(
+    tmp_path: Path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'metadata-episode-zero-web.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection, season, _ = season_title(12)
+        special = CatalogTitle(
+            collection=collection,
+            local_title="Special Episode 0",
+            normalized_local_title="special episode 0",
+            relative_root_path="Anime/Example Show/Special Episode 0",
+            part_type="special",
+            season_number=1,
+        )
+        Video(
+            relative_path=f"{special.relative_root_path}/Episode 0.mkv",
+            root_folder="Anime",
+            filename="Episode 0.mkv",
+            size=13,
+            mtime_ns=13,
+            file_type="special",
+            content_type_manual="special",
+            catalog_title=special,
+            catalog_collection=collection,
+        )
+        attach_confirmed_metadata(
+            season, 13, display_title="High School DxD HERO",
+        )
+        session.add(collection)
+        session.commit()
+        season_id = season.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+    )
+    rendered = endpoint(
+        web_request(web_app, f"/titles/{season_id}"), season_id,
+    ).body.decode()
+
+    assert "Lokálně: 12 logických položek (rozdíl 1)" in rendered
+    assert "Metadata počet vyžaduje kontrolu" in rendered
+    assert "Provider uvádí 13 epizod" in rendered
+    assert "Metadata rozsah odpovídá" not in rendered
 
 
 def test_hierarchy_review_uses_verified_bonus_local_title_without_restructuring(
