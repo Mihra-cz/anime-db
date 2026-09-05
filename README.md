@@ -141,9 +141,51 @@ pytest
 - Prázdný CatalogTitle lze po explicitním potvrzení odstranit spolu s jeho vlastněnými DB metadata záznamy; CatalogCollection se tím nikdy nemaže automaticky.
 - Prázdné CatalogCollection lze odstranit jednotlivě nebo hromadně. Server jejich prázdnost ověřuje z databáze znovu a neprázdné položky bezpečně přeskočí.
 
+## Požadavek na metadata a dokončení Metadata Check
+
+Potvrzená metadata a požadavek na samostatná metadata jsou dvě nezávislé osy.
+Potvrzení vyžaduje `linked_manual` a primární ruční `ExternalTitleLink`
+s `verified_at`; automatický kandidát, skóre ani odmítnutí kandidáta potvrzení
+nenahrazují. V detailu Metadata Check lze explicitním POST nastavit
+`CatalogTitle.metadata_requirement_manual`: `NULL` = automaticky,
+`required` = vyžadována, `not_required` = nejsou vyžadována.
+Volba Automaticky ruční override zruší. Ruční rozhodnutí má přednost.
+
+Automaticky metadata nevyžaduje pouze neprázdná část, jejíž **všechna** evidovaná
+videa mají přesný typ `op`, `ed`, `ncop`, `nced`, `menu` nebo `cm`.
+Non-`NULL` `Video.content_type_manual` má přednost před raw `Video.file_type`;
+obecný title-level Bonus/Special kontejner přesný technický subtype nepřekrývá.
+Bonus, Other, PV, interview ani making-of samy výjimku nezískávají. Směs Season
+epizod a NCOP zůstává required; Mini Dra vedené jako Bonus může mít vlastní
+potvrzená metadata.
+
+Část je resolved při potvrzené vazbě nebo effective `not_required`; UI oba
+důvody rozlišuje. Potvrzená vazba má při prezentaci dokončení přednost i při
+ručním `not_required` a automaticky se nemaže. Výchozí fronta **Metadata chybí**
+obsahuje pouze required části bez potvrzení s alespoň jedním videem;
+**Všechny části** zachovává možnost inspekce. Hromadné hledání přeskočí resolved
+části. Prázdné titles se do aggregate nepočítají.
+
+Sloupec **Metadata** na homepage i `/catalog/all` používá shared aggregate:
+collection má **Metadata OK**, jen pokud jsou resolved všechny její části
+s evidovaným videem. Řadí se serverově přes `sort=metadata&direction=asc|desc`;
+vzestupně jsou nejprve chybějící metadata, sestupně OK, uvnitř skupin podle názvu.
+Nevzniká nový katalogový filtr. GET nic nepersistuje.
+
+Requirement nemění hierarchii, klasifikaci, numbering, media fakta ani metadata
+vazby. `covered-by-parent` zůstává mimo tuto změnu: označení samostatného
+Specialu jako not_required nepřičítá epizodu k parentu a nepotlačuje jeho
+episode-count/range advisory ani neřeší budoucí V6 completeness.
+
 ## Aktualizace databáze
 
-Při prvním startu této compatibility verze proběhne idempotentní migrace SQLite: mimo jiné doplní nullable `CatalogTitle.part_number_manual`, přesné `Video.recap_episode_number_manual_tenths`, `Video.media_part_number`, `Video.czsk_availability_manual`, ruční language override, evidenci `unresolved_external_subtitles`, association `manual_split_rule_videos` a M:N `external_subtitle_compatibilities`. Dokončenou compatibility verzi eviduje nativní SQLite `user_version`; další stabilní startup pouze ověří schema a marker a znovu neprochází celou knihovnu. Při budoucí změně compatibility pipeline se její verze zvýší a plný rebuild proběhne znovu právě jednou. U staré DB nejprve každý platný legacy `ExternalSubtitle.video_id` konzervativně materializuje jako compatibility: automatický odkaz jako `automatic_match / legacy_backfill`, prokazatelně ruční unresolved assignment jako `confirmed_compatible / manual`; existující confirmed row, poznámka ani `verified_at` se nepřepisují. Historické per-video řádky téhož `relative_path` se po zachování všech video vazeb sloučí do jediného physical assetu a následný atomický SQLite table rebuild odstraní legacy `video_id`. Fresh schema jej už vůbec neobsahuje. Subtitle bez platného legacy cíle žádnou vymyšlenou vazbu nedostane. Každé SQLite spojení aplikace zapíná `PRAGMA foreign_keys=ON`; compatibility associations respektují `ON DELETE CASCADE`, zatímco smazání Video nesmaže owner-less asset. Existující `Video.catalog_title_id` se do manual-split association heuristicky nekopíruje. Nový Recap sloupec se nebackfilluje odhadem. Automatické `part_number` se nemění, `media_part_number`, CZ/SK workflow marker i language override u starých záznamů zůstávají zachované a nic se neodhaduje z filename nebo stáří anime. Ruční smazání databáze není pro tuto verzi nutné.
+Compatibility verze 2 přidává nullable `CatalogTitle.metadata_requirement_manual`
+bez backfillu; staré rows mají `NULL`, nikoli ruční potvrzení. Upgrade z verze 1
+provádí pouze aditivní DDL a posun markeru, bez rekonstrukce knihovny nebo DML.
+Starší DB bez compatibility checkpointu nejprve projde plnou dosavadní migrací.
+Ruční hodnoty zůstávají zachované a další stabilní startup je bez rekonstrukce.
+
+Při prvním startu této compatibility verze proběhne idempotentní migrace SQLite: mimo jiné doplní nullable `CatalogTitle.part_number_manual`, přesné `Video.recap_episode_number_manual_tenths`, `Video.media_part_number`, `Video.czsk_availability_manual`, ruční language override, evidenci `unresolved_external_subtitles`, association `manual_split_rule_videos` a M:N `external_subtitle_compatibilities`. Dokončenou compatibility verzi eviduje nativní SQLite `user_version`; další stabilní startup pouze ověří schema a marker a znovu neprochází celou knihovnu. Při změně vyžadující rekonstrukci se compatibility verze zvýší a plný rebuild proběhne znovu právě jednou; čistě aditivní upgrade 1→2 uvedený výše jej nevyžaduje. U staré DB nejprve každý platný legacy `ExternalSubtitle.video_id` konzervativně materializuje jako compatibility: automatický odkaz jako `automatic_match / legacy_backfill`, prokazatelně ruční unresolved assignment jako `confirmed_compatible / manual`; existující confirmed row, poznámka ani `verified_at` se nepřepisují. Historické per-video řádky téhož `relative_path` se po zachování všech video vazeb sloučí do jediného physical assetu a následný atomický SQLite table rebuild odstraní legacy `video_id`. Fresh schema jej už vůbec neobsahuje. Subtitle bez platného legacy cíle žádnou vymyšlenou vazbu nedostane. Každé SQLite spojení aplikace zapíná `PRAGMA foreign_keys=ON`; compatibility associations respektují `ON DELETE CASCADE`, zatímco smazání Video nesmaže owner-less asset. Existující `Video.catalog_title_id` se do manual-split association heuristicky nekopíruje. Nový Recap sloupec se nebackfilluje odhadem. Automatické `part_number` se nemění, `media_part_number`, CZ/SK workflow marker i language override u starých záznamů zůstávají zachované a nic se neodhaduje z filename nebo stáří anime. Ruční smazání databáze není pro tuto verzi nutné.
 
 Explicitní compatibility synchronizace je databázově idempotentní: pokud se
 žádná persistentní hodnota `CatalogTitle` skutečně nezmění, nevznikne pro něj

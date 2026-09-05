@@ -6,6 +6,7 @@
 <h1>{{ catalog_title_display_title(catalog_title, title_name_preference) if catalog_title else series.name }}</h1><p>{% if catalog_title %}Lokální část: <strong>{{ catalog_title.local_title }}</strong> · {% endif %}{{ catalog_title.relative_root_path if catalog_title else series.relative_path }} · aktivní filtr: <strong>{{ filter_label }}</strong>{% if catalog_title and catalog_title.collection %} · kolekce: <a href="/collections/{{ catalog_title.collection.id }}?filter_name={{ filter_name }}">{{ catalog_title.collection.local_title }}</a>{% endif %}</p>
 {% with search_action='/catalog/' ~ filter_name, search_cancel=back_url %}{% include '_search.html' %}{% endwith %}
 <section class="panel metadata-panel" id="metadata"><h2>Metadata</h2>
+{% include '_metadata_requirement.html' %}
 {% if metadata_query is not defined %}{% set metadata_query = metadata_default_query %}{% endif %}
 <p>Stav: <strong>{{ metadata_status_labels.get(catalog_title.metadata_status, 'Chyba') if catalog_title else 'Bez metadat' }}</strong>{% if catalog_title and catalog_title.metadata_locked %} · 🔒 Zamknuto{% endif %}</p>
 {% if catalog_title %}<p>Lokální původní titul: <strong>{{ catalog_title.local_title }}</strong></p>{% endif %}

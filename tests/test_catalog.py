@@ -1742,6 +1742,10 @@ def test_catalog_aggregates_multiple_metadata_titles_as_one_collection():
         id=11, local_title="Season 1", normalized_local_title="season 1",
         relative_root_path="Anime/Show/Season 1", season_number=1,
         season_label="S1", metadata_status="linked_manual", collection=collection,
+        external_links=[ExternalTitleLink(
+            provider="anilist", external_id="1", match_method="manual_search",
+            is_primary=True, is_manual=True, verified_at=datetime.now(timezone.utc),
+        )],
     )
     second = CatalogTitle(
         id=12, local_title="Season 2", normalized_local_title="season 2",

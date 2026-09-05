@@ -4,7 +4,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.metadata.candidates import batch_search_candidates
 from app.metadata.providers.base import ProviderTitleMetadata
-from app.models import CatalogCollection, CatalogTitle, ExternalTitleLink, MetadataCandidate
+from app.models import CatalogCollection, CatalogTitle, ExternalTitleLink, MetadataCandidate, Video
 
 
 class Provider:
@@ -52,4 +52,23 @@ def test_batch_skips_locked_and_conflicts_but_warns_for_review(tmp_path):
     assert result.processed == 1
     assert result.warnings == 1
     assert len(provider.queries) == 1
+    engine.dispose()
+
+
+def test_batch_skips_automatic_and_manual_not_required_before_limit(tmp_path):
+    engine, sessions = setup(tmp_path, [(False, "automatic")] * 3)
+    with sessions() as session:
+        first, second, _third = session.scalars(select(CatalogTitle).order_by(CatalogTitle.id)).all()
+        first.metadata_requirement_manual = "not_required"
+        second.videos.append(Video(
+            catalog_collection=second.collection, filename="NCOP.mkv", file_type="ncop",
+            relative_path=f"{second.relative_root_path}/NCOP.mkv", root_folder="Anime",
+            size=1, mtime_ns=1,
+        ))
+        session.commit()
+    provider = Provider()
+    result = batch_search_candidates(sessions, provider, limit=1)
+    assert result.skipped == 2
+    assert result.processed == 1
+    assert provider.queries == ["Show 3"]
     engine.dispose()

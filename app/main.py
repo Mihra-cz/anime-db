@@ -48,6 +48,7 @@ from .catalog import (
     detected_external_subtitle_language,
     language_display_label,
     normalize_search_query,
+    normalize_group_sort,
     normalize_language,
     normalize_title_name_preference,
     normalize_title,
@@ -147,6 +148,9 @@ from .metadata.split import (
     evaluate_metadata_split,
 )
 from .title_order import catalog_title_sort_key
+from .metadata.completion import (
+    METADATA_REQUIREMENT_CHOICES, resolve_metadata_completion, set_metadata_requirement,
+)
 from .video_variants import (
     VIDEO_VARIANT_CONTENT_VARIANT_CHOICES,
     VIDEO_VARIANT_RELEASE_SOURCE_CHOICES,
@@ -303,11 +307,11 @@ def _homepage_collection_rows(
     videos: list[Video],
     collection_titles: dict[int, tuple[CatalogTitle, ...]],
     title_name_preference: object = "romaji",
-    *, request_index=None,
+    *, request_index=None, sort="title", direction="asc",
 ) -> list[dict]:
     """Sestaví navigační homepage nad uloženou logickou hierarchií."""
     results = build_catalog_results(
-        videos, "all", sort="title", direction="asc",
+        videos, "all", sort=sort, direction=direction,
         title_name_preference=title_name_preference,
         request_index=request_index,
     )
@@ -357,6 +361,7 @@ def _load_videos(
                 CatalogTitle.metadata_record
             ),
             selectinload(Video.catalog_title).selectinload(CatalogTitle.metadata_record),
+            selectinload(Video.catalog_title).joinedload(CatalogTitle.external_links),
             selectinload(Video.catalog_collection).selectinload(
                 CatalogCollection.titles
             ).joinedload(CatalogTitle.metadata_record),
@@ -383,6 +388,7 @@ def _load_catalog_overview(sessions):
                 CatalogTitle.metadata_record
             ),
             joinedload(Video.catalog_title).joinedload(CatalogTitle.metadata_record),
+            joinedload(Video.catalog_title).joinedload(CatalogTitle.external_links),
             joinedload(Video.catalog_collection).selectinload(
                 CatalogCollection.titles
             ).joinedload(CatalogTitle.metadata_record),
@@ -728,6 +734,10 @@ def _metadata_template_values(
     )
     return {
         "title_metadata": metadata,
+        "metadata_completion": resolve_metadata_completion(
+            title, title_videos if title_videos is not None else title.videos,
+        ) if title else None,
+        "metadata_requirement_choices": METADATA_REQUIREMENT_CHOICES,
         "external_links": sorted(
             title.external_links if title else [],
             key=lambda link: (not link.is_primary, link.provider, link.external_id),
@@ -935,7 +945,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         error: str | None = None,
         confirm_deletions: bool = False,
         q: str = "",
+        sort: str | None = None, direction: str | None = None,
     ):
+        explicit_sort = sort is not None
+        sort, direction = normalize_group_sort(sort or "title", direction or "asc", "")
         videos, request_index = _load_catalog_overview(sessions)
         with sessions() as session:
             collection_titles = {
@@ -951,6 +964,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             collection_titles,
             get_preferred_title_language(request),
             request_index=request_index,
+            sort=sort, direction=direction,
         )
         totals["anime_titles"] = len(collection_rows)
         for video in videos:
@@ -970,6 +984,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "folders": sorted(folders.items()), "totals": totals, "message": message,
             "error": error, "confirm_deletions": confirm_deletions,
             "q": normalize_search_query(q),
+            "sort": sort, "direction": direction,
+            "search_sort": sort if explicit_sort else "",
+            "sort_url": lambda column: "/?" + urlencode({
+                "q": normalize_search_query(q), "sort": column,
+                "direction": toggled_direction(column, sort, direction),
+            }),
         })
 
     @app.get("/folders/{folder:path}", response_class=HTMLResponse)
@@ -2766,7 +2786,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def metadata_review_context(request: Request, status: str = "without", batch_result=None):
         allowed = {
             "without", "pending", "manual", "conflict", "missing-artwork",
-            "low-score", "split",
+            "low-score", "split", "all",
         }
         if status not in allowed:
             raise HTTPException(status_code=404, detail="Neznámý přehled metadat")
@@ -2779,6 +2799,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ).order_by(CatalogTitle.local_title)).all())
             rows = []
             for title in titles:
+                completion = resolve_metadata_completion(title, title.videos)
                 active = [candidate for candidate in title.metadata_candidates if candidate.rejected_at is None]
                 best = max((candidate.match_score or 0 for candidate in active), default=None)
                 range_presentation = (
@@ -2790,7 +2811,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if range_presentation is not None else None
                 )
                 include = {
-                    "without": title.metadata_status in {"unlinked", "unavailable", "error"},
+                    "without": completion.relevant and not completion.resolved,
+                    "all": True,
                     "pending": title.metadata_status == "candidates_available",
                     "manual": title.metadata_status == "linked_manual",
                     "conflict": title.metadata_status == "conflict",
@@ -2801,7 +2823,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if include:
                     rows.append({"title": title, "candidate_count": len(active), "best_score": best,
                                  "last_search": max((candidate.updated_at for candidate in title.metadata_candidates), default=None),
-                                 "split_evaluation": split_evaluation})
+                                 "split_evaluation": split_evaluation,
+                                 "completion": completion})
         return templates.TemplateResponse(request, "metadata_review.html", {
             "rows": rows, "status": status, "batch_result": batch_result,
             "default_batch_limit": settings.metadata_batch_search_limit,
@@ -3751,6 +3774,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             filter_name, catalog_title_id, q, sort, direction,
             detail_sort, detail_direction, message="Metadata byla odpojena.",
         )
+
+    @app.post("/titles/{catalog_title_id}/metadata/requirement")
+    def update_metadata_requirement(
+        catalog_title_id: int, requirement: str = Form(""),
+        return_url: str = Form("/metadata-review"),
+    ):
+        target = safe_local_redirect_target(return_url)
+        with sessions() as session:
+            title = session.get(CatalogTitle, catalog_title_id)
+            if title is None:
+                raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
+            try:
+                set_metadata_requirement(title, requirement)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            session.commit()
+        return local_redirect_response(target)
 
     @app.post("/catalog/{filter_name}/titles/{catalog_title_id}/metadata/lock")
     def set_metadata_lock(

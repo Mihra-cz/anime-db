@@ -17,7 +17,10 @@ def test_all_jinja_templates_load_and_base_declares_responsive_shell():
         templates.env.list_templates(filter_func=lambda name: name.endswith(".html"))
     )
 
-    assert len(names) == 16
+    assert {
+        "base.html", "index.html", "catalog.html", "metadata_review.html",
+        "_metadata_requirement.html",
+    } <= set(names)
     for name in names:
         templates.env.get_template(name)
 

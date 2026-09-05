@@ -158,6 +158,7 @@ class CatalogTitle(Base):
     preferred_external_id: Mapped[str | None] = mapped_column(String, nullable=True)
     metadata_status: Mapped[str] = mapped_column(String, default="unlinked", server_default="unlinked")
     metadata_locked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    metadata_requirement_manual: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     videos: Mapped[list[Video]] = relationship(back_populates="catalog_title")

@@ -3,7 +3,7 @@
 {% block content %}
 <div class="heading"><div><h1>Přehled knihovny</h1><p>Lokální katalog videí a titulkových stop.</p></div>
 <form method="post" action="/scan"><button type="submit">Spustit sken</button></form></div>
-{% with search_action='/catalog/all', search_cancel='/' %}{% include '_search.html' %}{% endwith %}
+{% with search_action='/catalog/all', search_cancel='/', sort=search_sort|default('') %}{% include '_search.html' %}{% endwith %}
 {% if message %}<div class="notice success">{{ message }}</div>{% endif %}
 {% if error %}<div class="notice error"><strong>Sken byl zastaven.</strong> {{ error }}
 {% if confirm_deletions %}<form method="post" action="/scan"><input type="hidden" name="confirm_deletions" value="true"><button type="submit">Potvrdit odstranění chybějících záznamů</button></form>{% endif %}</div>{% endif %}
@@ -21,9 +21,9 @@
 </section>
 <section class="panel logical-catalog"><h2>Katalog kolekcí</h2>
 <p>Hlavní přehled vychází z logické hierarchie katalogu. Collection s jedinou hlavní částí a pouze navázaným supplementary obsahem otevře rovnou její epizody; více hlavních sezón nebo anime-level části otevřou selector. Změny struktury se provádějí v <a href="/hierarchy-review">Kontrole hierarchie</a>.</p>
-<div class="table-wrap"><table class="responsive-cards"><thead><tr><th>Collection</th><th>Videa</th><th>Epizody</th><th>Varianty</th><th>Bonusy</th><th>CZ</th><th>SK</th><th>Bez CZ/SK</th><th>Části</th><th>Logická cesta</th></tr></thead><tbody>
-{% for row in collections %}{% set group = row.group %}<tr><td data-label="Collection" class="card-primary"><a href="{{ row.href }}">{{ group.name }}</a><small>{{ 'Přímý detail hlavní části' if row.opens_title else 'Přehled ' ~ row.title_count ~ ' částí' }}</small></td><td data-label="Videa">{{ group.total }}</td><td data-label="Epizody">{{ group.episodes }}</td><td data-label="Varianty">{{ group.variants if group.variants else '—' }}</td><td data-label="Bonusy">{{ group.bonus }}</td><td data-label="CZ">{{ group.cs }}</td><td data-label="SK">{{ group.sk }}</td><td data-label="Bez CZ/SK">{{ group.missing }}</td><td data-label="Části">{{ row.title_count }}</td><td data-label="Logická cesta" class="technical-path"><small>{{ group.relative_path }}</small></td></tr>
-{% else %}<tr><td colspan="10">Katalog zatím neobsahuje žádnou logickou collection s videem.</td></tr>{% endfor %}
+<div class="table-wrap"><table class="responsive-cards"><thead><tr><th>Collection</th><th>Videa</th><th>Epizody</th><th>Varianty</th><th>Bonusy</th><th>CZ</th><th>SK</th><th>Bez CZ/SK</th><th>Části</th><th><a class="sort-link" href="{{ sort_url('metadata') }}">Metadata{% if sort == 'metadata' %} {{ '▲' if direction == 'asc' else '▼' }}{% endif %}</a></th><th>Logická cesta</th></tr></thead><tbody>
+{% for row in collections %}{% set group = row.group %}<tr><td data-label="Collection" class="card-primary"><a href="{{ row.href }}">{{ group.name }}</a><small>{{ 'Přímý detail hlavní části' if row.opens_title else 'Přehled ' ~ row.title_count ~ ' částí' }}</small></td><td data-label="Videa">{{ group.total }}</td><td data-label="Epizody">{{ group.episodes }}</td><td data-label="Varianty">{{ group.variants if group.variants else '—' }}</td><td data-label="Bonusy">{{ group.bonus }}</td><td data-label="CZ">{{ group.cs }}</td><td data-label="SK">{{ group.sk }}</td><td data-label="Bez CZ/SK">{{ group.missing }}</td><td data-label="Části">{{ row.title_count }}</td><td data-label="Metadata"><span class="{{ 'verified' if group.metadata_ok else 'warning' }}">{{ 'Metadata OK' if group.metadata_ok else 'Metadata chybí' }}</span></td><td data-label="Logická cesta" class="technical-path"><small>{{ group.relative_path }}</small></td></tr>
+{% else %}<tr><td colspan="11">Katalog zatím neobsahuje žádnou logickou collection s videem.</td></tr>{% endfor %}
 </tbody></table></div></section>
 <section class="panel physical-folders"><h2>Technický pohled podle fyzického umístění</h2>
 <p>Složky a cesty na NASu slouží scanneru a diagnostice; neurčují logickou anime collection.</p>

@@ -40,9 +40,9 @@ logger = logging.getLogger(__name__)
 
 
 # SQLite's native application-version marker separates one-time compatibility
-# reconstruction from ordinary stable startup.  Increment this only when the
-# compatibility pipeline itself changes and must run once on existing data.
-STARTUP_COMPATIBILITY_VERSION = 1
+# reconstruction from ordinary stable startup. Version 2 adds only a nullable
+# workflow column to version 1; it does not require another library rebuild.
+STARTUP_COMPATIBILITY_VERSION = 2
 
 
 AutomaticStructuralInput = tuple[str, int | None, int | None, str | None]
@@ -198,6 +198,16 @@ def _apply_startup_structural_inputs(
         _set_catalog_title_structural_values(title, values)
 
 
+def _migrate_metadata_requirement(connection) -> None:
+    existing = {
+        column["name"] for column in inspect(connection).get_columns("catalog_titles")
+    }
+    if "metadata_requirement_manual" not in existing:
+        connection.execute(text(
+            "ALTER TABLE catalog_titles ADD COLUMN metadata_requirement_manual VARCHAR NULL"
+        ))
+
+
 def migrate_schema(engine) -> None:
     """Apply the small, idempotent SQLite schema migration needed by v0.2."""
     inspector = inspect(engine)
@@ -284,6 +294,7 @@ def migrate_schema(engine) -> None:
                 if name not in existing:
                     logger.info("Migrace databáze: přidávám %s.%s", table, name)
                     connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
+        _migrate_metadata_requirement(connection)
         connection.execute(text(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_external_title_primary "
             "ON external_title_links(catalog_title_id) WHERE is_primary = 1"
@@ -586,6 +597,7 @@ def migrate_schema(engine) -> None:
                         or title.preferred_metadata_provider
                         or title.preferred_external_id
                         or title.metadata_locked
+                        or title.metadata_requirement_manual is not None
                         or title.metadata_status != "unlinked"
                         or title.numbering_manual
                         or title.numbering_verified_at is not None
@@ -675,6 +687,9 @@ def migrate_schema(engine) -> None:
             else "conflict"
         )
         for legacy in original_titles - used_titles:
+            if legacy.metadata_requirement_manual is not None:
+                # A retained workflow decision is not a disposable placeholder.
+                continue
             has_metadata = session.get(TitleMetadata, legacy.id) is not None
             has_links = session.scalar(select(ExternalTitleLink.id).where(
                 ExternalTitleLink.catalog_title_id == legacy.id
@@ -756,8 +771,13 @@ def migrate_schema_at_startup(engine) -> bool:
         current = int(connection.scalar(text("PRAGMA user_version")) or 0)
     if current >= STARTUP_COMPATIBILITY_VERSION:
         return False
-    migrate_schema(engine)
+    if current < 1:
+        migrate_schema(engine)
     with engine.begin() as connection:
+        if current == 1:
+            # Preserve current numbering and other derived data after manual
+            # UI work; this additive schema upgrade needs no reconstruction.
+            _migrate_metadata_requirement(connection)
         connection.execute(text(
             f"PRAGMA user_version = {STARTUP_COMPATIBILITY_VERSION}"
         ))

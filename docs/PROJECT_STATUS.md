@@ -4992,6 +4992,68 @@ beze změny a scoring sám nic nepersistuje.
 
 ---
 
+## 6.77 Metadata requirement, completion a collection aggregate
+
+`CatalogTitle.metadata_requirement_manual` je nová nullable workflow autorita:
+`NULL` = automatická policy, `required` / `not_required` = explicitní ruční
+rozhodnutí. Existující pole pro metadata identity, kandidáty nebo lock tuto
+semantiku nevyjadřovala. Aditivní compatibility migrace zvyšuje SQLite startup
+checkpoint na 2, bez odhadu nebo backfillu ručního rozhodnutí. Upgrade 1→2 přidá
+pouze sloupec a marker bez DML nebo opětovné rekonstrukce; starší DB bez markeru
+nadále projde plnou compatibility pipeline. Rebuild fingerprint,
+projekce a ochrana uživatelského stavu i startup cleanup nové pole zachovávají.
+
+Shared resolver `app/metadata/completion.py` používá přednost manual requirement
+→ konzervativní automatic policy → required. Automatic not_required vznikne jen
+pro neprázdný title, kde všechna evidovaná videa patří přesně do
+`op/ed/ncop/nced/menu/cm`. Pro každé video má non-NULL content_type_manual
+přednost před raw file_type; broad title-level Bonus/Special zde přesný technický
+subtype nepřekrývá. Bonus/Other/PV, Film/OVA/Special/Recap/Preview ani standardní
+obsah automatickou výjimku samy nemají. Smíšená Season + NCOP zůstává required.
+
+Completion je `confirmed`, pokud existuje `linked_manual` a primární ruční
+ExternalTitleLink s verified_at, jinak `not_required` při effective výjimce,
+jinak `missing`. Samotný status, metadata record, candidate score nebo rejected
+candidate nejsou potvrzením. Confirmed link se při změně requirement nemaže a
+má pro výsledný completion přednost. Detail nabízí POST formulář Automaticky /
+Metadata vyžadována / Metadata nejsou vyžadována, včetně viditelné authority.
+Výchozí Metadata Check fronta nyní počítá všechny missing titles s videem,
+včetně kandidátů; Všechny části umožňuje inspekci resolved i prázdných částí.
+Batch search přeskočí resolved titles.
+
+Collection má Metadata OK jen tehdy, pokud jsou resolved všechny její relevantní
+titles. Relevantní = alespoň jedno aktuálně evidované Video podle stejného
+membership, ze kterého katalog už sestavuje aktivní části. Model nemá soft-delete
+nebo is_active flag; prázdné placeholdery nejsou v aggregate a prázdná collection
+nedostává zelené OK. Candidate ani linked_auto se už nevydávají za confirmed.
+Homepage a katalog mají řaditelný sloupec Metadata, bez nového filtru.
+Obě stránky používají dosavadní serverový group-sort resolver a sort/direction
+URL state; asc řadí missing před OK, desc opačně, se stabilním řazením podle názvu.
+Aggregate využívá existující title-local skupiny v numbering průchodu, nevytváří
+další full-library scan ani per-row SQL; externí vazby jsou eager loaded.
+
+Read-only produkční audit: 280 relevantních titles, 139 confirmed, 16 automatic
+not_required a 125 required + missing; 88 collections OK a 76 missing. Žádná
+automatic výjimka neobsahovala typ mimo safe množinu. Úplný seznam a konkrétní
+smoke cíle: [audit 5. září 2026](METADATA_COMPLETION_AUDIT_2026-09-05.md).
+
+Covered-by-parent, parent episode coverage/count advisory, V6 completeness,
+artwork miniatury, classification a hierarchy změny jsou mimo scope.
+Produkční DB nebyla migrována; migrace a write smoke proběhly pouze na test/temp
+DB a SQLite backup kopii v `/tmp`. Upgrade 1→2 na produkční kopii nezměnil
+žádnou existující tabulkovou hodnotu. Homepage/katalog/Metadata Check zachovaly
+7/5/8 SQL a nulové DML. Temp not_required na DxD Specialu 299 přepnulo collection
+48 na OK, zatímco parent 60 zachoval range warning i porovnání počtu.
+
+Ověření změny: cílené metadata/web/catalog/performance/rebuild/migration testy
+prošly; závěrečná sada completion/responsive/performance/navigation měla
+73 passed. Celý aktuální suite: **1 211 passed**. Python compileall, načtení
+všech 17 Jinja2 šablon a git diff --check prošly. Nové testy pokrývají i růst
+počtu titles bez N+1, skutečné dekódování prázdné Form hodnoty pro clear override,
+rebuild stale-plan authority a zachování výchozí search relevance na homepage.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

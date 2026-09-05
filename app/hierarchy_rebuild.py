@@ -418,6 +418,7 @@ def _state_fingerprint(
                 item.preferred_external_id,
                 item.metadata_status,
                 item.metadata_locked,
+                item.metadata_requirement_manual,
                 (
                     (
                         item.metadata_record.display_title,
@@ -526,6 +527,8 @@ def _title_protection_reasons(title: CatalogTitle) -> tuple[str, ...]:
         reasons.append("metadata_preference")
     if title.metadata_locked or title.metadata_status != "unlinked":
         reasons.append("metadata_state")
+    if title.metadata_requirement_manual is not None:
+        reasons.append("metadata_requirement_manual")
     if (
         title.numbering_manual
         or title.numbering_verified_at is not None
@@ -1093,6 +1096,7 @@ def _clone_title(spec: _TitleSpec, synthetic_id: int) -> CatalogTitle:
         preferred_external_id=original.preferred_external_id if original else None,
         metadata_status=original.metadata_status if original else "unlinked",
         metadata_locked=original.metadata_locked if original else False,
+        metadata_requirement_manual=original.metadata_requirement_manual if original else None,
     )
     if original is not None and original.metadata_record is not None:
         clone.metadata_record = TitleMetadata(

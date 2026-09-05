@@ -23,6 +23,7 @@ from app.numbering import (
 from .providers.base import MetadataProvider, ProviderTitleMetadata
 from .providers.base import MetadataProviderError, MetadataRateLimitError
 from .service import default_metadata_search_query
+from .completion import resolve_metadata_completion
 
 LOW_SCORE_THRESHOLD = 0.55
 SCORE_MAXIMUM = 1.0
@@ -522,6 +523,9 @@ def batch_search_candidates(session_factory, provider: MetadataProvider, *, limi
         with session_factory() as session:
             title = session.get(CatalogTitle, title_id)
             if title is None or title.metadata_status != "unlinked":
+                result.skipped += 1
+                continue
+            if resolve_metadata_completion(title, title.videos).resolved:
                 result.skipped += 1
                 continue
             if title.metadata_locked or title.collection and title.collection.hierarchy_status == "conflict":

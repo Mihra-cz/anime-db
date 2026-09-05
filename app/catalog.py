@@ -893,6 +893,7 @@ class SeriesSummary:
     catalog_title_id: int | None = None
     catalog_collection_id: int | None = None
     metadata_status: str = "unlinked"
+    metadata_ok: bool = False
     is_root_group: bool = False
     part_ids: set[int] = field(default_factory=set)
     linked_part_ids: set[int] = field(default_factory=set)
@@ -1117,6 +1118,7 @@ def natural_sort_key(value: str):
 
 
 GROUP_SORT_FIELDS = {
+    "metadata": lambda group: group.metadata_ok,
     "title": lambda group: natural_sort_key(group.name),
     "total": lambda group: group.total,
     "episodes": lambda group: group.episodes,
@@ -1235,8 +1237,6 @@ def build_catalog_results(
         )
         if catalog_title:
             summary.part_ids.add(catalog_title.id)
-            if catalog_title.metadata_status in {"linked_auto", "linked_manual"}:
-                summary.linked_part_ids.add(catalog_title.id)
         summary.total += 1
         status = derived.translation_statuses.get(video) or translation_status(video)
         filter_match = video_matches_filter(
@@ -1257,6 +1257,7 @@ def build_catalog_results(
     # Filesystem/root rows without a safe title retain their physical fallback;
     # global inventory statistics are built elsewhere and remain unchanged.
     from .numbering import summarize_title_numbering
+    from .metadata.completion import collection_metadata_ok, resolve_metadata_completion
 
     for title_path, title_videos_list in all_by_title.items():
         summary = groups[title_path]
@@ -1273,12 +1274,18 @@ def build_catalog_results(
             key = ("id", title.id) if title.id is not None else ("object", id(title))
             titles_by_key[key] = title
             videos_by_catalog_title.setdefault(key, []).append(video)
+        completions = []
         for key, scoped_videos in videos_by_catalog_title.items():
+            completion = resolve_metadata_completion(titles_by_key[key], scoped_videos)
+            completions.append(completion)
+            if completion.state == "confirmed":
+                summary.linked_part_ids.add(titles_by_key[key].id)
             numbering = summarize_title_numbering(
                 scoped_videos, titles_by_key[key], detections=derived.detections,
             )
             summary.episodes += numbering.logical_episode_count
             summary.variants += numbering.confirmed_variant_instance_count
+        summary.metadata_ok = collection_metadata_ok(completions)
         summary.episodes += sum(
             video.file_type == "episode" for video in unscoped_videos
         )

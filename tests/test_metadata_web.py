@@ -3725,6 +3725,7 @@ def test_root_folder_link_has_readable_label_and_no_dead_dot_url():
             "only_cs": 0, "only_sk": 0, "both_cs_sk": 0, "missing": 2,
             "unknown": 0, "total": 2,
         }, message=None, error=None, confirm_deletions=False, q="",
+        sort="title", direction="asc", sort_url=lambda column: f"/?sort={column}&direction=asc",
     )
 
     assert 'href="/root-videos">Videa v kořeni knihovny</a>' in rendered
