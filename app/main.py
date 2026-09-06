@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import json
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import time
 from urllib.parse import urlencode, urlparse
 
@@ -27,6 +27,7 @@ from .catalog import (
     build_catalog_request_index,
     build_video_language_profile_from_evidence,
     build_video_language_profile,
+    catalog_collection_display_title,
     catalog_title_display_title,
     catalog_title_series_label,
     detected_audio_track_language,
@@ -114,6 +115,9 @@ from .hierarchy_review import (
     single_title_confirmation_suggestion, supplementary_assignment_recommendations,
     supplementary_video_suggestions, set_manual_title_hierarchy,
     complementary_season_part_proposal_for_videos,
+)
+from .hierarchy_review_presentation import (
+    build_hierarchy_review_collection_presentation,
 )
 from .hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPE_CHOICES
 from .metadata.providers.anilist import AniListProvider
@@ -1926,7 +1930,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
             ).order_by(CatalogCollection.local_title)).all())
+            collections_by_id = {collection.id: collection for collection in collections}
             video_counts: dict[int, int] = {}
+            relevant_collection_ids: set[int] = set()
             unassigned_assignments = []
             assignment_rows = session.execute(select(
                 Video.id,
@@ -1947,6 +1953,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     video_counts[assignment_row.video_collection_id] = (
                         video_counts.get(assignment_row.video_collection_id, 0) + 1
                     )
+                if len(PurePosixPath(assignment_row.relative_path).parts) == 1:
+                    membership_candidates = (
+                        assignment_row.title_collection_id,
+                        assignment_row.video_collection_id,
+                    )
+                    relevant_collection_id = next((
+                        collection_id
+                        for collection_id in membership_candidates
+                        if collection_id in collections_by_id
+                        and collections_by_id[collection_id].relative_root_path
+                        != ROOT_FOLDER
+                    ), None)
+                else:
+                    relevant_collection_id = (
+                        assignment_row.title_collection_id
+                        if assignment_row.title_id is not None
+                        else assignment_row.video_collection_id
+                    )
+                if (
+                    relevant_collection_id in collections_by_id
+                    and collections_by_id[
+                        relevant_collection_id
+                    ].relative_root_path != ROOT_FOLDER
+                ):
+                    relevant_collection_ids.add(relevant_collection_id)
                 kind = insufficient_video_assignment_kind(
                     title_exists=assignment_row.title_id is not None,
                     title_collection_exists=(
@@ -1970,27 +2001,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 assignment.filename.casefold(), assignment.relative_path.casefold(),
             ))
             rows = []
+            all_collection_rows = []
+            title_name_preference = get_preferred_title_language(request)
             for collection in collections:
-                summaries = []
-                supplementary_reviews = []
-                for title in collection.titles:
-                    title_videos_list = list(title.videos)
-                    summaries.append(summarize_title_numbering(title_videos_list, title))
-                    issues = supplementary_review_issues(title_videos_list, title)
-                    if issues:
-                        supplementary_reviews.append({"title": title, "issues": issues})
-                numbering_unknown = sum(summary.unknown for summary in summaries)
-                if (
-                    collection.hierarchy_status in {"review_required", "conflict"}
-                    or any(summary.requires_review for summary in summaries)
-                    or supplementary_reviews
-                ):
+                presentation = build_hierarchy_review_collection_presentation(
+                    collection
+                )
+                if presentation.requires_review:
                     rows.append({
                         "collection": collection,
-                        "numbering_unknown": numbering_unknown,
+                        "numbering_unknown": presentation.numbering_unknown,
                         "video_count": video_counts.get(collection.id, 0),
-                        "supplementary_reviews": supplementary_reviews,
+                        "supplementary_reviews": presentation.supplementary_reviews,
                     })
+                if collection.id in relevant_collection_ids:
+                    display_title = catalog_collection_display_title(
+                        collection,
+                        title_name_preference,
+                    )
+                    all_collection_rows.append({
+                        "id": collection.id,
+                        "display_title": display_title,
+                        "badge": presentation.badge,
+                    })
+            all_collection_rows.sort(key=lambda row: (
+                row["display_title"].casefold(), row["id"],
+            ))
             suggestions = collection_grouping_suggestions(
                 session, collections=collections,
             )
@@ -2004,6 +2040,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "unassigned_assignments": unassigned_assignments,
             "selectable_collections": selectable_collections,
             "empty_collections": empty_collections,
+            "all_collection_rows": all_collection_rows,
             "message": message,
         })
 

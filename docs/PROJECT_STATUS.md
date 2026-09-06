@@ -2,8 +2,8 @@
 
 > Tento dokument je hlavní checkpoint projektu. Slouží pro pokračování v novém chatu, předání kontextu Codexu a kontrolu, že vývoj neuhýbá od cíle.
 >
-> **Aktualizováno:** 5. září 2026
-> **Aktuální checkpoint:** Metadata candidate scoring a logical metadata-range presentation
+> **Aktualizováno:** 6. září 2026
+> **Aktuální checkpoint:** Hierarchy Review navigační index všech anime
 > **Repozitář:** `git@github.com:Mihra-cz/anime-db.git`  
 > **Projekt:** `~/Projekty/anime-db`
 
@@ -5105,6 +5105,25 @@ celý aktuální suite po integraci Hierarchy Review a UI polish **1 298 passed*
 Resolver má nulové SQL a lineární parser work,
 GET testy nulové DML a nezměněný sémantický snapshot. Compileall, načtení všech
 17 Jinja2 šablon a `git diff --check` prošly.
+
+---
+
+## 6.79 Hierarchy Review – navigační index všech anime
+
+Spodní část `/hierarchy-review` obsahuje ve výchozím stavu sbalený nativní
+`details` seznam všech relevantních CatalogCollection. Relevantní collection má
+alespoň jedno aktuální Video podle stejné title/direct membership jako katalog;
+technický root `.` a prázdné legacy placeholdery se nezobrazují. Název používá
+shared collection display resolver a seznam je abecední s jednoduchým client-side
+filtrem. Odkaz vede vždy přímo na Hierarchy Review detail collection.
+
+Shared read-only presentation resolver zachovává původní horní pracovní frontu a
+pro navigační badge používá prioritu: aktuální hierarchy/numbering/supplementary
+review problém → existující neblokující warning dlouhé souvislé sady → ručně
+verified → automatic OK. Derived supplementary ordinal problém proto přebije i
+uložený `verified` nebo `automatic` stav. Dlouhá sada znovu používá existující
+strukturální resolver a threshold; žádná nová heuristika, persistence, schéma,
+API ani semantic GET write nevznikly.
 
 ---
 

@@ -492,15 +492,22 @@ def test_hierarchy_review_lists_derived_supplementary_issues_without_status_chan
     overview = endpoints["/hierarchy-review"](
         _request(web_app, "/hierarchy-review"), message=None,
     ).body.decode()
-    assert f'href="/hierarchy-review/{ids["automatic"]}"' in overview
-    assert f'href="/hierarchy-review/{ids["verified"]}"' in overview
-    assert f'href="/hierarchy-review/{ids["resolved"]}"' not in overview
+    queue = overview.split('id="hierarchy-review-queue"', 1)[1].split(
+        '<details class="panel all-collections-index"', 1
+    )[0]
+    all_collections = overview.split(
+        '<details class="panel all-collections-index"', 1
+    )[1]
+    assert f'href="/hierarchy-review/{ids["automatic"]}"' in queue
+    assert f'href="/hierarchy-review/{ids["verified"]}"' in queue
+    assert f'href="/hierarchy-review/{ids["resolved"]}"' not in queue
+    assert f'href="/hierarchy-review/{ids["resolved"]}"' in all_collections
     assert (
         f'/hierarchy-review/{ids["automatic"]}'
         f'#supplementary-ordinal-review-title-{ids["automatic_title"]}'
-    ) in overview
-    assert "Chybějící supplementary ordinal" in overview
-    assert "Kolize supplementary ordinalu" in overview
+    ) in queue
+    assert "Chybějící supplementary ordinal" in queue
+    assert "Kolize supplementary ordinalu" in queue
 
     detail = endpoints["/hierarchy-review/{collection_id}"](
         _request(web_app, f'/hierarchy-review/{ids["verified"]}'),

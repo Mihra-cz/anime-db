@@ -1099,7 +1099,14 @@ def test_bungo_bulk_duplicate_resolution_keeps_physical_cleanup_warning(tmp_path
     overview = endpoints["/hierarchy-review"](
         web_request(web_app, "/hierarchy-review"),
     ).body.decode()
-    assert f'<a href="/hierarchy-review/{collection_id}">' not in overview
+    queue = overview.split('id="hierarchy-review-queue"', 1)[1].split(
+        '<details class="panel all-collections-index"', 1
+    )[0]
+    all_collections = overview.split(
+        '<details class="panel all-collections-index"', 1
+    )[1]
+    assert f'<a href="/hierarchy-review/{collection_id}">' not in queue
+    assert f'<a href="/hierarchy-review/{collection_id}">' in all_collections
 
     title_detail = endpoints["/titles/{catalog_title_id}"](
         web_request(web_app, f"/titles/{title_id}"), title_id,

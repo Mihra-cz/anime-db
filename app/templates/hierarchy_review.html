@@ -75,8 +75,41 @@
 
 {% if empty_collections %}<section class="panel danger-zone"><h2>Prázdné collections</h2><p>Prázdná collection se nikdy nemaže automaticky. Server při každé akci znovu ověří nulový počet CatalogTitle i Video.</p><form id="bulk-empty-collections" method="post" action="/hierarchy-review/collections/delete-empty-bulk"><div class="inline-form"><button type="button" id="select-all-empty">Vybrat všechny</button><button type="button" id="clear-all-empty">Zrušit výběr</button></div>{% for collection in empty_collections %}<label><input class="empty-collection-choice" type="checkbox" name="collection_ids" value="{{ collection.id }}"> <strong>{{ collection.local_title }}</strong><small>{{ collection.relative_root_path }}</small></label>{% endfor %}<label><input type="checkbox" name="confirm_delete" value="true" required> Potvrzuji odstranění vybraných prázdných DB collections.</label><button type="submit">Odstranit vybrané prázdné collections</button></form>{% for collection in empty_collections %}<form class="inline-form" method="post" action="/hierarchy-review/collections/delete-empty"><input type="hidden" name="collection_id" value="{{ collection.id }}"><span><strong>{{ collection.local_title }}</strong> · {{ collection.relative_root_path }}</span><label><input type="checkbox" name="confirm_delete" value="true" required> Potvrzuji odstranění prázdné DB collection</label><button type="submit">Odstranit prázdnou collection</button></form>{% endfor %}<script>const emptyChoices=()=>document.querySelectorAll('.empty-collection-choice');document.getElementById('select-all-empty').addEventListener('click',()=>emptyChoices().forEach(item=>item.checked=true));document.getElementById('clear-all-empty').addEventListener('click',()=>emptyChoices().forEach(item=>item.checked=false));</script></section>{% endif %}
 
-<section class="panel"><div class="table-wrap"><table class="responsive-cards"><thead><tr><th>Kolekce</th><th>Zobrazované názvy částí</th><th>Cesta</th><th>Interní poznámka</th><th>Videa</th><th>Části</th><th>Stav</th><th>Důvod</th></tr></thead><tbody>
+<section class="panel" id="hierarchy-review-queue"><div class="table-wrap"><table class="responsive-cards"><thead><tr><th>Kolekce</th><th>Zobrazované názvy částí</th><th>Cesta</th><th>Interní poznámka</th><th>Videa</th><th>Části</th><th>Stav</th><th>Důvod</th></tr></thead><tbody>
 {% for row in rows %}{% set collection = row.collection %}<tr><td data-label="Kolekce" class="card-primary"><a href="/hierarchy-review/{{ collection.id }}">{{ collection.local_title }}</a></td><td data-label="Zobrazované názvy částí">{% for title in collection.titles %}<a href="/titles/{{ title.id }}">{{ catalog_title_display_title(title, title_name_preference) }}</a><small>Lokální část: {{ title.local_title }}</small>{% if not loop.last %}<hr>{% endif %}{% else %}—{% endfor %}</td><td data-label="Cesta" class="technical-path">{{ collection.relative_root_path }}</td><td data-label="Interní poznámka">{{ collection.local_period_hint or '—' }}</td><td data-label="Videa">{{ row.video_count }}</td><td data-label="Části">{{ collection.titles|length }}</td><td data-label="Stav">{{ collection.hierarchy_status }}</td><td data-label="Důvod" class="card-wide">{% if collection.hierarchy_note %}{{ collection.hierarchy_note }}{% endif %}{% if row.numbering_unknown %}{{ ' · ' if collection.hierarchy_note else '' }}{{ row.numbering_unknown }} videí nemá určené číslo epizody.{% endif %}{% for review in row.supplementary_reviews|default([]) %}<small><a href="/hierarchy-review/{{ collection.id }}#supplementary-ordinal-review-title-{{ review.title.id }}">{{ review.title.local_title }}</a>: {% for issue in review.issues %}{{ issue.type_label }} · {{ issue.issue_label }}{% if not loop.last %}; {% endif %}{% endfor %}</small>{% endfor %}{% if not collection.hierarchy_note and not row.numbering_unknown and not row.supplementary_reviews|default([]) %}Číslování obsahuje mezery nebo duplicity.{% endif %}</td></tr>
 {% else %}<tr><td colspan="8">Žádná collection nyní nevyžaduje kontrolu číslování nebo vlastní hierarchie.</td></tr>{% endfor %}
 </tbody></table></div></section>
+
+<details class="panel all-collections-index" id="all-collections">
+  <summary>Všechna anime ({{ all_collection_rows|length }})</summary>
+  <div class="all-collections-controls">
+    <label for="all-collections-search">Hledat podle názvu</label>
+    <input class="search-input" id="all-collections-search" type="search" maxlength="200" autocomplete="off" aria-controls="all-collections-list" placeholder="Hledat anime…">
+    <small id="all-collections-result-count" aria-live="polite">Zobrazeno {{ all_collection_rows|length }} z {{ all_collection_rows|length }}</small>
+  </div>
+  <ul class="all-collections-list" id="all-collections-list">
+    {% for row in all_collection_rows %}<li class="all-collections-row" data-collection-name="{{ row.display_title }}"><a href="/hierarchy-review/{{ row.id }}">{{ row.display_title }}</a><span class="status-badge severity-{{ row.badge.severity }}" data-hierarchy-status="{{ row.badge.key }}">{{ row.badge.label }}</span></li>{% endfor %}
+  </ul>
+</details>
+<script>
+(() => {
+  const search = document.getElementById('all-collections-search');
+  const list = document.getElementById('all-collections-list');
+  const resultCount = document.getElementById('all-collections-result-count');
+  if (!search || !list || !resultCount) return;
+  const rows = Array.from(list.querySelectorAll('[data-collection-name]'));
+  const normalize = value => value.normalize('NFKC').toLocaleLowerCase('cs-CZ');
+  const filterRows = () => {
+    const query = normalize(search.value.trim());
+    let visible = 0;
+    rows.forEach(row => {
+      const matches = normalize(row.dataset.collectionName || '').includes(query);
+      row.hidden = !matches;
+      if (matches) visible += 1;
+    });
+    resultCount.textContent = `Zobrazeno ${visible} z ${rows.length}`;
+  };
+  search.addEventListener('input', filterRows);
+})();
+</script>
 {% endblock %}

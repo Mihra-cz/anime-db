@@ -276,6 +276,69 @@ def test_hierarchy_overview_query_count_is_bounded_as_supplementary_videos_grow(
     assert baseline <= 7
 
 
+def test_hierarchy_overview_query_count_is_bounded_as_collection_count_grows(
+    performance_app,
+):
+    web_app, _ids = performance_app
+    engine = web_app.state.sessions.kw["bind"]
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review"
+    )
+
+    def query_count():
+        statements = 0
+
+        def increment(*_args):
+            nonlocal statements
+            statements += 1
+
+        event.listen(engine, "before_cursor_execute", increment)
+        try:
+            response = endpoint(
+                _request(web_app, "/hierarchy-review"), message=None,
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", increment)
+        assert response.status_code == 200
+        return statements
+
+    baseline = query_count()
+    with Session(engine) as session:
+        for number in range(1, 101):
+            collection = CatalogCollection(
+                local_title=f"Scale Show {number:03}",
+                normalized_local_title=f"scale show {number:03}",
+                relative_root_path=f"Anime/Scale Show {number:03}",
+            )
+            title = CatalogTitle(
+                collection=collection,
+                local_title=collection.local_title,
+                normalized_local_title=collection.normalized_local_title,
+                relative_root_path=f"{collection.relative_root_path}/Season 1",
+                part_type="season",
+                season_number=1,
+                season_label="S1",
+            )
+            Video(
+                catalog_collection=collection,
+                catalog_title=title,
+                relative_path=f"{title.relative_root_path}/Episode 01.mkv",
+                root_folder="Anime",
+                filename="Episode 01.mkv",
+                size=number,
+                mtime_ns=number,
+                file_type="episode",
+                local_episode_number=1,
+                season_episode_number=1,
+            )
+            session.add(collection)
+        session.commit()
+
+    assert query_count() == baseline
+    assert baseline <= 7
+
+
 def test_hierarchy_gets_with_supplementary_review_are_semantically_read_only(
     performance_app,
 ):

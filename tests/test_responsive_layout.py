@@ -112,3 +112,27 @@ def test_touch_accessible_paths_and_critical_hierarchy_controls_remain_present()
     assert 'class="inline-form part-type-form manual-hierarchy-form"' in hierarchy
     assert "effective_video_content_display" in hierarchy
     assert "video_content_type_choices" in hierarchy
+
+
+def test_hierarchy_all_anime_index_uses_native_disclosure_and_wrapping_rows():
+    overview = source("hierarchy_review.html")
+    css = STYLE_PATH.read_text(encoding="utf-8")
+
+    assert '<details class="panel all-collections-index" id="all-collections">' in overview
+    assert "<summary>Všechna anime ({{ all_collection_rows|length }})</summary>" in overview
+    assert 'aria-controls="all-collections-list"' in overview
+    assert 'aria-live="polite"' in overview
+    row_rule = re.search(r"\.all-collections-row \{([^}]*)\}", css).group(1)
+    link_rule = re.search(r"\.all-collections-row > a \{([^}]*)\}", css).group(1)
+    badge_rule = re.search(
+        r"\.all-collections-row > \.status-badge \{([^}]*)\}", css
+    ).group(1)
+    assert "justify-content: flex-start" in row_rule
+    assert "justify-content: space-between" not in row_rule
+    assert "flex-wrap: wrap" in row_rule
+    assert "column-gap: .625rem" in row_rule
+    assert "flex: 0 1 auto" in link_rule
+    assert "max-width: 100%" in link_rule
+    assert "overflow-wrap: anywhere" in link_rule
+    assert "margin-left: auto" not in row_rule + link_rule + badge_rule
+    assert "max-width: 100%" in badge_rule
