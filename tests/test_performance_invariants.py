@@ -226,6 +226,109 @@ def test_homepage_query_count_is_bounded_as_video_count_grows(performance_app):
     assert baseline <= 7
 
 
+def test_hierarchy_overview_query_count_is_bounded_as_supplementary_videos_grow(
+    performance_app,
+):
+    web_app, ids = performance_app
+    engine = web_app.state.sessions.kw["bind"]
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/hierarchy-review"
+    )
+
+    def query_count():
+        statements = 0
+
+        def increment(*_args):
+            nonlocal statements
+            statements += 1
+
+        event.listen(engine, "before_cursor_execute", increment)
+        try:
+            response = endpoint(
+                _request(web_app, "/hierarchy-review"), message=None,
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", increment)
+        assert response.status_code == 200
+        return statements
+
+    baseline = query_count()
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, ids["collection"])
+        title = session.get(CatalogTitle, ids["title"])
+        session.add_all([
+            Video(
+                catalog_collection=collection,
+                catalog_title=title,
+                relative_path=f"Anime/Performance Show/Season 1/NCOP{number:03}.mkv",
+                root_folder="Anime",
+                filename=f"NCOP{number:03}.mkv",
+                size=number,
+                mtime_ns=number,
+                file_type="ncop",
+            )
+            for number in range(1, 201)
+        ])
+        session.commit()
+
+    assert query_count() == baseline
+    assert baseline <= 7
+
+
+def test_hierarchy_gets_with_supplementary_review_are_semantically_read_only(
+    performance_app,
+):
+    web_app, ids = performance_app
+    engine = web_app.state.sessions.kw["bind"]
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, ids["collection"])
+        title = session.get(CatalogTitle, ids["title"])
+        session.add_all([
+            Video(
+                catalog_collection=collection,
+                catalog_title=title,
+                relative_path=f"Anime/Performance Show/Season 1/{filename}",
+                root_folder="Anime",
+                filename=filename,
+                size=2,
+                mtime_ns=2,
+                file_type="ncop",
+            )
+            for filename in ("NCOP.mkv", "NCOP clean.mkv")
+        ])
+        session.commit()
+
+    before = _semantic_snapshot(engine)
+    writes = []
+
+    def record(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            writes.append(statement)
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        overview = endpoints["/hierarchy-review"](
+            _request(web_app, "/hierarchy-review"), message=None,
+        )
+        detail = endpoints["/hierarchy-review/{collection_id}"](
+            _request(web_app, f'/hierarchy-review/{ids["collection"]}'),
+            ids["collection"], message=None,
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert overview.status_code == detail.status_code == 200
+    assert "Chybějící supplementary ordinal" in overview.body.decode()
+    assert "Supplementary ordinal · vyžaduje kontrolu" in detail.body.decode()
+    assert writes == []
+    assert _semantic_snapshot(engine) == before
+
+
 def test_hierarchy_detail_query_count_is_bounded_as_video_count_grows(
     performance_app,
 ):
@@ -386,3 +489,48 @@ def test_unresolved_subtitle_candidates_reuse_path_and_parser_index(monkeypatch)
     assert len(rows) == len(subtitles)
     assert all(row.candidate_count == 1 for row in rows)
     assert parser_calls == len(videos) + len(subtitles)
+
+
+def test_supplementary_title_get_shows_manual_ordinal_without_writes(performance_app):
+    web_app, ids = performance_app
+    engine = web_app.state.sessions.kw['bind']
+    with Session(engine) as session:
+        title = session.get(CatalogTitle, ids['title'])
+        title.part_type = 'bonus'
+        item = title.videos[0]
+        item.filename = 'Show NCOP03.mkv'
+        item.file_type = 'ncop'
+        item.episode_number_manual_override = 2
+        title.videos.append(Video(
+            catalog_collection=item.catalog_collection,
+            relative_path='Anime/Performance Show/Season 1/Show - 02.mkv',
+            root_folder='Anime', filename='Show - 02.mkv', size=2, mtime_ns=2,
+            file_type='episode', local_episode_number=2, season_episode_number=2,
+        ))
+        session.commit()
+    endpoint = next(route.endpoint for route in web_app.routes
+                    if getattr(route, 'path', None) == '/titles/{catalog_title_id}')
+    before = _semantic_snapshot(engine)
+    statements = []
+    def record(conn, cursor, statement, parameters, context, many):
+        statements.append(statement)
+    event.listen(engine, 'before_cursor_execute', record)
+    try:
+        response = endpoint(_request(web_app, f"/titles/{ids['title']}"), ids['title'])
+    finally:
+        event.remove(engine, 'before_cursor_execute', record)
+    assert response.status_code == 200
+    rendered = response.body.decode()
+    assert '<strong>NCOP 02</strong>' in rendered
+    assert 'class="inline-form supplementary-ordinal-form"' in rendered
+    assert '<span class="supplementary-ordinal-prefix">NCOP</span>' in rendered
+    assert 'Numerický ordinal <input type="number"' in rendered
+    assert 'name="manual_episode_number" value="2"' in rendered
+    assert 'Výsledná identita: <strong>NCOP 02</strong>' in rendered
+    assert 'Zadejte pouze kladné celé číslo.' in rendered
+    standard_row = rendered.split('id="video-2"', 1)[1].split('</tr>', 1)[0]
+    assert 'supplementary-ordinal-form' not in standard_row
+    assert 'placeholder="Číslo dle režimu"' in standard_row
+    assert 'aria-label="Ruční číslo epizody podle zvoleného režimu"' in standard_row
+    assert not any(s.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')) for s in statements)
+    assert _semantic_snapshot(engine) == before

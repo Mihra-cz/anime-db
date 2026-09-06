@@ -316,7 +316,7 @@ def test_complete_media_part_ordinals_with_two_episode_identities_keep_warning()
     presentation = evaluate_metadata_range_presentation(title)
 
     assert presentation is not None
-    assert presentation.comparison.matches is True
+    assert presentation.comparison.matches is None
     assert presentation.information is None
     assert "jedinou logickou epizodu" in presentation.warning
 
@@ -339,7 +339,7 @@ def test_complete_media_parts_with_conflicting_variant_lanes_keep_warning():
     presentation = evaluate_metadata_range_presentation(title)
 
     assert presentation is not None
-    assert presentation.comparison.matches is True
+    assert presentation.comparison.matches is None
     assert presentation.information is None
     assert "nekonfliktní" in presentation.warning
 
@@ -360,7 +360,7 @@ def test_media_parts_with_damaged_duplicate_reference_keep_warning():
     presentation = evaluate_metadata_range_presentation(title)
 
     assert presentation is not None
-    assert presentation.comparison.matches is True
+    assert presentation.comparison.matches is None
     assert presentation.information is None
     assert "úplnou a nekonfliktní" in presentation.warning
 

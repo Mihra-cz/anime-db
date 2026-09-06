@@ -347,7 +347,7 @@ def test_structural_ab_fractional_zero_and_unknown_stay_noncanonical():
     ]
 
 
-def test_supplementary_duplicate_identity_ignores_variant_lanes_as_before():
+def test_supplementary_duplicate_identity_respects_confirmed_variant_lanes():
     collection, title, group_a, group_b = _graph()
     first = _video(
         collection,
@@ -368,6 +368,4 @@ def test_supplementary_duplicate_identity_ignores_variant_lanes_as_before():
 
     groups = unresolved_duplicate_groups([first, second])
 
-    assert len(groups) == 1
-    assert groups[0].supplementary_type == "ova"
-    assert {video.id for video in groups[0].videos} == {1, 2}
+    assert groups == ()

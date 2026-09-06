@@ -5054,6 +5054,60 @@ rebuild stale-plan authority a zachování výchozí search relevance na homepag
 
 ---
 
+## 6.78 Supplementary ordinal – sjednocení read-only identity
+
+Parserová supplementary čísla a existující `episode_number_manual_override`
+nově sjednocuje čistý in-memory resolver bez změny schématu. Ordinal je lokální
+identita typu uvnitř CatalogTitle, nikoli automaticky provider/canonical episode
+number. Manual video classification/number mají přednost; přesné NCOP/NCED/OVA
+filename evidence nepřekrývá broad Bonus/Special/Season container. Generic
+Episode 14 se pouhým přesunem do OVA nemění na OVA14 a unknown nemá automatickou 01.
+
+Presentation, řazení a supplementary duplicate identity používají effective
+ordinal. Media Parts a confirmed variant lanes jsou oddělené osy; neověřené
+kolize, chybějící čísla a poškozené duplicate vazby vrací v nové inventory review,
+nikoli falešný logical count. Metadata advisory count u těchto konfliktů vrací
+unavailable. Recap fractional a standard Film/Season numbering zůstávají zachovány.
+Budoucí V6 rename musí bezpečnou identitu použít nebo vyžádat review; kolidující
+target paths nesmí generovat. Rename planner nebyl implementován.
+
+[Původní audit](SUPPLEMENTARY_ORDINAL_AUDIT_2026-09-05.md) a
+[navazující re-audit devíti kandidátů](SUPPLEMENTARY_CANDIDATE_REAUDIT_2026-09-05.md):
+161 sledovaných fyzických videí, po úzkém parserovém doplnění 113 s bezpečnou
+ordinal evidencí a 48 bez ordinalu. Nově podporované `NCOP Ver.TV1` (též OP/ED/NCED),
+`(PV 01)`, `_bd_spec_02` a `NCED 02a/02b` zachovávají číslo i oddělené hinty.
+Původní filtr chybějících ordinalů klesl z 9 na 5 title/type skupin, ale k review
+zůstává 7 původních skupin: dvě další mají známé ordinal collisions (DxD Special
+2–6 a Slime NCED2), bez potvrzené variant/duplicate authority. Ruční suspected
+marker na DxD kopiích není potvrzená duplicita. Nande nyní využívá již potvrzené
+BD/uncensored a TV/censored groups jako 4 logické NCOP × 2 lanes; vznikla pouze
+parserová evidence, žádná nová manual authority. PV1–3 se vyřešily samostatně od
+CM collection. IV, volume a generic Special source epizody zůstávají review.
+Produkční DB ani NAS se neměnily; auditní CLI používá SQLite `mode=ro`.
+
+Odvozený supplementary review je nyní součástí existujícího Hierarchy Review.
+Horní seznam zahrne collection i při uloženém stavu `automatic` nebo `verified`,
+pokud má některý její title více položek stejného typu bez bezpečného ordinalu,
+nevysvětlenou ordinal kolizi nebo porušenou supplementary duplicate identitu.
+Detail u konkrétního CatalogTitle ukáže typ problému, subtype, dotčená Video,
+známé ordinaly a důvod. Jde o čistou presentation/query vrstvu: nemění
+`hierarchy_status`, nevytváří variant pairing ani persistence a GET nezapisuje.
+Produkční read-only smoke vrátil přesně sedm očekávaných title/type skupin:
+66/Special, 147/Special, 150/Special, 271/NCED, 276/NCED, 276/NCOP a
+279/Special. Vyřešené 285/NCOP a 203/Preview-PV review nevyvolaly.
+Ruční editor čísla supplementary videa zobrazuje effective typový prefix,
+samostatný numerický integer ordinal a aktuální složenou identitu, například
+`NCOP + 1 → NCOP 01`. A/B marker, censored/uncensored lane a Media Part zůstávají
+samostatné authority; POST i serverová validace čísel jsou beze změny.
+
+Ověření: cílené numbering/parser/variant/metadata/hierarchy/read-only testy prošly;
+celý aktuální suite po integraci Hierarchy Review a UI polish **1 298 passed**.
+Resolver má nulové SQL a lineární parser work,
+GET testy nulové DML a nezměněný sémantický snapshot. Compileall, načtení všech
+17 Jinja2 šablon a `git diff --check` prošly.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

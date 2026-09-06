@@ -454,6 +454,72 @@ def test_main_selector_and_season_detail_nest_only_exact_supplementary_context(
         assert f'id="title-{title_id}"' in review_html
 
 
+def test_hierarchy_review_lists_derived_supplementary_issues_without_status_change(
+    tmp_path: Path,
+):
+    web_app, endpoints = _app(tmp_path)
+    with web_app.state.sessions() as session:
+        automatic = CatalogCollection(
+            local_title="Automatic Supplementary Review",
+            normalized_local_title="automatic supplementary review",
+            relative_root_path="Anime/Automatic Supplementary Review",
+            hierarchy_status="automatic",
+        )
+        automatic_title = _title(
+            automatic, "Specials", "special", None,
+            ("Special.mkv", "Special alternate.mkv"), verified=False,
+        )
+        verified = _collection("Verified Supplementary Review")
+        verified_title = _title(
+            verified, "NC endings", "bonus", None,
+            ("NCED01.mkv", "Show NCED01.mkv"),
+        )
+        resolved = _collection("Resolved Supplementary")
+        _title(
+            resolved, "OVAs", "ova", None,
+            ("OVA01.mkv", "OVA02.mkv"),
+        )
+        session.add_all([automatic, verified, resolved])
+        session.commit()
+        ids = {
+            "automatic": automatic.id,
+            "automatic_title": automatic_title.id,
+            "verified": verified.id,
+            "verified_title": verified_title.id,
+            "resolved": resolved.id,
+        }
+
+    overview = endpoints["/hierarchy-review"](
+        _request(web_app, "/hierarchy-review"), message=None,
+    ).body.decode()
+    assert f'href="/hierarchy-review/{ids["automatic"]}"' in overview
+    assert f'href="/hierarchy-review/{ids["verified"]}"' in overview
+    assert f'href="/hierarchy-review/{ids["resolved"]}"' not in overview
+    assert (
+        f'/hierarchy-review/{ids["automatic"]}'
+        f'#supplementary-ordinal-review-title-{ids["automatic_title"]}'
+    ) in overview
+    assert "Chybějící supplementary ordinal" in overview
+    assert "Kolize supplementary ordinalu" in overview
+
+    detail = endpoints["/hierarchy-review/{collection_id}"](
+        _request(web_app, f'/hierarchy-review/{ids["verified"]}'),
+        ids["verified"],
+    ).body.decode()
+    assert (
+        f'id="supplementary-ordinal-review-title-{ids["verified_title"]}"'
+        in detail
+    )
+    assert "Typ: NCED" in detail
+    assert "Dotčená Video:" in detail
+    assert "NCED01.mkv" in detail and "Show NCED01.mkv" in detail
+    assert "Známé ordinaly:" in detail and "NCED 01" in detail
+
+    with web_app.state.sessions() as session:
+        assert session.get(CatalogCollection, ids["automatic"]).hierarchy_status == "automatic"
+        assert session.get(CatalogCollection, ids["verified"]).hierarchy_status == "verified"
+
+
 def test_single_season_detail_renders_attached_parts_without_selector_step(
     tmp_path: Path,
 ):

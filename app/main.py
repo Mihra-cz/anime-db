@@ -174,6 +174,7 @@ from .unassigned_videos import (
     insufficient_video_assignment_kind,
     insufficient_video_assignments,
 )
+from .supplementary import supplementary_media_siblings, supplementary_review_issues
 from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
     ExternalSubtitleCompatibility,
@@ -1453,6 +1454,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
             "title_video_presentation": title_video_presentation,
             "title_media_videos": title_candidates,
+            "supplementary_media_siblings": supplementary_media_siblings(title_candidates),
             "media_part_summary": media_part_summary_label(title_candidates),
             "media_part_sequence_warning": media_part_sequence_warning(
                 title_candidates
@@ -1757,6 +1759,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ):
                 title_videos_list = videos_by_title.get(title.id, [])
                 title_card_issues = review_diagnostics.for_title_card(title)
+                title_supplementary_issues = supplementary_review_issues(
+                    title_videos_list, title
+                )
                 variant_groups = tuple(sorted(
                     title.video_variant_groups,
                     key=lambda group: (group.manual_label.casefold(), group.id),
@@ -1800,9 +1805,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         for issue in title_card_issues
                     ),
                     "diagnostic_issues": title_card_issues,
+                    "supplementary_review_issues": title_supplementary_issues,
                     "has_blocking_issue": any(
                         issue.blocking for issue in title_card_issues
-                    ),
+                    ) or bool(title_supplementary_issues),
                     "variant_groups": variant_groups,
                     "duplicate_variant_labels": duplicate_variant_labels,
                     "variant_lane_proposal": repeated_variant_lane_proposal(title),
@@ -1965,19 +1971,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ))
             rows = []
             for collection in collections:
-                summaries = [
-                    summarize_title_numbering(list(title.videos), title)
-                    for title in collection.titles
-                ]
+                summaries = []
+                supplementary_reviews = []
+                for title in collection.titles:
+                    title_videos_list = list(title.videos)
+                    summaries.append(summarize_title_numbering(title_videos_list, title))
+                    issues = supplementary_review_issues(title_videos_list, title)
+                    if issues:
+                        supplementary_reviews.append({"title": title, "issues": issues})
                 numbering_unknown = sum(summary.unknown for summary in summaries)
                 if (
                     collection.hierarchy_status in {"review_required", "conflict"}
                     or any(summary.requires_review for summary in summaries)
+                    or supplementary_reviews
                 ):
                     rows.append({
                         "collection": collection,
                         "numbering_unknown": numbering_unknown,
                         "video_count": video_counts.get(collection.id, 0),
+                        "supplementary_reviews": supplementary_reviews,
                     })
             suggestions = collection_grouping_suggestions(
                 session, collections=collections,

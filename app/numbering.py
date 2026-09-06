@@ -12,11 +12,12 @@ from sqlalchemy.orm import Session
 
 from .catalog import (
     EpisodeNumberDetection, FILE_TYPE_TO_SUPPLEMENTARY_SUBTYPE,
-    detect_episode_number, effective_video_content_type, natural_sort_key,
+    detect_episode_number, derive_season_info, effective_video_content_type, natural_sort_key,
     normalize_title,
 )
 from .hierarchy_authority import manual_hierarchy_snapshot_uses_legacy_projection
 from .models import CatalogCollection, CatalogTitle, Video, utc_now
+from .supplementary import ORDINAL_TYPES, representation_conflict, supplementary_ordinal
 
 NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
 
@@ -394,6 +395,13 @@ def video_numbering_identity(
 ) -> VideoNumberingIdentity | None:
     detection = detection or detect_episode_number(video.filename)
     supplementary = automatic_supplementary_numbering(video, detection)
+    ordinal = supplementary_ordinal(video, detection=detection)
+    if ordinal is not None:
+        supplementary = SupplementaryNumberingHint(ordinal.supplementary_type, ordinal.number)
+    elif video.content_type_manual is not None or (
+        supplementary is not None and supplementary.supplementary_type in ORDINAL_TYPES
+    ):
+        supplementary = None
     recap_position = manual_recap_episode_number(video)
     if recap_position is not None:
         supplementary = SupplementaryNumberingHint("recap", recap_position)
@@ -402,6 +410,7 @@ def video_numbering_identity(
         and supplementary.number is not None
         and (
             recap_position is not None
+            or ordinal is not None
             or
             detection.is_supplementary
             or video.episode_number_manual_override is None
@@ -439,7 +448,7 @@ def video_numbering_identity(
                 or f"S{current_title.effective_season_number}"
             )
             context_season_number = current_title.effective_season_number
-        elif hint:
+        elif hint and ordinal is None:
             context_key, context_label = f"name:{hint}", detection.context_hint
             context_season_number = None
         else:
@@ -467,6 +476,15 @@ def video_numbering_identity(
                     else None
                 )
                 context_season_number = None
+                if ordinal is not None and current_title is not None:
+                    # Release directories and filename variant hints are not
+                    # separate logical items. Retain only an explicit Season
+                    # path context for legacy multi-season supplementary titles.
+                    season = derive_season_info(video.relative_path).label
+                    season = season if season and re.fullmatch(r"S\d+", season) else None
+                    title_key = current_title.id if current_title.id is not None else id(current_title)
+                    context_key = f"title:{title_key}" + (f":{season}" if season else "")
+                    context_label = season
         return VideoNumberingIdentity(
             "supplementary", supplementary.number,
             supplementary.supplementary_type, context_key, context_label,
@@ -613,8 +631,7 @@ def unresolved_duplicate_groups(
                 has_unassigned_variant=bool(partition.unassigned_videos),
             ))
 
-    # Supplementary identity and collision semantics intentionally stay exactly
-    # as before Commit 2; variant lanes apply only to canonical standard episodes.
+    # Keep the existing season/context separation, then evaluate physical axes.
     by_identity: dict[VideoNumberingIdentity, list[Video]] = {}
     title_names = supplementary_context_map(videos)
     for video in videos:
@@ -637,7 +654,10 @@ def unresolved_duplicate_groups(
                 item[0].kind, item[0].supplementary_type or "",
                 item[0].context_key or "", item[0].number,
             ),
-        ) if len(items) > 1
+        ) if len(items) > 1 and (
+            identity.supplementary_type not in ORDINAL_TYPES
+            or representation_conflict(items)
+        )
     )
     return tuple(sorted(
         groups,
@@ -1064,10 +1084,19 @@ def effective_video_numbering(
         and effective_title.effective_part_type in SUPPLEMENTAL_PART_TYPES
     )
     supplementary_hint = automatic_supplementary_numbering(video, detection)
+    ordinal = supplementary_ordinal(
+        video, effective_title, detection=detection, use_current_title=False,
+    )
+    if ordinal is not None:
+        supplementary_hint = SupplementaryNumberingHint(ordinal.supplementary_type, ordinal.number)
+    elif video.content_type_manual is not None or (
+        supplementary_hint is not None and supplementary_hint.supplementary_type in ORDINAL_TYPES
+    ):
+        supplementary_hint = None
     recap_position = manual_recap_episode_number(video)
     if recap_position is not None:
         supplementary_hint = SupplementaryNumberingHint("recap", recap_position)
-    if video.content_type_manual or title_is_supplemental:
+    if video.content_type_manual or title_is_supplemental or ordinal is not None:
         classification = "supplementary"
     elif video.episode_number_manual_override is not None:
         classification = "standard"
@@ -1226,6 +1255,8 @@ def effective_video_sort_position(
     )
     if state.is_standard and state.season_episode_number is not None:
         return Decimal(state.season_episode_number)
+    if state.is_supplementary and state.supplementary_number is not None:
+        return Decimal(state.supplementary_number)
     detection = detection or state.detection
     return detection.sortable_episode_value
 

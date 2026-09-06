@@ -1461,10 +1461,29 @@ SUPPLEMENTARY_SEQUENCE = re.compile(
     r"\s*(?:(?:P|EPISODE|EP|E)\s*)?0*(?P<number>\d{1,3})(?:v\d+)?$",
     re.IGNORECASE,
 )
+SUPPLEMENTARY_MEDIA_PART_SEQUENCE = re.compile(
+    r"(?:^|[^a-z0-9])(?P<type>NCOP|NCED|OVA|OAD|SPECIAL|OP|ED|PREVIEW|PV|CM)"
+    r"\s*0*(?P<number>\d{1,3})\s+(?:MEDIA\s+)?PART\s+[1-9]\d*"
+    r"(?:\s*(?:/|OF)\s*[1-9]\d*)?$", re.IGNORECASE,
+)
 BRACKETED_SUPPLEMENTARY_SEQUENCE = re.compile(
     r"\[\s*(?P<type>NCOP|NCED|OP|ED|CM|PV|MENU)\s*"
     r"0*(?P<number>\d{1,3})\s*\]",
     re.IGNORECASE,
+)
+OPENING_ENDING_TV_SEQUENCE = re.compile(
+    r"(?:^|[^a-z0-9])(?P<type>NCOP|NCED|OP|ED)\s+Ver\.TV"
+    r"(?P<number>0?[1-9]|[1-9]\d)$", re.IGNORECASE,
+)
+PARENTHESIZED_PV_SEQUENCE = re.compile(
+    r"\(\s*(?P<type>PV)\s*0*(?P<number>\d{1,3})\s*\)", re.IGNORECASE,
+)
+LEGACY_BD_SPECIAL_SEQUENCE = re.compile(
+    r"_bd_(?P<type>spec)_(?P<number>\d{2})$", re.IGNORECASE,
+)
+OPENING_ENDING_LETTER_SEQUENCE = re.compile(
+    r"(?:^|[^a-z0-9])(?P<type>NCOP|NCED|OP|ED)\s*"
+    r"(?P<number>\d{2})(?P<marker>[AB])$", re.IGNORECASE,
 )
 BRACKETED_UNNUMBERED_SUPPLEMENTARY_MARKER = re.compile(
     r"\[\s*(?P<type>NCOP|NCED|OP|ED|CM|PV|MENU)\s*\]",
@@ -1598,6 +1617,12 @@ def _normalized_version_hint(raw: str) -> str:
 
 
 def _exact_supplementary_detection(stem: str) -> EpisodeNumberDetection | None:
+    if match := SUPPLEMENTARY_MEDIA_PART_SEQUENCE.search(stem):
+        return EpisodeNumberDetection(
+            "supplementary", int(match.group("number")),
+            supplementary_type=normalize_supplementary_subtype(match.group("type")),
+            context_hint=stem[:match.start()].rstrip(" -_.") or None,
+        )
     if match := BRACKETED_SUPPLEMENTARY_SEQUENCE.search(stem):
         return EpisodeNumberDetection(
             "supplementary",
@@ -1605,6 +1630,24 @@ def _exact_supplementary_detection(stem: str) -> EpisodeNumberDetection | None:
             supplementary_type=normalize_supplementary_subtype(match.group("type")),
             context_hint=stem[:match.start()].rstrip(" -_.") or None,
         )
+    # Audited explicit suffixes: the adjacent type owns the number. Release
+    # metadata is not searched for digits, and A/B remains only raw evidence.
+    for pattern in (
+        OPENING_ENDING_TV_SEQUENCE, PARENTHESIZED_PV_SEQUENCE,
+        LEGACY_BD_SPECIAL_SEQUENCE, OPENING_ENDING_LETTER_SEQUENCE,
+    ):
+        if match := pattern.search(stem):
+            raw_type = match.group("type").casefold()
+            return EpisodeNumberDetection(
+                "supplementary", int(match.group("number")),
+                supplementary_type=(
+                    "special" if raw_type == "spec"
+                    else normalize_supplementary_subtype(raw_type)
+                ),
+                context_hint=stem[:match.start()].rstrip(" -_.") or None,
+                version_hint="Ver.TV" if pattern is OPENING_ENDING_TV_SEQUENCE else None,
+                structural_marker=(match.groupdict().get("marker") or "").upper() or None,
+            )
     if match := BRACKETED_UNNUMBERED_SUPPLEMENTARY_MARKER.search(stem):
         return EpisodeNumberDetection(
             "supplementary",
@@ -1748,6 +1791,9 @@ class VideoContentDisplay:
     is_manual: bool
     display_label: str
     noncanonical_position: str | None
+    supplementary_label: str | None = None
+    supplementary_type_label: str | None = None
+    supplementary_ordinal: int | None = None
 
 
 def effective_video_content_display(video: Video) -> VideoContentDisplay:
@@ -1772,6 +1818,11 @@ def effective_video_content_display(video: Video) -> VideoContentDisplay:
     detection = detect_episode_number(video.filename)
     # Local import avoids the catalog -> numbering -> catalog module cycle.
     from .numbering import format_episode_position, manual_recap_episode_number
+    from .supplementary import supplementary_ordinal
+
+    ordinal = supplementary_ordinal(video, detection=detection)
+    if ordinal is not None and ordinal.number is not None:
+        label = ordinal.display_label
 
     recap_position = manual_recap_episode_number(video)
     noncanonical_position = (
@@ -1785,6 +1836,11 @@ def effective_video_content_display(video: Video) -> VideoContentDisplay:
         is_manual=is_manual,
         display_label=(f"{label} · ručně zařazeno" if is_manual else label),
         noncanonical_position=noncanonical_position,
+        supplementary_label=(
+            ordinal.display_label if ordinal is not None and ordinal.number is not None else None
+        ),
+        supplementary_type_label=ordinal.type_label if ordinal is not None else None,
+        supplementary_ordinal=ordinal.number if ordinal is not None else None,
     )
 
 

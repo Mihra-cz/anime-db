@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.catalog import normalize_title
 from app.media_parts import media_part_total
 from app.models import CatalogTitle, MetadataCandidate, Video
+from app.supplementary import supplementary_inventory
 from app.numbering import (
     SUPPLEMENTAL_PART_TYPES,
     effective_video_numbering,
@@ -189,8 +190,14 @@ def local_episode_count_evidence(
             ("no_active_video",),
         )
 
+    ordinal_inventory = supplementary_inventory(video_list, title)
+    if ordinal_inventory.invalid_duplicates or any(p.requires_review for p in ordinal_inventory.partitions):
+        return LocalEpisodeCountEvidence(
+            None, "supplementary_logical_items", physical_count, active_count,
+            summary.logical_episode_count, ("ambiguous_supplementary_identity",),
+        )
     media_total = media_part_total(active)
-    if media_total is not None and media_total == active_count:
+    if media_total is not None and media_total == active_count and len(ordinal_inventory.partitions) <= 1:
         return LocalEpisodeCountEvidence(
             1,
             "single_logical_item_from_media_parts",
