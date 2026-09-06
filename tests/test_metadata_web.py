@@ -36,7 +36,7 @@ from app.hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPE_CHOICES
 from app.metadata.providers.base import MetadataProviderError, ProviderTitleMetadata
 from app.migrations import migrate_schema
 from app.models import (
-    AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
+    Artwork, AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
     ExternalSubtitleCompatibility, ExternalTitleLink, InternalSubtitle,
     ManualSplitRuleVideo, TitleMetadata, Video, utc_now,
 )
@@ -3898,6 +3898,87 @@ def test_homepage_collection_name_uses_metadata_preference_and_local_fallback(
         catalog = render(preference)
         assert f'href="/titles/{metadata_title_id}">{expected}</a>' in catalog
         assert ">Fyzický název (P21)</a>" not in catalog
+
+
+def test_main_catalog_renders_cached_thumbnail_and_stable_placeholders(tmp_path):
+    artwork_root = tmp_path / "artwork"
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'catalog-thumbnails.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=artwork_root,
+    ))
+    valid_thumbnail = artwork_root / "anilist" / "1" / "cover-thumb.webp"
+    valid_thumbnail.parent.mkdir(parents=True)
+    valid_thumbnail.write_bytes(b"cached thumbnail")
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+
+        def add_collection(name, external_id, thumbnail_path=None):
+            collection = CatalogCollection(
+                local_title=name, normalized_local_title=name.casefold(),
+                relative_root_path=f"Anime/{name}",
+            )
+            title = CatalogTitle(
+                collection=collection, local_title=name,
+                normalized_local_title=name.casefold(),
+                relative_root_path=f"Anime/{name}/Season 1",
+                part_type="season", season_number=1,
+            )
+            if thumbnail_path is not None:
+                title.artwork.append(Artwork(
+                    provider="anilist", external_id=str(external_id),
+                    artwork_type="cover",
+                    remote_url=f"https://img/{external_id}",
+                    local_path=f"anilist/{external_id}/cover-original.jpg",
+                    thumbnail_path=thumbnail_path,
+                    mime_type="image/jpeg", file_size=1, is_primary=True,
+                ))
+            session.add(Video(
+                catalog_collection=collection, catalog_title=title,
+                relative_path=f"Anime/{name}/Season 1/{name} - 01.mkv",
+                root_folder="Anime", filename=f"{name} - 01.mkv",
+                size=1, mtime_ns=1, file_type="episode",
+                local_episode_number=1, season_episode_number=1,
+            ))
+
+        add_collection(
+            "Alpha Artwork", 1, "anilist/1/cover-thumb.webp",
+        )
+        add_collection(
+            "Beta Stale", 2, "anilist/2/cover-thumb.webp",
+        )
+        add_collection("Gamma Placeholder", 3)
+        session.commit()
+
+    endpoints = {
+        route.path: route.endpoint
+        for route in web_app.routes if hasattr(route, "endpoint")
+    }
+
+    homepage = endpoints["/"](web_request(web_app, "/")).body.decode()
+    logical = homepage.split(
+        'class="panel logical-catalog"', 1,
+    )[1].split('class="panel physical-folders"', 1)[0]
+    assert logical.count('class="artwork-thumbnail" aria-hidden="true"') == 3
+    assert logical.count("<img ") == 1
+    assert (
+        'src="/artwork/anilist/1/cover-thumb.webp" alt="" loading="lazy"'
+        in logical
+    )
+    assert "/artwork/anilist/2/cover-thumb.webp" not in logical
+    assert logical.index("Alpha Artwork") < logical.index("Beta Stale")
+    assert logical.index("Beta Stale") < logical.index("Gamma Placeholder")
+    assert "Metadata chybí" in logical
+
+    filtered = endpoints["/catalog/{filter_name}"](
+        web_request(web_app, "/catalog/all"), "all", q="bEtA",
+    ).body.decode()
+    assert "Beta Stale" in filtered
+    assert "Alpha Artwork" not in filtered
+    assert "Gamma Placeholder" not in filtered
+    assert 'class="artwork-thumbnail" aria-hidden="true"></span>' in filtered
+    assert "Metadata chybí" in filtered
 
 
 def test_homepage_collection_identity_is_not_taken_from_supplementary_title(

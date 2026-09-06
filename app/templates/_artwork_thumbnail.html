@@ -1,0 +1,3 @@
+{% macro artwork_thumbnail(url) -%}
+<span class="artwork-thumbnail" aria-hidden="true">{% if url %}<img src="{{ url }}" alt="" loading="lazy" onerror="this.hidden=true">{% endif %}</span>
+{%- endmacro %}

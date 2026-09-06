@@ -3,11 +3,15 @@ from pathlib import Path
 from sqlalchemy import event
 from starlette.requests import Request
 
-from app.collection_presentation import build_collection_presentation
+from app.collection_presentation import (
+    build_collection_presentation,
+    is_collection_part_artwork_worthy,
+)
 from app.config import Settings
 from app.database import Base
 from app.main import create_app
 from app.models import (
+    Artwork,
     CatalogCollection,
     CatalogTitle,
     TitleMetadata,
@@ -452,6 +456,191 @@ def test_main_selector_and_season_detail_nest_only_exact_supplementary_context(
     assert "season-supplementary-group" not in review_html
     for title_id in all_title_ids:
         assert f'id="title-{title_id}"' in review_html
+
+
+def test_collection_artwork_worthy_resolver_uses_presentation_role():
+    titles = {
+        part_type: CatalogTitle(
+            local_title=part_type,
+            normalized_local_title=part_type,
+            relative_root_path=f"Anime/Role/{part_type}",
+            part_type=part_type,
+        )
+        for part_type in ("season", "film", "ova", "special", "bonus")
+    }
+
+    assert is_collection_part_artwork_worthy(
+        titles["season"], role="primary",
+    ) is True
+    for part_type in ("film", "ova", "special"):
+        assert is_collection_part_artwork_worthy(
+            titles[part_type], role="anime_level",
+        ) is True
+    assert is_collection_part_artwork_worthy(
+        titles["bonus"], role="anime_level",
+    ) is False
+
+
+def test_collection_detail_artwork_follows_existing_presentation_role(
+    tmp_path: Path,
+):
+    web_app, endpoints = _app(tmp_path)
+    artwork_root = tmp_path / "artwork"
+    valid_artwork_ids = (1, 2, 10, 11, 12, 20, 21, 30, 31, 32, 33)
+    for external_id in valid_artwork_ids:
+        thumbnail = (
+            artwork_root / "anilist" / str(external_id) / "cover-thumb.webp"
+        )
+        thumbnail.parent.mkdir(parents=True)
+        thumbnail.write_bytes(f"cover {external_id}".encode())
+
+    def attach_artwork(title, external_id, *, stale=False):
+        title.artwork.append(Artwork(
+            provider="anilist", external_id=str(external_id),
+            artwork_type="cover", remote_url=f"https://img/{external_id}",
+            local_path=f"anilist/{external_id}/cover-original.jpg",
+            thumbnail_path=f"anilist/{external_id}/cover-thumb.webp",
+            mime_type="image/jpeg", file_size=1, is_primary=True,
+        ))
+        if stale:
+            assert not (
+                artwork_root / "anilist" / str(external_id) / "cover-thumb.webp"
+            ).exists()
+
+    with web_app.state.sessions() as session:
+        collection = _collection("Artwork Parts")
+        season_one = _title(
+            collection, "Season 1", "season", 1, ("S1E01.mkv",),
+        )
+        season_two = _title(
+            collection, "Season 2", "season", 2, ("S2E01.mkv",),
+        )
+        season_without = _title(
+            collection, "Season 3", "season", 3, ("S3E01.mkv",),
+        )
+        season_stale = _title(
+            collection, "Season 4", "season", 4, ("S4E01.mkv",),
+        )
+        anime_film = _title(
+            collection, "Anime Film", "film", None, ("Film.mkv",),
+        )
+        anime_ova = _title(
+            collection, "Anime-level OVA", "ova", None, ("OVA01.mkv",),
+        )
+        anime_special = _title(
+            collection, "Anime-level Special", "special", None,
+            ("Special01.mkv",),
+        )
+        film_without = _title(
+            collection, "Film without cover", "film", None,
+            ("Film missing.mkv",),
+        )
+        ova_without = _title(
+            collection, "OVA without cover", "ova", None,
+            ("OVA missing.mkv",),
+        )
+        special_stale = _title(
+            collection, "Special stale cover", "special", None,
+            ("Special stale.mkv",),
+        )
+        child_ova = _title(
+            collection, "OVA under Season 1", "ova", 1,
+            ("OVA child.mkv",),
+        )
+        child_special = _title(
+            collection, "Special under Season 1", "special", 1,
+            ("Special child.mkv",),
+        )
+        bonus = _title(
+            collection, "OP and ED extras", "bonus", None,
+            ("OP01.mkv", "ED01.mkv"),
+        )
+        recap = _title(
+            collection, "Recap", "recap", None, ("Recap01.mkv",),
+        )
+        preview = _title(
+            collection, "Preview", "preview", None, ("PV01.mkv",),
+        )
+        extras = _title(
+            collection, "Extras", "other", None, ("CM01.mkv",),
+        )
+        attach_artwork(season_one, 1)
+        attach_artwork(season_two, 2)
+        attach_artwork(season_stale, 4, stale=True)
+        attach_artwork(anime_film, 10)
+        attach_artwork(anime_ova, 11)
+        attach_artwork(anime_special, 12)
+        attach_artwork(special_stale, 15, stale=True)
+        attach_artwork(child_ova, 20)
+        attach_artwork(child_special, 21)
+        attach_artwork(bonus, 30)
+        attach_artwork(recap, 31)
+        attach_artwork(preview, 32)
+        attach_artwork(extras, 33)
+        session.add(collection)
+        session.commit()
+        collection_id = collection.id
+        title_ids = {
+            "s1": season_one.id,
+            "s2": season_two.id,
+            "without": season_without.id,
+            "stale": season_stale.id,
+            "film": anime_film.id,
+            "ova": anime_ova.id,
+            "special": anime_special.id,
+            "film_without": film_without.id,
+            "ova_without": ova_without.id,
+            "special_stale": special_stale.id,
+            "child_ova": child_ova.id,
+            "child_special": child_special.id,
+            "bonus": bonus.id,
+            "recap": recap.id,
+            "preview": preview.id,
+            "extras": extras.id,
+        }
+
+    rendered = endpoints["/collections/{collection_id}"](
+        _request(web_app, f"/collections/{collection_id}"), collection_id,
+    ).body.decode()
+
+    def title_row(key):
+        return rendered.split(
+            f'<tr id="title-{title_ids[key]}">', 1,
+        )[1].split("</tr>", 1)[0]
+
+    season_one_row = title_row("s1")
+    season_two_row = title_row("s2")
+    without_row = title_row("without")
+    stale_row = title_row("stale")
+    assert 'src="/artwork/anilist/1/cover-thumb.webp"' in season_one_row
+    assert 'src="/artwork/anilist/2/cover-thumb.webp"' in season_two_row
+    assert "/artwork/anilist/2/cover-thumb.webp" not in season_one_row
+    assert "/artwork/anilist/1/cover-thumb.webp" not in season_two_row
+    assert 'class="artwork-thumbnail" aria-hidden="true"></span>' in without_row
+    assert 'class="artwork-thumbnail" aria-hidden="true"></span>' in stale_row
+    assert "<img " not in without_row
+    assert "<img " not in stale_row
+    for key, external_id in (("film", 10), ("ova", 11), ("special", 12)):
+        row = title_row(key)
+        assert f'src="/artwork/anilist/{external_id}/cover-thumb.webp"' in row
+        assert "/artwork/anilist/1/cover-thumb.webp" not in row
+        assert f'href="/titles/{title_ids[key]}?' in row
+    for key in ("film_without", "ova_without", "special_stale"):
+        row = title_row(key)
+        assert 'class="artwork-thumbnail" aria-hidden="true"></span>' in row
+        assert "<img " not in row
+    for key in ("child_ova", "child_special"):
+        assert f'<tr id="title-{title_ids[key]}">' not in rendered
+    assert "/artwork/anilist/20/cover-thumb.webp" not in rendered
+    assert "/artwork/anilist/21/cover-thumb.webp" not in rendered
+    for key, external_id in (
+        ("bonus", 30), ("recap", 31), ("preview", 32), ("extras", 33),
+    ):
+        row = title_row(key)
+        assert "artwork-thumbnail" not in row
+        assert "artwork-title-cell" not in row
+        assert f"/artwork/anilist/{external_id}/cover-thumb.webp" not in row
+        assert f'href="/titles/{title_ids[key]}?' in row
 
 
 def test_hierarchy_review_lists_derived_supplementary_issues_without_status_change(

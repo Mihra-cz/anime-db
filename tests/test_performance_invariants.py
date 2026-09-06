@@ -99,6 +99,9 @@ def performance_app(tmp_path):
     ("path", "kwargs"),
     (
         ("/", {"message": None, "error": None, "confirm_deletions": False, "q": ""}),
+        ("/catalog/{filter_name}", {
+            "filter_name": "all", "q": "", "sort": None, "direction": None,
+        }),
         ("/hierarchy-review", {"message": None}),
         ("/metadata-review", {"status": "without"}),
         ("/media-check", {
@@ -224,6 +227,125 @@ def test_homepage_query_count_is_bounded_as_video_count_grows(performance_app):
 
     assert query_count() == baseline
     assert baseline <= 7
+
+
+def test_catalog_query_count_is_bounded_as_collection_count_grows(
+    performance_app,
+):
+    web_app, _ids = performance_app
+    engine = web_app.state.sessions.kw["bind"]
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/catalog/{filter_name}"
+    )
+
+    def query_count():
+        statements = 0
+
+        def increment(*_args):
+            nonlocal statements
+            statements += 1
+
+        event.listen(engine, "before_cursor_execute", increment)
+        try:
+            response = endpoint(
+                _request(web_app, "/catalog/all"), "all", q="",
+                sort=None, direction=None,
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", increment)
+        assert response.status_code == 200
+        return statements
+
+    baseline = query_count()
+    with Session(engine) as session:
+        for number in range(2, 202):
+            collection = CatalogCollection(
+                local_title=f"Collection {number:03}",
+                normalized_local_title=f"collection {number:03}",
+                relative_root_path=f"Anime/Collection {number:03}",
+            )
+            title = CatalogTitle(
+                collection=collection,
+                local_title=f"Collection {number:03}",
+                normalized_local_title=f"collection {number:03}",
+                relative_root_path=f"Anime/Collection {number:03}/Season 1",
+                part_type="season", season_number=1,
+            )
+            session.add(Video(
+                catalog_collection=collection, catalog_title=title,
+                relative_path=(
+                    f"Anime/Collection {number:03}/Season 1/"
+                    f"Collection {number:03} - 01.mkv"
+                ),
+                root_folder="Anime",
+                filename=f"Collection {number:03} - 01.mkv",
+                size=number, mtime_ns=number, file_type="episode",
+                local_episode_number=1, season_episode_number=1,
+            ))
+        session.commit()
+
+    assert query_count() == baseline
+    assert baseline <= 7
+
+
+def test_collection_detail_query_count_is_bounded_as_title_count_grows(
+    performance_app,
+):
+    web_app, ids = performance_app
+    engine = web_app.state.sessions.kw["bind"]
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/collections/{collection_id}"
+    )
+
+    def query_count():
+        statements = 0
+
+        def increment(*_args):
+            nonlocal statements
+            statements += 1
+
+        event.listen(engine, "before_cursor_execute", increment)
+        try:
+            response = endpoint(
+                _request(
+                    web_app, f"/collections/{ids['collection']}"
+                ),
+                ids["collection"],
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", increment)
+        assert response.status_code == 200
+        return statements
+
+    baseline = query_count()
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, ids["collection"])
+        for number in range(2, 102):
+            title = CatalogTitle(
+                collection=collection,
+                local_title=f"Season {number}",
+                normalized_local_title=f"season {number}",
+                relative_root_path=(
+                    f"Anime/Performance Show/Season {number}"
+                ),
+                part_type="season", season_number=number,
+                season_label=f"S{number}", numbering_mode="local",
+            )
+            session.add(Video(
+                catalog_collection=collection, catalog_title=title,
+                relative_path=(
+                    f"Anime/Performance Show/Season {number}/Show - 01.mkv"
+                ),
+                root_folder="Anime", filename="Show - 01.mkv",
+                size=number, mtime_ns=number, file_type="episode",
+                local_episode_number=1, season_episode_number=1,
+            ))
+        session.commit()
+
+    assert query_count() == baseline
+    assert baseline <= 24
 
 
 def test_hierarchy_overview_query_count_is_bounded_as_supplementary_videos_grow(

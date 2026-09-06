@@ -5127,6 +5127,27 @@ API ani semantic GET write nevznikly.
 
 ---
 
+## 6.80 Hlavní katalog – lokální artwork miniatury
+
+Homepage, filtrovaný hlavní katalog a hlavní části v detailu collection zobrazují
+před názvem malou portrait miniaturu z existující lokální artwork cache. Shared read-only resolver
+vybírá pouze primary cover, preferuje hlavní části v centrálním title pořadí a
+použije jen bezpečnou `thumbnail_path`, která skutečně existuje pod nastaveným
+artwork rootem. Chybějící, stale nebo neplatná cesta skončí stejně velkým
+neutrálním placeholderem; katalog nic nestahuje a vzdálenou URL nepoužívá.
+Collection detail přitom používá výhradně vlastní title-level artwork každé
+hlavní části. Artwork-worthy jsou navíc samostatné anime-level Film, OVA a
+Special položky, ale nikoli stejné typy podřízené konkrétní hlavní části. Ostatní
+supplementary a extras zůstávají bez obrázku i bez prázdného odsazení.
+
+Artwork graph se načítá jedním bounded eager dotazem a URL vznikají v
+request-local mapě bez per-collection SQL nebo filesystem globu. Miniatura je
+dekorativní (`alt=""`), lazy-loaded a její pevný portrait box s `object-fit`
+zachovává responsive card layout bez horizontálního scrollu. Metadata status,
+filtry, hledání, řazení, navigace i databázové schéma zůstaly beze změny.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

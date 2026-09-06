@@ -104,6 +104,30 @@ main > p, .panel > p, .metadata-description { max-inline-size: 90ch; }
 }
 .technical-details { margin-top: .45rem; }
 .technical-details summary { color: #95a2b8; font-size: .82rem; }
+.artwork-title-cell {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  min-width: 0;
+  max-width: 100%;
+}
+.artwork-thumbnail {
+  flex: 0 0 2.75rem;
+  width: 2.75rem;
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  border: 1px solid #364258;
+  border-radius: 5px;
+  background: #202a39;
+}
+.artwork-thumbnail img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.artwork-title-copy { flex: 1 1 auto; min-width: 0; }
+.artwork-title-copy > a { overflow-wrap: anywhere; }
 
 button, .button-link, .button-secondary,
 input:not([type="hidden"]), select, textarea {

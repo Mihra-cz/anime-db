@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Literal
 
 from .catalog import sort_title_videos
 from .hierarchy_types import (
@@ -12,6 +12,8 @@ from .hierarchy_types import (
 )
 from .models import CatalogTitle, Video
 from .title_order import catalog_title_sort_key
+
+ANIME_LEVEL_ARTWORK_PART_TYPES = frozenset({"film", "ova", "special"})
 
 
 @dataclass(frozen=True)
@@ -107,6 +109,18 @@ class CollectionPresentation:
             ),
             None,
         )
+
+
+def is_collection_part_artwork_worthy(
+    title: CatalogTitle, *, role: Literal["primary", "anime_level"],
+) -> bool:
+    """Resolve artwork visibility from the part's existing presentation role."""
+    if role == "primary":
+        return True
+    return (
+        role == "anime_level"
+        and title.effective_part_type in ANIME_LEVEL_ARTWORK_PART_TYPES
+    )
 
 
 def _title_presentation(

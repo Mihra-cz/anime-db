@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timezone
 import os
 from pathlib import Path, PurePosixPath
 import re
 import tempfile
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Artwork
+from app.hierarchy_types import MAIN_CONTENT_PART_TYPES
+from app.models import Artwork, CatalogTitle
+from app.title_order import catalog_title_sort_key
 from .providers.base import metadata_http_timeout
 
 
@@ -36,6 +39,50 @@ def resolve_local_path(root: Path, local_path: str) -> Path:
     if resolved != resolved_root and resolved_root not in resolved.parents:
         raise ArtworkCacheError("Cesta obalu opouští adresář cache.")
     return resolved
+
+
+def primary_cover_artwork(title: CatalogTitle | None) -> Artwork | None:
+    """Return the existing title-level presentation authority for local covers."""
+    return next((
+        artwork
+        for artwork in (title.artwork if title is not None else ())
+        if artwork.is_primary and artwork.artwork_type == "cover"
+    ), None)
+
+
+def local_artwork_thumbnail_url(artwork: Artwork | None, root: Path) -> str | None:
+    """Resolve a cached thumbnail to the existing safe local artwork mount."""
+    if artwork is None or not artwork.thumbnail_path:
+        return None
+    try:
+        resolved = resolve_local_path(root, artwork.thumbnail_path)
+    except ArtworkCacheError:
+        return None
+    if not resolved.is_file():
+        return None
+    relative = PurePosixPath(artwork.thumbnail_path).as_posix()
+    return f"/artwork/{quote(relative, safe='/')}"
+
+
+def collection_artwork_thumbnail_url(
+    titles: Iterable[CatalogTitle], root: Path,
+) -> str | None:
+    """Choose the first usable primary cover from the collection presentation order."""
+    ordered = sorted(
+        titles,
+        key=lambda title: (
+            title.effective_part_type not in MAIN_CONTENT_PART_TYPES,
+            catalog_title_sort_key(title),
+        ),
+    )
+    for title in ordered:
+        for artwork in title.artwork:
+            if not artwork.is_primary or artwork.artwork_type != "cover":
+                continue
+            url = local_artwork_thumbnail_url(artwork, root)
+            if url is not None:
+                return url
+    return None
 
 
 def _identity_path(provider: str, external_id: str) -> PurePosixPath:

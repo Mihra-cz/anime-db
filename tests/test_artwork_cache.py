@@ -9,8 +9,14 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.metadata import artwork as artwork_module
-from app.metadata.artwork import ArtworkCacheError, cache_cover
-from app.models import Artwork, CatalogTitle
+from app.metadata.artwork import (
+    ArtworkCacheError,
+    cache_cover,
+    collection_artwork_thumbnail_url,
+    local_artwork_thumbnail_url,
+    primary_cover_artwork,
+)
+from app.models import Artwork, CatalogCollection, CatalogTitle
 
 
 def image_bytes(fmt):
@@ -46,6 +52,70 @@ class RecordingClient(httpx.Client):
     def stream(self, method, url, **kwargs):
         self.request_timeout = kwargs.get("timeout")
         return super().stream(method, url, **kwargs)
+
+
+def stored_artwork(
+    external_id, thumbnail_path, *, primary=True, artwork_type="cover",
+):
+    return Artwork(
+        provider="anilist",
+        external_id=str(external_id),
+        artwork_type=artwork_type,
+        remote_url=f"https://img/{external_id}",
+        local_path=f"anilist/{external_id}/cover-original.jpg",
+        thumbnail_path=thumbnail_path,
+        mime_type="image/jpeg",
+        file_size=1,
+        is_primary=primary,
+    )
+
+
+def test_collection_artwork_uses_primary_cover_from_main_title_order(tmp_path):
+    root = tmp_path / "artwork"
+    main_thumbnail = root / "anilist" / "2" / "cover-thumb.webp"
+    supplementary_thumbnail = root / "anilist" / "1" / "cover-thumb.webp"
+    main_thumbnail.parent.mkdir(parents=True)
+    supplementary_thumbnail.parent.mkdir(parents=True)
+    main_thumbnail.write_bytes(b"main")
+    supplementary_thumbnail.write_bytes(b"supplementary")
+    collection = CatalogCollection(
+        id=1, local_title="Show", normalized_local_title="show",
+        relative_root_path="Anime/Show",
+    )
+    supplementary = CatalogTitle(
+        id=1, collection=collection, local_title="OVA",
+        normalized_local_title="ova", relative_root_path="Anime/Show/OVA",
+        part_type="ova", artwork=[stored_artwork(
+            1, "anilist/1/cover-thumb.webp",
+        )],
+    )
+    main = CatalogTitle(
+        id=2, collection=collection, local_title="Season 1",
+        normalized_local_title="season 1",
+        relative_root_path="Anime/Show/Season 1", part_type="season",
+        season_number=1, artwork=[
+            stored_artwork(
+                "ignored", "anilist/ignored/cover-thumb.webp", primary=False,
+            ),
+            stored_artwork(2, "anilist/2/cover-thumb.webp"),
+        ],
+    )
+
+    assert primary_cover_artwork(main).external_id == "2"
+    assert collection_artwork_thumbnail_url(
+        [supplementary, main], root,
+    ) == "/artwork/anilist/2/cover-thumb.webp"
+
+
+def test_local_artwork_url_rejects_missing_and_unsafe_thumbnail_paths(tmp_path):
+    root = tmp_path / "artwork"
+
+    assert local_artwork_thumbnail_url(
+        stored_artwork(1, "anilist/1/missing.webp"), root,
+    ) is None
+    assert local_artwork_thumbnail_url(
+        stored_artwork(2, "../outside.webp"), root,
+    ) is None
 
 
 @pytest.mark.parametrize(("mime", "fmt", "suffix"), [

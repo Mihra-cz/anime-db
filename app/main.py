@@ -66,7 +66,10 @@ from .catalog import (
     video_matches_search,
 )
 from .config import Settings, get_settings
-from .collection_presentation import build_collection_presentation
+from .collection_presentation import (
+    build_collection_presentation,
+    is_collection_part_artwork_worthy,
+)
 from .catalog_video_presentation import (
     build_catalog_title_video_presentation,
     ungrouped_presented_video_rows,
@@ -122,7 +125,13 @@ from .hierarchy_review_presentation import (
 from .hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPE_CHOICES
 from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
-from .metadata.artwork import ArtworkCacheError, cache_cover
+from .metadata.artwork import (
+    ArtworkCacheError,
+    cache_cover,
+    collection_artwork_thumbnail_url,
+    local_artwork_thumbnail_url,
+    primary_cover_artwork,
+)
 from .metadata.candidates import (
     LOW_SCORE_THRESHOLD, batch_search_candidates,
     decode_match_reasons, search_and_store_candidates, set_candidate_rejected,
@@ -312,7 +321,8 @@ def _homepage_collection_rows(
     videos: list[Video],
     collection_titles: dict[int, tuple[CatalogTitle, ...]],
     title_name_preference: object = "romaji",
-    *, request_index=None, sort="title", direction="asc",
+    *, thumbnail_urls: dict[int, str] | None = None,
+    request_index=None, sort="title", direction="asc",
 ) -> list[dict]:
     """Sestaví navigační homepage nad uloženou logickou hierarchií."""
     results = build_catalog_results(
@@ -345,8 +355,41 @@ def _homepage_collection_rows(
             ),
             "title_count": len(titles),
             "opens_title": has_unambiguous_title,
+            "thumbnail_url": (thumbnail_urls or {}).get(
+                group.catalog_collection_id
+            ),
         })
     return rows
+
+
+def _load_collection_titles_with_artwork(
+    sessions, collection_ids: set[int] | None = None,
+) -> dict[int, tuple[CatalogTitle, ...]]:
+    """Load collection cover authority in one bounded eager query."""
+    if collection_ids is not None and not collection_ids:
+        return {}
+    statement = select(CatalogCollection).options(
+        joinedload(CatalogCollection.titles).joinedload(CatalogTitle.artwork)
+    )
+    if collection_ids is not None:
+        statement = statement.where(CatalogCollection.id.in_(collection_ids))
+    with sessions() as session:
+        collections = session.scalars(statement).unique().all()
+        return {
+            collection.id: tuple(collection.titles)
+            for collection in collections
+        }
+
+
+def _catalog_thumbnail_urls(
+    collection_titles: dict[int, tuple[CatalogTitle, ...]], root: Path,
+) -> dict[int, str]:
+    """Build one request-local thumbnail map without per-row SQL or globbing."""
+    return {
+        collection_id: url
+        for collection_id, titles in collection_titles.items()
+        if (url := collection_artwork_thumbnail_url(titles, root)) is not None
+    }
 
 
 def _load_videos(
@@ -714,6 +757,7 @@ def _variant_preview_payload_from_form(form):
 def _metadata_template_values(
     title: CatalogTitle | None,
     allow_remote_images: bool,
+    artwork_root: Path,
     show_rejected: bool = False,
     show_candidates: bool = False,
     title_videos: list[Video] | None = None,
@@ -729,7 +773,7 @@ def _metadata_template_values(
             return result if isinstance(result, list) else []
         except (TypeError, ValueError):
             return []
-    artwork = next((item for item in (title.artwork if title else []) if item.is_primary and item.artwork_type == "cover"), None)
+    artwork = primary_cover_artwork(title)
     stored_candidates = sorted(
         [item for item in (title.metadata_candidates if title else []) if show_rejected or item.rejected_at is None],
         key=lambda item: (item.rejected_at is not None, -(item.match_score or 0), item.candidate_title.casefold()),
@@ -772,7 +816,7 @@ def _metadata_template_values(
         "low_score_threshold": LOW_SCORE_THRESHOLD,
         "show_rejected": show_rejected,
         "has_rejected_candidates": bool(title and any(item.rejected_at for item in title.metadata_candidates)),
-        "local_cover_url": f"/artwork/{artwork.thumbnail_path}" if artwork and artwork.thumbnail_path else None,
+        "local_cover_url": local_artwork_thumbnail_url(artwork, artwork_root),
         "show_remote_cover": bool(not artwork and allow_remote_images and metadata and metadata.cover_image_url),
     }
 
@@ -955,19 +999,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         explicit_sort = sort is not None
         sort, direction = normalize_group_sort(sort or "title", direction or "asc", "")
         videos, request_index = _load_catalog_overview(sessions)
-        with sessions() as session:
-            collection_titles = {
-                collection.id: tuple(collection.titles)
-                for collection in session.scalars(select(CatalogCollection).options(
-                    selectinload(CatalogCollection.titles)
-                )).all()
-            }
+        collection_titles = _load_collection_titles_with_artwork(sessions)
+        thumbnail_urls = _catalog_thumbnail_urls(
+            collection_titles, settings.metadata_artwork_directory,
+        )
         folders: dict[str, dict[str, int]] = {}
         totals = _empty_stats()
         collection_rows = _homepage_collection_rows(
             videos,
             collection_titles,
             get_preferred_title_language(request),
+            thumbnail_urls=thumbnail_urls,
             request_index=request_index,
             sort=sort, direction=direction,
         )
@@ -1006,6 +1048,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             videos, "all",
             title_name_preference=get_preferred_title_language(request),
         )
+        collection_titles = _load_collection_titles_with_artwork(
+            sessions,
+            {
+                group.catalog_collection_id
+                for group in results.groups
+                if group.catalog_collection_id is not None
+            },
+        )
         def sort_url(column: str) -> str:
             return catalog_state_url(
                 "all", "", column,
@@ -1017,6 +1067,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "all_filters": FILTER_LABELS, "sort": results.sort,
             "direction": results.direction, "sort_url": sort_url,
             "catalog_state_url": catalog_state_url,
+            "catalog_thumbnail_urls": _catalog_thumbnail_urls(
+                collection_titles, settings.metadata_artwork_directory,
+            ),
         })
 
     def unassigned_videos_response(
@@ -1276,6 +1329,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             title_name_preference=get_preferred_title_language(request),
             request_index=request_index,
         )
+        collection_titles = _load_collection_titles_with_artwork(
+            sessions,
+            {
+                group.catalog_collection_id
+                for group in results.groups
+                if group.catalog_collection_id is not None
+            },
+        )
         def sort_url(column: str) -> str:
             return catalog_state_url(
                 filter_name, results.query, column,
@@ -1290,6 +1351,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "sort": results.sort, "direction": results.direction,
             "sort_url": sort_url, "catalog_state_url": catalog_state_url,
             "all_filters": FILTER_LABELS,
+            "catalog_thumbnail_urls": _catalog_thumbnail_urls(
+                collection_titles, settings.metadata_artwork_directory,
+            ),
         })
 
     @app.get("/catalog/{filter_name}/series", response_class=HTMLResponse)
@@ -1542,6 +1606,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         context.update(_metadata_template_values(
             catalog_title,
             settings.metadata_allow_remote_images,
+            settings.metadata_artwork_directory,
             show_rejected,
             show_metadata_candidates,
             title_candidates,
@@ -1583,6 +1648,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             collection = session.scalar(select(CatalogCollection).options(
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+                selectinload(CatalogCollection.titles).joinedload(CatalogTitle.artwork),
             ).where(CatalogCollection.id == collection_id))
         if collection is None:
             raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
@@ -1655,6 +1721,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 attached_ids & visible_title_ids
             ):
                 continue
+            show_artwork = is_collection_part_artwork_worthy(
+                primary.title, role="primary",
+            )
             navigation_parts.append({
                 "part": parts_by_title_id[primary.title.id],
                 "section": "primary",
@@ -1662,10 +1731,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "supplementary_part_count": len(primary.supplementary_parts),
                 "supplementary_video_count": primary.supplementary_video_count,
                 "supplementary_video_tooltip": primary.supplementary_video_tooltip,
+                "show_artwork": show_artwork,
+                "thumbnail_url": (
+                    local_artwork_thumbnail_url(
+                        primary_cover_artwork(primary.title),
+                        settings.metadata_artwork_directory,
+                    )
+                    if show_artwork else None
+                ),
             })
         for extra in presentation.anime_level_parts:
             if extra.title.id not in visible_title_ids:
                 continue
+            show_artwork = is_collection_part_artwork_worthy(
+                extra.title, role="anime_level",
+            )
             navigation_parts.append({
                 "part": parts_by_title_id[extra.title.id],
                 "section": "extra",
@@ -1673,6 +1753,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "supplementary_part_count": 0,
                 "supplementary_video_count": None,
                 "supplementary_video_tooltip": "",
+                "show_artwork": show_artwork,
+                "thumbnail_url": (
+                    local_artwork_thumbnail_url(
+                        primary_cover_artwork(extra.title),
+                        settings.metadata_artwork_directory,
+                    )
+                    if show_artwork else None
+                ),
             })
         state = {"filter_name": filter_name, "q": normalize_search_query(q)}
         if sort:

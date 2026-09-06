@@ -60,6 +60,38 @@ def test_responsive_css_uses_content_breakpoints_without_global_scaling():
     assert not re.search(r"(?:^|[;{])\s*zoom\s*:", css)
 
 
+def test_catalog_thumbnails_are_fixed_decorative_and_responsive():
+    css = STYLE_PATH.read_text(encoding="utf-8")
+    thumbnail = source("_artwork_thumbnail.html")
+    index = source("index.html")
+    catalog = source("catalog.html")
+    collection = source("collection.html")
+
+    cell_rule = re.search(r"\.artwork-title-cell \{([^}]*)\}", css).group(1)
+    thumbnail_rule = re.search(r"\.artwork-thumbnail \{([^}]*)\}", css).group(1)
+    image_rule = re.search(r"\.artwork-thumbnail img \{([^}]*)\}", css).group(1)
+    copy_rule = re.search(r"\.artwork-title-copy \{([^}]*)\}", css).group(1)
+    assert "display: flex" in cell_rule
+    assert "min-width: 0" in cell_rule
+    assert "max-width: 100%" in cell_rule
+    assert "flex: 0 0 2.75rem" in thumbnail_rule
+    assert "width: 2.75rem" in thumbnail_rule
+    assert "aspect-ratio: 2 / 3" in thumbnail_rule
+    assert "overflow: hidden" in thumbnail_rule
+    assert "object-fit: cover" in image_rule
+    assert "width: 100%" in image_rule and "height: 100%" in image_rule
+    assert "min-width: 0" in copy_rule
+    assert 'aria-hidden="true"' in thumbnail
+    assert 'alt=""' in thumbnail
+    assert 'onerror="this.hidden=true"' in thumbnail
+    assert "artwork_thumbnail(row.thumbnail_url)" in index
+    assert "artwork_thumbnail(thumbnail_url)" in catalog
+    assert "artwork_thumbnail(item.thumbnail_url)" in collection
+    assert "item.show_artwork" in collection
+    assert "primary_cover_artwork" not in collection
+    assert "artwork_type" not in collection
+
+
 def test_editable_video_table_uses_its_own_landscape_card_breakpoint():
     css = STYLE_PATH.read_text(encoding="utf-8")
     series = source("series.html")
