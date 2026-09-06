@@ -39,7 +39,7 @@
 
 {% macro asset_card(subtitle, video, presentation, return_to, kind) -%}
 <article class="media-track">
-  <p><strong>{{ subtitle.relative_path }}</strong><small>{{ subtitle.codec|upper }} · detekováno {{ language_display_label(detected_external_subtitle_language(subtitle)) }} · ručně {{ language_display_label(subtitle.manual_language) if subtitle.manual_language is not none else '—' }} · efektivně {{ language_display_label(effective_external_subtitle_language(subtitle)) }}</small></p>
+  <p><strong>{{ subtitle.relative_path }}</strong><small>{{ subtitle.codec|upper }} · detekováno {{ language_display_label(detected_external_subtitle_language(subtitle), include_name=true) }} · ručně {{ language_display_label(subtitle.manual_language, include_name=true) if subtitle.manual_language is not none else '—' }} · efektivně {{ language_display_label(effective_external_subtitle_language(subtitle), include_name=true) }}</small></p>
   {% if kind == 'available' %}
     <span class="status-badge severity-success">{{ compatibility_status_label(external_subtitle_compatibility_status(subtitle, video)) }}</span>
     {% if external_subtitle_is_shared(subtitle) %}<small>Sdílený fyzický subtitle asset.</small>{% endif %}

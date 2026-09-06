@@ -215,8 +215,20 @@ SUBTITLE_LANGUAGE_LABELS = {
     "pol": "PL", "rus": "RU", "ukr": "UK", "por": "PT", "hun": "HU",
     "unknown": "?",
 }
+LANGUAGE_DISPLAY_NAMES = {
+    "cs": "Čeština", "sk": "Slovenština", "en": "Angličtina",
+    "deu": "Němčina", "fra": "Francouzština", "spa": "Španělština",
+    "ita": "Italština", "ja": "Japonština", "kor": "Korejština",
+    "zho": "Čínština", "pol": "Polština", "rus": "Ruština",
+    "ukr": "Ukrajinština", "por": "Portugalština", "hun": "Maďarština",
+    "unknown": "Neznámý jazyk",
+}
+LANGUAGE_DISPLAY_LABELS = {
+    language: f"{short_label} – {LANGUAGE_DISPLAY_NAMES[language]}"
+    for language, short_label in SUBTITLE_LANGUAGE_LABELS.items()
+}
 MANUAL_LANGUAGE_CHOICES = tuple(
-    (language, SUBTITLE_LANGUAGE_LABELS[language])
+    (language, LANGUAGE_DISPLAY_LABELS[language])
     for language in (
         "cs", "sk", "en", "ja", "deu", "fra", "spa", "ita", "kor", "zho",
         "pol", "rus", "ukr", "por", "hun", "unknown",
@@ -449,9 +461,14 @@ def catalog_title_series_label(title: CatalogTitle) -> str:
     }.get(title.effective_part_type, "—")
 
 
-def language_display_label(language: str | None) -> str:
+def language_display_label(
+    language: str | None, *, include_name: bool = False,
+) -> str:
     normalized = normalize_language(language)
-    return SUBTITLE_LANGUAGE_LABELS.get(normalized, normalized.upper())
+    labels = LANGUAGE_DISPLAY_LABELS if include_name else SUBTITLE_LANGUAGE_LABELS
+    return labels.get(
+        normalized, labels["unknown"],
+    )
 
 
 def _normalize_manual_language(language: str | None) -> str | None:

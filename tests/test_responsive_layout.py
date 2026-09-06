@@ -116,6 +116,10 @@ def test_media_check_reuses_landscape_cards_and_stacks_filters_on_mobile():
     assert 'class="panel media-check-filters"' in media_check
     assert '.media-check-filters { grid-template-columns: 1fr; }' in css
     assert '.media-control-grid' in css
+    assert "language_display_label(language, include_name=true)" in media_check
+    assert "profile.audio_languages|map('upper')" not in media_check
+    assert "select, textarea" in css
+    assert "max-width: 100%;" in css
 
 
 def test_unassigned_video_workflow_uses_desktop_cards_without_horizontal_scroll():

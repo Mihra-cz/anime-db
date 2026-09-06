@@ -5148,6 +5148,20 @@ filtry, hledání, řazení, navigace i databázové schéma zůstaly beze změn
 
 ---
 
+## 6.81 Media Check – lidské názvy jazyků
+
+Media Check zobrazuje canonical jazykové kódy spolu s českým názvem, např.
+`JA – Japonština`, `KO – Korejština` nebo `? – Neznámý jazyk`. Jeden shared
+presentation resolver používají souhrny audia, detaily audio/interních/externích
+subtitle stop i ruční jazykové volby. Kompaktní subtitle badge zachovávají krátký
+kód, aby se tabulky zbytečně neroztahovaly.
+
+Interní canonical hodnoty, alias normalizace, hodnoty formulářových `option`, URL
+filtry, Media Check evaluator, scanner a databázové schéma se nezměnily. Jde o
+čistý in-memory presentation lookup bez nových SQL dotazů.
+
+---
+
 # 7. V6 – Úplnost knihovny ⏳
 
 V6 není dokončená. Naváže na ověřenou hierarchii V5 a bude řešit skutečnou

@@ -10,7 +10,7 @@
   <h2>{{ preview.subtitle.relative_path.rsplit('/', 1)[-1] }}</h2>
   <p class="technical-path">{{ preview.subtitle.relative_path }}</p>
   <dl>
-    <dt>Jazyk fyzického assetu</dt><dd>{{ language_display_label(effective_external_subtitle_language(preview.subtitle)) }}</dd>
+    <dt>Jazyk fyzického assetu</dt><dd>{{ language_display_label(effective_external_subtitle_language(preview.subtitle), include_name=true) }}</dd>
     <dt>Cílové video</dt><dd><strong>{{ preview.target.video.filename }}</strong><small>{{ preview.target.episode_label }} · {{ preview.target.variant_label }}{% if preview.target.variant_details %} · {{ preview.target.variant_details|join(' · ') }}{% endif %}</small></dd>
     <dt>Aktuální stav</dt><dd>{{ preview.current_label }}</dd>
     <dt>Ruční rozhodnutí</dt><dd>{{ preview.decision_label }}</dd>

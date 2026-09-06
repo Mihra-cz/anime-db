@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import re
 from urllib.parse import urlencode
 
 from fastapi import HTTPException
@@ -779,6 +780,21 @@ def test_media_check_page_navigation_controls_and_existing_review_pages(tmp_path
     )
     assert f'action="/videos/{ids[10]}/hardsub"' in rendered
     assert '/hardsub"' not in hierarchy.body.decode()
+    assert "JA – Japonština" in rendered
+    assert "? – Neznámý jazyk" in rendered
+    assert "JP audio</span><small>JA – Japonština</small>" in rendered
+    assert "Jazyk audia neurčen</span><small>? – Neznámý jazyk</small>" in rendered
+    for value, label in (
+        ("ja", "JA – Japonština"),
+        ("kor", "KO – Korejština"),
+        ("zho", "ZH – Čínština"),
+        ("deu", "DE – Němčina"),
+        ("unknown", "? – Neznámý jazyk"),
+    ):
+        assert re.search(
+            rf'<option value="{value}"(?: selected)?\s*>{re.escape(label)}</option>',
+            rendered,
+        )
 
     return_to = "/media-check?subtitle=all&audio=all#video-test"
     audio_response = endpoints[

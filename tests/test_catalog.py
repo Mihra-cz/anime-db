@@ -5,6 +5,7 @@ import pytest
 from app.catalog import (
     FILE_TYPE_TO_SUPPLEMENTARY_SUBTYPE,
     FILTER_LABELS,
+    MANUAL_LANGUAGE_CHOICES,
     ROOT_VIDEO_GROUP_LABEL,
     SUPPLEMENTARY_SUBTYPE_TO_FILE_TYPE,
     VIDEO_FILE_TYPES,
@@ -23,6 +24,7 @@ from app.catalog import (
     determine_parent_series,
     group_videos_by_series,
     is_film_video,
+    language_display_label,
     manual_hardsub_state,
     normalize_language,
     title_filename_display_title,
@@ -59,6 +61,63 @@ def test_normalizes_czech_variants():
 
 def test_normalizes_slovak_variants():
     assert {normalize_language(value, None) for value in ("sk", "slk", "slo")} == {"sk"}
+
+
+@pytest.mark.parametrize(
+    ("aliases", "canonical", "label"),
+    [
+        (("cs", "cze", "ces"), "cs", "CZ – Čeština"),
+        (("sk", "slk", "slo"), "sk", "SK – Slovenština"),
+        (("en", "eng"), "en", "EN – Angličtina"),
+        (("ja", "jpn"), "ja", "JA – Japonština"),
+        (("de", "deu", "ger"), "deu", "DE – Němčina"),
+        (("fr", "fra", "fre"), "fra", "FR – Francouzština"),
+        (("es", "spa"), "spa", "ES – Španělština"),
+        (("it", "ita"), "ita", "IT – Italština"),
+        (("ko", "kor"), "kor", "KO – Korejština"),
+        (("zh", "zho", "chi"), "zho", "ZH – Čínština"),
+        (("pl", "pol"), "pol", "PL – Polština"),
+        (("ru", "rus"), "rus", "RU – Ruština"),
+        (("uk", "ukr"), "ukr", "UK – Ukrajinština"),
+        (("pt", "por"), "por", "PT – Portugalština"),
+        (("hu", "hun"), "hun", "HU – Maďarština"),
+    ],
+)
+def test_language_aliases_share_canonical_code_and_czech_display_label(
+    aliases, canonical, label,
+):
+    assert {normalize_language(value) for value in aliases} == {canonical}
+    assert {
+        language_display_label(value, include_name=True) for value in aliases
+    } == {label}
+
+
+@pytest.mark.parametrize("language", (None, "", "unknown", "und", "xyz"))
+def test_unknown_language_has_safe_czech_display_label(language):
+    assert language_display_label(language, include_name=True) == (
+        "? – Neznámý jazyk"
+    )
+
+
+def test_manual_language_choices_keep_canonical_values_and_use_czech_labels():
+    assert dict(MANUAL_LANGUAGE_CHOICES) == {
+        "cs": "CZ – Čeština",
+        "sk": "SK – Slovenština",
+        "en": "EN – Angličtina",
+        "ja": "JA – Japonština",
+        "deu": "DE – Němčina",
+        "fra": "FR – Francouzština",
+        "spa": "ES – Španělština",
+        "ita": "IT – Italština",
+        "kor": "KO – Korejština",
+        "zho": "ZH – Čínština",
+        "pol": "PL – Polština",
+        "rus": "RU – Ruština",
+        "ukr": "UK – Ukrajinština",
+        "por": "PT – Portugalština",
+        "hun": "HU – Maďarština",
+        "unknown": "? – Neznámý jazyk",
+    }
 
 
 def test_uses_english_title_when_language_is_unknown():
