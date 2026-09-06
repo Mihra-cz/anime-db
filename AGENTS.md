@@ -1,235 +1,225 @@
-# AnimeDB – instrukce pro Codex
+# AGENTS.md – AnimeDB
 
-Tento soubor obsahuje dlouhodobá pravidla práce pro Codex v repozitáři AnimeDB.
-Aktuální stav projektu, rozpracované body, checkpointy, čísla testů a plán verzí patří do
-`docs/PROJECT_STATUS.md` nebo jiné projektové dokumentace, ne sem.
+Trvalá pravidla pro coding agenty pracující v tomto repozitáři. AGENTS je
+provozní návod, nikoli druhý popis aplikace, roadmapa ani changelog.
 
-## 1. Zdroj pravdy a začátek každého úkolu
+## 1. Zdroj pravdy
 
-- Aktuální obsah repozitáře je autoritativní zdroj pravdy.
-- Nevycházej slepě z předchozí relace, starého checkpointu ani z paměti konverzace.
-- Před každou změnou nejprve:
-  1. zkontroluj `git status`,
-  2. ověř aktuální větev a stav vůči upstreamu, pokud je dostupný,
-  3. načti relevantní zdrojové soubory a testy,
-  4. načti `README.md` a relevantní dokumentaci v `docs/`, zejména `docs/PROJECT_STATUS.md`, pokud existuje,
-  5. zjisti, jak je dotčená funkcionalita skutečně implementována.
-- Existující necommitnuté změny považuj za práci uživatele. Nepřepisuj je, nemaž je a nezahazuj.
-- Pokud se dokumentace a skutečný kód rozcházejí, nejprve rozpor identifikuj. Kód bez ověření automaticky nepřepisuj podle zastaralého popisu.
+- Aktuální repozitář, databázový model a testy jsou primární autorita. Při
+  rozporu mají současný kód, testy a schema před historickou dokumentací
+  přednost.
+- Rozpor nejprve pojmenuj a urči pravděpodobnou autoritu. Pokud může znamenat
+  skutečnou chybu, nezakrývej ji automatickou úpravou dokumentace ani
+  nepřenášej historickou spekulaci do kódu bez zadání.
+- Dokumenty mají oddělené role:
+  - [README.md](README.md) je lidský rozcestník a provozní základ;
+  - [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) popisuje současnou
+    architekturu, business semantics a známá omezení;
+  - [docs/ROADMAP.md](docs/ROADMAP.md) je autorita pro V1–VX, aktuální fázi,
+    progress a closure/gate podmínky;
+  - [docs/HISTORY.md](docs/HISTORY.md) je stručná technická historie
+    významných milníků.
+- PROJECT_STATUS není changelog ani roadmapa, ROADMAP není commit log a HISTORY
+  není current-state autorita.
+- Před změnou zkontroluj `git status`, aktuální větev a stav vůči upstreamu;
+  načti relevantní kód, testy, README a příslušné části projektové dokumentace.
+  Nevycházej slepě ze staré relace nebo checkpointu.
+- Případný nested `AGENTS.md` nebo `AGENTS.override.md` má v příslušném podstromu
+  přednost před tímto kořenovým souborem.
 
-## 2. Rozsah úkolu a oddělení změn
+## 2. Rozsah a pracovní postup
 
-- Řeš přesně zadaný úkol.
-- Nedělej vedlejší opravy, refaktory ani redesign jen proto, že sis při práci všiml dalšího problému.
-- Nález mimo rozsah úkolu popiš v závěrečném reportu, ale neopravuj ho bez zadání.
-- Nemíchej do jednoho zásahu odlišné druhy práce, pokud to není technicky nutné.
-- Zejména drž odděleně:
-  - audit a diagnostiku,
-  - backend/business logiku,
-  - databázové změny,
-  - CSS/responzivitu a čistě prezentační úpravy,
-  - refaktor komentářů a dokumentace.
-- Audit je primárně analytický úkol. Pokud zadání říká pouze provést audit, během auditu automaticky neopravuj nalezené problémy.
-- Čistě responzivní/CSS úprava nesmí svévolně měnit business logiku, databázové schéma ani význam dat.
-- Funkční změna nesmí být schována uvnitř „úklidu“, formátování nebo dokumentačního refaktoru.
+- Řeš přesně zadaný úkol. Tangenciální nálezy reportuj, ale neopravuj bez
+  zadání; audit ani diagnostika samy o sobě neopravňují k implementaci.
+- Existující necommitnuté změny jsou práce uživatele. Nezahazuj je, nepřepisuj
+  je a pracuj kolem nich.
+- Nemíchej bez technické nutnosti business logiku, databázové změny, čisté
+  presentation/CSS úpravy a dokumentační refaktor. Presentation změna nesmí
+  měnit uložená business data.
+- Nezačínej V6 ani jinou budoucí etapu během V5 polish/closure úkolu. Rozsah
+  verzí určuje ROADMAP a explicitní zadání uživatele.
+- Preferuj nejmenší změnu, která používá stávající shared resolver a zachová
+  chování mimo scope. Nevytvářej paralelní source of truth ani novou závislost
+  bez prokazatelné potřeby.
+- Před editací zjisti skutečný write/read lifecycle, autority a relevantní
+  regresní testy. Pro hledání v repozitáři preferuj `rg`.
 
-## 3. Ochrana produkčních dat
+## 3. Produkční DB a NAS
 
-- Produkční `anime.db` je pro Codex ve výchozím stavu READ-ONLY.
-- Bez výslovného pokynu uživatele produkční databázi:
-  - neměň,
-  - nemaž,
-  - nepřepisuj,
-  - nemigruj,
-  - nevytvářej nad ní testovací data.
-- Pro testy, migrace a experimenty používej testovací, dočasnou nebo zkopírovanou databázi.
-- Nikdy automaticky neměň fyzický obsah anime knihovny na NAS.
-- Bez výslovného pokynu uživatele na NAS:
-  - nepřejmenovávej soubory ani adresáře,
-  - nepřesouvej soubory ani adresáře,
-  - nemaž soubory ani adresáře,
-  - nepřepisuj video, audio, titulky ani artwork,
-  - nevytvářej reorganizovanou produkční strukturu.
-- Pokud úkol navrhuje budoucí reorganizaci NAS nebo přejmenování videí či externích titulků, vytvoř pouze návrh/preview. Fyzickou změnu proveď až po explicitním ručním potvrzení uživatele.
-- Logická hierarchie v databázi a fyzická struktura NAS jsou dvě oddělené věci. Změna jedné automaticky neopravňuje ke změně druhé.
-- Pokud operace může teoreticky zasáhnout produkční data, před i po práci ověř, že produkční databáze a NAS zůstaly nezměněné. Použij vhodné neinvazivní kontroly, například velikost, `mtime`, hash nebo stav relevantních cest.
+- Produkční databáze je `data/anime.db`; media root určený `ANIME_PATH` je
+  produkční knihovna na NAS. Bez explicitního pokynu uživatele je neměň.
+- Bez explicitního povolení nad produkční DB nespouštěj migrace, scan,
+  testovací data, mass automatic fixes ani jiné semantic writes. Testy a
+  experimenty používej nad dočasnou nebo testovací databází.
+- Audit produkční DB prováděj pouze read-only. Nezakládej kvůli němu běžný
+  aplikační startup, pokud by mohl spustit compatibility/migrační write
+  lifecycle.
+- Na NAS bez explicitního pokynu nic nepřejmenovávej, nepřesouvej, nemaž,
+  nekopíruj ani nepřepisuj; platí to pro videa, audio, externí titulky i artwork.
+  Logická hierarchie v DB sama neopravňuje k fyzické změně knihovny.
+- Pokud úkol může produkční data zasáhnout, pořiď pro tento konkrétní úkol
+  aktuální read-only baseline a před/po porovnej vhodný fingerprint, velikost a
+  `mtime`. Nikdy neobnovuj DB na starší fingerprint: uživatel mohl mezitím
+  legitimně provést změny přes UI.
+- Destruktivní nebo nejednoznačný zásah zastav a vyžádej explicitní potvrzení.
 
-## 4. Git a práce s historií
+## 4. Git workflow
 
-- Automaticky nevytvářej commit.
-- Automaticky neprováděj `git push`.
-- Commit nebo push proveď pouze po výslovném pokynu uživatele.
-- Před změnami vždy zkontroluj pracovní strom.
-- Nezahoď existující změny uživatele.
-- Bez výslovného souhlasu nepoužívej destruktivní operace, například:
-  - `git reset --hard`,
-  - `git clean -fd`,
-  - nucený push,
-  - přepis historie,
-  - odstranění větví s neověřenou prací.
-- Neprováděj automaticky rebase, merge ani checkout jiné větve, pokud to není součást zadání.
-- Při commitu zahrň pouze změny patřící k danému úkolu.
-- Před commitem nejprve dokonči relevantní testy a kontroly a shrň stav změn.
-- Pokud uživatel požádá pouze o commit, neinterpretuj to automaticky jako povolení k pushi.
+- Bez výslovného pokynu uživatele nevytvářej commit ani neprováděj push.
+  Požadavek na commit automaticky neznamená povolení k pushi.
+- Nevytvářej automatické checkpoint commity. Po implementaci ukaž změněné
+  soubory, `git diff --stat`, kontroly a závěrečný `git status` a nech commit/push
+  uživateli.
+- Bez výslovného souhlasu nepoužívej `git reset --hard`, `git clean -fd`,
+  force-push, přepis historie ani odstranění větve s neověřenou prací.
+- Rebase, merge a checkout jiné větve neprováděj automaticky. Případný commit
+  musí obsahovat pouze změny daného úkolu a až po odpovídající validaci.
 
-## 5. Testování a validace
+## 5. Databázové a write workflow
 
-Po každé změně proveď kontroly odpovídající rozsahu zásahu.
+- Před změnou schema ověř současný model a migrační mechanismus. Preferuj
+  zpětně kompatibilní, idempotentní migrace a ověř je na testovací kopii,
+  včetně opakovaného spuštění, má-li být idempotentní.
+- Zachovávej význam `NULL`, explicitně prázdných hodnot a ručních overrides.
+  Automatický odhad nesmí bezdůvodně přepisovat existující autoritu.
+- Stabilní GET a read-only presentation/review routes nesmějí provádět semantic
+  writes ani měnit authority, hierarchy, numbering, metadata, compatibility či
+  jejich timestampy. Scanner/startup reconciliation a explicitní POST workflow
+  jsou oddělené write lifecycle.
+- Derived review warning je read model, nikoli automatická persistence změna.
+  Ručně verified/manual stav se mění jen explicitním workflow.
 
-Výchozí validační sada projektu je:
+## 6. Doménové invarianty
 
-- relevantní automatické testy,
-- následně plná testovací sada, pokud je její spuštění rozumné pro daný zásah,
-- Python `compileall`,
-- kontrola načtení všech Jinja2 šablon, pokud se změnily šablony nebo backend, který je používá,
-- `git diff --check`,
-- závěrečný `git status`.
+Detaily a konkrétní resolvery jsou v PROJECT_STATUS a kódu; zde jsou pravidla,
+která agent nesmí při lokální změně obejít.
 
-Další pravidla:
+### Ruční autorita a hierarchie
 
-- Nepoužívej historický počet testů jako podmínku úspěchu. Rozhodující je aktuální testovací sada v repozitáři.
-- Nevydávej změnu za dokončenou, pokud relevantní testy selhávají.
-- Pokud test selže už na nezměněném baseline, nejprve to ověř a jasně odliš od regrese způsobené aktuálním zásahem.
-- Pokud některou kontrolu nelze spustit, uveď konkrétní důvod.
-- Pokud zásah může ovlivnit produkční data, přidej kontrolu jejich nezměněnosti.
-- Při změně databázové migrace ověř její chování na testovací kopii a pokud má být idempotentní, ověř i opakované spuštění.
+- Manual authority má přednost pouze tam, kde ji příslušný model/resolver
+  definuje. Nevytvářej jednu univerzální precedence pro různé domény.
+- `NULL`, explicitně prázdná hodnota a aktivní ruční rozhodnutí nemusí znamenat
+  totéž. Raw/parser evidence nepřepisuj jen proto, aby odpovídala effective
+  presentation; presentation resolver musí být bez business side effectu.
+- Pouze kompletní aktivní manual hierarchy snapshot je effective ruční
+  hierarchie a základ `verified`. Neúplný historický snapshot se
+  nedestruktivně zachovává a blokuje review, ale není effective authority ani
+  selector; neaktivní historická pole se rovněž jako autorita nepoužívají.
+- Manual-split selector authority (range, pattern nebo explicitní M:N výběr)
+  je oddělená od výsledného assignmentu. `Video.catalog_title_id` je výsledek,
+  nikoli důkaz selectoru; samotný hierarchy override členství ve splitu
+  nevytváří.
+- Season ani její číslo nevymýšlej z existence jediného title. Supplementary
+  obsah nepovyšuj na hlavní část podle názvu adresáře; používej současnou
+  taxonomy a hierarchy evaluátor.
 
-## 6. Databáze a migrace
+### Duplicity, číslování a identity
 
-- Před změnou schématu zjisti aktuální schéma a existující migrační mechanismus projektu.
-- Preferuj zpětně kompatibilní a idempotentní migrace.
-- Migrace nesmí bezdůvodně přepisovat existující hodnoty.
-- Zachovávej význam `NULL`. Pokud `NULL` znamená „neposouzeno“, „nenastaveno“ nebo jiný odlišný stav, nenahrazuj jej automaticky konkrétní hodnotou.
-- Ruční hodnoty a ruční override nepřepisuj automatickým odhadem.
-- Databázový refaktor nesmí měnit význam existujících dat jen proto, aby byl model „čistší“.
-- Schéma produkční databáze neměň bez explicitního povolení uživatele.
+- Rozlišuj automaticky zjištěnou nevyřešenou duplicitu, ruční podezření a
+  potvrzenou duplicitu přes `duplicate_of_video_id`. Ruční podezření není
+  potvrzení a primární video nevybírej svévolně.
+- Potvrzená duplicate secondary zůstává fyzickým souborem, ale nezvyšuje logical
+  identity count. Chybějící primary nebo neplatná vazba musí zůstat viditelný
+  problém; nic se kvůli tomu automaticky nemaže z NAS.
+- **Supplementary ordinal, Media Part a variant jsou tři oddělené osy.**
+  Nezaměňuj je ani je od sebe automaticky neodvozuj.
+- Varianta sama nevytváří novou logical episode identity. Media Parts mohou být
+  více fyzických souborů jedné logical identity. Běžné raw/source episode number
+  se bez bezpečné evidence nesmí překlopit na supplementary ordinal.
+- Parserové rozšíření musí zachovat již podporované formáty a mít regresní test.
+  Nestandardní číslo neklasifikuj jako běžnou epizodu jen proto, že obsahuje
+  číslice.
 
-## 7. Doménové invarianty AnimeDB
+### Metadata a názvy
 
-Následující pravidla chování považuj za důležitá a před jejich změnou vyžaduj, aby ji zadání skutečně požadovalo.
+- Metadata candidate není confirmed metadata. Confirmed stav vyžaduje současný
+  kontrakt ručně potvrzené primární vazby; candidate scoring je pouze evidence.
+- Metadata requirement je samostatná osa. `not_required` není missing metadata
+  ani confirmed metadata a změna requirement nesmí mazat existující confirmed
+  link.
+- Ručně zadaný display title má přednost podle současného resolveru. Nehardcoduj
+  jednu jazykovou variantu ani nevytvářej vlastní fallback chain v template.
 
-### Ruční rozhodnutí
+### Externí titulky
 
-- Ruční rozhodnutí uživatele mají přednost před automatickým odhadem.
-- Automatická detekce nesmí svévolně přepsat ručně potvrzenou:
-  - hierarchii,
-  - klasifikaci části,
-  - metadata,
-  - číslování,
-  - stav duplicity.
-- Pokud současný model používá ručně potvrzenou prázdnou hodnotu jako autoritativní rozhodnutí, zachovej tento význam.
+- `ExternalSubtitle` je owner-less fyzický asset; jedinou autoritou vztahu k
+  jednotlivým fyzickým Videos je explicitní M:N compatibility. Chybějící row
+  znamená neurčeno, nikoli nekompatibilitu.
+- Dostupnost poskytuje pouze bezpečný `automatic_match` nebo ručně
+  `confirmed_compatible` pro konkrétní Video. Nepřenášej ji automaticky mezi
+  BD/TV, A/B, known/NULL variantami ani na duplicate copy; návrh kandidáta není
+  potvrzená kompatibilita.
 
-### Hierarchie
+## 7. Výkon, UI a read modely
 
-- Neodvozuj automaticky sezónu pouze z toho, že existuje jediný `CatalogTitle`.
-- Číslo sezóny nevymýšlej, pokud jej nelze spolehlivě určit.
-- Obsah typu bonus, extras, specials, NC/OP/ED, OVA, preview, recap, movies/films nebo CM/PV automaticky nepovyšuj na hlavní kolekci jen kvůli názvu adresáře.
-- Pokud se logika seskupování nebo klasifikace mění, ověř chování na existujících testovacích případech hierarchie.
+- Nevytvářej N+1. Query count musí zůstat bounded s růstem knihovny; seznamy,
+  katalog, review a Media Check mají používat batch/eager loading a
+  request-local indexy.
+- Vyhýbej se per-row DB, filesystem a HTTP lookupům. Presentation helper má být
+  pokud možno čistý in-memory resolver nad již načtenými daty.
+- Při změně listové nebo review stránky audituj existující performance a
+  read-only regression testy. Nezapisuj do dokumentace náhodný historický query
+  count, není-li skutečným testovaným kontraktem.
+- Zachovávej současné UI a navigační konvence. Důležité ovládání nesmí být jen
+  na `hover`; responzivitu neřeš pouhým zmenšením fontu a presentation úprava
+  nesmí měnit business semantics.
+- U relevantní responzivní změny ověř 1366×768, 1600×900, 1920×1080,
+  2560×1440 a iPad Air 11" v portrait i landscape, včetně dotykového ovládání.
 
-### Duplicity
+## 8. Testování a validace
 
-Rozlišuj minimálně tyto významově odlišné stavy:
+Pro změnu kódu:
 
-- automaticky zjištěná nevyřešená duplicita,
-- potvrzená duplicita reprezentovaná vazbou na primární video,
-- ruční podezření na duplicitu.
+1. spusť nejprve cílené testy;
+2. přidej relevantní regression, performance a read-only kontroly;
+3. před běžným funkčním commitem typicky spusť celý `pytest`, pokud to rozsah a
+   dostupný limit rozumně dovolují;
+4. spusť `python -m compileall app tests`;
+5. ověř načtení všech Jinja templates, pokud se měnila šablona nebo její backend
+   contract;
+6. spusť `git diff --check` a závěrečný `git status`.
 
-Pravidla:
+Pro čistě dokumentační změnu standardně stačí `git diff --check`, kontrola
+Markdown struktury a relativních odkazů, případně existující docs checker, a
+`git status`. Pytest, compileall ani Jinja load bez důvodu nespouštěj.
 
-- Ruční podezření není potvrzená duplicita.
-- `NULL` u ručního stavu nemusí znamenat „není duplicita“; může znamenat „neposouzeno“.
-- Primární video nevybírej svévolně automaticky, pokud současná logika vyžaduje ruční rozhodnutí.
-- Potvrzené duplicity automaticky nemaž z NAS.
-- Pokud primární video zmizí, zachovej explicitní stav problému místo tichého přepojení na jiný soubor.
+Nevydávej změnu za hotovou při selhávajícím relevantním testu. Baseline selhání
+ověř a odliš od regrese. Neprovedenou kontrolu i důvod transparentně reportuj;
+nepředstírej úspěch full suite a neřiď se historickým počtem testů.
 
-### Parser a číslování
+## 9. Dokumentace
 
-- Při úpravě parseru zachovávej již podporované formáty názvů souborů, pokud zadání výslovně nevyžaduje změnu.
-- Nové pravidlo parseru nesmí bez testů rozbít starší formáty.
-- Nezaměňuj speciální nebo nestandardní číslování za běžnou epizodu pouze proto, že obsahuje číslo.
-- Pro nové parserové případy přidej regresní testy.
+- Funkční změna podle potřeby aktualizuje dokument, jehož role je uvedena v
+  části „Zdroj pravdy“. Neopisuj stejnou informaci do všech dokumentů.
+- Pracovní session, diff staty, přechodné checkpointy a přesné průběžné počty
+  testů automaticky nepatří do PROJECT_STATUS ani ROADMAP.
+- Významná změna scope, stavu verze nebo gate může vyžadovat ROADMAP; běžný
+  implementační commit automaticky nevytváří nový roadmap bod. HISTORY vybírá
+  jen významné technické milníky.
+- Plánovanou funkci nepopisuj jako existující. Komentáře mají vysvětlovat účel,
+  ne samozřejmou syntaxi; obecný docs/comment cleanup drž odděleně od funkční
+  změny.
 
-### Metadata a zobrazovaný název
+## 10. Bezpečnost budoucí V6
 
-- Nehardcoduj jednu jazykovou variantu názvu jako jedinou správnou pro všechny uživatele.
-- Zachovej možnost volby preferované varianty názvu, pokud ji aplikace podporuje.
-- Ručně zadaný zobrazovaný název má přednost před automaticky odvozeným názvem.
-- Při změně fallbacků názvu zachovej deterministické pořadí a přidej testy.
+- V6 začne až po formálním closure V5, ručním cleanupu produkčních dat a všech
+  precondition auditech uvedených v ROADMAP. V6 není současná funkcionalita.
+- Fyzická reorganizace vždy začíná pouze plánem/preview. Rename, move nebo delete
+  se smí provést až po explicitním potvrzení uživatele.
+- Cílové cesty musí být jednoznačné a bez kolizí; videa a jejich externí titulky
+  se plánují konzistentně. V6 nesmí opravovat neuklizená V5 data.
+- „Není v AnimeDB“ neznamená „lze smazat“. Neznámý soubor nebo asset je důvod k
+  auditu, nikoli implicitní delete authority.
 
-## 8. UI a responzivita
+## 11. Závěrečný report a bezpečné dokončení
 
-- Zachovávej existující vizuální a navigační konvence aplikace, pokud není výslovně zadán redesign.
-- Responzivní úpravy řeš napříč celou aplikací, pokud zadání mluví o kompletní responzivitě. Neomezuj je bezdůvodně pouze na jednu stránku.
-- Ověř, že formuláře, tabulky, akční prvky a navigace zůstávají použitelné i při menší šířce.
-- Neřeš responzivitu pouze zmenšením fontu.
-- Vyhýbej se ovládání dostupnému pouze přes `hover`; důležité akce musí být použitelné i dotykem.
-- U prvků s velkým množstvím dat preferuj čitelné skládání, scroll nebo jinou použitelnou adaptaci před překrýváním či useknutím obsahu.
-- Při relevantních responzivních změnách ověř minimálně tyto cílové velikosti:
-  - 1366×768,
-  - 1600×900,
-  - 1920×1080,
-  - 2560×1440,
-  - iPad Air 11" v portrait,
-  - iPad Air 11" v landscape.
-- U tabletového zobrazení ověř dotykové ovládání a nepředpokládej přítomnost myši.
-- Čistě prezentační změna nesmí měnit business logiku ani databázové chování.
+Úkol je hotový teprve po odpovídající validaci a kontrole scope. V závěru vždy
+stručně uveď:
 
-## 9. Dokumentace a komentáře
-
-- Funkční změna, která mění skutečné chování aplikace, musí podle potřeby aktualizovat relevantní dokumentaci.
-- `README.md`, `docs/PROJECT_STATUS.md` a další projektové dokumenty nesmí tvrdit, že plánovaná funkce již existuje.
-- Aktuální checkpointy, commit hashe, počty testů a právě rozpracované body neukládej do `AGENTS.md`; patří do stavové dokumentace.
-- Refaktor komentářů a dokumentace kódu prováděj samostatně od funkčních změn, pokud není konkrétní komentář nutné opravit kvůli změně chování.
-- Při dokumentačním refaktoru zachovej chování aplikace.
-- Komentáře mají vysvětlovat účel, ne samozřejmou syntaxi. Nevytvářej hlučné komentáře ke každému řádku.
-- Pokud dokumentace popisuje důležité invarianty nebo bezpečnostní omezení, udržuj je při změnách aktuální.
-
-## 10. Verze a roadmapa
-
-- Nezačínej automaticky další projektovou fázi nebo verzi jen proto, že předchozí úkol skončil.
-- Řiď se aktuálním stavem a roadmapou v projektové dokumentaci.
-- V6, V7 ani jinou budoucí etapu nezačínej bez explicitního zadání uživatele.
-- Budoucí reorganizaci NAS, import nebo přejmenování souborů nejprve implementuj jako bezpečný návrh/preview, pokud dokumentace neurčuje jinak.
-- Jakákoli fyzická aplikace navržených přesunů, přejmenování nebo mazání vyžaduje ruční potvrzení uživatele.
-
-## 11. Implementační rozhodování
-
-- U drobných implementačních detailů v jasně vymezeném úkolu postupuj samostatně a nezdržuj práci zbytečnými dotazy.
-- Pokud existuje více variant s významně odlišným dopadem na:
-  - datový model,
-  - kompatibilitu,
-  - uživatelská data,
-  - fyzické soubory na NAS,
-  - veřejné chování aplikace,
-  nejprve varianty stručně vyhodnoť a neprováděj nevratnou volbu bez souhlasu.
-- Preferuj nejmenší změnu, která řeší zadaný problém a zachovává existující chování mimo rozsah úkolu.
-- Nepřidávej nové závislosti bez důvodu. Před přidáním knihovny ověř, zda problém nelze rozumně vyřešit existujícími prostředky projektu.
-
-## 12. Závěrečný report
-
-Po dokončení práce vždy stručně uveď:
-
-1. co bylo změněno,
-2. které soubory byly změněny,
-3. jaké testy a kontroly byly spuštěny,
-4. výsledky těchto kontrol,
-5. zda se změnilo databázové schéma,
-6. zda byla jakkoli změněna produkční `anime.db`,
-7. zda byla jakkoli změněna data na NAS,
-8. aktuální stav `git status`,
-9. případné známé problémy nebo nálezy mimo rozsah úkolu.
-
-Pokud nebyl výslovně požadován commit nebo push, uveď také, že nebyly provedeny.
-
-## 13. Zásada bezpečného dokončení
-
-Úkol není „hotový“ jen proto, že kód vypadá správně.
-
-Za dokončený jej považuj až tehdy, když:
-
-- změna odpovídá zadání,
-- nebyly přimíchány nesouvisející zásahy,
-- relevantní testy a kontroly prošly,
-- produkční data zůstala nedotčena, pokud jejich změna nebyla výslovně povolena,
-- pracovní strom a případné zbývající změny jsou jasně popsány,
-- uživatel dostal stručný a pravdivý závěrečný report.
+1. co a které soubory se změnily;
+2. spuštěné testy/kontroly a jejich výsledky, včetně vynechaných kontrol;
+3. zda se změnilo schema, produkční `data/anime.db` nebo NAS;
+4. `git diff --stat` a aktuální `git status`;
+5. známé problémy a nálezy mimo scope;
+6. zda byl proveden commit nebo push; bez výslovného zadání nesmí být proveden
+   ani jeden.

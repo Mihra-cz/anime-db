@@ -1,7 +1,8 @@
 # AnimeDB – technická historie
 
 Výběr významných milníků, nikoli úplný changelog nebo pracovní deník.
-Současnou implementaci a zbývající práci popisuje [PROJECT_STATUS.md](PROJECT_STATUS.md);
+Současnou implementaci a business semantics popisuje [PROJECT_STATUS.md](PROJECT_STATUS.md);
+verzovaný plán, aktuální fázi, zbývající práci a gates popisuje [ROADMAP.md](ROADMAP.md);
 provozní návod je v [README.md](../README.md).
 
 Chronologie vychází z Git historie do `4769df4`. Hash a původní subject jsou
