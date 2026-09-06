@@ -7,6 +7,17 @@ import httpx
 from .base import MetadataProviderError, MetadataRateLimitError, ProviderTitleMetadata, metadata_http_timeout
 
 ANILIST_ENDPOINT = "https://graphql.anilist.co"
+ANILIST_COMMUNICATION_ERROR = "Nepodařilo se komunikovat s AniList API."
+ANILIST_OUTAGE_ERROR = (
+    "AniList API je momentálně dočasně nedostupné kvůli problémům na straně "
+    "AniListu. Zkuste akci později."
+)
+ANILIST_RATE_LIMIT_ERROR = (
+    "Byl dosažen limit požadavků AniList API. Zkuste akci znovu později."
+)
+ANILIST_TEMPORARY_DISABLED_PREFIX = (
+    "the anilist api has been temporarily disabled due to severe stability issues"
+)
 MEDIA_FIELDS = """
 id
 title { romaji english native }
@@ -51,6 +62,41 @@ class AniListProvider:
         self.timeout = metadata_http_timeout(timeout_seconds)
         self.client = client
 
+    @staticmethod
+    def _graphql_error_messages(payload: object) -> tuple[str, ...]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("errors"), list):
+            return ()
+        return tuple(
+            message.strip()
+            for error in payload["errors"]
+            if isinstance(error, dict)
+            and isinstance((message := error.get("message")), str)
+            and message.strip()
+        )
+
+    @classmethod
+    def _is_temporary_outage(cls, payload: object) -> bool:
+        return any(
+            " ".join(message.split()).casefold().startswith(
+                ANILIST_TEMPORARY_DISABLED_PREFIX
+            )
+            for message in cls._graphql_error_messages(payload)
+        )
+
+    @staticmethod
+    def _rate_limit_message(response: httpx.Response) -> str:
+        raw_retry_after = response.headers.get("Retry-After")
+        try:
+            retry_after = int(raw_retry_after.strip()) if raw_retry_after else None
+        except ValueError:
+            retry_after = None
+        if retry_after is None or retry_after < 1:
+            return ANILIST_RATE_LIMIT_ERROR
+        return (
+            "Byl dosažen limit požadavků AniList API. Zkuste akci znovu "
+            f"přibližně za {retry_after} sekund."
+        )
+
     def _request(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         try:
             if self.client is not None:
@@ -64,19 +110,30 @@ class AniListProvider:
                     timeout=self.timeout,
                 )
         except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TimeoutException, httpx.NetworkError) as exc:
-            raise MetadataProviderError("AniList není momentálně dostupný.") from exc
+            raise MetadataProviderError(ANILIST_COMMUNICATION_ERROR) from exc
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
         if response.status_code == 429:
-            raise MetadataRateLimitError("AniList dočasně omezil počet požadavků.")
+            raise MetadataRateLimitError(self._rate_limit_message(response))
+        if response.status_code == 403 and self._is_temporary_outage(payload):
+            raise MetadataProviderError(ANILIST_OUTAGE_ERROR)
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise MetadataProviderError(f"AniList vrátil HTTP chybu {response.status_code}.") from exc
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise MetadataProviderError("AniList vrátil neplatnou odpověď.") from exc
+            raise MetadataProviderError(
+                f"{ANILIST_COMMUNICATION_ERROR} HTTP stav {response.status_code}."
+            ) from exc
+        if not isinstance(payload, dict):
+            raise MetadataProviderError(
+                f"{ANILIST_COMMUNICATION_ERROR} AniList vrátil neplatnou odpověď."
+            )
         if payload.get("errors"):
-            raise MetadataProviderError("AniList GraphQL požadavek skončil chybou.")
+            raise MetadataProviderError(
+                f"{ANILIST_COMMUNICATION_ERROR} GraphQL odpověď obsahovala chybu."
+            )
         return payload.get("data") or {}
 
     @staticmethod

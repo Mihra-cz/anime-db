@@ -33,7 +33,7 @@ from app.hierarchy_review import (
     supplementary_assignment_recommendations,
 )
 from app.hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPE_CHOICES
-from app.metadata.providers.base import ProviderTitleMetadata
+from app.metadata.providers.base import MetadataProviderError, ProviderTitleMetadata
 from app.migrations import migrate_schema
 from app.models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
@@ -76,6 +76,14 @@ class RecordingMetadataProvider:
         return next(
             item for item in self.results if item.external_id == str(external_id)
         )
+
+
+class FailingMetadataProvider:
+    def __init__(self, message):
+        self.message = message
+
+    def search_titles(self, _query):
+        raise MetadataProviderError(self.message)
 
 
 def metadata_candidate(
@@ -518,6 +526,45 @@ def test_first_metadata_search_redirects_to_visible_persisted_candidates(tmp_pat
     assert "nalezeno 2 kandidátů" in rendered
     # Navazující GET pouze načetl uložené výsledky a druhý search nebyl potřeba.
     assert provider.search_calls == ["Example"]
+
+
+def test_metadata_search_exposes_only_safe_provider_message(tmp_path):
+    settings = Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'metadata-provider-error.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    )
+    web_app = create_app(settings)
+    expected = (
+        "AniList API je momentálně dočasně nedostupné kvůli problémům na straně "
+        "AniListu. Zkuste akci později."
+    )
+    web_app.state.metadata_provider = FailingMetadataProvider(expected)
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        title = CatalogTitle(
+            local_title="Example",
+            normalized_local_title="example",
+            relative_root_path="Anime/Example",
+        )
+        session.add(title)
+        session.commit()
+        title_id = title.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None)
+        == "/catalog/{filter_name}/titles/{catalog_title_id}/metadata/search"
+    )
+    response = endpoint(
+        "all", title_id, metadata_query="Example", q="", sort="",
+        direction="", video_sort="", video_direction="",
+    )
+
+    assert response.status_code == 303
+    query = parse_qs(urlparse(response.headers["location"]).query)
+    assert query["metadata_error"] == [expected]
 
 
 def test_metadata_change_uses_stored_candidates_and_preserves_local_hierarchy(tmp_path):
