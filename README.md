@@ -2,6 +2,12 @@
 
 AnimeDB je jednoduchý read-only katalog anime knihovny. Rekurzivně najde MKV, MP4, M4V a AVI, načte technická metadata přes `ffprobe`, spáruje externí titulky a zobrazí souhrn ve webovém rozhraní. Do adresáře knihovny nikdy nezapisuje.
 
+## Dokumentace
+
+- [PROJECT_STATUS](docs/PROJECT_STATUS.md) — aktuální stav, hlavní cíl, technologie a současné fungování AnimeDB.
+- [ROADMAP](docs/ROADMAP.md) — vývojový plán V1–V10, aktuální progress a podmínky uzavření/zahájení verzí.
+- [HISTORY](docs/HISTORY.md) — technická historie významných milníků.
+
 ## Spuštění bez Dockeru
 
 Požadavky: Python 3.12 a `ffprobe` (součást FFmpeg) dostupný v `PATH`.
@@ -133,7 +139,7 @@ pytest
 - Ručně ověřený supplementary `CatalogTitle` správného typu a season/anime contextu už jednotlivá OVA/Special/OP/ED videa znovu nenabízí ke generic splitu pouze kvůli filename markeru. Nezávislé skutečné hierarchy, numbering a duplicate problémy zůstávají v Hierarchy Review beze změny.
 - **Správa zařazení jednotlivých videí** zachovává samostatnou video-level klasifikaci Recap, Preview, Special, OVA, Bonus a Other. Workflow **Oddělit do nové části** mění strukturální typ `CatalogTitle`, ale nevytváří ani nepřepisuje `Video.content_type_manual`; ten mění pouze výslovná akce klasifikace konkrétních videí.
 - `media_part_number` se nyní nastavuje a maže pouze ručně na detailu fyzického videa. Scanner jej neodvozuje z `P1`, `CD1`, `Disc1` ani `MP01` a při rescan jej zachovává. Souvislá aktivní sada 1..N se zobrazuje jako `Část média X/N`; confirmed secondary duplicate kopie nezvyšují N. Mezery a duplicitní ordinaly jsou pouze video-level upozornění a nemění hierarchy status.
-- Roadmapa V6 počítá bez Partu s `S01E01`, s hierarchy Partem s `S01P01E01` / `S01P02E01` a pro fyzický segment s tokenem `MPxx`. Kombinace `S01P02E03-MP01` jednoznačně odděluje Season 1, hierarchy Part 2, epizodu 3 a první fyzickou část média. Part složky na NASu nejsou cílově povinné a fyzické přejmenování se nyní neprovádí.
+- Budoucí pravidla cílových názvů a fyzické struktury patří do [ROADMAP – V6](docs/ROADMAP.md#v6--řízená-reorganizace-knihovny-na-nas); fyzické přejmenování se nyní neprovádí.
 - Aktivní grouping a review používají stejný effective numbering stav jako horní souhrn. Například raw `00` bez ručního čísla zůstává nestandardní, ale po autoritativním override E01 se zobrazuje mezi standardními epizodami a původní filename detekce už nevytváří aktivní warning.
 - Po vložení explicitního fractional Recapu může Hierarchy Review nabídnout **Navrženou opravu číslování**, pouze když nad současnými `LogicalEpisodeIdentity` existuje právě jedna vysvětlitelná mezera a jediný souvislý standardní suffix s bezpečným konstantním posunem. Potvrzený ruční metadata `episode_count` je silná podmínka; candidate guess se jako autorita nepoužije. Preview ukáže každé `Původní → Nové`, rozsah, offset, počet logických epizod i fyzických variant/kopií a případné ruční overrides. Apply vyžaduje explicitní potvrzení, znovu ověří fingerprint, membership a collisions a proběhne atomicky. Ambiguity, více mezer, blockers nebo konflikty návrh potlačí. Recapy, další supplementary položky, jiné titles/seasons ani NAS se nepřečíslují; varianty jedné logical episode a její confirmed duplicate copies se aktualizují společně bez vytvoření dalších logical episodes.
 - Absolutní numbering řadí tituly podle samostatných os Season a Part (`S1P1`, `S1P2`, `S2P1`) a offset skládá jen z předchozích canonical titulů se známým oficiálním počtem epizod. Supplementary tituly se do offsetu nepočítají ani nepřeruší známou canonical řadu; Part bez Season zůstává `season_number=NULL` a Media Part toto pořadí nikdy neovlivňuje.
