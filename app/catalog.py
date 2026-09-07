@@ -1052,12 +1052,31 @@ def hierarchy_video_content_type(video: Video) -> str | None:
     return None
 
 
-def effective_video_content_type(video: Video) -> str:
-    """Resolve manual video authority before title hierarchy and scanner data."""
+def effective_video_content_type(
+    video: Video, title: CatalogTitle | None = None, *,
+    detection: EpisodeNumberDetection | None = None, use_current_title: bool = True,
+) -> str:
+    """Manual video authority > specific filename/raw evidence > container."""
     manual = (video.content_type_manual or "").strip().casefold()
     if manual:
         return manual
-    return hierarchy_video_content_type(video) or video.file_type
+    detection = detection or detect_episode_number(video.filename)
+    if detection.supplementary_type:
+        return normalize_supplementary_subtype(detection.supplementary_type)
+    raw = normalize_supplementary_subtype(video.file_type or "other")
+    if raw not in {"episode", "other"}:
+        return raw
+    if title is None and use_current_title:
+        title = video.catalog_title
+    if title is not None and title.effective_part_type in SUPPLEMENTARY_PART_TYPES:
+        return title.effective_part_type
+    if raw == "other" and (
+        detection.is_standard or video.season_episode_number is not None
+    ):
+        # Other is also the scanner's unresolved fallback. A safe standard
+        # filename in a main container already has episode semantics.
+        return "episode"
+    return raw
 
 
 def is_film_video(video: Video) -> bool:
@@ -1090,7 +1109,7 @@ def video_matches_filter(
         "missing": not status.has_cs_or_sk,
         "unknown": status.has_unknown,
         "episodes": video.file_type == "episode",
-        "films": is_film_video(video),
+        "films": filter_name == "films" and is_film_video(video),
         "bonus": video.file_type != "episode",
         "unassigned": video.catalog_title_id is None,
         "hierarchy-conflict": bool(
@@ -1816,7 +1835,7 @@ class VideoContentDisplay:
 def effective_video_content_display(video: Video) -> VideoContentDisplay:
     """Vrátí read-model klasifikace bez zápisu do numbering nebo DB.
 
-    Ruční klasifikace je autoritativní pouze pro prezentaci typu obsahu.
+    Ruční video-level klasifikace používá společnou effective content autoritu.
     Desetinné/nestandardní označení se znovu bezpečně čte z filename a
     slouží jen jako lokální prezentační pozice; nikdy se nepřevádí do
     integer canonical episode polí.
@@ -1824,7 +1843,8 @@ def effective_video_content_display(video: Video) -> VideoContentDisplay:
     manual_value = (video.content_type_manual or "").strip().casefold()
     is_manual = bool(manual_value)
     hierarchy_value = hierarchy_video_content_type(video) if not is_manual else None
-    value = effective_video_content_type(video)
+    detection = detect_episode_number(video.filename)
+    value = effective_video_content_type(video, detection=detection)
     label = (
         VIDEO_CONTENT_TYPE_LABELS.get(value, value)
         if is_manual
@@ -1832,16 +1852,15 @@ def effective_video_content_display(video: Video) -> VideoContentDisplay:
         if hierarchy_value is not None
         else value
     )
-    detection = detect_episode_number(video.filename)
     # Local import avoids the catalog -> numbering -> catalog module cycle.
-    from .numbering import format_episode_position, manual_recap_episode_number
+    from .numbering import format_episode_position, effective_recap_episode_number
     from .supplementary import supplementary_ordinal
 
     ordinal = supplementary_ordinal(video, detection=detection)
-    if ordinal is not None and ordinal.number is not None:
+    if ordinal is not None:
         label = ordinal.display_label
 
-    recap_position = manual_recap_episode_number(video)
+    recap_position = effective_recap_episode_number(video, detection=detection)
     noncanonical_position = (
         format_episode_position(recap_position)
         if value == "recap" and recap_position is not None
@@ -1854,7 +1873,9 @@ def effective_video_content_display(video: Video) -> VideoContentDisplay:
         display_label=(f"{label} · ručně zařazeno" if is_manual else label),
         noncanonical_position=noncanonical_position,
         supplementary_label=(
-            ordinal.display_label if ordinal is not None and ordinal.number is not None else None
+            ordinal.display_label
+            if ordinal is not None and (ordinal.number is not None or not detection.is_nonstandard)
+            else None
         ),
         supplementary_type_label=ordinal.type_label if ordinal is not None else None,
         supplementary_ordinal=ordinal.number if ordinal is not None else None,

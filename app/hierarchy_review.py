@@ -12,7 +12,7 @@ import re
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from .catalog import GENERIC_ROOTS, detect_episode_number, normalize_title
+from .catalog import GENERIC_ROOTS, detect_episode_number, normalize_title, effective_video_content_type
 from .hierarchy import derive_library_hierarchy, parse_explicit_part
 from .hierarchy_authority import (
     activate_manual_hierarchy_snapshot,
@@ -1960,15 +1960,13 @@ def classify_videos_in_place(
     collection = _load_collection_for_assignment(session, collection_id)
     selected = _selected_videos(collection, video_ids)
     for video in selected:
-        title_type = (
-            video.catalog_title.effective_part_type
-            if video.catalog_title is not None else None
-        )
-        projected_type = normalized_type or (
-            title_type if title_type in SUPPLEMENTAL_PART_TYPES else video.file_type
-        )
-        validate_recap_number_for_content_type(video, projected_type)
+        previous = video.content_type_manual
         video.content_type_manual = normalized_type
+        try:
+            validate_recap_number_for_content_type(video, effective_video_content_type(video))
+        except ValueError:
+            video.content_type_manual = previous
+            raise
     session.flush()
     refresh_collection_state(collection)
     return selected

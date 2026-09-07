@@ -2,22 +2,20 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 
 from .catalog import (
     EpisodeNumberDetection, detect_episode_number,
-    normalize_supplementary_subtype,
+    effective_video_content_type,
 )
+from .hierarchy_types import VIDEO_CONTENT_TYPES, VIDEO_CONTENT_TYPE_LABELS
 from .models import CatalogTitle, Video
 
 
 # PV and Preview already share one parser subtype; do not invent a second axis.
-ORDINAL_TYPES = frozenset({"op", "ed", "ncop", "nced", "ova", "special", "preview", "cm"})
-ORDINAL_LABELS = {
-    "op": "OP", "ed": "ED", "ncop": "NCOP", "nced": "NCED", "ova": "OVA",
-    "special": "Special", "preview": "Preview", "cm": "CM",
-}
+ORDINAL_TYPES = VIDEO_CONTENT_TYPES - {"episode"}
+ORDINAL_LABELS = VIDEO_CONTENT_TYPE_LABELS
 
 
 @dataclass(frozen=True)
@@ -51,16 +49,24 @@ def supplementary_ordinal(
     detection = detection or detect_episode_number(video.filename)
     if title is None and use_current_title:
         title = video.__dict__.get("catalog_title")
-    manual = normalize_supplementary_subtype((video.content_type_manual or "").strip())
-    raw = normalize_supplementary_subtype((video.file_type or "").strip())
+    manual = (video.content_type_manual or "").strip()
     title_type = title.effective_part_type if title is not None else None
-    subtype = (
-        manual if video.content_type_manual is not None
-        else detection.supplementary_type if detection.supplementary_type in ORDINAL_TYPES
-        else raw if raw in ORDINAL_TYPES
-        else title_type
+    subtype = effective_video_content_type(
+        video, title, detection=detection, use_current_title=False,
     )
     if subtype not in ORDINAL_TYPES:
+        return None
+    if subtype == "recap":
+        from .numbering import effective_recap_episode_number
+        if effective_recap_episode_number(
+            video, title, detection=detection, use_current_title=False,
+        ) is not None:
+            return None
+    # Raw Other is also the parser's unresolved fallback. Unknown content and
+    # zero/fractional/A-B evidence in a main container keep their diagnostics;
+    # explicit Other (video or container) is still a normal typed identity.
+    if (subtype == "other" and not manual
+            and title_type not in ORDINAL_TYPES):
         return None
     override = video.episode_number_manual_override
     if override is not None:
@@ -123,7 +129,7 @@ def representation_conflict(videos: list[Video]) -> bool:
 class SupplementaryIdentity:
     catalog_title_key: tuple[str, int]
     supplementary_type: str
-    ordinal: int
+    ordinal: int | None
 
 
 @dataclass(frozen=True)
@@ -138,6 +144,14 @@ class SupplementaryInventory:
     partitions: tuple[SupplementaryPartition, ...]
     unknown_videos: tuple[Video, ...]
     invalid_duplicates: tuple[Video, ...]
+    unnumbered_identity_groups: tuple[tuple[Video, ...], ...] = ()
+
+    @property
+    def logical_identity_count(self) -> int | None:
+        """Multiplicity including unidentified items, never physical copies."""
+        if self.invalid_duplicates or any(p.requires_review for p in self.partitions):
+            return None
+        return len(self.partitions) + len(self.unnumbered_identity_groups)
 
     @property
     def requires_review(self) -> bool:
@@ -176,6 +190,7 @@ class SupplementaryReviewIssue:
 
 def supplementary_inventory(
     videos: list[Video], title: CatalogTitle | None = None,
+    *, collection_scope: bool = False, titles_by_id: dict[int, CatalogTitle] | None = None,
 ) -> SupplementaryInventory:
     """Linear, in-memory precondition for future naming; no target paths/writes.
 
@@ -187,34 +202,48 @@ def supplementary_inventory(
     unknown, invalid = [], []
     by_id = {v.id: v for v in videos if v.id is not None}
     identities = {}
+    scopes = {}
     for video in videos:
-        state = supplementary_ordinal(video, title)
+        current = title or (titles_by_id or {}).get(video.catalog_title_id) or video.__dict__.get("catalog_title")
+        state = supplementary_ordinal(video, current)
         if state is None:
             continue
-        current = title if title is not None else video.__dict__.get("catalog_title")
         title_id = current.id if current is not None else video.catalog_title_id
         key = (
             ("id", title_id) if title_id is not None
             else ("object", id(current)) if current is not None else None
         )
+        scopes[video] = key
+        collection_id = (
+            current.catalog_collection_id if current is not None
+            else video.catalog_collection_id
+        )
+        collection = current.__dict__.get("collection") if current is not None else None
+        if collection_scope:
+            key = (
+                ("collection", collection_id) if collection_id is not None
+                else ("collection_object", id(collection)) if collection is not None else key
+            )
         identity = (
             SupplementaryIdentity(key, state.supplementary_type, state.number)
-            if key is not None and state.number is not None else None
+            if key is not None else None
         )
         identities[video] = identity
-        if identity is None:
-            unknown.append(video)
-        elif not (
+        if not (
             video.duplicate_of_video_id is not None
             or video.__dict__.get("duplicate_of") is not None
             or video.duplicate_primary_missing
         ):
-            by_identity[identity].append(video)
+            if state.number is None or identity is None:
+                unknown.append(video)
+            else:
+                by_identity[identity].append(video)
     for video, identity in identities.items():
         primary = video.__dict__.get("duplicate_of") or by_id.get(video.duplicate_of_video_id)
         if video.duplicate_primary_missing or video.duplicate_of_video_id is not None or primary is not None:
             if (primary is None or primary not in identities or identity is None
                 or identities[primary] != identity or primary is video
+                or scopes[primary] != scopes[video]
                 or primary.duplicate_of_video_id is not None
                 or primary.__dict__.get("duplicate_of") is not None
                 or primary.duplicate_primary_missing
@@ -222,31 +251,51 @@ def supplementary_inventory(
                     and variant_group_id(video) != variant_group_id(primary))
                 or video.media_part_number != primary.media_part_number):
                 invalid.append(video)
+    unnumbered = defaultdict(list)
+    for video in unknown:
+        # Physical-part authority is title-local; never combine two containers
+        # merely because both have an unidentified item of the same type.
+        unnumbered[(scopes[video], identities[video])].append(video)
+    groups = []
+    for items in unnumbered.values():
+        if (all(v.media_part_number is not None for v in items)
+                and not representation_conflict(items)):
+            groups.append(tuple(items))
+        else:
+            groups.extend((video,) for video in items)
     return SupplementaryInventory(
-        tuple(SupplementaryPartition(identity, tuple(items), representation_conflict(items))
-              for identity, items in by_identity.items()), tuple(unknown), tuple(invalid),
+        tuple(SupplementaryPartition(
+            identity, tuple(items),
+            representation_conflict(items) or len({scopes[v] for v in items}) > 1,
+        ) for identity, items in by_identity.items()),
+        tuple(unknown), tuple(invalid), tuple(groups),
     )
 
 
 def supplementary_review_issues(
-    videos: list[Video], title: CatalogTitle,
+    videos: list[Video], title: CatalogTitle | None = None, *,
+    collection_scope: bool = False, titles_by_id: dict[int, CatalogTitle] | None = None,
 ) -> tuple[SupplementaryReviewIssue, ...]:
     """Return collision-risk reasons for Hierarchy Review using loaded scalar data.
 
-    A single unnumbered supplementary video cannot collide with another item in
-    its local type namespace, so it remains unknown without opening this review
-    workflow. Multiple items of the same type must all have safe identities.
+    An unnumbered logical singleton needs no ordinal. Multiplicity uses the
+    shared inventory's representation rules, never the physical row count.
+    Collection callers pass the whole collection and project issues afterwards.
     """
     typed: dict[str, list[tuple[Video, SupplementaryOrdinal]]] = defaultdict(list)
     for video in videos:
-        state = supplementary_ordinal(video, title)
+        current = title or (titles_by_id or {}).get(video.catalog_title_id)
+        state = supplementary_ordinal(video, current)
         if state is not None:
             typed[state.supplementary_type].append((video, state))
 
     issues = []
     for subtype in sorted(typed):
         members = typed[subtype]
-        inventory = supplementary_inventory([video for video, _state in members], title)
+        inventory = supplementary_inventory(
+            [video for video, _state in members], title, collection_scope=collection_scope,
+            titles_by_id=titles_by_id,
+        )
         known_ordinals = tuple(sorted({
             state.number for _video, state in members if state.number is not None
         }))
@@ -258,14 +307,15 @@ def supplementary_review_issues(
             ),
             key=lambda video: (video.relative_path.casefold(), video.id or 0),
         ))
-        if len(members) > 1 and missing:
+        count = inventory.logical_identity_count
+        if (count is None or count > 1) and missing:
             issues.append(SupplementaryReviewIssue(
                 code="missing_supplementary_ordinal",
                 supplementary_type=subtype,
                 videos=missing,
                 known_ordinals=known_ordinals,
                 message=(
-                    "Více videí stejného supplementary typu nelze bezpečně rozlišit: "
+                    "Více logických identit stejného typu v kolekci nelze bezpečně rozlišit: "
                     "u uvedených souborů chybí explicitní ruční nebo parserový ordinal."
                 ),
             ))
@@ -302,6 +352,24 @@ def supplementary_review_issues(
                 ),
             ))
     return tuple(issues)
+
+
+def collection_supplementary_review(
+    videos: list[Video], titles: list[CatalogTitle] | None = None,
+) -> dict[int, tuple[SupplementaryReviewIssue, ...]]:
+    """Build collection-wide review once, then project issues to title cards."""
+    by_title = defaultdict(list)
+    for issue in supplementary_review_issues(
+        videos, collection_scope=True, titles_by_id={t.id: t for t in titles or []},
+    ):
+        members = defaultdict(list)
+        for video in issue.videos:
+            title = video.__dict__.get("catalog_title")
+            key = title.id if title is not None else video.catalog_title_id
+            members[key].append(video)
+        for key, items in members.items():
+            by_title[key].append(replace(issue, videos=tuple(items)))
+    return {key: tuple(issues) for key, issues in by_title.items()}
 
 
 def supplementary_media_siblings(videos: list[Video]) -> dict[Video, list[Video]]:

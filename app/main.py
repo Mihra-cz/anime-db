@@ -187,7 +187,7 @@ from .unassigned_videos import (
     insufficient_video_assignment_kind,
     insufficient_video_assignments,
 )
-from .supplementary import supplementary_media_siblings, supplementary_review_issues
+from .supplementary import supplementary_media_siblings, collection_supplementary_review
 from .models import (
     AudioTrack, CatalogCollection, CatalogTitle, ExternalSubtitle,
     ExternalSubtitleCompatibility,
@@ -1522,6 +1522,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
             "title_video_presentation": title_video_presentation,
             "title_media_videos": title_candidates,
+            "typed_identity_issues": {
+                video.id: issue
+                for issues in collection_supplementary_review([
+                    video for part in catalog_title.collection.titles for video in part.videos
+                ] if catalog_title is not None and catalog_title.collection is not None
+                  else title_candidates,
+                  list(catalog_title.collection.titles)
+                  if catalog_title is not None and catalog_title.collection is not None
+                  else None).values()
+                for issue in issues for video in issue.videos
+            },
             "supplementary_media_siblings": supplementary_media_siblings(title_candidates),
             "media_part_summary": media_part_summary_label(title_candidates),
             "media_part_sequence_warning": media_part_sequence_warning(
@@ -1842,6 +1853,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for video in videos:
                 videos_by_title.setdefault(video.catalog_title_id, []).append(video)
             title_numbering = []
+            review_by_title = collection_supplementary_review(videos, list(collection.titles))
             for title in sorted(
                 collection.titles,
                 key=lambda value: (
@@ -1851,9 +1863,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ):
                 title_videos_list = videos_by_title.get(title.id, [])
                 title_card_issues = review_diagnostics.for_title_card(title)
-                title_supplementary_issues = supplementary_review_issues(
-                    title_videos_list, title
-                )
+                title_supplementary_issues = review_by_title.get(title.id, ())
                 variant_groups = tuple(sorted(
                     title.video_variant_groups,
                     key=lambda group: (group.manual_label.casefold(), group.id),
@@ -3274,6 +3284,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 collection_id,
                 assignment_split_proposal=assignment_split_proposal,
             )
+        if operation == "classify" and str(form.get("return_to") or "").strip():
+            return local_redirect_response(str(form["return_to"]))
         return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}"
             "#operation-result",

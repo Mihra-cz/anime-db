@@ -113,8 +113,10 @@ fallback inference, nikoli nová autoritativní ruční klasifikace.
   explicitní rozsah, filename pattern nebo `ManualSplitRuleVideo`. Samotné
   `Video.catalog_title_id` se na selector automaticky nepovyšuje.
 - `Video.file_type` je uložená parserová klasifikace. Obecný effective typ má
-  prioritu video manual → supplementary typ title → raw typ. Film je
-  title-level klasifikace, nikoli nová video-level ruční hodnota.
+  prioritu video manual → konkrétní filename/raw typ → supplementary kontext
+  title. Bonus/Extras container proto nezakrývá konkrétní Special/OVA/OP evidence.
+  Detail videa nabízí „Typ obsahu“ nad existujícím `content_type_manual`,
+  včetně Episode a Film; „automaticky“ odstraní pouze tuto ruční autoritu.
 - Raw filename/parser evidence se nepřepisuje jen kvůli presentation nebo
   ručnímu rozhodnutí. Effective resolvery čtou autority; scanner/migrace mohou
   v určeném write workflow aktualizovat automatickou evidenci a projekce.
@@ -128,7 +130,7 @@ fallback inference, nikoli nová autoritativní ruční klasifikace.
 
 | Osa | Současný význam |
 | --- | --- |
-| Supplementary ordinal | Lokální pořadí v namespace `(CatalogTitle, subtype)`; není automaticky providerové číslo. |
+| Typed local ordinal | Lokální identita v namespace `(CatalogCollection, effective video type)`; Preview/PV namespace sdílejí. Není automaticky providerové číslo. |
 | Media Part | Ručně určený fyzický segment jedné logické položky, `Video.media_part_number`. |
 | Video variant | Ručně potvrzená release/content skupina jednoho title; její reprezentace konkrétní epizody sdílí stejnou logickou identitu. |
 
@@ -190,6 +192,9 @@ Není to samostatná persistentní Episode tabulka. Lokální, season, absolute
 a external čísla nejsou zaměnitelná; canonical pole jsou řízené projekce
 z numbering autority a lokální evidence. Ruční číslo/numbering režim mají
 své explicitní workflow včetně náhledu hromadné opravy.
+Standardní Episode musí mít logical episode number vždy, i jako singleton;
+chybějící číslo vyžaduje review. Toto pravidlo nemění strukturální čísla
+Season/Part/Cour.
 
 Potvrzená duplicate secondary nezvyšuje počet logických epizod ani potvrzených
 variant, ale zůstává fyzickým videem. Autoritou je vazba `duplicate_of_video_id`,
@@ -213,27 +218,48 @@ konkrétního ordinalu a potvrzené varianty.
 
 Fractional Recap zůstává nestandardním doplňkem, ne běžnou epizodou. Ruční
 desetinná pozice je přesně uložena v desetinách, nezvyšuje standardní logical
-count ani se nezaokrouhluje do integer epizodní osy.
+count ani se nezaokrouhluje do integer epizodní osy. Ruční pozice má přednost
+před přesnou parserovou fractional hodnotou (např. 5.5, 24.5 či 24.9);
+parserová přesnost se nezkracuje. Jde o chronologickou identitu, nikdy o
+typed ordinal, a počet Recapů ji nepřečísluje.
 
 ### Supplementary ordinal
 
-Společný resolver používá OP, ED, NCOP, NCED, OVA, Special, Preview/PV a CM;
-Preview/PV tvoří jeden namespace. Lokální identita je `(CatalogTitle, subtype,
-ordinal)`: OP01 a ED01 nejsou kolize. Bonus/Menu parser hinty existují, ale
-nejsou novými typy tohoto bezpečného ordinal kontraktu; Other jej nemá.
+Společný resolver v `app/supplementary.py` pokrývá všechny canonical non-episode
+video typy z `VIDEO_CONTENT_TYPES`, včetně Film, Bonus, Menu a explicitního Other.
+Chronologicky očíslovaný Recap je vyňat; Recap bez takové pozice používá obecné
+pravidlo multiplicity. Existující Recap editor zapisuje chronologickou pozici.
+Raw Other je také parserový fallback: bezpečně rozpoznaná běžná epizoda v hlavní
+části zachovává episode semantics a nezařazené zero/fractional/A-B zachovávají
+svou nonstandard diagnostiku. Nerozpoznaný obsah v hlavním kontejneru zůstává
+review problémem; explicitní Other (video nebo kontejner) používá typed namespace.
 
 Ruční video klasifikace a explicitní použitelné číslo mají přednost. Jinak je
 potřeba bezpečná filename evidence odpovídajícího typu; broad Bonus/Special
 kontejner přesný marker nezakrývá. Pouhé `Episode 14` přesunuté pod OVA není
 automaticky OVA14. Čísla se nevymýšlejí z pořadí, abecedy, počtu souborů ani
 z metadat. Rozpoznané TV/A/B suffixy nevytvářejí variantní autoritu.
+Parserový Special05 se po ruční změně typu na Bonus nestává Bonus05.
+Teprve kompatibilní evidence nebo explicitní manual ordinal 5 vytvoří Bonus05;
+raw typ a filename evidence přitom zůstávají dostupné v detailu.
 
-Nečíslovaný singleton zůstává unknown, ale sám neotevírá collision-risk review.
-Více videí stejného typu musí mít bezpečně rozlišené identity. Kolizi mohou
-vysvětlit potvrzené duplicity, různé potvrzené varianty nebo úplné Media Parts;
-neplatná vazba ani kombinace neurčené a známé varianty ji tiše nevyřeší.
-Přísný supplementary inventory při nejasnosti vrací neznámý logical count.
-Absence review u singletonu tedy není důkaz připravenosti pro budoucí rename.
+Ordinal je povinný až při 2+ distinct logical identities stejného effective
+typu/namespace přes celou collection, i napříč titles. Singleton může zůstat
+bez čísla; existující bezpečný parser/manual ordinal se nemaže. Preview/PV
+sdílejí namespace, OP a ED mají oddělené.
+
+Multiplicity i collision review používají společný inventory: potvrzené
+duplicate secondary nezvyšují count, různé potvrzené varianty známé identity a
+úplné Media Parts téže identity tvoří jednu položku. Úplná nečíslovaná sada
+Media Parts uvnitř jednoho title může být singleton. Samotné variant groups
+bez společné identity ani neúplné segmenty nejsou důkazem totožnosti.
+Stejný ordinal ve dvou různých titles představuje collection-wide kolizi;
+title-local variantní autorita ji nemůže vysvětlit. Missing ordinal při
+multiplicitě, nevysvětlená kolize a neplatná duplicate vazba vyžadují derived
+review bez zápisu hierarchy statusu. Detail videa a Hierarchy Review používají
+stejnou collection-wide projekci. Metadata count nadále vyhodnocuje scope
+konkrétního title; přísný inventory při nejasnosti vrací neznámý logical count.
+Absence review u singletonu není sama důkaz připravenosti pro budoucí rename.
 
 ## Metadata
 

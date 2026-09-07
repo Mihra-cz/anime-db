@@ -1082,7 +1082,7 @@ def test_unknown_iv_marker_keeps_only_broad_bonus_context_and_is_noncanonical():
 
     assert state.is_supplementary
     assert state.detection.kind == "unknown"
-    assert state.supplementary_type is None
+    assert state.supplementary_type == "bonus"
     assert state.supplementary_number is None
     assert video.file_type == "other"
     assert video.local_episode_number is None

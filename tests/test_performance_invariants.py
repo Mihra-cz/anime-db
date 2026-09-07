@@ -137,6 +137,143 @@ def test_stable_get_endpoints_are_semantically_read_only(
     assert _semantic_snapshot(engine) == before
 
 
+def test_overlord_content_editor_reuses_classification_and_preserves_raw_evidence(performance_app):
+    import asyncio
+    from test_metadata_web import post_form_request
+    from app.hierarchy_types import VIDEO_CONTENT_TYPE_CHOICES
+    from app.catalog import effective_video_content_type
+
+    web_app, ids = performance_app
+    engine = web_app.state.sessions.kw["bind"]
+    with Session(engine) as session:
+        title = session.get(CatalogTitle, ids["title"])
+        title.part_type = "bonus"
+        title.local_title = "Extras – Drama CD"
+        original = title.videos[0]
+        original.filename = "Overlord Special 05.mkv"
+        original.file_type = "special"
+        original.local_episode_number = original.season_episode_number = None
+        video_id = original.id
+        sibling_title = CatalogTitle(
+            collection=title.collection, local_title="Extras B", normalized_local_title="extras b",
+            relative_root_path="Anime/Performance Show/Extras B", part_type="bonus",
+        )
+        session.add(Video(
+            catalog_title=sibling_title, catalog_collection=title.collection,
+            relative_path="Anime/Performance Show/Extras B/drama.mkv",
+            filename="drama.mkv", root_folder="Anime", size=1, mtime_ns=1,
+            file_type="bonus", content_type_manual="bonus", episode_number_manual_override=6,
+        ))
+        session.commit()
+
+    endpoints = {route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")}
+    path = f"/titles/{ids['title']}"
+    def render():
+        before = _semantic_snapshot(engine)
+        html = endpoints["/titles/{catalog_title_id}"](
+            _request(web_app, path), ids["title"],
+        ).body.decode()
+        assert _semantic_snapshot(engine) == before
+        return html.split(f'id="video-{video_id}"', 1)[1].split("</tr>", 1)[0]
+
+    def classify(value):
+        action = f"/hierarchy-review/{ids['collection']}/manage-videos"
+        response = asyncio.run(endpoints["/hierarchy-review/{collection_id}/manage-videos"](
+            post_form_request(web_app, action, [
+                ("operation", "classify"), ("video_ids", str(video_id)),
+                ("content_type", value), ("return_to", f"{path}#video-{video_id}"),
+            ]), ids["collection"],
+        ))
+        assert response.status_code == 303
+        assert response.headers["location"] == f"{path}#video-{video_id}"
+
+    html = render()
+    assert "Typ obsahu" in html and "automaticky</option>" in html
+    for value, _label in VIDEO_CONTENT_TYPE_CHOICES:
+        assert f'<option value="{value}"' in html
+    assert "<strong>Special 05</strong>" in html
+    classify("bonus")
+    html = render()
+    assert "Raw typ: special" in html
+    assert "<strong>Special 05</strong>" not in html
+    assert "<strong>Bonus</strong>" in html and "Bonus ?" in html
+    assert "Chybějící supplementary ordinal" in html
+    with Session(engine) as session:
+        item = session.get(Video, video_id)
+        assert effective_video_content_type(item) == "bonus"
+        assert item.file_type == "special"
+        assert item.episode_number_manual_override is None
+
+    response = endpoints["/videos/{video_id}/episode-number"](
+        video_id, manual_episode_number="5", return_to=path,
+    )
+    assert response.status_code == 303
+    html = render()
+    assert "<strong>Bonus 05</strong>" in html
+    assert "Chybějící supplementary ordinal" not in html
+    classify("")
+    html = render()
+    assert "<strong>Special 05</strong>" in html
+    assert "<strong>Bonus 05</strong>" not in html
+    with Session(engine) as session:
+        item = session.get(Video, video_id)
+        assert item.content_type_manual is None
+        assert item.file_type == "special"
+        assert item.episode_number_manual_override == 5
+
+
+@pytest.mark.parametrize("route,argument", [
+    ("/titles/{catalog_title_id}", "title"),
+    ("/hierarchy-review/{collection_id}", "collection"),
+    ("/hierarchy-review", None),
+])
+def test_collection_wide_identity_review_is_bounded_and_read_only(performance_app, route, argument):
+    web_app, ids = performance_app
+    engine = web_app.state.sessions.kw["bind"]
+    endpoint = next(r.endpoint for r in web_app.routes if getattr(r, "path", None) == route)
+    def measure():
+        before = _semantic_snapshot(engine)
+        statements = []
+        def record(conn, cursor, statement, parameters, context, many):
+            statements.append(statement)
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            response = (endpoint(_request(web_app, route), ids[argument]) if argument
+                        else endpoint(_request(web_app, route)))
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        assert response.status_code == 200
+        assert not any(s.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE")) for s in statements)
+        assert _semantic_snapshot(engine) == before
+        return len(statements), response.body.decode()
+
+    with Session(engine) as session:
+        title = session.get(CatalogTitle, ids["title"])
+        title.part_type = "bonus"
+        item = title.videos[0]
+        item.content_type_manual = "bonus"
+        session.commit()
+    baseline, _ = measure()
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, ids["collection"])
+        for i in range(20):
+            title = CatalogTitle(
+                collection=collection, local_title=f"Extras {i}", normalized_local_title=f"extras {i}",
+                relative_root_path=f"Anime/Performance Show/Extras {i}", part_type="bonus",
+            )
+            session.add(Video(
+                catalog_title=title, catalog_collection=collection,
+                filename=f"Bonus item {i}.mkv",
+                relative_path=f"{title.relative_root_path}/Bonus item {i}.mkv",
+                root_folder="Anime", file_type="bonus", size=1, mtime_ns=1,
+                content_type_manual="bonus",
+            ))
+        session.commit()
+    expanded, html = measure()
+    assert expanded == baseline
+    assert "Chybějící supplementary ordinal" in html
+
+
 def test_title_detail_count_comparison_is_semantically_read_only(performance_app):
     web_app, ids = performance_app
     engine = web_app.state.sessions.kw["bind"]
@@ -691,6 +828,7 @@ def test_supplementary_title_get_shows_manual_ordinal_without_writes(performance
             relative_path='Anime/Performance Show/Season 1/Show - 02.mkv',
             root_folder='Anime', filename='Show - 02.mkv', size=2, mtime_ns=2,
             file_type='episode', local_episode_number=2, season_episode_number=2,
+            content_type_manual='episode',
         ))
         session.commit()
     endpoint = next(route.endpoint for route in web_app.routes

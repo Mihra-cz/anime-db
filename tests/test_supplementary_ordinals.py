@@ -156,7 +156,7 @@ def test_hierarchy_review_reasons_distinguish_missing_collision_and_broken_ident
 
 def test_hierarchy_review_reason_disappears_when_ordinals_or_variants_resolve_identity():
     title = graph('ova')
-    unknown = [video(title, 'OVA.mkv', 1), video(title, 'OVA extra.mkv', 2)]
+    unknown = [video(title, 'OVA.mkv', 1), video(title, 'OVA alternate.mkv', 2)]
     assert supplementary_review_issues(unknown, title)
     unknown[0].episode_number_manual_override = 1
     unknown[1].episode_number_manual_override = 2
@@ -169,9 +169,13 @@ def test_hierarchy_review_reason_disappears_when_ordinals_or_variants_resolve_id
     assert supplementary_review_issues(variants, title) == ()
 
 
-@pytest.mark.parametrize('filename', ['Menu01.mkv', 'Bonus01.mkv', 'Interview 01.mkv', 'Other 01.mkv'])
-def test_no_new_ordinal_namespace_for_other_content(filename):
-    assert supplementary_ordinal(video(graph(), filename)) is None
+@pytest.mark.parametrize('filename,kind,number', [
+    ('Menu01.mkv', 'menu', 1), ('Bonus01.mkv', 'bonus', 1),
+    ('Interview 01.mkv', 'bonus', None), ('Other 01.mkv', 'bonus', None),
+])
+def test_generalized_namespace_uses_only_compatible_number_evidence(filename, kind, number):
+    state = supplementary_ordinal(video(graph(), filename))
+    assert (state.supplementary_type, state.number) == (kind, number)
 
 
 def test_nande_tv_sequence_recognition_does_not_create_variant_authority():

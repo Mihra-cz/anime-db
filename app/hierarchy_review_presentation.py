@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from .models import CatalogCollection, CatalogTitle
 from .numbering import TitleNumberingSummary, summarize_title_numbering
 from .structural_inference import automatic_flat_sequence_notice
-from .supplementary import SupplementaryReviewIssue, supplementary_review_issues
+from .supplementary import SupplementaryReviewIssue, collection_supplementary_review
 
 
 @dataclass(frozen=True)
@@ -56,8 +56,8 @@ def build_hierarchy_review_collection_presentation(
 ) -> HierarchyReviewCollectionPresentation:
     """Resolve the overview queue and navigation badge from loaded ORM state.
 
-    The queue predicate intentionally remains identical to the existing
-    Hierarchy Review overview.  Supplementary ordinal issues are derived and
+    The overview and navigation share collection-wide typed identity review.
+    Supplementary ordinal issues are derived and
     therefore override even a stored verified/automatic collection status.
     The long-set badge reuses the existing non-blocking structural notice; a
     blocking long sequence is already represented by review_required.
@@ -65,10 +65,13 @@ def build_hierarchy_review_collection_presentation(
     summaries: list[TitleNumberingSummary] = []
     supplementary_reviews = []
     has_long_episode_set = False
+    review_by_title = collection_supplementary_review([
+        video for title in collection.titles for video in title.videos
+    ], list(collection.titles))
     for title in collection.titles:
         title_videos = list(title.videos)
         summaries.append(summarize_title_numbering(title_videos, title))
-        issues = supplementary_review_issues(title_videos, title)
+        issues = review_by_title.get(title.id, ())
         if issues:
             supplementary_reviews.append(SupplementaryReviewPresentation(
                 title=title,

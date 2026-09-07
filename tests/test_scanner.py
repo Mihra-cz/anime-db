@@ -611,7 +611,7 @@ def test_scan_persists_exact_supplementary_types_without_canonical_episodes(
         assert unknown.file_type == "other"
         assert unknown_state.is_supplementary
         assert unknown_state.detection.kind == "unknown"
-        assert unknown_state.supplementary_type is None
+        assert unknown_state.supplementary_type == "bonus"
         assert unknown_state.supplementary_number is None
         assert unknown.season_episode_number is None
 

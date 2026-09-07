@@ -1712,7 +1712,7 @@ def test_fractional_video_can_be_classified_directly_without_confirming_title(
     invalid_request = post_form_request(web_app, path, [
         ("video_ids", str(video_id)),
         ("operation", "classify"),
-        ("content_type", "film"),
+        ("content_type", "not-a-content-type"),
     ])
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(endpoints["/hierarchy-review/{collection_id}/manage-videos"](
@@ -1729,7 +1729,7 @@ def test_fractional_video_can_be_classified_directly_without_confirming_title(
     [
         ("Anime - 05.5.mkv", "other", "recap", "Recap · ručně zařazeno", "5.5"),
         ("Anime - 14.5.mkv", "other", "ova", "OVA · ručně zařazeno", "14.5"),
-        ("Anime Special.mkv", "special", None, "special", None),
+        ("Anime Special.mkv", "special", None, "Special", None),
     ],
 )
 def test_effective_video_content_display_prefers_manual_classification(
@@ -1854,7 +1854,8 @@ def test_fractional_supplementary_position_and_effective_type_match_in_views(
     assert "OVA · ručně zařazeno" in ova_row
     assert ">other<" not in ova_row
     assert "E14.5" not in ova_row
-    assert '<td data-label="Typ" class="content-type-column">episode</td>' in automatic_row
+    assert '<td data-label="Typ" class="content-type-column">episode' in automatic_row
+    assert 'class="inline-form video-content-type-form"' in automatic_row
 
     with web_app.state.sessions() as session:
         collection = session.get(CatalogCollection, collection_id)
@@ -2049,7 +2050,7 @@ def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_pat
     assert "Automaticky / zrušit ruční klasifikaci" in review_html
     assert "film" in expected_part_types
     assert "title" not in expected_part_types
-    assert all("film" not in choices for choices in video_choices)
+    assert all("film" in choices for choices in video_choices)
     assert (
         f'action="/collections/{collection_id}/titles/{title.id}/hierarchy"'
         in review_html

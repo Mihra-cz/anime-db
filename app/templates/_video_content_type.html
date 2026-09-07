@@ -1,0 +1,13 @@
+{% if video.catalog_collection_id %}
+<form class="inline-form video-content-type-form" method="post" action="/hierarchy-review/{{ video.catalog_collection_id }}/manage-videos">
+  <input type="hidden" name="operation" value="classify">
+  <input type="hidden" name="video_ids" value="{{ video.id }}">
+  <input type="hidden" name="return_to" value="/titles/{{ video.catalog_title_id }}{% if request.url.query %}?{{ request.url.query }}{% endif %}#video-{{ video.id }}">
+  <label>Typ obsahu <select name="content_type" aria-label="Typ obsahu videa">
+    <option value="" {% if video.content_type_manual is none %}selected{% endif %}>automaticky</option>
+    {% for value, label in video_content_type_choices %}<option value="{{ value }}" {% if video.content_type_manual == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+  </select></label>
+  <button type="submit">Uložit typ</button>
+</form>
+{% endif %}
+<details class="technical-details"><summary>Parserová evidence</summary><small>Raw typ: {{ video.file_type }} · {{ detect_episode_number(video.filename).display_value or 'číslo neurčeno' }}</small></details>

@@ -170,6 +170,7 @@ def test_numbering_gap_and_unknown_are_localized_to_title_and_video():
         collection, 2, "Episode 03.mkv", title=title, episode_number=3,
     )
     unknown = _video(collection, 3, "Mystery.mkv", title=title)
+    unknown.content_type_manual = "episode"
 
     diagnostics = hierarchy_review_diagnostics(collection, [first, third, unknown])
 

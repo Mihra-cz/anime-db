@@ -223,7 +223,7 @@ def test_fractional_recap_reclassification_requires_explicit_number_clear():
         recap = recaps[0]
 
         with pytest.raises(ValueError, match="nebude smazána automaticky"):
-            classify_videos_in_place(session, collection.id, [recap.id], "")
+            classify_videos_in_place(session, collection.id, [recap.id], "bonus")
         assert recap.content_type_manual == "recap"
         assert recap.recap_episode_number_manual_tenths == 145
 

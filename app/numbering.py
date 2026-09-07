@@ -206,22 +206,20 @@ def format_episode_position(value: int | Decimal) -> str:
     decimal_value = value if isinstance(value, Decimal) else Decimal(value)
     if decimal_value == decimal_value.to_integral_value():
         return str(int(decimal_value))
-    return format(decimal_value, ".1f")
+    return format(decimal_value, "f")
 
 
-def manual_recap_episode_number(video: Video) -> Decimal | None:
+def manual_recap_episode_number(video: Video, title: CatalogTitle | None = None) -> Decimal | None:
     """Return explicit Recap authority, including a legacy integer fallback."""
     tenths = video.recap_episode_number_manual_tenths
     if tenths is not None:
         return Decimal(tenths) / Decimal(10)
     if video.episode_number_manual_override is None:
         return None
-    manual_type = (video.content_type_manual or "").strip().casefold()
-    loaded_title = video.__dict__.get("catalog_title")
-    title_type = (
-        loaded_title.effective_part_type if loaded_title is not None else None
-    )
-    if manual_type == "recap" or not manual_type and title_type == "recap":
+    loaded_title = title if title is not None else video.__dict__.get("catalog_title")
+    if effective_video_content_type(
+        video, loaded_title, use_current_title=False,
+    ) == "recap":
         # Before fractional Recap support an integer entered through the same UI
         # lived in the canonical override column.  Read it as the old manual
         # Recap position until the user explicitly replaces or clears it.
@@ -235,6 +233,24 @@ def manual_episode_number_input_value(video: Video) -> str:
         return format_episode_position(value) if value is not None else ""
     value = video.episode_number_manual_override
     return str(value) if value is not None else ""
+
+
+def effective_recap_episode_number(
+    video: Video, title: CatalogTitle | None = None, *,
+    detection: EpisodeNumberDetection | None = None, use_current_title: bool = True,
+) -> Decimal | None:
+    """Chronological Recap authority is never a typed local ordinal."""
+    detection = detection or detect_episode_number(video.filename)
+    if effective_video_content_type(
+        video, title, detection=detection, use_current_title=use_current_title,
+    ) != "recap":
+        return None
+    manual = manual_recap_episode_number(video, title)
+    if manual is not None:
+        return manual
+    if detection.kind == "fractional" and detection.number is not None and detection.fraction:
+        return Decimal(f"{detection.number}.{detection.fraction}")
+    return None
 
 
 def _parse_recap_episode_tenths(raw_value: str) -> int | None:
@@ -402,7 +418,10 @@ def video_numbering_identity(
         supplementary is not None and supplementary.supplementary_type in ORDINAL_TYPES
     ):
         supplementary = None
-    recap_position = manual_recap_episode_number(video)
+    recap_position = effective_recap_episode_number(
+        video, video.__dict__.get("catalog_title"), detection=detection,
+        use_current_title=False,
+    )
     if recap_position is not None:
         supplementary = SupplementaryNumberingHint("recap", recap_position)
     use_supplementary_identity = bool(
@@ -492,7 +511,7 @@ def video_numbering_identity(
         )
     if (
         video.season_episode_number is not None
-        and not video.content_type_manual
+        and video.content_type_manual in {None, "episode"}
         and (
             supplementary is None
             or video.episode_number_manual_override is not None
@@ -768,12 +787,15 @@ def recalculate_title_numbering(
     title_is_supplemental = part_type in SUPPLEMENTAL_PART_TYPES
     local_values = [
         item.number
-        if item.is_standard and hint is None and not title_is_supplemental
+        if item.is_standard and (
+            video.content_type_manual == "episode"
+            or hint is None and not title_is_supplemental
+        )
         else None
-        for item, hint in zip(detections, supplementary_hints)
+        for video, item, hint in zip(videos, detections, supplementary_hints)
     ]
     automatic_values = [
-        None if video.content_type_manual else local
+        None if video.content_type_manual not in {None, "episode"} else local
         for video, local in zip(videos, local_values)
     ]
     effective_values = [
@@ -1093,10 +1115,14 @@ def effective_video_numbering(
         supplementary_hint is not None and supplementary_hint.supplementary_type in ORDINAL_TYPES
     ):
         supplementary_hint = None
-    recap_position = manual_recap_episode_number(video)
+    recap_position = effective_recap_episode_number(
+        video, effective_title, detection=detection, use_current_title=False,
+    )
     if recap_position is not None:
         supplementary_hint = SupplementaryNumberingHint("recap", recap_position)
-    if video.content_type_manual or title_is_supplemental or ordinal is not None:
+    if video.content_type_manual == "episode":
+        classification = "standard"
+    elif video.content_type_manual or title_is_supplemental or ordinal is not None:
         classification = "supplementary"
     elif video.episode_number_manual_override is not None:
         classification = "standard"
@@ -1149,6 +1175,7 @@ def summarize_title_numbering(
     }
     supplemental = bool(
         title is not None and title.effective_part_type in SUPPLEMENTAL_PART_TYPES
+        and not any(video.content_type_manual == "episode" for video in videos)
     )
     states = [
         effective_video_numbering(

@@ -126,6 +126,14 @@ která agent nesmí při lokální změně obejít.
 - Varianta sama nevytváří novou logical episode identity. Media Parts mohou být
   více fyzických souborů jedné logical identity. Běžné raw/source episode number
   se bez bezpečné evidence nesmí překlopit na supplementary ordinal.
+- Episode vyžaduje logical číslo vždy. Ostatní video typy vyžadují typed ordinal
+  až při 2+ logical identities stejného namespace přes celou collection;
+  nepočítej fyzické rows. Singletonu nemaž existující bezpečné číslo.
+- Fractional Recap si zachovává přesnou chronologickou pozici (manual před
+  parserem); nikdy mu nepřidávej druhý typed ordinal ani jej nepřečísluj.
+- `Video.content_type_manual` přebíjí parserový typ, ale parserový ordinal se
+  nesmí přenést do jiného namespace jen změnou typu. Explicitní manual ordinal
+  zůstává autoritou; container sám nenahrazuje video-level manual rozhodnutí.
 - Parserové rozšíření musí zachovat již podporované formáty a mít regresní test.
   Nestandardní číslo neklasifikuj jako běžnou epizodu jen proto, že obsahuje
   číslice.

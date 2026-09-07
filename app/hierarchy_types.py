@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 # Ordered UI choices and backend validation intentionally share one definition.
-# ``film`` belongs to CatalogTitle hierarchy, not to per-video content types.
+# Structural choices remain separate from video-level classification.
 PART_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
     ("season", "Sezóna"),
     ("part", "Part"),
@@ -25,12 +25,20 @@ MAIN_CONTENT_PART_TYPES = frozenset({"season", "part", "cour", "title"})
 TECHNICAL_PART_TYPES = frozenset({*PART_TYPES, "title"})
 
 VIDEO_CONTENT_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
+    ("episode", "Epizoda"),
+    ("film", "Film"),
     ("recap", "Recap"),
     ("preview", "Preview"),
     ("special", "Special"),
     ("ova", "OVA"),
     ("bonus", "Bonus"),
     ("other", "Other"),
+    ("op", "OP"),
+    ("ed", "ED"),
+    ("ncop", "NCOP"),
+    ("nced", "NCED"),
+    ("cm", "CM"),
+    ("menu", "Menu"),
 )
 VIDEO_CONTENT_TYPE_LABELS = dict(VIDEO_CONTENT_TYPE_CHOICES)
 VIDEO_CONTENT_TYPES = frozenset(value for value, _ in VIDEO_CONTENT_TYPE_CHOICES)
