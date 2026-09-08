@@ -469,6 +469,7 @@ def _state_fingerprint(
                 item.episode_number_source,
                 item.episode_number_confidence,
                 item.episode_number_manual_override,
+                item.recap_episode_number_manual_tenths,
                 item.episode_number_verified_at.isoformat()
                 if item.episode_number_verified_at else None,
                 item.content_type_manual,
@@ -1136,6 +1137,7 @@ def _clone_video(video: Video) -> Video:
         episode_number_source=video.episode_number_source,
         episode_number_confidence=video.episode_number_confidence,
         episode_number_manual_override=video.episode_number_manual_override,
+        recap_episode_number_manual_tenths=video.recap_episode_number_manual_tenths,
         episode_number_verified_at=video.episode_number_verified_at,
         content_type_manual=video.content_type_manual,
         media_part_number=video.media_part_number,

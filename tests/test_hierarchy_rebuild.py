@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from pathlib import PurePosixPath
 
 import pytest
@@ -12,6 +13,7 @@ from app.database import Base
 from app.hierarchy_evaluation import finalize_collection_hierarchy
 from app.hierarchy_rebuild import (
     HierarchyPlanBlockedError,
+    HierarchyPlanStaleError,
     ReconciliationAction,
     ReconciliationReason,
     apply_hierarchy_rebuild_plan,
@@ -27,6 +29,10 @@ from app.models import (
     TitleMetadata,
     Video,
     utc_now,
+)
+from app.numbering import (
+    effective_recap_episode_number,
+    set_video_episode_number_from_input,
 )
 from app.scanner import scan_library
 
@@ -822,6 +828,121 @@ def test_supplementary_classification_is_preserved_and_not_marked_unmatched():
         # result instead of manufacturing either an automatic or manual match.
         assert stored.catalog_title is None
         assert stored.catalog_collection.relative_root_path == "Anime/Show"
+
+
+@pytest.mark.parametrize(
+    ("filename", "manual_value", "expected_value", "expected_source"),
+    (
+        ("manual-no-parser.mkv", "5.5", Decimal("5.5"), "manual_recap"),
+        ("Recap 3.5.mkv", "24.9", Decimal("24.9"), "manual_recap"),
+        ("Recap 24.25.mkv", None, Decimal("24.25"), "fractional"),
+    ),
+    ids=("manual-no-parser", "manual-over-parser", "parser-higher-precision"),
+)
+def test_fractional_recap_rebuild_preview_apply_and_repeat_are_consistent(
+    filename,
+    manual_value,
+    expected_value,
+    expected_source,
+):
+    engine = _engine()
+    with Session(engine) as session:
+        episodes = [
+            _video(f"Anime/Show/E{number:02}.mkv", mtime_ns=number)
+            for number in range(1, 13)
+        ]
+        recap = _video(
+            f"Anime/Show/{filename}",
+            mtime_ns=20,
+            content_type_manual="recap",
+        )
+        if manual_value is not None:
+            set_video_episode_number_from_input(recap, manual_value)
+        session.add_all([*episodes, recap])
+        session.commit()
+        recap_id = recap.id
+
+        assert effective_recap_episode_number(recap) == expected_value
+        plan = build_hierarchy_rebuild_plan(session)
+        desired = next(item.desired for item in plan.numbering if item.video_id == recap_id)
+        assert desired.episode_number_source == expected_source
+        assert effective_recap_episode_number(recap) == expected_value
+
+        assert apply_hierarchy_rebuild_plan(session, plan).applied is True
+        session.commit()
+        stored = session.get(Video, recap_id)
+        assert effective_recap_episode_number(stored) == expected_value
+        assert stored.episode_number_source == expected_source
+        assert stored.recap_episode_number_manual_tenths == (
+            int(expected_value * 10) if manual_value is not None else None
+        )
+
+        repeated = build_hierarchy_rebuild_plan(session)
+        assert repeated.summary.logical_changes == 0
+        assert repeated.numbering == ()
+
+
+def test_fractional_recap_rebuild_respects_explicit_manual_clear():
+    engine = _engine()
+    with Session(engine) as session:
+        session.add_all([
+            _video(f"Anime/Show/E{number:02}.mkv", mtime_ns=number)
+            for number in range(1, 13)
+        ])
+        recap = _video(
+            "Anime/Show/Recap 3.5.mkv",
+            mtime_ns=20,
+            content_type_manual="recap",
+        )
+        set_video_episode_number_from_input(recap, "24.9")
+        session.add(recap)
+        session.commit()
+
+        set_video_episode_number_from_input(recap, "")
+        session.commit()
+        assert recap.recap_episode_number_manual_tenths is None
+        assert effective_recap_episode_number(recap) == Decimal("3.5")
+
+        plan = build_hierarchy_rebuild_plan(session)
+        desired = next(item.desired for item in plan.numbering if item.video_id == recap.id)
+        assert desired.episode_number_source == "fractional"
+        assert apply_hierarchy_rebuild_plan(session, plan).applied is True
+        session.commit()
+
+        assert recap.recap_episode_number_manual_tenths is None
+        assert effective_recap_episode_number(recap) == Decimal("3.5")
+        assert build_hierarchy_rebuild_plan(session).summary.logical_changes == 0
+
+
+def test_fractional_recap_manual_change_invalidates_rebuild_plan(monkeypatch):
+    engine = _engine()
+    fixed_now = utc_now()
+    monkeypatch.setattr("app.numbering.utc_now", lambda: fixed_now)
+    with Session(engine) as session:
+        session.add_all([
+            _video(f"Anime/Show/E{number:02}.mkv", mtime_ns=number)
+            for number in range(1, 13)
+        ])
+        recap = _video(
+            "Anime/Show/Recap 3.5.mkv",
+            mtime_ns=20,
+            content_type_manual="recap",
+        )
+        set_video_episode_number_from_input(recap, "24.9")
+        session.add(recap)
+        session.commit()
+
+        stale_plan = build_hierarchy_rebuild_plan(session)
+        set_video_episode_number_from_input(recap, "5.5")
+        session.commit()
+        current_plan = build_hierarchy_rebuild_plan(session)
+
+        assert recap.episode_number_verified_at == _without_timezone(fixed_now)
+        assert stale_plan.source_fingerprint != current_plan.source_fingerprint
+        with pytest.raises(HierarchyPlanStaleError):
+            apply_hierarchy_rebuild_plan(session, stale_plan)
+        assert recap.recap_episode_number_manual_tenths == 55
+        assert effective_recap_episode_number(recap) == Decimal("5.5")
 
 
 def test_confirmed_secondary_duplicate_is_preserved_and_excluded_from_structure():
