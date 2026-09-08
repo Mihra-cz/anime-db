@@ -51,7 +51,8 @@ nejsou součástí aplikačního kontraktu a nejsou zde vydávány za ověřené
 
 ## Aktuální rozsah a baseline
 
-Auditovaný baseline implementace: `4769df4` — Zpřehlednění jazyků v Media Check.
+Auditovaný baseline implementace: `7a77ebb` — Sjednocení Recap authority napříč
+hierarchy a Media Check.
 Aktuální fáze: **V5 – Uzavírání**.
 Podrobný vývojový plán a zbývající kroky jsou výhradně v [ROADMAP.md](ROADMAP.md).
 
@@ -216,12 +217,22 @@ segmentů mají diagnostiku. `OVA P1/P2` s Media Part autoritou samo neprokazuje
 dva OVA ordinaly. U známých supplementary identit se segmenty posuzují uvnitř
 konkrétního ordinalu a potvrzené varianty.
 
-Fractional Recap zůstává nestandardním doplňkem, ne běžnou epizodou. Ruční
+Effective content type Recap smí existovat pouze v authoritative Season
+structural contextu. Je to nestandardní doplněk, ne běžná epizoda, a jako jediný
+effective content type smí používat fractional chronologickou pozici. Ruční
 desetinná pozice je přesně uložena v desetinách, nezvyšuje standardní logical
 count ani se nezaokrouhluje do integer epizodní osy. Ruční pozice má přednost
-před přesnou parserovou fractional hodnotou (např. 5.5, 24.5 či 24.9);
+před přesnou parserovou fractional hodnotou (např. 5.5, 24.9 či 24.25);
 parserová přesnost se nezkracuje. Jde o chronologickou identitu, nikdy o
-typed ordinal, a počet Recapů ji nepřečísluje.
+typed ordinal, a počet Recapů ji nepřečísluje. Episode používá integer logical
+episode number; ostatní non-Episode typy používají integer typed ordinal,
+případně podle současných multiplicity pravidel žádný.
+
+Pokud uživatel raw/parser Recap explicitně ručně překlasifikuje na Bonus nebo
+jiný non-Recap typ, raw evidence zůstává zachována, ale fractional Recap
+numbering už není effective. Structural assignment nebo move samo o sobě není
+content classification: nemění `Video.content_type_manual` ani automaticky
+nemaže fractional manual authority.
 
 ### Supplementary ordinal
 

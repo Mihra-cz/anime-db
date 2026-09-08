@@ -96,8 +96,9 @@ navazujícího V5 rozsahu.
 
 ### Zbývá do uzavření V5
 
-1. Samostatná revize AGENTS.md.
-2. Finální V5 closure audit.
+Samostatná revize AGENTS.md byla dokončena.
+
+1. Finální V5 closure audit.
 
 Žádná další feature není tímto dokumentačním rozdělením přidána do V5.
 

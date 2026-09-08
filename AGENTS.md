@@ -133,8 +133,16 @@ která agent nesmí při lokální změně obejít.
   nikoli. Bez attachmentu použij collection root. Complete Media Parts, varianty
   a potvrzené duplicity vyhodnoť před multiplicitou; nepočítej fyzické rows.
   Singletonu nemaž existující bezpečné číslo.
-- Fractional Recap si zachovává přesnou chronologickou pozici (manual před
-  parserem); nikdy mu nepřidávej druhý typed ordinal ani jej nepřečísluj.
+- Effective content type Recap smí existovat pouze v authoritative Season
+  structural contextu. Pouze effective Recap používá přesnou fractional
+  chronologickou pozici (manual před parserem), například `5.5`, `24.9` nebo
+  parserových `24.25`; nikdy mu nepřidávej druhý typed ordinal ani jej
+  nepřečísluj. Episode používá integer logical episode number a ostatní
+  non-Episode typy integer typed ordinal, případně podle multiplicity žádný.
+- Ruční překlasifikování raw/parser Recapu na Bonus nebo jiný non-Recap typ
+  zachovává raw evidence, ale fractional Recap numbering už není effective.
+  Structural assignment/move není content classification a nesmí samo nastavovat
+  `Video.content_type_manual` ani mazat fractional manual authority.
 - `Video.content_type_manual` přebíjí parserový typ, ale parserový ordinal se
   nesmí přenést do jiného namespace jen změnou typu. Explicitní manual ordinal
   zůstává autoritou; container sám nenahrazuje video-level manual rozhodnutí.
