@@ -2909,6 +2909,7 @@ def test_create_title_from_videos_accepts_all_part_types_without_inventing_video
             created.append(create_title_from_videos(
                 session, collection.id, [video.id], local_title=label,
                 part_type=part_type,
+                season_number=1 if part_type in {"season", "recap"} else None,
                 part_number=1 if part_type == "part" else None,
             ))
 

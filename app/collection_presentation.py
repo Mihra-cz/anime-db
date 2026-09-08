@@ -110,6 +110,41 @@ class CollectionPresentation:
             None,
         )
 
+    def structural_context_for_title(
+        self, title: CatalogTitle,
+    ) -> PrimaryTitlePresentation | None:
+        """Return the primary context that owns a title in this presentation."""
+        for part in self.primary_parts:
+            if part.title is title or any(
+                item.title is title for item in part.supplementary_parts
+            ):
+                return part
+        return None
+
+
+def title_has_authoritative_season_context(
+    title: CatalogTitle | None,
+    *,
+    titles: Iterable[CatalogTitle] | None = None,
+    presentation: CollectionPresentation | None = None,
+) -> bool:
+    """Return whether a title belongs to one resolved Season context."""
+    if title is None:
+        return False
+    if presentation is None:
+        if titles is None:
+            collection = title.collection
+            titles = collection.titles if collection is not None else (title,)
+        presentation = build_collection_presentation(
+            titles,
+            include_videos=False,
+        )
+    context = presentation.structural_context_for_title(title)
+    return bool(
+        context is not None
+        and context.title.effective_part_type == "season"
+    )
+
 
 def is_collection_part_artwork_worthy(
     title: CatalogTitle, *, role: Literal["primary", "anime_level"],

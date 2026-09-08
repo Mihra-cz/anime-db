@@ -16,7 +16,11 @@ from .catalog import (
 )
 from .hierarchy import CollectionIdentity, HierarchyIdentity, TitleIdentity, derive_library_hierarchy
 from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
-from .hierarchy_evaluation import HierarchyEvaluationResult, finalize_collection_hierarchy
+from .hierarchy_evaluation import (
+    HierarchyEvaluationResult,
+    HierarchyIssueCode,
+    finalize_collection_hierarchy,
+)
 from .hierarchy_review import extract_local_period_hint
 from .manual_split import (
     ManualSplitDecisionKind,
@@ -1306,6 +1310,21 @@ def build_hierarchy_rebuild_plan(session: Session) -> HierarchyRebuildPlan:
         intents,
         blocked_paths,
     )
+    for collection_path, evaluation in projection.evaluations.items():
+        for issue in evaluation.blocking_issues:
+            if issue.code != HierarchyIssueCode.RECAP_OUTSIDE_SEASON:
+                continue
+            for video in issue.videos:
+                blockers.append(RebuildBlocker(
+                    code=issue.code.value,
+                    collection_path=collection_path,
+                    title_path=(
+                        issue.catalog_title.relative_root_path
+                        if issue.catalog_title is not None else None
+                    ),
+                    video_path=video.relative_path,
+                    prevents_apply=True,
+                ))
 
     original_collections = {item.relative_root_path: item for item in collections}
     collection_items: list[CollectionPlanItem] = []

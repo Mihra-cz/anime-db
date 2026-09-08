@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from .catalog import detect_episode_number
+from .catalog import detect_episode_number, effective_video_content_type
+from .collection_presentation import (
+    build_collection_presentation,
+    title_has_authoritative_season_context,
+)
 from .hierarchy_authority import (
     ManualHierarchyAuthorityState,
     manual_hierarchy_authority_state,
@@ -80,6 +84,9 @@ MANUAL_SPLIT_CONFLICT_REVIEW_REASON = (
 MANUAL_SPLIT_UNMATCHED_REVIEW_REASON = (
     "Video, které vyžaduje ruční rozdělení, neodpovídá žádnému pravidlu."
 )
+RECAP_OUTSIDE_SEASON_REVIEW_REASON = (
+    "Recap není přiřazen do autoritativního Season kontextu."
+)
 
 
 class HierarchyIssueCode(StrEnum):
@@ -102,6 +109,7 @@ class HierarchyIssueCode(StrEnum):
     INCOMPLETE_MANUAL_SNAPSHOT = "incomplete_manual_snapshot"
     RELATED_NAMED_CHILD = "related_named_child"
     SUPPLEMENTARY_NAMED_CHILD = "supplementary_named_child"
+    RECAP_OUTSIDE_SEASON = "recap_outside_season"
     LEGACY_UNLOCALIZED_REVIEW_STATE = "legacy_unlocalized_review_state"
 
 
@@ -305,6 +313,7 @@ def evaluate_collection_hierarchy(
     titles_by_id = {
         title.id: title for title in titles if title.id is not None
     }
+    presentation = build_collection_presentation(titles, include_videos=False)
     videos_by_title: dict[int, list[Video]] = {
         title.id: [] for title in titles if title.id is not None
     }
@@ -391,6 +400,22 @@ def evaluate_collection_hierarchy(
                     f"automaticky zařazena jako S{title.effective_season_number}. "
                     f"{FILENAME_SEASON_CONFLICT_REVIEW_REASON}"
                 ),
+                HierarchyIssueScope.VIDEO,
+                blocking=True,
+                title=title,
+                target_videos=target,
+            )
+        if (
+            title is not None
+            and effective_video_content_type(video, title) == "recap"
+            and not title_has_authoritative_season_context(
+                title,
+                presentation=presentation,
+            )
+        ):
+            add_issue(
+                HierarchyIssueCode.RECAP_OUTSIDE_SEASON,
+                RECAP_OUTSIDE_SEASON_REVIEW_REASON,
                 HierarchyIssueScope.VIDEO,
                 blocking=True,
                 title=title,

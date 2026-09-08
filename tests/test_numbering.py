@@ -641,7 +641,7 @@ def test_structural_ab_variants_are_routed_to_review_without_canonical_duplicate
     assert unresolved_duplicate_groups(items) == ()
 
 
-def test_fractional_episode_position_sorts_exactly_between_adjacent_integers():
+def test_non_recap_fractional_evidence_is_not_an_effective_sort_position():
     items = [
         Video(
             id=index,
@@ -658,11 +658,11 @@ def test_fractional_episode_position_sorts_exactly_between_adjacent_integers():
     ]
 
     assert [video.filename for video in sorted(items, key=video_sort_key)] == [
-        "Show E05.mkv", "Show E05.5.mkv", "Show E06.mkv",
+        "Show E05.mkv", "Show E06.mkv", "Show E05.5.mkv",
     ]
     explicitly_sorted, _, _ = sort_title_videos(items, "episode", "asc")
     assert [video.filename for video in explicitly_sorted] == [
-        "Show E05.mkv", "Show E05.5.mkv", "Show E06.mkv",
+        "Show E05.mkv", "Show E06.mkv", "Show E05.5.mkv",
     ]
 
 

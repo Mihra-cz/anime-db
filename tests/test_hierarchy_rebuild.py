@@ -882,6 +882,29 @@ def test_fractional_recap_rebuild_preview_apply_and_repeat_are_consistent(
         assert repeated.numbering == ()
 
 
+def test_rebuild_blocks_effective_recap_projected_outside_season():
+    engine = _engine()
+    with Session(engine) as session:
+        recap = _video(
+            "Anime/Show/Bonus/Recap 3.5.mkv",
+            file_type="recap",
+        )
+        session.add(recap)
+        session.commit()
+
+        plan = build_hierarchy_rebuild_plan(session)
+
+        assert any(
+            blocker.code == "recap_outside_season"
+            and blocker.video_path == recap.relative_path
+            and blocker.prevents_apply
+            for blocker in plan.blockers
+        )
+        with pytest.raises(HierarchyPlanBlockedError, match="recap_outside_season"):
+            apply_hierarchy_rebuild_plan(session, plan)
+        assert recap.catalog_title_id is None
+
+
 def test_fractional_recap_rebuild_respects_explicit_manual_clear():
     engine = _engine()
     with Session(engine) as session:

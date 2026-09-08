@@ -34,7 +34,7 @@ from .models import (
     InternalSubtitle, TitleMetadata, Video, VideoVariantGroup,
 )
 from .structural_inference import infer_automatic_structural_values
-from .video_variants import assign_video_catalog_title
+from .video_variants import reconcile_video_catalog_title
 
 logger = logging.getLogger(__name__)
 
@@ -536,7 +536,7 @@ def migrate_schema(engine) -> None:
             # Existující assignment zůstává na videu zachován, ale unassigned
             # video se nesmí před vyhodnocením připojit k prvnímu path title.
             if not manual_split_titles(collection):
-                assign_video_catalog_title(video, title)
+                reconcile_video_catalog_title(video, title)
 
         apply_collection_grouping_authority(session)
         videos_by_collection = {}
@@ -572,7 +572,11 @@ def migrate_schema(engine) -> None:
                     if historical_manual_split_ambiguities(collection, manual_split):
                         protected_collection_ids.add(collection.id)
                         continue
-                    apply_manual_split_decisions(manual_split, collection)
+                    apply_manual_split_decisions(
+                        manual_split,
+                        collection,
+                        allow_invalid_recap_review=True,
+                    )
                     _apply_startup_structural_inputs(
                         collection,
                         collection_videos,

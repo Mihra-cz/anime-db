@@ -22,6 +22,7 @@ from app.models import (
     ExternalSubtitleCompatibility, InternalSubtitle,
     TitleMetadata, UnresolvedExternalSubtitle, Video,
 )
+from app.numbering import set_video_episode_number_from_input
 from app.subtitle_review import build_unresolved_subtitle_rows
 
 
@@ -472,6 +473,101 @@ def test_media_check_summary_filters_search_and_pagination_share_evaluator():
             videos, subtitle_filter=filter_name, page_size=20,
         )
         assert filtered.total_filtered == count
+
+
+def test_media_check_uses_effective_numbering_for_recap_display_search_and_sort():
+    collection, title = _collection()
+    episode_five = _video(5, title=title, collection=collection)
+    episode_six = _video(6, title=title, collection=collection)
+    episode_24 = _video(24, title=title, collection=collection)
+    episode_25 = _video(25, title=title, collection=collection)
+
+    manual_55 = _video(
+        55, file_type="recap", content_type_manual="recap",
+        title=title, collection=collection,
+    )
+    manual_55.filename = "Inserted recap.mkv"
+    manual_55.relative_path = "Anime/Media Show/Season 1/Inserted recap.mkv"
+    manual_55.local_episode_number = None
+    manual_55.season_episode_number = None
+    set_video_episode_number_from_input(manual_55, "5.5")
+
+    manual_249 = _video(
+        249, file_type="recap", content_type_manual="recap",
+        title=title, collection=collection,
+    )
+    manual_249.filename = "Recap 3.5.mkv"
+    manual_249.relative_path = "Anime/Media Show/Season 1/Recap 3.5.mkv"
+    manual_249.local_episode_number = None
+    manual_249.season_episode_number = None
+    set_video_episode_number_from_input(manual_249, "24.9")
+
+    parser_2425 = _video(
+        2425, file_type="recap", title=title, collection=collection,
+    )
+    parser_2425.filename = "Recap 24.25.mkv"
+    parser_2425.relative_path = "Anime/Media Show/Season 1/Recap 24.25.mkv"
+    parser_2425.local_episode_number = None
+    parser_2425.season_episode_number = None
+
+    manual_bonus = _video(
+        350, file_type="recap", content_type_manual="bonus",
+        title=title, collection=collection,
+    )
+    manual_bonus.filename = "Recap 3.5 bonus source.mkv"
+    manual_bonus.relative_path = (
+        "Anime/Media Show/Season 1/Recap 3.5 bonus source.mkv"
+    )
+    manual_bonus.local_episode_number = None
+    manual_bonus.season_episode_number = None
+    manual_bonus.episode_number_manual_override = 7
+
+    videos = [
+        episode_25, manual_249, episode_six, parser_2425,
+        manual_bonus, episode_five, manual_55, episode_24,
+    ]
+    results = build_media_check_results(
+        videos, subtitle_filter="all", page_size=20,
+    )
+    rows = {row.video.id: row for row in results.rows}
+
+    assert rows[manual_55.id].episode_label == "E5.5"
+    assert rows[manual_249.id].episode_label == "E24.9"
+    assert rows[parser_2425.id].episode_label == "E24.25"
+    assert rows[manual_bonus.id].episode_label == "Bonus 07"
+    assert "3.5" not in rows[manual_bonus.id].episode_label
+    assert [row.video.id for row in results.rows] == [
+        episode_five.id,
+        manual_55.id,
+        episode_six.id,
+        manual_bonus.id,
+        episode_24.id,
+        parser_2425.id,
+        manual_249.id,
+        episode_25.id,
+    ]
+
+    for query, expected_id in (
+        ("5.5", manual_55.id),
+        ("24.9", manual_249.id),
+        ("24.25", parser_2425.id),
+        ("Bonus 07", manual_bonus.id),
+    ):
+        searched = build_media_check_results(
+            videos,
+            subtitle_filter="all",
+            query=query,
+            page_size=20,
+        )
+        assert [row.video.id for row in searched.rows] == [expected_id]
+
+    integer_search = build_media_check_results(
+        videos,
+        subtitle_filter="all",
+        query="E24.mkv",
+        page_size=20,
+    )
+    assert [row.video.id for row in integer_search.rows] == [episode_24.id]
 
 
 def test_confirmed_duplicate_copy_keeps_facts_without_new_completion_unit():

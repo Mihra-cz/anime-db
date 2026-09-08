@@ -1135,12 +1135,28 @@ def effective_video_numbering(
     )
     if recap_position is not None:
         supplementary_hint = SupplementaryNumberingHint("recap", recap_position)
-    if video.content_type_manual == "episode":
+    effective_type = effective_video_content_type(
+        video,
+        effective_title,
+        detection=detection,
+        use_current_title=False,
+    )
+    if effective_type == "episode":
         classification = "standard"
-    elif video.content_type_manual or title_is_supplemental or ordinal is not None:
+    elif (
+        video.episode_number_manual_override is not None
+        and video.content_type_manual is None
+        and effective_type != "recap"
+        and ordinal is None
+    ):
+        classification = "standard"
+    elif (
+        effective_type in ORDINAL_TYPES - {"other"}
+        or video.content_type_manual
+        or title_is_supplemental
+        or ordinal is not None
+    ):
         classification = "supplementary"
-    elif video.episode_number_manual_override is not None:
-        classification = "standard"
     elif detection.is_supplementary:
         classification = "supplementary"
     elif detection.is_nonstandard:
@@ -1280,27 +1296,23 @@ def collection_requires_numbering_review(collection: CatalogCollection) -> bool:
 def effective_video_sort_position(
     video: Video,
     detection: EpisodeNumberDetection | None = None,
+    *,
+    numbering: EffectiveVideoNumbering | None = None,
 ) -> Decimal | None:
     """Return the shared numeric presentation position, never a string key."""
-    recap = manual_recap_episode_number(video)
-    if recap is not None:
-        return recap
     # Catalog presentation can sort ORM rows after their read-only session has
     # closed.  Reuse an eagerly loaded relationship when present, but never
     # trigger a lazy load merely to derive a numeric presentation key.
     loaded_title = video.__dict__.get("catalog_title")
-    state = effective_video_numbering(
-        video,
-        title=loaded_title,
-        use_current_title=False,
-        detection=detection,
+    state = numbering or effective_video_numbering(
+        video, title=loaded_title, use_current_title=False, detection=detection,
     )
-    if state.is_standard and state.season_episode_number is not None:
-        return Decimal(state.season_episode_number)
+    if state.is_standard:
+        number = state.season_episode_number or state.numbering_input
+        return Decimal(number) if number is not None else None
     if state.is_supplementary and state.supplementary_number is not None:
         return Decimal(state.supplementary_number)
-    detection = detection or state.detection
-    return detection.sortable_episode_value
+    return None
 
 
 def _confirmed_expected_episode_count(title: CatalogTitle) -> int | None:

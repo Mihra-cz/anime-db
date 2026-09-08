@@ -1,5 +1,7 @@
+import asyncio
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlencode
 
 import pytest
 from fastapi import HTTPException, Request
@@ -8,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.catalog import (
     detect_episode_number,
+    effective_video_content_type,
     effective_video_content_display,
     sort_title_videos,
 )
@@ -15,6 +18,7 @@ from app.catalog_video_presentation import build_catalog_title_video_presentatio
 from app.config import Settings
 from app.database import Base
 from app.hierarchy_authority import activate_manual_hierarchy_snapshot
+from app.hierarchy_evaluation import finalize_collection_hierarchy
 from app.hierarchy_review import classify_videos_in_place
 from app.main import create_app
 from app.migrations import migrate_schema
@@ -31,6 +35,8 @@ from app.numbering import (
     BulkRenumberMetrics,
     apply_deterministic_bulk_renumber,
     deterministic_bulk_renumber_proposal,
+    effective_recap_episode_number,
+    effective_video_numbering,
     logical_episode_partitions,
     manual_episode_number_input_value,
     manual_recap_episode_number,
@@ -41,6 +47,7 @@ from app.numbering import (
     validate_recap_number_for_content_type,
 )
 from app.scanner import scan_library
+from app.supplementary import supplementary_review_issues
 
 
 PROBE_RESULT = {
@@ -162,6 +169,31 @@ def _request(web_app, path):
     })
 
 
+def _post_form_request(web_app, path, items):
+    body = urlencode(items).encode()
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if sent:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request({
+        "type": "http",
+        "app": web_app,
+        "method": "POST",
+        "path": path,
+        "root_path": "",
+        "scheme": "http",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/x-www-form-urlencoded")],
+        "server": ("testserver", 80),
+        "client": ("testclient", 50000),
+    }, receive)
+
+
 def test_manual_input_is_integer_for_standard_and_one_decimal_for_recap():
     _collection, title, _videos, recaps = _graph(range(1, 3), expected_count=None)
     standard = _standard_by_number(title, 1)
@@ -231,6 +263,239 @@ def test_fractional_recap_reclassification_requires_explicit_number_clear():
         classify_videos_in_place(session, collection.id, [recap.id], "")
         assert recap.content_type_manual is None
         assert recap.recap_episode_number_manual_tenths is None
+
+
+def test_explicit_recap_to_bonus_keeps_raw_evidence_and_uses_integer_ordinal():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection, title, _videos, _recaps = _graph(
+            range(1, 3), recap_positions=(), expected_count=None,
+            explicit_ids=False,
+        )
+        recap = Video(
+            relative_path="Anime/Show/Season 1/Recap 3.5.mkv",
+            root_folder="Anime",
+            filename="Recap 3.5.mkv",
+            size=10,
+            mtime_ns=10,
+            file_type="recap",
+            content_type_manual="recap",
+            catalog_collection=collection,
+            catalog_title=title,
+        )
+        session.add(collection)
+        session.flush()
+        set_video_episode_number_from_input(recap, "5.5")
+
+        with pytest.raises(ValueError, match="nebude smazána automaticky"):
+            classify_videos_in_place(session, collection.id, [recap.id], "bonus")
+        assert recap.content_type_manual == "recap"
+        assert effective_recap_episode_number(recap) == Decimal("5.5")
+
+        set_video_episode_number_from_input(recap, "")
+        classify_videos_in_place(session, collection.id, [recap.id], "bonus")
+
+        assert recap.file_type == "recap"
+        assert effective_video_content_type(recap) == "bonus"
+        assert effective_recap_episode_number(recap) is None
+        assert effective_video_numbering(recap).supplementary_number is None
+        assert supplementary_review_issues([recap], title) == ()
+
+        set_video_episode_number_from_input(recap, "5")
+        state = effective_video_numbering(recap)
+        assert (state.supplementary_type, state.supplementary_number) == (
+            "bonus", 5,
+        )
+        with pytest.raises(ValueError, match="celé číslo"):
+            set_video_episode_number_from_input(recap, "5.5")
+
+        second = Video(
+            relative_path="Anime/Show/Season 1/Bonus interview.mkv",
+            root_folder="Anime",
+            filename="Bonus interview.mkv",
+            size=11,
+            mtime_ns=11,
+            file_type="other",
+            content_type_manual="bonus",
+            catalog_collection=collection,
+            catalog_title=title,
+        )
+        assert [issue.code for issue in supplementary_review_issues(
+            [recap, second], title,
+        )] == ["missing_supplementary_ordinal"]
+
+
+def test_public_move_rejects_effective_recap_outside_season_and_allows_season(
+    tmp_path: Path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'recap-move.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show",
+            normalized_local_title="show",
+            relative_root_path="Anime/Show",
+        )
+        season_one = CatalogTitle(
+            collection=collection,
+            local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Show/Season 1",
+        )
+        season_two = CatalogTitle(
+            collection=collection,
+            local_title="Season 2",
+            normalized_local_title="season 2",
+            relative_root_path="Anime/Show/Season 2",
+        )
+        bonus = CatalogTitle(
+            collection=collection,
+            local_title="Bonus",
+            normalized_local_title="bonus",
+            relative_root_path="Anime/Show/.catalog-part-bonus",
+        )
+        for title, part_type, season_number, label in (
+            (season_one, "season", 1, "S1"),
+            (season_two, "season", 2, "S2"),
+            (bonus, "bonus", None, "Bonus"),
+        ):
+            activate_manual_hierarchy_snapshot(
+                title,
+                part_type=part_type,
+                season_number=season_number,
+                part_number=None,
+                season_label=label,
+                sort_order=None,
+                verified_at=utc_now(),
+            )
+        manual = Video(
+            relative_path="Anime/Show/Season 1/Manual recap.mkv",
+            root_folder="Anime", filename="Manual recap.mkv", size=1, mtime_ns=1,
+            file_type="episode", content_type_manual="recap",
+            catalog_collection=collection, catalog_title=season_one,
+        )
+        parser = Video(
+            relative_path="Anime/Show/Season 1/Recap 3.5.mkv",
+            root_folder="Anime", filename="Recap 3.5.mkv", size=2, mtime_ns=2,
+            file_type="recap", catalog_collection=collection,
+            catalog_title=season_one,
+        )
+        raw_manual = Video(
+            relative_path="Anime/Show/Season 1/Raw recap.mkv",
+            root_folder="Anime", filename="Raw recap.mkv", size=3, mtime_ns=3,
+            file_type="recap", catalog_collection=collection,
+            catalog_title=season_one,
+        )
+        valid = Video(
+            relative_path="Anime/Show/Season 1/Valid recap.mkv",
+            root_folder="Anime", filename="Valid recap.mkv", size=4, mtime_ns=4,
+            file_type="episode", content_type_manual="recap",
+            catalog_collection=collection, catalog_title=season_one,
+        )
+        session.add(collection)
+        session.flush()
+        set_video_episode_number_from_input(manual, "24.9")
+        set_video_episode_number_from_input(raw_manual, "24.9")
+        set_video_episode_number_from_input(valid, "5.5")
+        session.commit()
+        ids = {
+            "collection": collection.id,
+            "season_one": season_one.id,
+            "season_two": season_two.id,
+            "bonus": bonus.id,
+            "manual": manual.id,
+            "parser": parser.id,
+            "raw_manual": raw_manual.id,
+            "valid": valid.id,
+        }
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    endpoint = endpoints["/hierarchy-review/{collection_id}/manage-videos"]
+    path = f"/hierarchy-review/{ids['collection']}/manage-videos"
+    for name in ("manual", "parser", "raw_manual"):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(endpoint(_post_form_request(web_app, path, [
+                ("video_ids", str(ids[name])),
+                ("operation", "move"),
+                ("target_title_id", str(ids["bonus"])),
+            ]), ids["collection"]))
+        assert exc_info.value.status_code == 400
+        assert "Season kontextu" in exc_info.value.detail
+
+    response = asyncio.run(endpoint(_post_form_request(web_app, path, [
+        ("video_ids", str(ids["valid"])),
+        ("operation", "move"),
+        ("target_title_id", str(ids["season_two"])),
+    ]), ids["collection"]))
+    assert response.status_code == 303
+
+    with web_app.state.sessions() as session:
+        for name in ("manual", "parser", "raw_manual"):
+            stored = session.get(Video, ids[name])
+            assert stored.catalog_title_id == ids["season_one"]
+        assert session.get(Video, ids["manual"]).recap_episode_number_manual_tenths == 249
+        assert session.get(Video, ids["raw_manual"]).recap_episode_number_manual_tenths == 249
+        moved = session.get(Video, ids["valid"])
+        assert moved.catalog_title_id == ids["season_two"]
+        assert moved.content_type_manual == "recap"
+        assert moved.recap_episode_number_manual_tenths == 55
+
+
+def test_shared_finalization_cannot_verify_legacy_recap_outside_season():
+    collection = CatalogCollection(
+        id=1,
+        local_title="Show",
+        normalized_local_title="show",
+        relative_root_path="Anime/Show",
+        hierarchy_status="verified",
+        hierarchy_verified_at=utc_now(),
+    )
+    bonus = CatalogTitle(
+        id=2,
+        collection=collection,
+        local_title="Bonus",
+        normalized_local_title="bonus",
+        relative_root_path="Anime/Show/Bonus",
+    )
+    activate_manual_hierarchy_snapshot(
+        bonus,
+        part_type="bonus",
+        season_number=None,
+        part_number=None,
+        season_label="Bonus",
+        sort_order=None,
+        verified_at=utc_now(),
+    )
+    recap = Video(
+        id=3,
+        relative_path="Anime/Show/Bonus/Recap 3.5.mkv",
+        root_folder="Anime",
+        filename="Recap 3.5.mkv",
+        size=1,
+        mtime_ns=1,
+        file_type="recap",
+        content_type_manual="recap",
+        catalog_collection=collection,
+        catalog_title=bonus,
+    )
+
+    result = finalize_collection_hierarchy(collection, [recap])
+
+    assert result.status == "review_required"
+    assert [
+        issue.code.value for issue in result.blocking_issues
+        if issue.code.value == "recap_outside_season"
+    ] == ["recap_outside_season"]
+    assert collection.hierarchy_verified_at is None
 
 
 def test_recap_sort_count_and_presentation_are_numeric_not_lexicographic():
@@ -743,8 +1008,8 @@ def test_manual_recap_authority_survives_startup_migration_and_temp_rescan(
     tmp_path: Path,
     monkeypatch,
 ):
-    media = tmp_path / "Show" / "E15.mkv"
-    media.parent.mkdir()
+    media = tmp_path / "Show" / "Season 1" / "E15.mkv"
+    media.parent.mkdir(parents=True)
     media.write_bytes(b"video")
     monkeypatch.setattr("app.scanner.service.probe_video", lambda *_args, **_kwargs: PROBE_RESULT)
     engine = create_engine(f"sqlite:///{tmp_path / 'rescan.db'}")
@@ -752,7 +1017,9 @@ def test_manual_recap_authority_survives_startup_migration_and_temp_rescan(
 
     with Session(engine) as session:
         scan_library(session, tmp_path)
-        video = session.scalar(select(Video).where(Video.relative_path == "Show/E15.mkv"))
+        video = session.scalar(select(Video).where(
+            Video.relative_path == "Show/Season 1/E15.mkv"
+        ))
         video.content_type_manual = "recap"
         set_video_episode_number_from_input(video, "14.5")
         session.commit()
@@ -768,4 +1035,36 @@ def test_manual_recap_authority_survives_startup_migration_and_temp_rescan(
         assert video.recap_episode_number_manual_tenths == 145
         assert manual_recap_episode_number(video) == Decimal("14.5")
         assert video.season_episode_number is None
+    assert media.exists()
+
+
+def test_scanner_and_startup_leave_recap_outside_season_unassigned_for_review(
+    tmp_path: Path,
+    monkeypatch,
+):
+    media = tmp_path / "Show" / "Bonus" / "Recap 3.5.mkv"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"video")
+    monkeypatch.setattr(
+        "app.scanner.service.probe_video",
+        lambda *_args, **_kwargs: PROBE_RESULT,
+    )
+    engine = create_engine(f"sqlite:///{tmp_path / 'invalid-recap.db'}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        result = scan_library(session, tmp_path)
+        video = session.scalar(select(Video))
+        assert result.errors == 0
+        assert video.catalog_title_id is None
+        assert video.catalog_collection.hierarchy_status == "review_required"
+        video_id = video.id
+
+    migrate_schema(engine)
+
+    with Session(engine) as session:
+        stored = session.get(Video, video_id)
+        assert stored.catalog_title_id is None
+        assert stored.catalog_collection.hierarchy_status == "review_required"
+        assert stored.catalog_collection.hierarchy_verified_at is None
     assert media.exists()

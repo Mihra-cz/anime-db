@@ -24,7 +24,14 @@ from .external_subtitle_compatibility import (
     VideoExternalSubtitleState,
     build_video_external_subtitle_states,
 )
+from .hierarchy_types import VIDEO_CONTENT_TYPE_LABELS
 from .models import Video
+from .numbering import (
+    EffectiveVideoNumbering,
+    effective_video_numbering,
+    effective_video_sort_position,
+    format_episode_position,
+)
 
 
 CZSK_AVAILABILITY_UNAVAILABLE = "unavailable"
@@ -131,6 +138,7 @@ class MediaCheckRow:
     title_name: str
     hierarchy_label: str
     episode_label: str
+    episode_sort_position: Decimal | None
     external_subtitle_state: VideoExternalSubtitleState
     audio_tracks: tuple[MediaAudioTrack, ...]
     internal_subtitles: tuple[MediaInternalSubtitle, ...]
@@ -295,17 +303,22 @@ def _audio_matches(evaluation: MediaCheckEvaluation, filter_name: str) -> bool:
     return filter_name == "all" or evaluation.factual.audio_status == filter_name
 
 
-def _episode_label(
-    video: Video, detection: EpisodeNumberDetection | None = None,
-) -> str:
-    if video.season_episode_number is not None:
-        return f"E{video.season_episode_number}"
-    detection = detection or detect_episode_number(video.filename)
-    if detection.display_value is None:
-        return "—"
-    if detection.kind in {"standard", "fractional", "zero"}:
-        return f"E{detection.display_value}"
-    return detection.display_value
+def _episode_label(numbering: EffectiveVideoNumbering) -> str:
+    if numbering.is_standard:
+        number = numbering.season_episode_number or numbering.numbering_input
+        return f"E{number}" if number is not None else "—"
+    if numbering.is_supplementary and numbering.supplementary_type is not None:
+        label = VIDEO_CONTENT_TYPE_LABELS.get(
+            numbering.supplementary_type,
+            numbering.supplementary_type.replace("_", " ").title(),
+        )
+        if numbering.supplementary_number is None:
+            return label
+        value = format_episode_position(numbering.supplementary_number)
+        if numbering.supplementary_type == "recap":
+            return f"E{value}"
+        return f"{label} {int(numbering.supplementary_number):02d}"
+    return "—"
 
 
 def _build_row(
@@ -334,6 +347,12 @@ def _build_row(
             catalog_title_display_title(title, title_name_preference, videos=())
             if title is not None else "Nezařazené video"
         )
+    numbering = effective_video_numbering(
+        video,
+        title,
+        use_current_title=False,
+        detection=detection,
+    )
     return MediaCheckRow(
         video=video,
         evaluation=build_media_check_evaluation(
@@ -344,7 +363,12 @@ def _build_row(
         collection_name=collection_name,
         title_name=title_name,
         hierarchy_label=catalog_title_series_label(title) if title is not None else "—",
-        episode_label=_episode_label(video, detection),
+        episode_label=_episode_label(numbering),
+        episode_sort_position=effective_video_sort_position(
+            video,
+            detection,
+            numbering=numbering,
+        ),
         external_subtitle_state=external_subtitle_state,
         audio_tracks=audio_tracks,
         internal_subtitles=internal_subtitles,
@@ -376,15 +400,8 @@ def _row_matches_search(row: MediaCheckRow, query: str) -> bool:
     )
 
 
-def _row_sort_key(
-    row: MediaCheckRow, detection: EpisodeNumberDetection | None = None,
-) -> tuple:
-    detection = detection or detect_episode_number(row.video.filename)
-    episode_value = (
-        Decimal(row.video.season_episode_number)
-        if row.video.season_episode_number is not None
-        else detection.sortable_episode_value
-    )
+def _row_sort_key(row: MediaCheckRow) -> tuple:
+    episode_value = row.episode_sort_position
     return (
         natural_sort_key(row.collection_name),
         natural_sort_key(row.title_name),
@@ -505,9 +522,7 @@ def build_media_check_results(
             row for row in (row_for(video) for video in videos)
             if _row_matches_search(row, normalized_query)
         ),
-        key=lambda row: _row_sort_key(
-            row, detection=detection_by_video.get(row.video),
-        ),
+        key=_row_sort_key,
     )
     subtitle_basis = [
         row for row in searched if _audio_matches(row.evaluation, audio_filter)

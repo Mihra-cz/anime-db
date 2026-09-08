@@ -6,7 +6,10 @@ import re
 
 from .catalog import derive_episode_number
 from .models import CatalogCollection, CatalogTitle, ManualSplitRuleVideo, Video
-from .video_variants import assign_video_catalog_title
+from .video_variants import (
+    assign_video_catalog_title,
+    reconcile_video_catalog_title,
+)
 from .numbering import effective_video_numbering, is_nonprimary_duplicate_video
 from .title_order import catalog_title_sort_key
 
@@ -484,6 +487,7 @@ def apply_manual_split_decisions(
     collection: CatalogCollection,
     *,
     catalog_titles: list[CatalogTitle] | None = None,
+    allow_invalid_recap_review: bool = False,
 ) -> None:
     """Apply an already complete decision; this function never matches rules."""
     targets = catalog_titles or [
@@ -496,7 +500,10 @@ def apply_manual_split_decisions(
         decision.video.catalog_collection = collection
         if decision.kind == ManualSplitDecisionKind.UNIQUE:
             target = targets[decision.assigned_rule.index]
-            assign_video_catalog_title(decision.video, target)
+            if allow_invalid_recap_review:
+                reconcile_video_catalog_title(decision.video, target)
+            else:
+                assign_video_catalog_title(decision.video, target)
         elif decision.kind in {
             ManualSplitDecisionKind.CONFLICT,
             ManualSplitDecisionKind.UNMATCHED,

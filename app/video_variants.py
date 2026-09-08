@@ -10,7 +10,8 @@ from typing import cast
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from .catalog import detect_episode_number
+from .catalog import detect_episode_number, effective_video_content_type
+from .collection_presentation import title_has_authoritative_season_context
 from .models import CatalogCollection, CatalogTitle, Video, VideoVariantGroup, utc_now
 from .numbering import (
     is_nonprimary_duplicate_video,
@@ -47,6 +48,13 @@ CONFIRMED_DUPLICATE_VARIANT_CONFLICT_MESSAGE = (
     "Potvrzená duplicita nemůže být rozdělena do dvou různých potvrzených "
     "variant. Nejprve upravte duplicate vztah."
 )
+RECAP_SEASON_CONTEXT_ERROR = (
+    "Recap lze přiřadit pouze do autoritativního Season kontextu."
+)
+
+
+class RecapSeasonContextError(ValueError):
+    """An effective Recap assignment has no resolved Season owner."""
 
 
 @dataclass(frozen=True)
@@ -313,6 +321,27 @@ def assign_video_variant_group(
     video.video_variant_group = group
 
 
+def validate_video_catalog_title_assignment(
+    video: Video,
+    catalog_title: CatalogTitle | None,
+) -> None:
+    """Validate content/number authority against one prospective title."""
+    from .numbering import validate_recap_number_for_content_type
+
+    effective_type = effective_video_content_type(
+        video,
+        catalog_title,
+        use_current_title=False,
+    )
+    validate_recap_number_for_content_type(video, effective_type)
+    if (
+        catalog_title is not None
+        and effective_type == "recap"
+        and not title_has_authoritative_season_context(catalog_title)
+    ):
+        raise RecapSeasonContextError(RECAP_SEASON_CONTEXT_ERROR)
+
+
 def assign_video_catalog_title(
     video: Video,
     catalog_title: CatalogTitle | None,
@@ -324,20 +353,7 @@ def assign_video_catalog_title(
     Without an explicit new group, an existing assignment survives only when it
     belongs to the target title. No corresponding group is inferred or cloned.
     """
-    # Local import keeps the central membership helper free of an import cycle.
-    from .hierarchy_types import SUPPLEMENTARY_PART_TYPES
-    from .numbering import validate_recap_number_for_content_type
-
-    target_title_type = (
-        catalog_title.effective_part_type
-        if catalog_title is not None
-        and catalog_title.effective_part_type in SUPPLEMENTARY_PART_TYPES
-        else None
-    )
-    validate_recap_number_for_content_type(
-        video,
-        video.content_type_manual or target_title_type or video.file_type,
-    )
+    validate_video_catalog_title_assignment(video, catalog_title)
     if video_variant_group is _UNSPECIFIED_GROUP:
         current_group = video.video_variant_group
         target_group = (
@@ -358,6 +374,24 @@ def assign_video_catalog_title(
 
     video.catalog_title = catalog_title
     video.video_variant_group = target_group
+
+
+def reconcile_video_catalog_title(
+    video: Video,
+    catalog_title: CatalogTitle | None,
+) -> bool:
+    """Apply an automatic assignment or leave an invalid Recap for review.
+
+    Existing invalid authority is preserved for structured review. A newly
+    proposed invalid target is not persisted and the video remains unassigned.
+    """
+    try:
+        assign_video_catalog_title(video, catalog_title)
+    except RecapSeasonContextError:
+        if not _titles_match(video.catalog_title, catalog_title):
+            assign_video_catalog_title(video, None)
+        return False
+    return True
 
 
 def parser_variant_suggestion(video: Video) -> ParserVariantSuggestion | None:

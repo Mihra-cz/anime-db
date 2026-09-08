@@ -72,7 +72,10 @@ from .title_naming import (
     safe_catalog_title_local_title,
 )
 from .title_order import catalog_title_sort_key
-from .video_variants import assign_video_catalog_title
+from .video_variants import (
+    assign_video_catalog_title,
+    validate_video_catalog_title_assignment,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1963,7 +1966,7 @@ def classify_videos_in_place(
         previous = video.content_type_manual
         video.content_type_manual = normalized_type
         try:
-            validate_recap_number_for_content_type(video, effective_video_content_type(video))
+            validate_video_catalog_title_assignment(video, video.catalog_title)
         except ValueError:
             video.content_type_manual = previous
             raise
