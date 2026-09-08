@@ -450,6 +450,397 @@ def test_public_move_rejects_effective_recap_outside_season_and_allows_season(
         assert moved.recap_episode_number_manual_tenths == 55
 
 
+def _title_hierarchy_endpoint(web_app):
+    return next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None)
+        == "/collections/{collection_id}/titles/{catalog_title_id}/hierarchy"
+    )
+
+
+def _post_title_hierarchy(
+    endpoint,
+    collection_id: int,
+    title_id: int,
+    *,
+    part_type: str,
+    season_number: str = "",
+    season_label: str = "",
+):
+    return endpoint(
+        collection_id,
+        title_id,
+        season_number_manual=season_number,
+        season_label_manual=season_label,
+        part_number_manual="",
+        part_type_manual=part_type,
+        sort_order_manual="",
+        hierarchy_verified=True,
+        filter_name="all",
+        q="",
+        sort="",
+        direction="",
+        return_to="hierarchy_review",
+    )
+
+
+def _hierarchy_write_state(session: Session, collection_id: int) -> tuple:
+    def stored_datetime(value):
+        return value.replace(tzinfo=None) if value is not None else None
+
+    collection = session.get(CatalogCollection, collection_id)
+    return (
+        (
+            collection.hierarchy_status,
+            stored_datetime(collection.hierarchy_verified_at),
+            collection.hierarchy_note,
+            stored_datetime(collection.created_at),
+            stored_datetime(collection.updated_at),
+        ),
+        tuple(sorted(
+            (
+                title.id,
+                title.part_type,
+                title.season_number,
+                title.part_number,
+                title.season_label,
+                title.sort_order,
+                title.hierarchy_manual_override,
+                title.part_type_manual,
+                title.season_number_manual,
+                title.part_number_manual,
+                title.season_label_manual,
+                title.sort_order_manual,
+                stored_datetime(title.hierarchy_verified_at),
+                stored_datetime(title.created_at),
+                stored_datetime(title.updated_at),
+            )
+            for title in collection.titles
+        )),
+        tuple(sorted(
+            (
+                video.id,
+                video.catalog_title_id,
+                video.catalog_collection_id,
+                video.content_type_manual,
+                video.recap_episode_number_manual_tenths,
+                video.episode_number_manual_override,
+                stored_datetime(video.episode_number_verified_at),
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.external_episode_number,
+                video.episode_number_source,
+                video.episode_number_confidence,
+                video.file_type,
+                video.filename,
+                video.relative_path,
+                video.size,
+                video.mtime_ns,
+            )
+            for video in collection.videos
+        )),
+    )
+
+
+def _seed_recap_title_hierarchy_app(
+    tmp_path: Path,
+    *,
+    manual_recap: bool,
+):
+    database_name = "manual-recap-title.db" if manual_recap else "parser-recap-title.db"
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / database_name}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show",
+            normalized_local_title="show",
+            relative_root_path="Anime/Show",
+            hierarchy_status="verified",
+            hierarchy_verified_at=utc_now(),
+        )
+        season = CatalogTitle(
+            collection=collection,
+            local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Show/Season 1",
+            part_type="season",
+            season_number=1,
+            season_label="S1",
+        )
+        activate_manual_hierarchy_snapshot(
+            season,
+            part_type="season",
+            season_number=1,
+            part_number=None,
+            season_label="S1",
+            sort_order=None,
+            verified_at=utc_now(),
+        )
+        recap = Video(
+            relative_path="Anime/Show/Season 1/Recap 3.5.mkv",
+            root_folder="Anime",
+            filename="Recap 3.5.mkv",
+            size=1,
+            mtime_ns=1,
+            file_type="recap",
+            content_type_manual="recap" if manual_recap else None,
+            recap_episode_number_manual_tenths=249 if manual_recap else None,
+            catalog_collection=collection,
+            catalog_title=season,
+        )
+        Video(
+            relative_path="Anime/Show/Season 1/Episode 01.mkv",
+            root_folder="Anime",
+            filename="Episode 01.mkv",
+            size=2,
+            mtime_ns=2,
+            file_type="episode",
+            season_episode_number=1,
+            catalog_collection=collection,
+            catalog_title=season,
+        )
+        Video(
+            relative_path="Anime/Show/Season 1/Bonus interview.mkv",
+            root_folder="Anime",
+            filename="Bonus interview.mkv",
+            size=3,
+            mtime_ns=3,
+            file_type="bonus",
+            catalog_collection=collection,
+            catalog_title=season,
+        )
+        session.add(collection)
+        session.commit()
+        ids = collection.id, season.id, recap.id
+        before = _hierarchy_write_state(session, collection.id)
+    return web_app, ids, before
+
+
+@pytest.mark.parametrize("manual_recap", [True, False], ids=["manual-24.9", "parser-3.5"])
+def test_public_title_hierarchy_rejects_mixed_season_to_bonus_atomically(
+    tmp_path: Path,
+    manual_recap: bool,
+):
+    web_app, (collection_id, season_id, recap_id), before = (
+        _seed_recap_title_hierarchy_app(tmp_path, manual_recap=manual_recap)
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        _post_title_hierarchy(
+            _title_hierarchy_endpoint(web_app),
+            collection_id,
+            season_id,
+            part_type="bonus",
+        )
+
+    assert raised.value.status_code == 400
+    assert "efektivní Recap" in raised.value.detail
+    assert "Season kontext" in raised.value.detail
+    with web_app.state.sessions() as session:
+        assert _hierarchy_write_state(session, collection_id) == before
+        recap = session.get(Video, recap_id)
+        assert recap.file_type == "recap"
+        assert detect_episode_number(recap.filename).display_value == "3.5"
+        if manual_recap:
+            assert recap.content_type_manual == "recap"
+            assert effective_recap_episode_number(recap) == Decimal("24.9")
+        else:
+            assert recap.content_type_manual is None
+            assert recap.recap_episode_number_manual_tenths is None
+            assert effective_recap_episode_number(recap) == Decimal("3.5")
+
+
+def test_parser_recap_explicit_bonus_allows_followup_title_hierarchy_change(
+    tmp_path: Path,
+):
+    web_app, (collection_id, season_id, recap_id), _before = (
+        _seed_recap_title_hierarchy_app(tmp_path, manual_recap=False)
+    )
+    with web_app.state.sessions() as session:
+        recap = session.get(Video, recap_id)
+        classify_videos_in_place(session, collection_id, [recap_id], "bonus")
+        set_video_episode_number_from_input(recap, "7")
+        session.commit()
+        assert recap.file_type == "recap"
+        assert detect_episode_number(recap.filename).display_value == "3.5"
+        assert effective_video_content_type(recap) == "bonus"
+        assert effective_recap_episode_number(recap) is None
+        assert effective_video_numbering(recap).supplementary_number == 7
+
+    response = _post_title_hierarchy(
+        _title_hierarchy_endpoint(web_app),
+        collection_id,
+        season_id,
+        part_type="bonus",
+    )
+
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        season = session.get(CatalogTitle, season_id)
+        recap = session.get(Video, recap_id)
+        assert season.effective_part_type == "bonus"
+        assert recap.catalog_title_id == season_id
+        assert recap.content_type_manual == "bonus"
+        assert recap.recap_episode_number_manual_tenths is None
+        assert recap.file_type == "recap"
+        assert detect_episode_number(recap.filename).display_value == "3.5"
+        assert effective_recap_episode_number(recap) is None
+        assert effective_video_numbering(recap).supplementary_number == 7
+
+
+def test_manual_recap_clear_then_bonus_allows_followup_title_hierarchy_change(
+    tmp_path: Path,
+):
+    web_app, (collection_id, season_id, recap_id), _before = (
+        _seed_recap_title_hierarchy_app(tmp_path, manual_recap=True)
+    )
+    with web_app.state.sessions() as session:
+        recap = session.get(Video, recap_id)
+        with pytest.raises(ValueError, match="nebude smazána automaticky"):
+            classify_videos_in_place(session, collection_id, [recap_id], "bonus")
+        assert recap.content_type_manual == "recap"
+        assert recap.recap_episode_number_manual_tenths == 249
+
+        set_video_episode_number_from_input(recap, "")
+        classify_videos_in_place(session, collection_id, [recap_id], "bonus")
+        set_video_episode_number_from_input(recap, "7")
+        session.commit()
+        assert recap.file_type == "recap"
+        assert recap.content_type_manual == "bonus"
+        assert recap.recap_episode_number_manual_tenths is None
+        assert effective_recap_episode_number(recap) is None
+
+    response = _post_title_hierarchy(
+        _title_hierarchy_endpoint(web_app),
+        collection_id,
+        season_id,
+        part_type="bonus",
+    )
+
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        season = session.get(CatalogTitle, season_id)
+        recap = session.get(Video, recap_id)
+        assert season.effective_part_type == "bonus"
+        assert recap.catalog_title_id == season_id
+        assert recap.file_type == "recap"
+        assert recap.content_type_manual == "bonus"
+        assert effective_video_numbering(recap).supplementary_number == 7
+
+
+def test_public_title_hierarchy_allows_season_edit_with_effective_recap(
+    tmp_path: Path,
+):
+    web_app, (collection_id, season_id, recap_id), _before = (
+        _seed_recap_title_hierarchy_app(tmp_path, manual_recap=True)
+    )
+
+    response = _post_title_hierarchy(
+        _title_hierarchy_endpoint(web_app),
+        collection_id,
+        season_id,
+        part_type="season",
+        season_number="2",
+        season_label="S2",
+    )
+
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        season = session.get(CatalogTitle, season_id)
+        recap = session.get(Video, recap_id)
+        assert (season.effective_part_type, season.effective_season_number) == (
+            "season", 2,
+        )
+        assert recap.catalog_title_id == season_id
+        assert recap.content_type_manual == "recap"
+        assert effective_recap_episode_number(recap) == Decimal("24.9")
+
+
+def test_primary_title_edit_protects_recap_in_attached_supplementary_title(
+    tmp_path: Path,
+):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'attached-recap-title.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection = CatalogCollection(
+            local_title="Show",
+            normalized_local_title="show",
+            relative_root_path="Anime/Show",
+            hierarchy_status="verified",
+            hierarchy_verified_at=utc_now(),
+        )
+        season = CatalogTitle(
+            collection=collection,
+            local_title="Season 1",
+            normalized_local_title="season 1",
+            relative_root_path="Anime/Show/Season 1",
+            part_type="season",
+            season_number=1,
+            season_label="S1",
+        )
+        extras = CatalogTitle(
+            collection=collection,
+            local_title="Season 1 Extras",
+            normalized_local_title="season 1 extras",
+            relative_root_path="Anime/Show/Season 1 Extras",
+            part_type="bonus",
+            season_number=1,
+            season_label="S1",
+        )
+        for title, part_type in ((season, "season"), (extras, "bonus")):
+            activate_manual_hierarchy_snapshot(
+                title,
+                part_type=part_type,
+                season_number=1,
+                part_number=None,
+                season_label="S1",
+                sort_order=None,
+                verified_at=utc_now(),
+            )
+        recap = Video(
+            relative_path="Anime/Show/Season 1 Extras/Recap 3.5.mkv",
+            root_folder="Anime",
+            filename="Recap 3.5.mkv",
+            size=1,
+            mtime_ns=1,
+            file_type="recap",
+            catalog_collection=collection,
+            catalog_title=extras,
+        )
+        session.add(collection)
+        session.commit()
+        collection_id, season_id, recap_id = collection.id, season.id, recap.id
+        before = _hierarchy_write_state(session, collection_id)
+
+    with pytest.raises(HTTPException) as raised:
+        _post_title_hierarchy(
+            _title_hierarchy_endpoint(web_app),
+            collection_id,
+            season_id,
+            part_type="bonus",
+        )
+
+    assert raised.value.status_code == 400
+    assert "Season kontext" in raised.value.detail
+    with web_app.state.sessions() as session:
+        assert _hierarchy_write_state(session, collection_id) == before
+        recap = session.get(Video, recap_id)
+        assert recap.catalog_title is not None
+        assert recap.catalog_title.local_title == "Season 1 Extras"
+        assert effective_recap_episode_number(recap) == Decimal("3.5")
+
+
 def test_shared_finalization_cannot_verify_legacy_recap_outside_season():
     collection = CatalogCollection(
         id=1,

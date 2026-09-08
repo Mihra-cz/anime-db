@@ -13,6 +13,11 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .catalog import GENERIC_ROOTS, detect_episode_number, normalize_title, effective_video_content_type
+from .collection_presentation import (
+    CollectionPresentation,
+    build_collection_presentation,
+    title_has_authoritative_season_context,
+)
 from .hierarchy import derive_library_hierarchy, parse_explicit_part
 from .hierarchy_authority import (
     activate_manual_hierarchy_snapshot,
@@ -1345,6 +1350,120 @@ class _ProjectedHierarchyTitle:
     effective_part_number: int | None
 
 
+@dataclass(frozen=True)
+class _ProspectiveCatalogTitle:
+    """Read-only effective hierarchy override for shared presentation resolvers."""
+
+    source: CatalogTitle
+    effective_part_type: str
+    effective_season_number: int | None
+    effective_part_number: int | None
+
+    def __getattr__(self, name: str):
+        return getattr(self.source, name)
+
+
+def _presentation_context_identity(
+    presentation: CollectionPresentation,
+    title: CatalogTitle | _ProspectiveCatalogTitle,
+) -> tuple[int, str, int | None, int | None] | None:
+    context = presentation.structural_context_for_title(title)
+    if context is None:
+        return None
+    owner = context.title
+    source = (
+        owner.source if isinstance(owner, _ProspectiveCatalogTitle) else owner
+    )
+    return (
+        id(source),
+        owner.effective_part_type,
+        owner.effective_season_number,
+        owner.effective_part_number,
+    )
+
+
+def _validate_prospective_recap_season_context(
+    collection: CatalogCollection,
+    title: CatalogTitle,
+    *,
+    part_type: str,
+    season_number: int | None,
+    part_number: int | None,
+) -> None:
+    """Reject a title edit that would leave an affected effective Recap rootless."""
+    current_titles = list(collection.titles)
+    prospective_title = _ProspectiveCatalogTitle(
+        source=title,
+        effective_part_type=part_type,
+        effective_season_number=season_number,
+        effective_part_number=part_number,
+    )
+    prospective_titles = [
+        prospective_title if candidate is title else candidate
+        for candidate in current_titles
+    ]
+    current_presentation = build_collection_presentation(
+        current_titles,
+        include_videos=False,
+    )
+    prospective_presentation = build_collection_presentation(
+        prospective_titles,
+        include_videos=False,
+    )
+    current_by_id = {
+        candidate.id: candidate
+        for candidate in current_titles
+        if candidate.id is not None
+    }
+    prospective_by_id = {
+        candidate.id: candidate
+        for candidate in prospective_titles
+        if candidate.id is not None
+    }
+
+    for video in collection.videos:
+        current_title = (
+            current_by_id.get(video.catalog_title_id)
+            if video.catalog_title_id is not None
+            else video.__dict__.get("catalog_title")
+        )
+        if current_title is None:
+            continue
+        prospective_video_title = (
+            prospective_by_id.get(video.catalog_title_id)
+            if video.catalog_title_id is not None
+            else prospective_title if current_title is title else current_title
+        )
+        if prospective_video_title is None:
+            continue
+        current_context = _presentation_context_identity(
+            current_presentation,
+            current_title,
+        )
+        prospective_context = _presentation_context_identity(
+            prospective_presentation,
+            prospective_video_title,
+        )
+        if current_title is not title and current_context == prospective_context:
+            continue
+        effective_type = effective_video_content_type(
+            video,
+            prospective_video_title,
+            use_current_title=False,
+        )
+        if (
+            effective_type == "recap"
+            and not title_has_authoritative_season_context(
+                prospective_video_title,
+                presentation=prospective_presentation,
+            )
+        ):
+            raise ValueError(
+                "Část nelze změnit tak, že by efektivní Recap ztratil "
+                "autoritativní Season kontext."
+            )
+
+
 def _safe_contiguous_episode_range(
     videos: list[Video], title: CatalogTitle,
 ) -> SeasonEpisodeRange | None:
@@ -1603,20 +1722,6 @@ def set_manual_title_hierarchy(
         _validate_structural_numbers(
             snapshot_type, snapshot_season_number, snapshot_part_number,
         )
-        for video in title.videos:
-            projected_title_type = (
-                snapshot_type
-                if snapshot_type in SUPPLEMENTAL_PART_TYPES
-                else None
-            )
-            projected_content_type = (
-                video.content_type_manual
-                or projected_title_type
-                or video.file_type
-            )
-            validate_recap_number_for_content_type(
-                video, projected_content_type
-            )
         if title.collection is not None:
             _validate_split_season_structure(
                 title.collection,
@@ -1624,6 +1729,28 @@ def set_manual_title_hierarchy(
                 override_part_type=snapshot_type,
                 override_season_number=snapshot_season_number,
                 override_part_number=snapshot_part_number,
+            )
+            _validate_prospective_recap_season_context(
+                title.collection,
+                title,
+                part_type=snapshot_type,
+                season_number=snapshot_season_number,
+                part_number=snapshot_part_number,
+            )
+        projected_title = _ProspectiveCatalogTitle(
+            source=title,
+            effective_part_type=snapshot_type,
+            effective_season_number=snapshot_season_number,
+            effective_part_number=snapshot_part_number,
+        )
+        for video in title.videos:
+            validate_recap_number_for_content_type(
+                video,
+                effective_video_content_type(
+                    video,
+                    projected_title,
+                    use_current_title=False,
+                ),
             )
         if snapshot_type == "part":
             snapshot_label = (
@@ -1650,16 +1777,33 @@ def set_manual_title_hierarchy(
             verified_at=utc_now(),
         )
     else:
-        for video in title.videos:
-            projected_title_type = (
-                title.part_type
-                if title.part_type in SUPPLEMENTAL_PART_TYPES else None
+        projected_part_number = (
+            title.part_number
+            if title.part_type in {"season", "part", "cour"}
+            else None
+        )
+        if title.collection is not None:
+            _validate_prospective_recap_season_context(
+                title.collection,
+                title,
+                part_type=title.part_type,
+                season_number=title.season_number,
+                part_number=projected_part_number,
             )
+        projected_title = _ProspectiveCatalogTitle(
+            source=title,
+            effective_part_type=title.part_type,
+            effective_season_number=title.season_number,
+            effective_part_number=projected_part_number,
+        )
+        for video in title.videos:
             validate_recap_number_for_content_type(
                 video,
-                video.content_type_manual
-                or projected_title_type
-                or video.file_type,
+                effective_video_content_type(
+                    video,
+                    projected_title,
+                    use_current_title=False,
+                ),
             )
         clear_manual_hierarchy_snapshot(title)
     if title.collection is not None:
