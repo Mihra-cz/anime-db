@@ -127,8 +127,12 @@ která agent nesmí při lokální změně obejít.
   více fyzických souborů jedné logical identity. Běžné raw/source episode number
   se bez bezpečné evidence nesmí překlopit na supplementary ordinal.
 - Episode vyžaduje logical číslo vždy. Ostatní video typy vyžadují typed ordinal
-  až při 2+ logical identities stejného namespace přes celou collection;
-  nepočítej fyzické rows. Singletonu nemaž existující bezpečné číslo.
+  až při 2+ logical identities stejného effective typu a authoritative
+  structural contextu uvnitř collection. Reuse attachment z CollectionPresentation;
+  různé supplementary titles téhož kontextu sdílejí namespace, různé hlavní části
+  nikoli. Bez attachmentu použij collection root. Complete Media Parts, varianty
+  a potvrzené duplicity vyhodnoť před multiplicitou; nepočítej fyzické rows.
+  Singletonu nemaž existující bezpečné číslo.
 - Fractional Recap si zachovává přesnou chronologickou pozici (manual před
   parserem); nikdy mu nepřidávej druhý typed ordinal ani jej nepřečísluj.
 - `Video.content_type_manual` přebíjí parserový typ, ale parserový ordinal se

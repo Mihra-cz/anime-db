@@ -227,7 +227,8 @@ def test_overlord_content_editor_reuses_classification_and_preserves_raw_evidenc
     ("/hierarchy-review/{collection_id}", "collection"),
     ("/hierarchy-review", None),
 ])
-def test_collection_wide_identity_review_is_bounded_and_read_only(performance_app, route, argument):
+@pytest.mark.parametrize("structural", [False, True])
+def test_collection_wide_identity_review_is_bounded_and_read_only(performance_app, route, argument, structural):
     web_app, ids = performance_app
     engine = web_app.state.sessions.kw["bind"]
     endpoint = next(r.endpoint for r in web_app.routes if getattr(r, "path", None) == route)
@@ -252,6 +253,12 @@ def test_collection_wide_identity_review_is_bounded_and_read_only(performance_ap
         title.part_type = "bonus"
         item = title.videos[0]
         item.content_type_manual = "bonus"
+        if structural:
+            session.add(CatalogTitle(
+                collection=title.collection, local_title="S1", normalized_local_title="s1",
+                relative_root_path="Anime/Performance Show/Primary 1",
+                part_type="season", season_number=1, season_label="S1",
+            ))
         session.commit()
     baseline, _ = measure()
     with Session(engine) as session:
@@ -260,6 +267,7 @@ def test_collection_wide_identity_review_is_bounded_and_read_only(performance_ap
             title = CatalogTitle(
                 collection=collection, local_title=f"Extras {i}", normalized_local_title=f"extras {i}",
                 relative_root_path=f"Anime/Performance Show/Extras {i}", part_type="bonus",
+                season_number=i + 2 if structural else None,
             )
             session.add(Video(
                 catalog_title=title, catalog_collection=collection,
@@ -267,11 +275,28 @@ def test_collection_wide_identity_review_is_bounded_and_read_only(performance_ap
                 relative_path=f"{title.relative_root_path}/Bonus item {i}.mkv",
                 root_folder="Anime", file_type="bonus", size=1, mtime_ns=1,
                 content_type_manual="bonus",
+                episode_number_manual_override=1 if structural else None,
+                media_part_number=1 if structural else None,
             ))
+            if structural:
+                session.add(CatalogTitle(
+                    collection=collection, local_title=f"S{i + 2}", normalized_local_title=f"s{i + 2}",
+                    relative_root_path=f"Anime/Performance Show/Primary {i + 2}",
+                    part_type="season", season_number=i + 2, season_label=f"S{i + 2}",
+                ))
+                session.add(Video(
+                    catalog_title=title, catalog_collection=collection,
+                    filename=f"Bonus item {i} second segment.mkv",
+                    relative_path=f"{title.relative_root_path}/Bonus item {i} second segment.mkv",
+                    root_folder="Anime", file_type="bonus", size=1, mtime_ns=1,
+                    content_type_manual="bonus", episode_number_manual_override=1,
+                    media_part_number=2,
+                ))
         session.commit()
     expanded, html = measure()
     assert expanded == baseline
-    assert "Chybějící supplementary ordinal" in html
+    assert ("Chybějící supplementary ordinal" in html) is not structural
+    assert "Kolize supplementary ordinalu" not in html
 
 
 def test_title_detail_count_comparison_is_semantically_read_only(performance_app):

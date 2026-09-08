@@ -130,7 +130,7 @@ fallback inference, nikoli nová autoritativní ruční klasifikace.
 
 | Osa | Současný význam |
 | --- | --- |
-| Typed local ordinal | Lokální identita v namespace `(CatalogCollection, effective video type)`; Preview/PV namespace sdílejí. Není automaticky providerové číslo. |
+| Typed local ordinal | Lokální identita v namespace `(CatalogCollection, authoritative structural context, effective video type)`; Preview/PV namespace sdílejí. Není automaticky providerové číslo. |
 | Media Part | Ručně určený fyzický segment jedné logické položky, `Video.media_part_number`. |
 | Video variant | Ručně potvrzená release/content skupina jednoho title; její reprezentace konkrétní epizody sdílí stejnou logickou identitu. |
 
@@ -244,20 +244,32 @@ Teprve kompatibilní evidence nebo explicitní manual ordinal 5 vytvoří Bonus0
 raw typ a filename evidence přitom zůstávají dostupné v detailu.
 
 Ordinal je povinný až při 2+ distinct logical identities stejného effective
-typu/namespace přes celou collection, i napříč titles. Singleton může zůstat
+typu a authoritative structural contextu uvnitř collection, i napříč supplementary
+titles téhož kontextu. Singleton může zůstat
 bez čísla; existující bezpečný parser/manual ordinal se nemaže. Preview/PV
 sdílejí namespace, OP a ED mají oddělené.
+
+Structural context přebírá attachment z `CollectionPresentation` nad effective
+hierarchy: hlavní Season/Part/Cour/title je vlastním kontextem, připojený doplněk
+přebírá identitu této hlavní části. Pouhá shoda ordinalu nebo názvu souboru
+není attachment. Současná projekce připojuje supplementary title jen při právě
+jedné hlavní části odpovídající effective season contextu; chybějící či nejednoznačný
+attachment zůstává v anime-level/root namespace dané collection. Nový season/part
+odhad nevzniká. Complete manual snapshot má přes effective properties přednost;
+neúplná historická pole nejsou effective ruční autoritou.
 
 Multiplicity i collision review používají společný inventory: potvrzené
 duplicate secondary nezvyšují count, různé potvrzené varianty známé identity a
 úplné Media Parts téže identity tvoří jednu položku. Úplná nečíslovaná sada
 Media Parts uvnitř jednoho title může být singleton. Samotné variant groups
 bez společné identity ani neúplné segmenty nejsou důkazem totožnosti.
-Stejný ordinal ve dvou různých titles představuje collection-wide kolizi;
-title-local variantní autorita ji nemůže vysvětlit. Missing ordinal při
+Stejný ordinal ve dvou různých structural contextech není kolize. Ve stejném
+kontextu se posoudí společná identita i napříč supplementary titles; úplnost
+segmentů ověřuje shared `media_part_total` před multiplicitou a collision review.
+Variant groups z jiného title nejsou vysvětlením společného ordinalu. Missing ordinal při
 multiplicitě, nevysvětlená kolize a neplatná duplicate vazba vyžadují derived
 review bez zápisu hierarchy statusu. Detail videa a Hierarchy Review používají
-stejnou collection-wide projekci. Metadata count nadále vyhodnocuje scope
+stejnou structural namespace projekci v rámci collection. Metadata count nadále vyhodnocuje scope
 konkrétního title; přísný inventory při nejasnosti vrací neznámý logical count.
 Absence review u singletonu není sama důkaz připravenosti pro budoucí rename.
 

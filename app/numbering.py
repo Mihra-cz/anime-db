@@ -186,7 +186,9 @@ class EpisodeDuplicateGroup:
 
 
 def is_confirmed_duplicate(video: Video) -> bool:
-    return video.duplicate_of_video_id is not None or video.duplicate_of is not None
+    # Persisted FK is sufficient; the loaded relation also covers unflushed edits.
+    # A scalar read model must not lazy-load the primary merely to test existence.
+    return video.duplicate_of_video_id is not None or video.__dict__.get("duplicate_of") is not None
 
 
 def is_nonprimary_duplicate_video(video: Video) -> bool:

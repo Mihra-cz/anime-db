@@ -109,6 +109,14 @@ def variant_group_id(video: Video) -> int | None:
 
 def representation_conflict(videos: list[Video]) -> bool:
     """Distinct confirmed lanes and complete physical parts are separate axes."""
+    from .media_parts import media_part_total
+    # Variant groups belong to one title; unlike explicit physical segments,
+    # groups from different titles cannot explain a shared ordinal.
+    if any(variant_group_id(v) is not None for v in videos) and len({
+        v.catalog_title_id if v.catalog_title_id is not None
+        else id(v.__dict__.get("catalog_title")) for v in videos
+    }) > 1:
+        return True
     lanes: dict[int | None, list[Video]] = defaultdict(list)
     for video in videos:
         lanes[variant_group_id(video)].append(video)
@@ -119,15 +127,14 @@ def representation_conflict(videos: list[Video]) -> bool:
         if all(part is None for part in parts):
             if len(items) > 1:
                 return True
-        elif (len(parts) < 2 or None in parts or len(set(parts)) != len(parts)
-              or min(parts) != 1 or max(parts) != len(parts)):
+        elif None in parts or media_part_total(items) != len(items):
             return True
     return False
 
 
 @dataclass(frozen=True)
 class SupplementaryIdentity:
-    catalog_title_key: tuple[str, int]
+    catalog_title_key: tuple
     supplementary_type: str
     ordinal: int | None
 
@@ -188,9 +195,76 @@ class SupplementaryReviewIssue:
         }[self.code]
 
 
+@dataclass(frozen=True)
+class TypedStructuralContext:
+    key: tuple
+    label: str
+
+
+def typed_structural_contexts(
+    videos: list[Video], titles: list[CatalogTitle] | None = None,
+) -> dict[Video, TypedStructuralContext]:
+    """Reuse collection attachment authority, without lazy loads or inference.
+
+    Callers provide all collection titles, including primaries without videos.
+    An already loaded collection can supply them for standalone inventory calls.
+    """
+    from .collection_presentation import build_collection_presentation
+
+    known = {id(t): t for t in titles or []}
+    seen_collections = set()
+    for video in videos:
+        title = video.__dict__.get("catalog_title")
+        if title is not None:
+            known[id(title)] = title
+            collection = title.__dict__.get("collection")
+            if collection is not None and id(collection) not in seen_collections:
+                seen_collections.add(id(collection))
+                for sibling in collection.__dict__.get("titles", ()):
+                    known[id(sibling)] = sibling
+
+    def collection_key(title, video=None):
+        identifier = title.catalog_collection_id if title is not None else None
+        if identifier is None and video is not None:
+            identifier = video.catalog_collection_id
+        if identifier is not None:
+            return ("collection", identifier)
+        collection = title.__dict__.get("collection") if title is not None else None
+        return ("collection_object", id(collection)) if collection is not None else (
+            "unattached_title", title.id if title is not None and title.id is not None else id(title),
+        )
+
+    grouped = defaultdict(list)
+    for title in known.values():
+        grouped[collection_key(title)].append(title)
+    contexts = {}
+    for boundary, members in grouped.items():
+        presentation = build_collection_presentation(members, include_videos=False)
+        for part in presentation.primary_parts:
+            primary = part.title
+            key = ("primary", primary.id) if primary.id is not None else ("primary_object", id(primary))
+            context = TypedStructuralContext(
+                (boundary, key), primary.effective_season_label or primary.local_title,
+            )
+            contexts[id(primary)] = context
+            for child in part.supplementary_parts:
+                contexts[id(child.title)] = context
+        for part in presentation.anime_level_parts:
+            contexts[id(part.title)] = TypedStructuralContext((boundary, ("root",)), "Anime / root")
+    by_id = {t.id: t for t in known.values() if t.id is not None}
+    result = {}
+    for video in videos:
+        title = video.__dict__.get("catalog_title") or by_id.get(video.catalog_title_id)
+        result[video] = contexts.get(id(title), TypedStructuralContext(
+            (collection_key(title, video), ("root",)), "Anime / root",
+        ))
+    return result
+
+
 def supplementary_inventory(
     videos: list[Video], title: CatalogTitle | None = None,
     *, collection_scope: bool = False, titles_by_id: dict[int, CatalogTitle] | None = None,
+    contexts: dict[Video, TypedStructuralContext] | None = None,
 ) -> SupplementaryInventory:
     """Linear, in-memory precondition for future naming; no target paths/writes.
 
@@ -203,6 +277,8 @@ def supplementary_inventory(
     by_id = {v.id: v for v in videos if v.id is not None}
     identities = {}
     scopes = {}
+    if collection_scope and contexts is None:
+        contexts = typed_structural_contexts(videos, list((titles_by_id or {}).values()))
     for video in videos:
         current = title or (titles_by_id or {}).get(video.catalog_title_id) or video.__dict__.get("catalog_title")
         state = supplementary_ordinal(video, current)
@@ -214,16 +290,8 @@ def supplementary_inventory(
             else ("object", id(current)) if current is not None else None
         )
         scopes[video] = key
-        collection_id = (
-            current.catalog_collection_id if current is not None
-            else video.catalog_collection_id
-        )
-        collection = current.__dict__.get("collection") if current is not None else None
         if collection_scope:
-            key = (
-                ("collection", collection_id) if collection_id is not None
-                else ("collection_object", id(collection)) if collection is not None else key
-            )
+            key = contexts[video].key
         identity = (
             SupplementaryIdentity(key, state.supplementary_type, state.number)
             if key is not None else None
@@ -266,7 +334,7 @@ def supplementary_inventory(
     return SupplementaryInventory(
         tuple(SupplementaryPartition(
             identity, tuple(items),
-            representation_conflict(items) or len({scopes[v] for v in items}) > 1,
+            representation_conflict(items),
         ) for identity, items in by_identity.items()),
         tuple(unknown), tuple(invalid), tuple(groups),
     )
@@ -282,19 +350,24 @@ def supplementary_review_issues(
     shared inventory's representation rules, never the physical row count.
     Collection callers pass the whole collection and project issues afterwards.
     """
-    typed: dict[str, list[tuple[Video, SupplementaryOrdinal]]] = defaultdict(list)
+    contexts = typed_structural_contexts(
+        videos, list((titles_by_id or {}).values()),
+    ) if collection_scope else None
+    typed = defaultdict(list)
     for video in videos:
         current = title or (titles_by_id or {}).get(video.catalog_title_id)
         state = supplementary_ordinal(video, current)
         if state is not None:
-            typed[state.supplementary_type].append((video, state))
+            context = contexts[video] if contexts is not None else None
+            typed[(context, state.supplementary_type)].append((video, state))
 
     issues = []
-    for subtype in sorted(typed):
-        members = typed[subtype]
+    for context, subtype in sorted(typed, key=lambda key: (repr(key[0]), key[1])):
+        members = typed[(context, subtype)]
+        issue_start = len(issues)
         inventory = supplementary_inventory(
             [video for video, _state in members], title, collection_scope=collection_scope,
-            titles_by_id=titles_by_id,
+            titles_by_id=titles_by_id, contexts=contexts,
         )
         known_ordinals = tuple(sorted({
             state.number for _video, state in members if state.number is not None
@@ -315,7 +388,7 @@ def supplementary_review_issues(
                 videos=missing,
                 known_ordinals=known_ordinals,
                 message=(
-                    "Více logických identit stejného typu v kolekci nelze bezpečně rozlišit: "
+                    "Více logických identit stejného typu v tomto kontextu nelze bezpečně rozlišit: "
                     "u uvedených souborů chybí explicitní ruční nebo parserový ordinal."
                 ),
             ))
@@ -351,6 +424,12 @@ def supplementary_review_issues(
                     "supplementary identitu nebo její primární video chybí."
                 ),
             ))
+        if context is not None:
+            for index in range(issue_start, len(issues)):
+                issues[index] = replace(issues[index], message=(
+                    f"Kontext: {context.label} / {ORDINAL_LABELS[subtype]}. "
+                    + issues[index].message
+                ))
     return tuple(issues)
 
 
