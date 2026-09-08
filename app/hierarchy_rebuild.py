@@ -1207,6 +1207,10 @@ def _build_projection(
         else:
             clone.catalog_title = None
             clone.catalog_title_id = None
+        # Preview needs the same confirmed lane authority as apply. A title
+        # move retires the old lane, matching assign_video_catalog_title().
+        if clone.catalog_title_id == video.catalog_title_id:
+            clone.video_variant_group_id = video.video_variant_group_id
         projected_videos[video.id] = clone
 
     for original in videos:

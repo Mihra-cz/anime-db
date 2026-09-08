@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .hierarchy import HierarchyIdentity
 from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .models import CatalogCollection, CatalogTitle, Video
-from .numbering import effective_video_numbering, is_nonprimary_duplicate_video
+from .numbering import effective_video_numbering, logical_episode_partitions
 
 
 SOFT_LONG_FLAT_SEQUENCE_WARNING_TEMPLATE = (
@@ -112,17 +111,21 @@ def is_direct_root_title(title: CatalogTitle) -> bool:
 
 
 def direct_root_episode_profile(videos: list[Video]) -> DirectRootEpisodeProfile:
-    numbers = [
-        state.numbering_input
+    numbering_inputs = {
+        video: state.numbering_input
         for video in videos
-        if not is_nonprimary_duplicate_video(video)
-        and (state := effective_video_numbering(video)).is_standard
+        if (state := effective_video_numbering(
+            video, video.__dict__.get("catalog_title"), use_current_title=False,
+        )).is_standard
         and state.detection.season_hint in {None, 1}
         and state.numbering_input is not None
-    ]
-    counts = Counter(numbers)
-    duplicates = tuple(sorted(number for number, count in counts.items() if count > 1))
-    unique = sorted(counts)
+    }
+    partitions = logical_episode_partitions(videos, numbering_inputs=numbering_inputs)
+    duplicates = tuple(sorted({
+        partition.identity.season_episode_number
+        for partition in partitions if partition.unresolved_video_groups
+    }))
+    unique = sorted({partition.identity.season_episode_number for partition in partitions})
     episode_min = unique[0] if unique else None
     episode_max = unique[-1] if unique else None
     contiguous = bool(
@@ -132,7 +135,7 @@ def direct_root_episode_profile(videos: list[Video]) -> DirectRootEpisodeProfile
         and unique == list(range(1, episode_max + 1))
     )
     return DirectRootEpisodeProfile(
-        standard_count=len(numbers),
+        standard_count=len(partitions),
         episode_min=episode_min,
         episode_max=episode_max,
         contiguous_from_one=contiguous,

@@ -527,7 +527,7 @@ def _catalog_title_identity_key(
     video: Video,
     catalog_title: CatalogTitle | None = None,
 ) -> tuple[str, int] | None:
-    title = catalog_title or video.catalog_title
+    title = catalog_title or video.__dict__.get("catalog_title")
     title_id = title.id if title is not None else video.catalog_title_id
     if title_id is not None:
         return ("id", title_id)
@@ -568,22 +568,35 @@ def logical_episode_partitions(
     *,
     catalog_title: CatalogTitle | None = None,
     detections: Mapping[Video, EpisodeNumberDetection] | None = None,
+    numbering_inputs: Mapping[Video, int] | None = None,
 ) -> tuple[LogicalEpisodePartition, ...]:
     """Partition active standard videos by logical episode and confirmed lane.
 
     Confirmed duplicate secondaries and missing-primary remnants are not active
     representations. NULL stays an explicit unassigned bucket and never becomes
     a default variant.
+
+    Direct-root inference runs before canonical numbering is projected. It can
+    supply already resolved standard numbering inputs instead, retaining the
+    same title scope and representation authority without mutating Video rows.
     """
-    title_names = supplementary_context_map(videos)
+    title_names = supplementary_context_map(videos) if numbering_inputs is None else None
     by_identity: dict[LogicalEpisodeIdentity, list[Video]] = {}
     for video in videos:
-        identity = logical_episode_identity(
-            video,
-            catalog_title=catalog_title,
-            title_names=title_names,
-            detection=detections.get(video) if detections is not None else None,
-        )
+        if numbering_inputs is None:
+            identity = logical_episode_identity(
+                video,
+                catalog_title=catalog_title,
+                title_names=title_names,
+                detection=detections.get(video) if detections is not None else None,
+            )
+        else:
+            title_key = _catalog_title_identity_key(video, catalog_title)
+            number = numbering_inputs.get(video)
+            identity = (
+                LogicalEpisodeIdentity(title_key, number)
+                if title_key is not None and number is not None else None
+            )
         if identity is not None and not is_nonprimary_duplicate_video(video):
             by_identity.setdefault(identity, []).append(video)
 
