@@ -69,6 +69,7 @@ from .config import Settings, get_settings
 from .collection_presentation import (
     build_collection_presentation,
     is_collection_part_artwork_worthy,
+    validate_effective_recap_season_context,
 )
 from .catalog_video_presentation import (
     build_catalog_title_video_presentation,
@@ -1184,6 +1185,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     session.rollback()
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
             else:
+                if old_collection is not None:
+                    try:
+                        validate_effective_recap_season_context(
+                            old_collection.titles,
+                            ((video, None),),
+                        )
+                    except ValueError as exc:
+                        session.rollback()
+                        raise HTTPException(
+                            status_code=400,
+                            detail=str(exc),
+                        ) from exc
                 assign_video_catalog_title(video, None)
                 video.catalog_collection = None
                 replace_explicit_video_selector_authority([video], None)

@@ -46,21 +46,10 @@ class AutomaticStructuralValues:
     reason: str
 
 
-def invalidate_automatic_hierarchy_for_collection_move(
+def _raw_structural_values_for_collection_move(
     title: CatalogTitle,
     raw_hierarchy: Mapping[str, HierarchyIdentity],
-) -> bool:
-    """Restore raw parser input before inference in a different collection.
-
-    Automatic structural fields are a persisted cache of both path facts and
-    collection-context inference.  In particular, a direct-root episodic title
-    may have become automatic S1 only because it was alone at its former root.
-    A parent change must not feed that final cache back into inference as if it
-    were an explicit path fact.  Manual snapshots remain authoritative.
-    """
-    if manual_hierarchy_snapshot_requires_preservation(title):
-        return False
-
+) -> AutomaticStructuralValues:
     identities = []
     for video in title.videos:
         identity = raw_hierarchy.get(video.relative_path)
@@ -81,25 +70,76 @@ def invalidate_automatic_hierarchy_for_collection_move(
         )
         for identity in identities
     }
-    raw = (
+    values = (
         next(iter(structural_inputs))
         if identities and len(structural_inputs) == 1
         else ("title", None, None, None)
     )
+    return AutomaticStructuralValues(*values, reason="raw_path_evidence")
+
+
+def prospective_hierarchy_for_collection_move(
+    title: CatalogTitle,
+    raw_hierarchy: Mapping[str, HierarchyIdentity],
+    *,
+    target_relative_root_path: str,
+) -> AutomaticStructuralValues:
+    """Project the effective structural values after a parent collection change."""
+    if manual_hierarchy_snapshot_requires_preservation(title):
+        return AutomaticStructuralValues(
+            title.effective_part_type,
+            title.effective_season_number,
+            title.effective_part_number,
+            title.effective_season_label,
+            "preserved_manual_authority",
+        )
+    raw = _raw_structural_values_for_collection_move(title, raw_hierarchy)
+    return infer_automatic_structural_values(
+        part_type=raw.part_type,
+        season_number=raw.season_number,
+        part_number=raw.part_number,
+        season_label=raw.season_label,
+        is_direct_root=title.relative_root_path == target_relative_root_path,
+        videos=list(title.videos),
+    )
+
+
+def invalidate_automatic_hierarchy_for_collection_move(
+    title: CatalogTitle,
+    raw_hierarchy: Mapping[str, HierarchyIdentity],
+) -> bool:
+    """Restore raw parser input before inference in a different collection.
+
+    Automatic structural fields are a persisted cache of both path facts and
+    collection-context inference.  In particular, a direct-root episodic title
+    may have become automatic S1 only because it was alone at its former root.
+    A parent change must not feed that final cache back into inference as if it
+    were an explicit path fact.  Manual snapshots remain authoritative.
+    """
+    if manual_hierarchy_snapshot_requires_preservation(title):
+        return False
+
+    raw = _raw_structural_values_for_collection_move(title, raw_hierarchy)
     current = (
         title.part_type,
         title.season_number,
         title.part_number,
         title.season_label,
     )
-    if current == raw:
+    projected = (
+        raw.part_type,
+        raw.season_number,
+        raw.part_number,
+        raw.season_label,
+    )
+    if current == projected:
         return False
     (
         title.part_type,
         title.season_number,
         title.part_number,
         title.season_label,
-    ) = raw
+    ) = projected
     return True
 
 

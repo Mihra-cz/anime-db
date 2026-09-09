@@ -16,7 +16,7 @@ from .catalog import GENERIC_ROOTS, detect_episode_number, normalize_title, effe
 from .collection_presentation import (
     CollectionPresentation,
     build_collection_presentation,
-    title_has_authoritative_season_context,
+    validate_effective_recap_season_context,
 )
 from .hierarchy import derive_library_hierarchy, parse_explicit_part
 from .hierarchy_authority import (
@@ -47,6 +47,7 @@ from .hierarchy_provenance import (
 )
 from .manual_split import (
     AssignmentPreview,
+    ManualSplitDecisionKind,
     ManualTitleDefinition,
     apply_manual_split_decisions,
     compile_manual_split_pattern,
@@ -71,6 +72,7 @@ from .structural_inference import (
     LONG_FLAT_SEQUENCE_REVIEW_REASON,
     direct_root_episode_profile,
     invalidate_automatic_hierarchy_for_collection_move,
+    prospective_hierarchy_for_collection_move,
 )
 from .title_naming import (
     generic_catalog_title_local_title,
@@ -962,7 +964,13 @@ def move_titles_to_collection(
     if target is None:
         raise ValueError("Cílová collection nebyla nalezena.")
     titles = list(session.scalars(select(CatalogTitle).options(
-        selectinload(CatalogTitle.videos), selectinload(CatalogTitle.collection),
+        selectinload(CatalogTitle.videos),
+        selectinload(CatalogTitle.collection),
+        selectinload(CatalogTitle.manual_split_rule_videos).selectinload(
+            ManualSplitRuleVideo.video
+        ).selectinload(Video.manual_split_rule_videos).selectinload(
+            ManualSplitRuleVideo.catalog_title
+        ).selectinload(CatalogTitle.collection),
     ).where(CatalogTitle.id.in_(selected_ids))).all())
     if len(titles) != len(selected_ids):
         raise ValueError("Výběr obsahuje cizí nebo neexistující část.")
@@ -993,6 +1001,12 @@ def move_titles_to_collection(
         for collection in affected
         for video in collection.videos
     ])
+    _validate_collection_move_recap_context(
+        affected,
+        target=target,
+        moved_titles=moved_titles,
+        raw_hierarchy=raw_hierarchy,
+    )
     for title in moved_titles:
         invalidate_automatic_hierarchy_for_collection_move(title, raw_hierarchy)
         title.collection = target
@@ -1302,6 +1316,15 @@ def apply_single_title_confirmation(
         season_number = None
         label = None
     title = suggestion.title
+    _validate_prospective_title_hierarchy_recap_context(
+        collection,
+        title,
+        part_type=normalized_type,
+        season_number=season_number,
+        part_number=(
+            part_number if normalized_type in {"season", "part", "cour"} else None
+        ),
+    )
     activate_manual_hierarchy_snapshot(
         title,
         part_type=normalized_type,
@@ -1382,7 +1405,102 @@ def _presentation_context_identity(
     )
 
 
+def _prospective_title_identity(
+    title: CatalogTitle | _ProspectiveCatalogTitle | None,
+) -> tuple[int, str, int | None, int | None] | None:
+    if title is None:
+        return None
+    source = title.source if isinstance(title, _ProspectiveCatalogTitle) else title
+    return (
+        id(source),
+        title.effective_part_type,
+        title.effective_season_number,
+        title.effective_part_number,
+    )
+
+
+def _projected_title_indexes(
+    titles: list[CatalogTitle | _ProspectiveCatalogTitle],
+) -> tuple[
+    dict[int, CatalogTitle | _ProspectiveCatalogTitle],
+    dict[int, CatalogTitle | _ProspectiveCatalogTitle],
+]:
+    return ({
+        title.id: title for title in titles if title.id is not None
+    }, {
+        id(title.source if isinstance(title, _ProspectiveCatalogTitle) else title): title
+        for title in titles
+    })
+
+
+def _projected_video_title(
+    video: Video,
+    by_id: Mapping[int, CatalogTitle | _ProspectiveCatalogTitle],
+    by_source: Mapping[int, CatalogTitle | _ProspectiveCatalogTitle],
+) -> CatalogTitle | _ProspectiveCatalogTitle | None:
+    if video.catalog_title_id is not None:
+        return by_id.get(video.catalog_title_id)
+    current = video.__dict__.get("catalog_title")
+    return by_source.get(id(current)) if current is not None else None
+
+
 def _validate_prospective_recap_season_context(
+    current_titles: list[CatalogTitle | _ProspectiveCatalogTitle],
+    prospective_titles: list[CatalogTitle | _ProspectiveCatalogTitle],
+    videos: list[Video],
+    *,
+    prospective_video_titles: Mapping[
+        int, CatalogTitle | _ProspectiveCatalogTitle | None
+    ] | None = None,
+) -> None:
+    """Validate structurally changed placements against one prospective projection."""
+    current_presentation = build_collection_presentation(
+        current_titles,
+        include_videos=False,
+    )
+    prospective_presentation = build_collection_presentation(
+        prospective_titles,
+        include_videos=False,
+    )
+    current_by_id, current_by_source = _projected_title_indexes(current_titles)
+    prospective_by_id, prospective_by_source = _projected_title_indexes(
+        prospective_titles
+    )
+    changed: list[tuple[Video, CatalogTitle | _ProspectiveCatalogTitle | None]] = []
+    for video in videos:
+        current_title = _projected_video_title(
+            video,
+            current_by_id,
+            current_by_source,
+        )
+        prospective_video_title = (
+            prospective_video_titles[id(video)]
+            if prospective_video_titles is not None
+            and id(video) in prospective_video_titles
+            else _projected_video_title(
+                video,
+                prospective_by_id,
+                prospective_by_source,
+            )
+        )
+        current_context = _presentation_context_identity(
+            current_presentation,
+            current_title,
+        ) if current_title is not None else None
+        prospective_context = _presentation_context_identity(
+            prospective_presentation,
+            prospective_video_title,
+        ) if prospective_video_title is not None else None
+        if (
+            _prospective_title_identity(current_title)
+            != _prospective_title_identity(prospective_video_title)
+            or current_context != prospective_context
+        ):
+            changed.append((video, prospective_video_title))
+    validate_effective_recap_season_context(prospective_titles, changed)
+
+
+def _validate_prospective_title_hierarchy_recap_context(
     collection: CatalogCollection,
     title: CatalogTitle,
     *,
@@ -1390,7 +1508,6 @@ def _validate_prospective_recap_season_context(
     season_number: int | None,
     part_number: int | None,
 ) -> None:
-    """Reject a title edit that would leave an affected effective Recap rootless."""
     current_titles = list(collection.titles)
     prospective_title = _ProspectiveCatalogTitle(
         source=title,
@@ -1402,66 +1519,77 @@ def _validate_prospective_recap_season_context(
         prospective_title if candidate is title else candidate
         for candidate in current_titles
     ]
-    current_presentation = build_collection_presentation(
+    _validate_prospective_recap_season_context(
         current_titles,
-        include_videos=False,
-    )
-    prospective_presentation = build_collection_presentation(
         prospective_titles,
-        include_videos=False,
+        list(collection.videos),
     )
-    current_by_id = {
-        candidate.id: candidate
-        for candidate in current_titles
-        if candidate.id is not None
-    }
-    prospective_by_id = {
-        candidate.id: candidate
-        for candidate in prospective_titles
-        if candidate.id is not None
-    }
 
-    for video in collection.videos:
-        current_title = (
-            current_by_id.get(video.catalog_title_id)
-            if video.catalog_title_id is not None
-            else video.__dict__.get("catalog_title")
+
+def _validate_collection_move_recap_context(
+    affected_collections: set[CatalogCollection],
+    *,
+    target: CatalogCollection,
+    moved_titles: list[CatalogTitle],
+    raw_hierarchy,
+) -> None:
+    """Validate source and target presentations before a collection move mutates ORM state."""
+    moved_sources = {id(title): title for title in moved_titles}
+    projected_moved = {}
+    projected_moved_by_id = {}
+    for title in moved_titles:
+        values = prospective_hierarchy_for_collection_move(
+            title,
+            raw_hierarchy,
+            target_relative_root_path=target.relative_root_path,
         )
-        if current_title is None:
-            continue
-        prospective_video_title = (
-            prospective_by_id.get(video.catalog_title_id)
-            if video.catalog_title_id is not None
-            else prospective_title if current_title is title else current_title
+        projected_moved[id(title)] = _ProspectiveCatalogTitle(
+            source=title,
+            effective_part_type=values.part_type,
+            effective_season_number=values.season_number,
+            effective_part_number=values.part_number,
         )
-        if prospective_video_title is None:
-            continue
-        current_context = _presentation_context_identity(
-            current_presentation,
-            current_title,
+        if title.id is not None:
+            projected_moved_by_id[title.id] = projected_moved[id(title)]
+
+    moved_videos = {
+        id(video): video
+        for title in moved_titles
+        for video in (
+            *title.videos,
+            *(link.video for link in title.manual_split_rule_videos),
         )
-        prospective_context = _presentation_context_identity(
-            prospective_presentation,
-            prospective_video_title,
+    }
+    for collection in affected_collections:
+        current_titles = list(collection.titles)
+        current_videos = list(collection.videos)
+        if collection is target:
+            prospective_titles = [
+                *current_titles,
+                *(projected_moved[id(title)] for title in moved_titles),
+            ]
+            prospective_videos = list({
+                id(video): video
+                for video in (*current_videos, *moved_videos.values())
+            }.values())
+        else:
+            prospective_titles = [
+                title for title in current_titles if id(title) not in moved_sources
+            ]
+            prospective_videos = [
+                video for video in current_videos if id(video) not in moved_videos
+            ]
+        prospective_video_titles = {
+            id(video): projected_moved_by_id[video.catalog_title_id]
+            for video in prospective_videos
+            if video.catalog_title_id in projected_moved_by_id
+        }
+        _validate_prospective_recap_season_context(
+            current_titles,
+            prospective_titles,
+            prospective_videos,
+            prospective_video_titles=prospective_video_titles,
         )
-        if current_title is not title and current_context == prospective_context:
-            continue
-        effective_type = effective_video_content_type(
-            video,
-            prospective_video_title,
-            use_current_title=False,
-        )
-        if (
-            effective_type == "recap"
-            and not title_has_authoritative_season_context(
-                prospective_video_title,
-                presentation=prospective_presentation,
-            )
-        ):
-            raise ValueError(
-                "Část nelze změnit tak, že by efektivní Recap ztratil "
-                "autoritativní Season kontext."
-            )
 
 
 def _safe_contiguous_episode_range(
@@ -1681,6 +1809,87 @@ def _validate_manual_split_structure(
         raise ValueError(issues[0].message)
 
 
+def _validate_manual_split_recap_context(
+    collection: CatalogCollection,
+    definitions: list[ManualTitleDefinition],
+    preview: AssignmentPreview,
+) -> None:
+    """Project all manual hierarchy and selector decisions before applying them."""
+    definitions_by_id = {
+        definition.title_id: definition
+        for definition in definitions
+        if definition.title_id is not None
+    }
+    prospective_titles: list[CatalogTitle | _ProspectiveCatalogTitle] = []
+    targets: list[CatalogTitle | _ProspectiveCatalogTitle] = []
+    projected_by_id: dict[int, CatalogTitle | _ProspectiveCatalogTitle] = {}
+    for title in collection.titles:
+        definition = definitions_by_id.get(title.id)
+        projected = (
+            _ProspectiveCatalogTitle(
+                source=title,
+                effective_part_type=definition.part_type_manual,
+                effective_season_number=definition.season_number_manual,
+                effective_part_number=(
+                    definition.part_number_manual
+                    if definition.part_type_manual in {"season", "part", "cour"}
+                    else None
+                ),
+            )
+            if definition is not None and definition.part_type_manual is not None
+            else title
+        )
+        prospective_titles.append(projected)
+        if title.id is not None:
+            projected_by_id[title.id] = projected
+
+    for position, definition in enumerate(definitions, 1):
+        if definition.title_id is not None:
+            targets.append(projected_by_id[definition.title_id])
+            continue
+        transient = CatalogTitle(
+            local_title=definition.local_title,
+            normalized_local_title=normalize_title(definition.local_title),
+            relative_root_path=(
+                f"{collection.relative_root_path}/.prospective-catalog-part-{position}"
+            ),
+            part_type="title",
+        )
+        projected = (
+            _ProspectiveCatalogTitle(
+                source=transient,
+                effective_part_type=definition.part_type_manual,
+                effective_season_number=definition.season_number_manual,
+                effective_part_number=(
+                    definition.part_number_manual
+                    if definition.part_type_manual in {"season", "part", "cour"}
+                    else None
+                ),
+            )
+            if definition.part_type_manual is not None else transient
+        )
+        prospective_titles.append(projected)
+        targets.append(projected)
+
+    prospective_video_titles = {}
+    for decision in preview.decisions:
+        if decision.kind == ManualSplitDecisionKind.UNIQUE:
+            prospective_video_titles[id(decision.video)] = targets[
+                decision.assigned_rule.index
+            ]
+        elif decision.kind in {
+            ManualSplitDecisionKind.CONFLICT,
+            ManualSplitDecisionKind.UNMATCHED,
+        }:
+            prospective_video_titles[id(decision.video)] = None
+    _validate_prospective_recap_season_context(
+        list(collection.titles),
+        prospective_titles,
+        list(collection.videos),
+        prospective_video_titles=prospective_video_titles,
+    )
+
+
 def set_manual_title_hierarchy(
     title: CatalogTitle, *, season_number: int | None, season_label: str | None,
     part_type: str | None, sort_order: int | None, hierarchy_verified: bool,
@@ -1730,7 +1939,7 @@ def set_manual_title_hierarchy(
                 override_season_number=snapshot_season_number,
                 override_part_number=snapshot_part_number,
             )
-            _validate_prospective_recap_season_context(
+            _validate_prospective_title_hierarchy_recap_context(
                 title.collection,
                 title,
                 part_type=snapshot_type,
@@ -1783,7 +1992,7 @@ def set_manual_title_hierarchy(
             else None
         )
         if title.collection is not None:
-            _validate_prospective_recap_season_context(
+            _validate_prospective_title_hierarchy_recap_context(
                 title.collection,
                 title,
                 part_type=title.part_type,
@@ -2230,11 +2439,9 @@ def create_title_from_videos(
         suffix += 1
         virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}-{suffix}"
     title = CatalogTitle(
-        collection=collection, local_title=name, normalized_local_title=normalize_title(name),
+        local_title=name, normalized_local_title=normalize_title(name),
         relative_root_path=virtual_path, numbering_mode="unknown",
     )
-    session.add(title)
-    session.flush()
     activate_manual_hierarchy_snapshot(
         title,
         part_type=normalized_type,
@@ -2246,7 +2453,21 @@ def create_title_from_videos(
         sort_order=sort_order,
         verified_at=utc_now(),
     )
-    _validate_split_season_structure(collection)
+    current_titles = list(collection.titles)
+    prospective_titles = [*current_titles, title]
+    if issues := split_season_structure_issues(prospective_titles):
+        raise ValueError(issues[0].message)
+    _validate_prospective_recap_season_context(
+        current_titles,
+        prospective_titles,
+        list(collection.videos),
+        prospective_video_titles={
+            id(video): title for video in selected
+        },
+    )
+    title.collection = collection
+    session.add(title)
+    session.flush()
     replace_explicit_video_selector_authority(selected, title)
     for video in selected:
         assign_video_catalog_title(video, title)
@@ -2572,6 +2793,18 @@ def delete_empty_local_title(
         raise ValueError(
             "Část už není prázdná; obsahuje video a nebyla odstraněna."
         )
+    collection = session.scalar(select(CatalogCollection).options(
+        selectinload(CatalogCollection.titles),
+        selectinload(CatalogCollection.videos),
+    ).where(CatalogCollection.id == collection_id))
+    if collection is None:
+        raise ValueError("Kolekce nebyla nalezena.")
+    current_titles = list(collection.titles)
+    _validate_prospective_recap_season_context(
+        current_titles,
+        [candidate for candidate in current_titles if candidate.id != title_id],
+        list(collection.videos),
+    )
     # Explicitní vyprázdnění zachovává vlastní aplikační cleanup vedle FK cascade.
     title.external_links.clear()
     title.metadata_candidates.clear()
@@ -2590,10 +2823,8 @@ def delete_empty_local_title(
         ManualSplitRuleVideo.catalog_title_id == title_id
     ))
     session.flush()
-    collection = session.get(CatalogCollection, collection_id)
-    if collection is not None:
-        session.expire(collection, ["titles"])
-        refresh_collection_state(collection)
+    session.expire(collection, ["titles"])
+    refresh_collection_state(collection)
     return is_manual_split_entry
 
 
@@ -2632,6 +2863,7 @@ def apply_manual_split(
     )
     if preview.conflicts and not confirm_conflicts:
         raise ValueError("Rozsahy nebo pravidla se překrývají; je nutné explicitní potvrzení.")
+    _validate_manual_split_recap_context(collection, definitions, preview)
     existing = {title.id: title for title in collection.titles}
     resolved: list[CatalogTitle] = []
     now = utc_now()

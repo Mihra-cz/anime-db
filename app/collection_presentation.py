@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable, Literal
 
-from .catalog import sort_title_videos
+from .catalog import effective_video_content_type, sort_title_videos
 from .hierarchy_types import (
     MAIN_CONTENT_PART_TYPES,
     PART_TYPE_LABELS,
@@ -14,6 +14,14 @@ from .models import CatalogTitle, Video
 from .title_order import catalog_title_sort_key
 
 ANIME_LEVEL_ARTWORK_PART_TYPES = frozenset({"film", "ova", "special"})
+RECAP_SEASON_CONTEXT_ERROR = (
+    "Operaci nelze provést, protože efektivní Recap musí zůstat "
+    "v autoritativním Season kontextu."
+)
+
+
+class RecapSeasonContextError(ValueError):
+    """A prospective effective Recap has no resolved Season owner."""
 
 
 @dataclass(frozen=True)
@@ -144,6 +152,27 @@ def title_has_authoritative_season_context(
         context is not None
         and context.title.effective_part_type == "season"
     )
+
+
+def validate_effective_recap_season_context(
+    titles: Iterable[CatalogTitle],
+    video_titles: Iterable[tuple[Video, CatalogTitle | None]],
+) -> None:
+    """Validate effective Recaps against one read-only structural projection."""
+    presentation = build_collection_presentation(titles, include_videos=False)
+    for video, title in video_titles:
+        if (
+            effective_video_content_type(
+                video,
+                title,
+                use_current_title=False,
+            ) == "recap"
+            and not title_has_authoritative_season_context(
+                title,
+                presentation=presentation,
+            )
+        ):
+            raise RecapSeasonContextError(RECAP_SEASON_CONTEXT_ERROR)
 
 
 def is_collection_part_artwork_worthy(

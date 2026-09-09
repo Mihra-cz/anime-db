@@ -11,7 +11,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .catalog import detect_episode_number, effective_video_content_type
-from .collection_presentation import title_has_authoritative_season_context
+from .collection_presentation import (
+    RECAP_SEASON_CONTEXT_ERROR,
+    RecapSeasonContextError,
+    validate_effective_recap_season_context,
+)
 from .models import CatalogCollection, CatalogTitle, Video, VideoVariantGroup, utc_now
 from .numbering import (
     is_nonprimary_duplicate_video,
@@ -48,15 +52,6 @@ CONFIRMED_DUPLICATE_VARIANT_CONFLICT_MESSAGE = (
     "Potvrzená duplicita nemůže být rozdělena do dvou různých potvrzených "
     "variant. Nejprve upravte duplicate vztah."
 )
-RECAP_SEASON_CONTEXT_ERROR = (
-    "Recap lze přiřadit pouze do autoritativního Season kontextu."
-)
-
-
-class RecapSeasonContextError(ValueError):
-    """An effective Recap assignment has no resolved Season owner."""
-
-
 @dataclass(frozen=True)
 class ParserVariantSuggestion:
     hint: str
@@ -334,12 +329,12 @@ def validate_video_catalog_title_assignment(
         use_current_title=False,
     )
     validate_recap_number_for_content_type(video, effective_type)
-    if (
-        catalog_title is not None
-        and effective_type == "recap"
-        and not title_has_authoritative_season_context(catalog_title)
-    ):
-        raise RecapSeasonContextError(RECAP_SEASON_CONTEXT_ERROR)
+    if catalog_title is not None and effective_type == "recap":
+        collection = catalog_title.collection
+        validate_effective_recap_season_context(
+            collection.titles if collection is not None else (catalog_title,),
+            ((video, catalog_title),),
+        )
 
 
 def assign_video_catalog_title(
