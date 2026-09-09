@@ -10,7 +10,7 @@ import posixpath
 import re
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, object_session, selectinload
 
 from .catalog import GENERIC_ROOTS, detect_episode_number, normalize_title, effective_video_content_type
 from .collection_presentation import (
@@ -39,6 +39,7 @@ from .hierarchy_evaluation import (
     finalize_hierarchy_write,
     hierarchy_primary_note,
     manual_hierarchy_snapshot_issue,
+    strict_hierarchy_write_guard,
 )
 from .hierarchy_types import PART_TYPE_LABELS, PART_TYPES, VIDEO_CONTENT_TYPES
 from .hierarchy_provenance import (
@@ -946,8 +947,20 @@ def create_manual_collection(
 def create_main_collection(
     session: Session, local_title: str, title_ids: list[int],
 ) -> CatalogCollection:
-    collection = create_manual_collection(session, local_title)
-    move_titles_to_collection(session, collection.id, title_ids)
+    selected_ids = {int(value) for value in title_ids}
+    if not selected_ids:
+        raise ValueError("Vyberte alespoň jednu část.")
+    titles = list(session.scalars(select(CatalogTitle).options(
+        selectinload(CatalogTitle.collection),
+    ).where(CatalogTitle.id.in_(selected_ids))).all())
+    if len(titles) != len(selected_ids):
+        raise ValueError("Výběr obsahuje cizí nebo neexistující část.")
+    sources = {
+        title.collection for title in titles if title.collection is not None
+    }
+    with strict_hierarchy_write_guard(session, list(sources)):
+        collection = create_manual_collection(session, local_title)
+        move_titles_to_collection(session, collection.id, title_ids)
     return collection
 
 
@@ -1007,18 +1020,19 @@ def move_titles_to_collection(
         moved_titles=moved_titles,
         raw_hierarchy=raw_hierarchy,
     )
-    for title in moved_titles:
-        invalidate_automatic_hierarchy_for_collection_move(title, raw_hierarchy)
-        title.collection = target
-        for video in title.videos:
-            video.catalog_collection = target
-        for link in title.manual_split_rule_videos:
-            link.video.catalog_collection = target
-    session.flush()
-    for collection in affected:
-        session.expire(collection, ["titles", "videos"])
-    finalize_hierarchy_write(list(affected))
-    session.flush()
+    with strict_hierarchy_write_guard(session, list(affected)):
+        for title in moved_titles:
+            invalidate_automatic_hierarchy_for_collection_move(title, raw_hierarchy)
+            title.collection = target
+            for video in title.videos:
+                video.catalog_collection = target
+            for link in title.manual_split_rule_videos:
+                link.video.catalog_collection = target
+        session.flush()
+        for collection in affected:
+            session.expire(collection, ["titles", "videos"])
+        finalize_hierarchy_write(list(affected))
+        session.flush()
     return target
 
 
@@ -1890,7 +1904,7 @@ def _validate_manual_split_recap_context(
     )
 
 
-def set_manual_title_hierarchy(
+def _set_manual_title_hierarchy(
     title: CatalogTitle, *, season_number: int | None, season_label: str | None,
     part_type: str | None, sort_order: int | None, hierarchy_verified: bool,
     part_number: int | None = None,
@@ -2018,6 +2032,36 @@ def set_manual_title_hierarchy(
     if title.collection is not None:
         refresh_collection_state(title.collection)
     return title
+
+
+def set_manual_title_hierarchy(
+    title: CatalogTitle, *, season_number: int | None, season_label: str | None,
+    part_type: str | None, sort_order: int | None, hierarchy_verified: bool,
+    part_number: int | None = None,
+) -> CatalogTitle:
+    """Apply a strict hierarchy edit and validate its actual finalized result."""
+    session = object_session(title)
+    collection = title.collection
+    if session is None or collection is None:
+        return _set_manual_title_hierarchy(
+            title,
+            season_number=season_number,
+            season_label=season_label,
+            part_type=part_type,
+            sort_order=sort_order,
+            hierarchy_verified=hierarchy_verified,
+            part_number=part_number,
+        )
+    with strict_hierarchy_write_guard(session, [collection]):
+        return _set_manual_title_hierarchy(
+            title,
+            season_number=season_number,
+            season_label=season_label,
+            part_type=part_type,
+            sort_order=sort_order,
+            hierarchy_verified=hierarchy_verified,
+            part_number=part_number,
+        )
 
 
 def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
@@ -2292,18 +2336,19 @@ def reevaluate_automatic_collection_hierarchy(
     raw_hierarchy = derive_library_hierarchy([
         video.relative_path for video in collection.videos
     ])
-    for title in collection.titles:
-        invalidate_automatic_hierarchy_for_collection_move(title, raw_hierarchy)
+    with strict_hierarchy_write_guard(session, [collection]):
+        for title in collection.titles:
+            invalidate_automatic_hierarchy_for_collection_move(title, raw_hierarchy)
 
-    # This is a structural cache repair.  The shared finalizer still runs
-    # inference and evaluation, while established canonical numbering remains
-    # byte-for-byte authoritative for this explicit action.
-    refresh_collection_state(collection, recalculate=False)
-    if _collection_context_reevaluation_preserved_state(collection) != preserved:
-        raise ValueError(
-            "Přepočet automatické hierarchie by změnil autoritativní vazby "
-            "nebo canonical numbering; operace byla zrušena."
-        )
+        # This is a structural cache repair.  The shared finalizer still runs
+        # inference and evaluation, while established canonical numbering remains
+        # byte-for-byte authoritative for this explicit action.
+        refresh_collection_state(collection, recalculate=False)
+        if _collection_context_reevaluation_preserved_state(collection) != preserved:
+            raise ValueError(
+                "Přepočet automatické hierarchie by změnil autoritativní vazby "
+                "nebo canonical numbering; operace byla zrušena."
+            )
     return collection
 
 
@@ -2315,16 +2360,17 @@ def classify_videos_in_place(
         raise ValueError("Neplatný typ doplňkového obsahu.")
     collection = _load_collection_for_assignment(session, collection_id)
     selected = _selected_videos(collection, video_ids)
-    for video in selected:
-        previous = video.content_type_manual
-        video.content_type_manual = normalized_type
-        try:
-            validate_video_catalog_title_assignment(video, video.catalog_title)
-        except ValueError:
-            video.content_type_manual = previous
-            raise
-    session.flush()
-    refresh_collection_state(collection)
+    with strict_hierarchy_write_guard(session, [collection]):
+        for video in selected:
+            previous = video.content_type_manual
+            video.content_type_manual = normalized_type
+            try:
+                validate_video_catalog_title_assignment(video, video.catalog_title)
+            except ValueError:
+                video.content_type_manual = previous
+                raise
+        session.flush()
+        refresh_collection_state(collection)
     return selected
 
 
@@ -2336,11 +2382,12 @@ def confirm_duplicate_videos(
     primary = next((video for video in selected if video.id == primary_video_id), None)
     if primary is None:
         raise ValueError("Primární kopie musí být součástí potvrzované skupiny.")
-    clear_duplicate_group(selected)
-    session.flush()
-    set_duplicate_group_primary(selected, primary)
-    session.flush()
-    refresh_collection_state(collection)
+    with strict_hierarchy_write_guard(session, [collection]):
+        clear_duplicate_group(selected)
+        session.flush()
+        set_duplicate_group_primary(selected, primary)
+        session.flush()
+        refresh_collection_state(collection)
     return selected
 
 
@@ -2353,21 +2400,22 @@ def confirm_duplicate_groups(
     collection = _load_collection_for_assignment(session, collection_id)
     changed: list[Video] = []
     used_ids: set[int] = set()
-    for video_ids, primary_video_id in assignments:
-        selected = _selected_videos(collection, video_ids)
-        selected_ids = {video.id for video in selected}
-        if used_ids & selected_ids:
-            raise ValueError("Jedno video nemůže být v několika skupinách duplicit.")
-        primary = next((video for video in selected if video.id == primary_video_id), None)
-        if primary is None:
-            raise ValueError("Primární kopie musí být součástí potvrzované skupiny.")
-        clear_duplicate_group(selected)
+    with strict_hierarchy_write_guard(session, [collection]):
+        for video_ids, primary_video_id in assignments:
+            selected = _selected_videos(collection, video_ids)
+            selected_ids = {video.id for video in selected}
+            if used_ids & selected_ids:
+                raise ValueError("Jedno video nemůže být v několika skupinách duplicit.")
+            primary = next((video for video in selected if video.id == primary_video_id), None)
+            if primary is None:
+                raise ValueError("Primární kopie musí být součástí potvrzované skupiny.")
+            clear_duplicate_group(selected)
+            session.flush()
+            set_duplicate_group_primary(selected, primary)
+            used_ids.update(selected_ids)
+            changed.extend(selected)
         session.flush()
-        set_duplicate_group_primary(selected, primary)
-        used_ids.update(selected_ids)
-        changed.extend(selected)
-    session.flush()
-    refresh_collection_state(collection)
+        refresh_collection_state(collection)
     return changed
 
 
@@ -2378,9 +2426,10 @@ def clear_confirmed_duplicate_videos(
     selected = _selected_videos(collection, video_ids)
     if len(selected) < 2 and not any(video.duplicate_primary_missing for video in selected):
         raise ValueError("Pro zrušení duplicity je nutné vybrat celou skupinu.")
-    clear_duplicate_group(selected)
-    session.flush()
-    refresh_collection_state(collection)
+    with strict_hierarchy_write_guard(session, [collection]):
+        clear_duplicate_group(selected)
+        session.flush()
+        refresh_collection_state(collection)
     return selected
 
 
@@ -2465,15 +2514,16 @@ def create_title_from_videos(
             id(video): title for video in selected
         },
     )
-    title.collection = collection
-    session.add(title)
-    session.flush()
-    replace_explicit_video_selector_authority(selected, title)
-    for video in selected:
-        assign_video_catalog_title(video, title)
-        video.catalog_collection = collection
-    session.flush()
-    refresh_collection_state(collection, recalculate=recalculate)
+    with strict_hierarchy_write_guard(session, [collection]):
+        title.collection = collection
+        session.add(title)
+        session.flush()
+        replace_explicit_video_selector_authority(selected, title)
+        for video in selected:
+            assign_video_catalog_title(video, title)
+            video.catalog_collection = collection
+        session.flush()
+        refresh_collection_state(collection, recalculate=recalculate)
     return title
 
 
@@ -2531,49 +2581,50 @@ def create_title_with_complementary_season_part(
         if title.id == proposal.source_title_id
     )
     source_label = source.effective_season_label or f"S{season_number}"
-    activate_manual_hierarchy_snapshot(
-        source,
-        part_type="season",
-        season_number=season_number,
-        part_number=proposal.complementary_part_number,
-        season_label=source_label,
-        sort_order=source.sort_order_manual,
-        verified_at=utc_now(),
-    )
-    title = create_title_from_videos(
-        session,
-        collection_id,
-        video_ids,
-        local_title=local_title,
-        part_type="season",
-        season_number=season_number,
-        season_label=season_label,
-        part_number=part_number,
-        recalculate=False,
-    )
-    _validate_split_season_structure(collection)
-    selected_ids = set(proposal.selected_video_ids)
-    if any(
-        video.catalog_title_id != (
-            title.id if video.id in selected_ids else original_membership[video.id]
+    with strict_hierarchy_write_guard(session, [collection]):
+        activate_manual_hierarchy_snapshot(
+            source,
+            part_type="season",
+            season_number=season_number,
+            part_number=proposal.complementary_part_number,
+            season_label=source_label,
+            sort_order=source.sort_order_manual,
+            verified_at=utc_now(),
         )
-        for video in collection.videos
-    ):
-        raise ValueError("Atomické rozdělení změnilo jiné video membership.")
-    if original_numbering != {
-        video.id: (
-            video.local_episode_number,
-            video.season_episode_number,
-            video.absolute_episode_number,
-            video.external_episode_number,
+        title = create_title_from_videos(
+            session,
+            collection_id,
+            video_ids,
+            local_title=local_title,
+            part_type="season",
+            season_number=season_number,
+            season_label=season_label,
+            part_number=part_number,
+            recalculate=False,
         )
-        for video in collection.videos
-    }:
-        raise ValueError("Part ordinal nesmí změnit canonical episode numbering.")
-    if original_duplicates != {
-        video.id: video.duplicate_of_video_id for video in collection.videos
-    }:
-        raise ValueError("Rozdělení Season nesmí změnit duplicate vazby.")
+        _validate_split_season_structure(collection)
+        selected_ids = set(proposal.selected_video_ids)
+        if any(
+            video.catalog_title_id != (
+                title.id if video.id in selected_ids else original_membership[video.id]
+            )
+            for video in collection.videos
+        ):
+            raise ValueError("Atomické rozdělení změnilo jiné video membership.")
+        if original_numbering != {
+            video.id: (
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.external_episode_number,
+            )
+            for video in collection.videos
+        }:
+            raise ValueError("Part ordinal nesmí změnit canonical episode numbering.")
+        if original_duplicates != {
+            video.id: video.duplicate_of_video_id for video in collection.videos
+        }:
+            raise ValueError("Rozdělení Season nesmí změnit duplicate vazby.")
     return title
 
 
@@ -2674,15 +2725,16 @@ def assign_known_videos_to_title(
         video.catalog_collection for video in selected
         if video.catalog_collection is not None
     }
-    for video in selected:
-        assign_video_catalog_title(video, target)
-        video.catalog_collection = target.collection
-    replace_explicit_video_selector_authority(selected, target)
-    session.flush()
     affected = sources | {target.collection}
-    for collection in affected:
-        session.expire(collection, ["titles", "videos"])
-    finalize_hierarchy_write(list(affected))
+    with strict_hierarchy_write_guard(session, list(affected)):
+        for video in selected:
+            assign_video_catalog_title(video, target)
+            video.catalog_collection = target.collection
+        replace_explicit_video_selector_authority(selected, target)
+        session.flush()
+        for collection in affected:
+            session.expire(collection, ["titles", "videos"])
+        finalize_hierarchy_write(list(affected))
     return target
 
 
@@ -2708,25 +2760,27 @@ def create_title_for_known_videos(
         video.catalog_collection for video in selected
         if video.catalog_collection is not None
     }
-    for video in selected:
-        assign_video_catalog_title(video, None)
-        video.catalog_collection = collection
-    session.flush()
-    session.expire(collection, ["titles", "videos"])
-    title = create_title_from_videos(
-        session, collection.id, list(selected_ids),
-        local_title=local_title,
-        part_type=part_type,
-        season_number=season_number,
-        season_label=season_label,
-        part_number=part_number,
-        sort_order=sort_order,
-    )
-    other_sources = [source for source in sources if source is not collection]
-    if other_sources:
-        for source in other_sources:
-            session.expire(source, ["titles", "videos"])
-        finalize_hierarchy_write(other_sources)
+    affected = sources | {collection}
+    with strict_hierarchy_write_guard(session, list(affected)):
+        for video in selected:
+            assign_video_catalog_title(video, None)
+            video.catalog_collection = collection
+        session.flush()
+        session.expire(collection, ["titles", "videos"])
+        title = create_title_from_videos(
+            session, collection.id, list(selected_ids),
+            local_title=local_title,
+            part_type=part_type,
+            season_number=season_number,
+            season_label=season_label,
+            part_number=part_number,
+            sort_order=sort_order,
+        )
+        other_sources = [source for source in sources if source is not collection]
+        if other_sources:
+            for source in other_sources:
+                session.expire(source, ["titles", "videos"])
+            finalize_hierarchy_write(other_sources)
     return title
 
 
@@ -2737,16 +2791,29 @@ def create_anime_for_known_videos(
     sort_order: int | None = None,
 ) -> CatalogTitle:
     """Create one new anime and authoritative part for explicitly chosen videos."""
-    collection = create_manual_collection(session, collection_title)
-    return create_title_for_known_videos(
-        session, collection.id, video_ids,
-        local_title=local_title,
-        part_type=part_type,
-        season_number=season_number,
-        season_label=season_label,
-        part_number=part_number,
-        sort_order=sort_order,
-    )
+    selected_ids = {int(video_id) for video_id in video_ids}
+    if not selected_ids:
+        raise ValueError("Vyberte alespoň jedno video.")
+    selected = list(session.scalars(select(Video).options(
+        selectinload(Video.catalog_collection),
+    ).where(Video.id.in_(selected_ids))).all())
+    if len(selected) != len(selected_ids):
+        raise ValueError("Výběr obsahuje neexistující video.")
+    sources = {
+        video.catalog_collection for video in selected
+        if video.catalog_collection is not None
+    }
+    with strict_hierarchy_write_guard(session, list(sources)):
+        collection = create_manual_collection(session, collection_title)
+        return create_title_for_known_videos(
+            session, collection.id, video_ids,
+            local_title=local_title,
+            part_type=part_type,
+            season_number=season_number,
+            season_label=season_label,
+            part_number=part_number,
+            sort_order=sort_order,
+        )
 
 
 def merge_title_into(
@@ -2805,26 +2872,27 @@ def delete_empty_local_title(
         [candidate for candidate in current_titles if candidate.id != title_id],
         list(collection.videos),
     )
-    # Explicitní vyprázdnění zachovává vlastní aplikační cleanup vedle FK cascade.
-    title.external_links.clear()
-    title.metadata_candidates.clear()
-    title.artwork.clear()
-    title.metadata_record = None
-    session.flush()
-    deleted = session.execute(delete(CatalogTitle).where(
-        CatalogTitle.id == title_id,
-        ~select(Video.id).where(Video.catalog_title_id == CatalogTitle.id).exists(),
-    ).execution_options(synchronize_session=False))
-    if deleted.rowcount != 1:
-        raise ValueError(
-            "Část už není prázdná; mezitím do ní přibylo video a nebyla odstraněna."
-        )
-    session.execute(delete(ManualSplitRuleVideo).where(
-        ManualSplitRuleVideo.catalog_title_id == title_id
-    ))
-    session.flush()
-    session.expire(collection, ["titles"])
-    refresh_collection_state(collection)
+    with strict_hierarchy_write_guard(session, [collection]):
+        # Explicitní vyprázdnění zachovává vlastní aplikační cleanup vedle FK cascade.
+        title.external_links.clear()
+        title.metadata_candidates.clear()
+        title.artwork.clear()
+        title.metadata_record = None
+        session.flush()
+        deleted = session.execute(delete(CatalogTitle).where(
+            CatalogTitle.id == title_id,
+            ~select(Video.id).where(Video.catalog_title_id == CatalogTitle.id).exists(),
+        ).execution_options(synchronize_session=False))
+        if deleted.rowcount != 1:
+            raise ValueError(
+                "Část už není prázdná; mezitím do ní přibylo video a nebyla odstraněna."
+            )
+        session.execute(delete(ManualSplitRuleVideo).where(
+            ManualSplitRuleVideo.catalog_title_id == title_id
+        ))
+        session.flush()
+        session.expire(collection, ["titles"])
+        refresh_collection_state(collection)
     return is_manual_split_entry
 
 
@@ -2864,62 +2932,63 @@ def apply_manual_split(
     if preview.conflicts and not confirm_conflicts:
         raise ValueError("Rozsahy nebo pravidla se překrývají; je nutné explicitní potvrzení.")
     _validate_manual_split_recap_context(collection, definitions, preview)
-    existing = {title.id: title for title in collection.titles}
-    resolved: list[CatalogTitle] = []
-    now = utc_now()
-    for position, definition in enumerate(definitions, 1):
-        title = existing.get(definition.title_id) if definition.title_id else None
-        if definition.title_id and title is None:
-            raise ValueError("Definice odkazuje na cizí nebo neexistující část.")
-        if title is None:
-            virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}"
-            suffix = 1
-            while session.scalar(select(CatalogTitle.id).where(CatalogTitle.relative_root_path == virtual_path)):
-                suffix += 1
-                virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}-{suffix}"
-            title = CatalogTitle(
-                collection=collection, local_title=definition.local_title,
-                normalized_local_title=normalize_title(definition.local_title),
-                relative_root_path=virtual_path,
-            )
-            session.add(title)
-        title.local_title = definition.local_title
-        title.normalized_local_title = normalize_title(definition.local_title)
-        title.manual_display_title = definition.manual_display_title
-        if definition.part_type_manual is not None:
-            snapshot_part_number = definition.part_number_manual
-            if definition.part_type_manual not in {"season", "part", "cour"}:
-                snapshot_part_number = None
-            activate_manual_hierarchy_snapshot(
-                title,
-                part_type=definition.part_type_manual,
-                season_number=definition.season_number_manual,
-                part_number=snapshot_part_number,
-                season_label=definition.season_label_manual,
-                sort_order=definition.sort_order,
-                verified_at=now,
-            )
-        title.episode_start = definition.episode_start
-        title.episode_end = definition.episode_end
-        title.episode_start_offset = definition.episode_start_offset
-        title.numbering_mode = definition.numbering_mode
-        title.episode_filename_pattern = definition.filename_pattern
-        resolved.append(title)
-    _validate_split_season_structure(collection)
-    session.flush()
-    synchronize_manual_split_authority(
-        definitions,
-        resolved,
-        list(collection.videos),
-    )
-    session.flush()
-    apply_manual_split_decisions(
-        preview,
-        collection,
-        catalog_titles=resolved,
-    )
-    session.flush()
-    refresh_collection_state(collection)
+    with strict_hierarchy_write_guard(session, [collection]):
+        existing = {title.id: title for title in collection.titles}
+        resolved: list[CatalogTitle] = []
+        now = utc_now()
+        for position, definition in enumerate(definitions, 1):
+            title = existing.get(definition.title_id) if definition.title_id else None
+            if definition.title_id and title is None:
+                raise ValueError("Definice odkazuje na cizí nebo neexistující část.")
+            if title is None:
+                virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}"
+                suffix = 1
+                while session.scalar(select(CatalogTitle.id).where(CatalogTitle.relative_root_path == virtual_path)):
+                    suffix += 1
+                    virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}-{suffix}"
+                title = CatalogTitle(
+                    collection=collection, local_title=definition.local_title,
+                    normalized_local_title=normalize_title(definition.local_title),
+                    relative_root_path=virtual_path,
+                )
+                session.add(title)
+            title.local_title = definition.local_title
+            title.normalized_local_title = normalize_title(definition.local_title)
+            title.manual_display_title = definition.manual_display_title
+            if definition.part_type_manual is not None:
+                snapshot_part_number = definition.part_number_manual
+                if definition.part_type_manual not in {"season", "part", "cour"}:
+                    snapshot_part_number = None
+                activate_manual_hierarchy_snapshot(
+                    title,
+                    part_type=definition.part_type_manual,
+                    season_number=definition.season_number_manual,
+                    part_number=snapshot_part_number,
+                    season_label=definition.season_label_manual,
+                    sort_order=definition.sort_order,
+                    verified_at=now,
+                )
+            title.episode_start = definition.episode_start
+            title.episode_end = definition.episode_end
+            title.episode_start_offset = definition.episode_start_offset
+            title.numbering_mode = definition.numbering_mode
+            title.episode_filename_pattern = definition.filename_pattern
+            resolved.append(title)
+        _validate_split_season_structure(collection)
+        session.flush()
+        synchronize_manual_split_authority(
+            definitions,
+            resolved,
+            list(collection.videos),
+        )
+        session.flush()
+        apply_manual_split_decisions(
+            preview,
+            collection,
+            catalog_titles=resolved,
+        )
+        session.flush()
+        refresh_collection_state(collection)
     return preview
 
 

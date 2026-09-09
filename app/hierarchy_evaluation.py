@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 
+from sqlalchemy.orm import Session
+
 from .catalog import detect_episode_number, effective_video_content_type
 from .collection_presentation import (
+    RECAP_SEASON_CONTEXT_ERROR,
+    RecapSeasonContextError,
     build_collection_presentation,
     title_has_authoritative_season_context,
 )
@@ -696,6 +702,96 @@ def apply_hierarchy_evaluation(
         collection.hierarchy_verified_at = None
 
 
+def _unique_collections(
+    collections: list[CatalogCollection] | tuple[CatalogCollection, ...],
+) -> tuple[CatalogCollection, ...]:
+    unique: list[CatalogCollection] = []
+    seen: set[tuple[str, int | str]] = set()
+    for collection in collections:
+        key = (
+            ("id", collection.id)
+            if collection.id is not None
+            else ("path", collection.relative_root_path)
+        )
+        if key not in seen:
+            seen.add(key)
+            unique.append(collection)
+    return tuple(unique)
+
+
+def _recap_season_context_violations(
+    collections: tuple[CatalogCollection, ...],
+) -> frozenset[int]:
+    """Return stable IDs of effective Recaps outside a resolved Season context."""
+    violations: set[int] = set()
+    for collection in collections:
+        titles = tuple(collection.titles)
+        presentation = build_collection_presentation(
+            titles,
+            include_videos=False,
+        )
+        titles_by_id = {
+            title.id: title for title in titles if title.id is not None
+        }
+        videos = {
+            video.id: video
+            for video in (
+                *collection.videos,
+                *(video for title in titles for video in title.videos),
+            )
+            if video.id is not None
+        }
+        for video_id, video in videos.items():
+            title = (
+                titles_by_id.get(video.catalog_title_id)
+                or video.__dict__.get("catalog_title")
+            )
+            if (
+                effective_video_content_type(
+                    video,
+                    title,
+                    use_current_title=False,
+                ) == "recap"
+                and not title_has_authoritative_season_context(
+                    title,
+                    presentation=presentation,
+                )
+            ):
+                violations.add(video_id)
+    return frozenset(violations)
+
+
+@contextmanager
+def strict_hierarchy_write_guard(
+    session: Session,
+    collections: list[CatalogCollection] | tuple[CatalogCollection, ...],
+) -> Iterator[None]:
+    """Rollback an explicit write that creates a new finalized Recap violation.
+
+    Callers run their ordinary mutation and shared hierarchy finalization inside
+    the guard.  Existing legacy violations are captured before the mutation and
+    therefore do not block an unrelated or corrective write by themselves.
+    """
+    affected = _unique_collections(collections)
+    violations_before = _recap_season_context_violations(affected)
+    savepoint = session.begin_nested()
+    try:
+        yield
+        session.flush()
+        introduced = (
+            _recap_season_context_violations(affected) - violations_before
+        )
+        if introduced:
+            raise RecapSeasonContextError(RECAP_SEASON_CONTEXT_ERROR)
+    except Exception:
+        if savepoint.is_active:
+            savepoint.rollback()
+        session.expire_all()
+        raise
+    else:
+        savepoint.commit()
+
+
 def finalize_collection_hierarchy(
     collection: CatalogCollection,
     videos: list[Video] | None = None,
@@ -733,17 +829,7 @@ def finalize_hierarchy_write(
     recalculate: bool = True,
 ) -> dict[int, HierarchyEvaluationResult]:
     """Finish ordinary writes with the existing shared assignment pipeline."""
-    unique: list[CatalogCollection] = []
-    seen: set[tuple[str, int | str]] = set()
-    for collection in collections:
-        key = (
-            ("id", collection.id)
-            if collection.id is not None
-            else ("path", collection.relative_root_path)
-        )
-        if key not in seen:
-            seen.add(key)
-            unique.append(collection)
+    unique = _unique_collections(collections)
 
     for collection in unique:
         for title in collection.titles:

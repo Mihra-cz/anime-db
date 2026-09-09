@@ -858,7 +858,10 @@ def apply_video_variant_assignments(
     workflow: str = "manual_bulk",
     require_distinct: bool = False,
 ) -> VariantAssignmentPreview:
-    from .hierarchy_evaluation import finalize_hierarchy_write
+    from .hierarchy_evaluation import (
+        finalize_hierarchy_write,
+        strict_hierarchy_write_guard,
+    )
 
     preview = preview_video_variant_assignments(
         session,
@@ -892,30 +895,31 @@ def apply_video_variant_assignments(
         video.id: (video.catalog_title_id, video.catalog_collection_id)
         for video in title.collection.videos
     }
-    _materialize_variant_assignments(session, title, preview)
-    finalize_hierarchy_write([title.collection], recalculate=False)
-    session.flush()
-    if numbering_before != {
-        video.id: (
-            video.local_episode_number,
-            video.season_episode_number,
-            video.absolute_episode_number,
-            video.external_episode_number,
-            video.episode_number_manual_override,
-        )
-        for video in title.videos
-    }:
-        raise ValueError("Variant assignment nesmí měnit canonical numbering.")
-    if duplicate_before != {
-        video.id: (video.duplicate_of_video_id, video.duplicate_primary_missing)
-        for video in title.videos
-    }:
-        raise ValueError("Variant assignment nesmí měnit duplicate vztahy.")
-    if hierarchy_before != {
-        video.id: (video.catalog_title_id, video.catalog_collection_id)
-        for video in title.collection.videos
-    }:
-        raise ValueError("Variant assignment nesmí měnit hierarchy membership.")
+    with strict_hierarchy_write_guard(session, [title.collection]):
+        _materialize_variant_assignments(session, title, preview)
+        finalize_hierarchy_write([title.collection], recalculate=False)
+        session.flush()
+        if numbering_before != {
+            video.id: (
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.external_episode_number,
+                video.episode_number_manual_override,
+            )
+            for video in title.videos
+        }:
+            raise ValueError("Variant assignment nesmí měnit canonical numbering.")
+        if duplicate_before != {
+            video.id: (video.duplicate_of_video_id, video.duplicate_primary_missing)
+            for video in title.videos
+        }:
+            raise ValueError("Variant assignment nesmí měnit duplicate vztahy.")
+        if hierarchy_before != {
+            video.id: (video.catalog_title_id, video.catalog_collection_id)
+            for video in title.collection.videos
+        }:
+            raise ValueError("Variant assignment nesmí měnit hierarchy membership.")
     return preview
 
 
@@ -1151,7 +1155,10 @@ def apply_structural_ab_confirmation(
     expected_proposal_fingerprint: str,
     expected_assignment_fingerprint: str,
 ) -> StructuralABPreview:
-    from .hierarchy_evaluation import finalize_hierarchy_write
+    from .hierarchy_evaluation import (
+        finalize_hierarchy_write,
+        strict_hierarchy_write_guard,
+    )
 
     preview = preview_structural_ab_confirmation(
         session,
@@ -1169,18 +1176,19 @@ def apply_structural_ab_confirmation(
         )
     title = _load_variant_title(session, collection_id, catalog_title_id)
     videos_by_id = {video.id: video for video in title.videos}
-    set_video_episode_override(videos_by_id[video_a_id], preview.proposal.episode_number)
-    set_video_episode_override(videos_by_id[video_b_id], preview.proposal.episode_number)
-    _materialize_variant_assignments(session, title, preview.assignment_preview)
-    finalize_hierarchy_write([title.collection], recalculate=True)
-    session.flush()
-    first, second = videos_by_id[video_a_id], videos_by_id[video_b_id]
-    if (
-        first.season_episode_number != preview.proposal.episode_number
-        or second.season_episode_number != preview.proposal.episode_number
-        or first.video_variant_group_id is None
-        or second.video_variant_group_id is None
-        or first.video_variant_group_id == second.video_variant_group_id
-    ):
-        raise ValueError("A/B potvrzení nevytvořilo očekávaný atomický stav.")
+    with strict_hierarchy_write_guard(session, [title.collection]):
+        set_video_episode_override(videos_by_id[video_a_id], preview.proposal.episode_number)
+        set_video_episode_override(videos_by_id[video_b_id], preview.proposal.episode_number)
+        _materialize_variant_assignments(session, title, preview.assignment_preview)
+        finalize_hierarchy_write([title.collection], recalculate=True)
+        session.flush()
+        first, second = videos_by_id[video_a_id], videos_by_id[video_b_id]
+        if (
+            first.season_episode_number != preview.proposal.episode_number
+            or second.season_episode_number != preview.proposal.episode_number
+            or first.video_variant_group_id is None
+            or second.video_variant_group_id is None
+            or first.video_variant_group_id == second.video_variant_group_id
+        ):
+            raise ValueError("A/B potvrzení nevytvořilo očekávaný atomický stav.")
     return preview

@@ -18,11 +18,16 @@ from app.catalog_video_presentation import build_catalog_title_video_presentatio
 from app.config import Settings
 from app.database import Base
 from app.hierarchy_authority import activate_manual_hierarchy_snapshot
-from app.hierarchy_evaluation import finalize_collection_hierarchy
+from app.hierarchy_evaluation import (
+    evaluate_collection_hierarchy,
+    finalize_collection_hierarchy,
+)
 from app.hierarchy_review import (
     ManualTitleDefinition,
     apply_manual_split,
     classify_videos_in_place,
+    clear_confirmed_duplicate_videos,
+    confirm_duplicate_videos,
     create_title_from_videos,
     delete_empty_local_title,
 )
@@ -56,6 +61,11 @@ from app.numbering import (
 )
 from app.scanner import scan_library
 from app.supplementary import supplementary_review_issues
+from app.video_variants import (
+    VariantGroupDraft,
+    apply_video_variant_assignments,
+    preview_video_variant_assignments,
+)
 
 
 PROBE_RESULT = {
@@ -636,6 +646,739 @@ def _all_structural_write_state(session: Session) -> tuple:
             for decision in session.scalars(select(CollectionGroupingDecision))
         )),
     )
+
+
+def _route_endpoint(web_app, path: str):
+    return next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == path
+    )
+
+
+def _public_manage_videos(web_app, collection_id: int, items):
+    return asyncio.run(_route_endpoint(
+        web_app,
+        "/hierarchy-review/{collection_id}/manage-videos",
+    )(
+        _post_form_request(
+            web_app,
+            f"/hierarchy-review/{collection_id}/manage-videos",
+            items,
+        ),
+        collection_id,
+    ))
+
+
+def _public_set_episode_number(web_app, video_id: int, value: str):
+    return _route_endpoint(web_app, "/videos/{video_id}/episode-number")(
+        video_id,
+        manual_episode_number=value,
+        filter_name="all",
+        q="",
+        sort="",
+        direction="",
+        detail_sort="",
+        detail_direction="",
+        return_to="",
+    )
+
+
+def _seed_r1_automatic_recap_app(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    extra_filenames: tuple[str, ...] = (),
+    existing_bonus: bool = False,
+    manual_recap: bool = False,
+):
+    """Scan the public R1 graph, then explicitly attach its Recap to auto S1."""
+    library = tmp_path / "library"
+    root = library / "Show"
+    root.mkdir(parents=True)
+    filenames = ["E01.mkv", "E02.mkv", "Recap 3.5.mkv", *extra_filenames]
+    if existing_bonus:
+        filenames.append("Bonus 01.mkv")
+    for filename in filenames:
+        (root / filename).write_bytes(b"video")
+    monkeypatch.setattr(
+        "app.scanner.service.probe_video",
+        lambda *_args, **_kwargs: PROBE_RESULT,
+    )
+    web_app = create_app(Settings(
+        anime_path=library,
+        database_url=f"sqlite:///{tmp_path / 'r1.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        scan_library(session, library)
+        collection = session.scalar(select(CatalogCollection))
+        season = next(
+            title for title in collection.titles
+            if title.effective_part_type == "season"
+        )
+        videos = {video.filename: video for video in collection.videos}
+        recap = videos["Recap 3.5.mkv"]
+        assert season.effective_season_number == 1
+        assert recap.catalog_title_id is None
+        ids = {
+            "collection": collection.id,
+            "season": season.id,
+            "e01": videos["E01.mkv"].id,
+            "e02": videos["E02.mkv"].id,
+            "recap": recap.id,
+        }
+        for filename in extra_filenames:
+            ids[filename] = videos[filename].id
+        bonus_video_id = videos["Bonus 01.mkv"].id if existing_bonus else None
+
+    if existing_bonus:
+        response = _public_manage_videos(web_app, ids["collection"], [
+            ("video_ids", str(bonus_video_id)),
+            ("operation", "create"),
+            ("local_title", "Bonus"),
+            ("part_type", "bonus"),
+            ("season_number", ""),
+            ("season_label", ""),
+            ("part_number", ""),
+            ("sort_order", ""),
+        ])
+        assert response.status_code == 303
+        with web_app.state.sessions() as session:
+            collection = session.get(CatalogCollection, ids["collection"])
+            ids["bonus"] = next(
+                title.id for title in collection.titles
+                if title.effective_part_type == "bonus"
+            )
+
+    response = _route_endpoint(
+        web_app,
+        "/root-videos/{video_id}/assignment",
+    )(
+        ids["recap"],
+        target_title_id=str(ids["season"]),
+        confirm_manual=True,
+    )
+    assert response.status_code == 303
+
+    if manual_recap:
+        assert _public_classify_video(
+            web_app,
+            ids["collection"],
+            ids["recap"],
+            "recap",
+        ).status_code == 303
+        assert _public_set_episode_number(
+            web_app, ids["recap"], "24.9"
+        ).status_code == 303
+
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, ids["collection"])
+        season = session.get(CatalogTitle, ids["season"])
+        recap = session.get(Video, ids["recap"])
+        assert season.effective_part_type == "season"
+        assert season.effective_season_number == 1
+        assert recap.catalog_title_id == season.id
+        assert not evaluate_collection_hierarchy(collection).blocking_issues
+        if manual_recap:
+            assert recap.content_type_manual == "recap"
+            assert effective_recap_episode_number(recap) == Decimal("24.9")
+        else:
+            assert recap.content_type_manual is None
+            assert effective_recap_episode_number(recap) == Decimal("3.5")
+        before = _all_structural_write_state(session)
+    return web_app, ids, before
+
+
+@pytest.mark.parametrize("target_mode", ["new", "existing"])
+def test_r1_public_episode_move_rejects_post_finalization_recap_orphan_atomically(
+    tmp_path: Path,
+    monkeypatch,
+    target_mode: str,
+):
+    web_app, ids, before = _seed_r1_automatic_recap_app(
+        tmp_path,
+        monkeypatch,
+        existing_bonus=target_mode == "existing",
+    )
+    items = [("video_ids", str(ids["e02"]))]
+    if target_mode == "new":
+        items.extend((
+            ("operation", "create"),
+            ("local_title", "Bonus"),
+            ("part_type", "bonus"),
+            ("season_number", ""),
+            ("season_label", ""),
+            ("part_number", ""),
+            ("sort_order", ""),
+        ))
+    else:
+        items.extend((
+            ("operation", "move"),
+            ("target_title_id", str(ids["bonus"])),
+        ))
+
+    with pytest.raises(HTTPException) as raised:
+        _public_manage_videos(web_app, ids["collection"], items)
+
+    assert raised.value.status_code == 400
+    assert "Season kontextu" in raised.value.detail
+    with web_app.state.sessions() as session:
+        assert _all_structural_write_state(session) == before
+        collection = session.get(CatalogCollection, ids["collection"])
+        season = session.get(CatalogTitle, ids["season"])
+        assert season.effective_part_type == "season"
+        assert session.get(Video, ids["e02"]).catalog_title_id == season.id
+        assert session.get(Video, ids["recap"]).catalog_title_id == season.id
+        if target_mode == "new":
+            assert len(collection.titles) == 1
+
+
+def test_r1_public_episode_move_rejects_manual_24_9_recap_atomically(
+    tmp_path: Path,
+    monkeypatch,
+):
+    web_app, ids, before = _seed_r1_automatic_recap_app(
+        tmp_path,
+        monkeypatch,
+        manual_recap=True,
+    )
+
+    with pytest.raises(HTTPException, match="Season kontextu"):
+        _public_manage_videos(web_app, ids["collection"], [
+            ("video_ids", str(ids["e02"])),
+            ("operation", "create"),
+            ("local_title", "Bonus"),
+            ("part_type", "bonus"),
+            ("season_number", ""),
+            ("season_label", ""),
+            ("part_number", ""),
+            ("sort_order", ""),
+        ])
+
+    with web_app.state.sessions() as session:
+        assert _all_structural_write_state(session) == before
+        recap = session.get(Video, ids["recap"])
+        assert recap.content_type_manual == "recap"
+        assert effective_recap_episode_number(recap) == Decimal("24.9")
+
+
+def test_r1_manual_split_rejects_source_demotion_after_finalization(
+    tmp_path: Path,
+    monkeypatch,
+):
+    web_app, ids, before = _seed_r1_automatic_recap_app(tmp_path, monkeypatch)
+    with web_app.state.sessions() as session:
+        season = session.get(CatalogTitle, ids["season"])
+        definitions = [
+            ManualTitleDefinition(
+                title_id=season.id,
+                local_title=season.local_title,
+                manual_display_title=None,
+                season_number_manual=None,
+                season_label_manual=None,
+                part_number_manual=None,
+                part_type_manual=None,
+                episode_start=None,
+                episode_end=None,
+                episode_start_offset=None,
+                numbering_mode=season.numbering_mode,
+                sort_order=None,
+                filename_pattern=None,
+                video_ids=(ids["e01"], ids["recap"]),
+            ),
+            ManualTitleDefinition(
+                title_id=None,
+                local_title="Bonus",
+                manual_display_title=None,
+                season_number_manual=None,
+                season_label_manual=None,
+                part_number_manual=None,
+                part_type_manual="bonus",
+                episode_start=None,
+                episode_end=None,
+                episode_start_offset=None,
+                numbering_mode="unknown",
+                sort_order=None,
+                filename_pattern=None,
+                video_ids=(ids["e02"],),
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="Season kontextu"):
+            apply_manual_split(session, ids["collection"], definitions)
+
+        assert _all_structural_write_state(session) == before
+        assert not session.new
+        assert not session.deleted
+        assert not session.dirty
+        assert session.get(Video, ids["e02"]).catalog_title_id == ids["season"]
+
+
+def test_r1_classifying_other_episode_rejects_post_finalization_recap_orphan(
+    tmp_path: Path,
+    monkeypatch,
+):
+    web_app, ids, before = _seed_r1_automatic_recap_app(tmp_path, monkeypatch)
+
+    with pytest.raises(HTTPException) as raised:
+        _public_classify_video(
+            web_app, ids["collection"], ids["e02"], "bonus"
+        )
+
+    assert raised.value.status_code == 400
+    assert "Season kontextu" in raised.value.detail
+    with web_app.state.sessions() as session:
+        assert _all_structural_write_state(session) == before
+        assert session.get(Video, ids["e02"]).content_type_manual is None
+
+
+def test_r1_renumbering_other_episode_rejects_post_finalization_recap_orphan(
+    tmp_path: Path,
+    monkeypatch,
+):
+    web_app, ids, before = _seed_r1_automatic_recap_app(tmp_path, monkeypatch)
+
+    with pytest.raises(HTTPException) as raised:
+        _public_set_episode_number(web_app, ids["e02"], "3")
+
+    assert raised.value.status_code == 400
+    assert "Season kontextu" in raised.value.detail
+    with web_app.state.sessions() as session:
+        assert _all_structural_write_state(session) == before
+        episode = session.get(Video, ids["e02"])
+        assert episode.episode_number_manual_override is None
+        assert episode.season_episode_number == 2
+
+
+def test_r1_complete_manual_season_allows_episode_move_that_keeps_recap_context(
+    tmp_path: Path,
+    monkeypatch,
+):
+    web_app, ids, _before = _seed_r1_automatic_recap_app(tmp_path, monkeypatch)
+    assert _post_confirm_part(
+        web_app, ids["collection"], part_type="season"
+    ).status_code == 303
+
+    response = _public_manage_videos(web_app, ids["collection"], [
+        ("video_ids", str(ids["e02"])),
+        ("operation", "create"),
+        ("local_title", "Bonus"),
+        ("part_type", "bonus"),
+        ("season_number", ""),
+        ("season_label", ""),
+        ("part_number", ""),
+        ("sort_order", ""),
+    ])
+
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        season = session.get(CatalogTitle, ids["season"])
+        recap = session.get(Video, ids["recap"])
+        assert season.hierarchy_manual_override is True
+        assert season.effective_part_type == "season"
+        assert recap.catalog_title_id == season.id
+
+
+def test_r1_write_is_allowed_when_automatic_season_survives_finalization(
+    tmp_path: Path,
+    monkeypatch,
+):
+    web_app, ids, _before = _seed_r1_automatic_recap_app(
+        tmp_path,
+        monkeypatch,
+        extra_filenames=("E03.mkv",),
+    )
+
+    response = _public_manage_videos(web_app, ids["collection"], [
+        ("video_ids", str(ids["E03.mkv"])),
+        ("operation", "create"),
+        ("local_title", "Bonus"),
+        ("part_type", "bonus"),
+        ("season_number", ""),
+        ("season_label", ""),
+        ("part_number", ""),
+        ("sort_order", ""),
+    ])
+
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        season = session.get(CatalogTitle, ids["season"])
+        assert season.effective_part_type == "season"
+        assert session.get(Video, ids["recap"]).catalog_title_id == season.id
+        assert not evaluate_collection_hierarchy(season.collection).blocking_issues
+
+
+def test_r1_raw_recap_classified_bonus_is_not_a_recap_dependency(
+    tmp_path: Path,
+    monkeypatch,
+):
+    web_app, ids, _before = _seed_r1_automatic_recap_app(tmp_path, monkeypatch)
+    assert _public_classify_video(
+        web_app, ids["collection"], ids["recap"], "bonus"
+    ).status_code == 303
+
+    response = _public_manage_videos(web_app, ids["collection"], [
+        ("video_ids", str(ids["e02"])),
+        ("operation", "create"),
+        ("local_title", "Bonus 2"),
+        ("part_type", "bonus"),
+        ("season_number", ""),
+        ("season_label", ""),
+        ("part_number", ""),
+        ("sort_order", ""),
+    ])
+
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        recap = session.get(Video, ids["recap"])
+        assert recap.file_type == "recap"
+        assert recap.content_type_manual == "bonus"
+        assert effective_video_content_type(recap) == "bonus"
+        assert effective_recap_episode_number(recap) is None
+
+
+def test_r1_preexisting_legacy_recap_violation_does_not_block_unrelated_write(
+    tmp_path: Path,
+    monkeypatch,
+):
+    web_app, ids, _before = _seed_r1_automatic_recap_app(
+        tmp_path,
+        monkeypatch,
+        extra_filenames=("E03.mkv",),
+    )
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, ids["collection"])
+        legacy_title = CatalogTitle(
+            collection=collection,
+            local_title="Legacy Extras",
+            normalized_local_title="legacy extras",
+            relative_root_path="Show/.legacy-extras",
+            part_type="bonus",
+        )
+        activate_manual_hierarchy_snapshot(
+            legacy_title,
+            part_type="bonus",
+            season_number=None,
+            part_number=None,
+            season_label=None,
+            sort_order=None,
+            verified_at=utc_now(),
+        )
+        legacy_recap = Video(
+            relative_path="Show/.legacy-extras/Recap 8.5.mkv",
+            root_folder="Show",
+            filename="Recap 8.5.mkv",
+            size=99,
+            mtime_ns=99,
+            file_type="recap",
+            catalog_collection=collection,
+            catalog_title=legacy_title,
+        )
+        session.add_all([legacy_title, legacy_recap])
+        finalize_collection_hierarchy(collection)
+        session.commit()
+        legacy_id = legacy_recap.id
+        assert any(
+            issue.code.value == "recap_outside_season"
+            for issue in evaluate_collection_hierarchy(collection).issues
+        )
+
+    response = _public_manage_videos(web_app, ids["collection"], [
+        ("video_ids", str(ids["E03.mkv"])),
+        ("operation", "create"),
+        ("local_title", "Bonus"),
+        ("part_type", "bonus"),
+        ("season_number", ""),
+        ("season_label", ""),
+        ("part_number", ""),
+        ("sort_order", ""),
+    ])
+
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        legacy = session.get(Video, legacy_id)
+        season = session.get(CatalogTitle, ids["season"])
+        assert legacy.catalog_title.effective_part_type == "bonus"
+        assert effective_video_content_type(legacy) == "recap"
+        assert season.effective_part_type == "season"
+        assert session.get(Video, ids["recap"]).catalog_title_id == season.id
+
+
+def _seed_r1_repeated_episode_authority_app(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    authority: str,
+):
+    library = tmp_path / "library"
+    root = library / "Show"
+    root.mkdir(parents=True)
+    filenames = (
+        (
+            "Show - 01.mkv",
+            "Show - 01 Ver.TV.mkv",
+            "Show - 02.mkv",
+            "Show - 02 Ver.TV.mkv",
+            "Recap 3.5.mkv",
+        )
+        if authority == "variant"
+        else (
+            "Show - 01.mkv",
+            "Show 01.mp4",
+            "Show - 02.mkv",
+            "Recap 3.5.mkv",
+        )
+    )
+    for filename in filenames:
+        (root / filename).write_bytes(b"video")
+    monkeypatch.setattr(
+        "app.scanner.service.probe_video",
+        lambda *_args, **_kwargs: PROBE_RESULT,
+    )
+    web_app = create_app(Settings(
+        anime_path=library,
+        database_url=f"sqlite:///{tmp_path / f'r1-{authority}.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        scan_library(session, library)
+        collection = session.scalar(select(CatalogCollection))
+        title, = collection.titles
+        videos = {video.filename: video for video in collection.videos}
+        recap = videos["Recap 3.5.mkv"]
+        standard = [video for video in title.videos if video.id != recap.id]
+        if authority == "variant":
+            assignments = tuple(
+                (
+                    video.id,
+                    "tv" if "Ver.TV" in video.filename else "base",
+                )
+                for video in standard
+            )
+            drafts = (
+                VariantGroupDraft(key="base", manual_label="Base"),
+                VariantGroupDraft(
+                    key="tv", manual_label="TV", release_source="tv"
+                ),
+            )
+            preview = preview_video_variant_assignments(
+                session,
+                collection.id,
+                title.id,
+                assignments=assignments,
+                drafts=drafts,
+            )
+            apply_video_variant_assignments(
+                session,
+                collection.id,
+                title.id,
+                assignments=assignments,
+                drafts=drafts,
+                expected_fingerprint=preview.fingerprint,
+            )
+            authority_ids = tuple(video.id for video in standard)
+        else:
+            primary = videos["Show - 01.mkv"]
+            secondary = videos["Show 01.mp4"]
+            confirm_duplicate_videos(
+                session,
+                collection.id,
+                [primary.id, secondary.id],
+                primary.id,
+            )
+            authority_ids = (primary.id, secondary.id)
+        session.commit()
+        assert title.effective_part_type == "season"
+        ids = {
+            "collection": collection.id,
+            "season": title.id,
+            "recap": recap.id,
+            "authority": authority_ids,
+        }
+
+    response = _route_endpoint(
+        web_app,
+        "/root-videos/{video_id}/assignment",
+    )(
+        ids["recap"],
+        target_title_id=str(ids["season"]),
+        confirm_manual=True,
+    )
+    assert response.status_code == 303
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, ids["collection"])
+        assert session.get(CatalogTitle, ids["season"]).effective_part_type == "season"
+        assert not evaluate_collection_hierarchy(collection).blocking_issues
+        before = _all_structural_write_state(session)
+    return web_app, ids, before
+
+
+def test_r1_clearing_variant_authority_rejects_recap_orphan_atomically(
+    tmp_path: Path,
+    monkeypatch,
+):
+    web_app, ids, before = _seed_r1_repeated_episode_authority_app(
+        tmp_path,
+        monkeypatch,
+        authority="variant",
+    )
+    with web_app.state.sessions() as session:
+        cleared_video_id = ids["authority"][0]
+        preview = preview_video_variant_assignments(
+            session,
+            ids["collection"],
+            ids["season"],
+            assignments=((cleared_video_id, "null"),),
+            drafts=(),
+        )
+
+        with pytest.raises(ValueError, match="Season kontextu"):
+            apply_video_variant_assignments(
+                session,
+                ids["collection"],
+                ids["season"],
+                assignments=((cleared_video_id, "null"),),
+                drafts=(),
+                expected_fingerprint=preview.fingerprint,
+            )
+
+        assert _all_structural_write_state(session) == before
+        assert not session.new
+        assert not session.deleted
+        assert not session.dirty
+
+
+def test_r1_clearing_duplicate_authority_rejects_recap_orphan_atomically(
+    tmp_path: Path,
+    monkeypatch,
+):
+    web_app, ids, before = _seed_r1_repeated_episode_authority_app(
+        tmp_path,
+        monkeypatch,
+        authority="duplicate",
+    )
+    with web_app.state.sessions() as session:
+        with pytest.raises(ValueError, match="Season kontextu"):
+            clear_confirmed_duplicate_videos(
+                session,
+                ids["collection"],
+                list(ids["authority"]),
+            )
+
+        assert _all_structural_write_state(session) == before
+        assert not session.new
+        assert not session.deleted
+        assert not session.dirty
+
+
+def test_r1_reset_manual_season_rejects_automatic_recap_orphan_atomically(
+    tmp_path: Path,
+    monkeypatch,
+):
+    web_app, ids, _before = _seed_r1_automatic_recap_app(tmp_path, monkeypatch)
+    assert _post_confirm_part(
+        web_app, ids["collection"], part_type="season"
+    ).status_code == 303
+    assert _public_manage_videos(web_app, ids["collection"], [
+        ("video_ids", str(ids["e02"])),
+        ("operation", "create"),
+        ("local_title", "Bonus"),
+        ("part_type", "bonus"),
+        ("season_number", ""),
+        ("season_label", ""),
+        ("part_number", ""),
+        ("sort_order", ""),
+    ]).status_code == 303
+    with web_app.state.sessions() as session:
+        before = _all_structural_write_state(session)
+        season = session.get(CatalogTitle, ids["season"])
+        verified_at = season.hierarchy_verified_at
+        assert season.hierarchy_manual_override is True
+        assert season.effective_part_type == "season"
+
+    endpoint = _title_hierarchy_endpoint(web_app)
+    with pytest.raises(HTTPException) as raised:
+        endpoint(
+            ids["collection"],
+            ids["season"],
+            season_number_manual="",
+            season_label_manual="",
+            part_number_manual="",
+            part_type_manual="",
+            sort_order_manual="",
+            hierarchy_verified=False,
+            filter_name="all",
+            q="",
+            sort="",
+            direction="",
+            return_to="hierarchy_review",
+        )
+
+    assert raised.value.status_code == 400
+    assert "Season kontextu" in raised.value.detail
+    with web_app.state.sessions() as session:
+        assert _all_structural_write_state(session) == before
+        season = session.get(CatalogTitle, ids["season"])
+        assert season.hierarchy_manual_override is True
+        assert season.hierarchy_verified_at == verified_at
+        assert season.effective_part_type == "season"
+
+
+def test_r1_post_finalization_guard_query_count_is_bounded_by_video_rows(
+    tmp_path: Path,
+    monkeypatch,
+):
+    def statement_count(label: str, extra_count: int) -> int:
+        case_path = tmp_path / label
+        case_path.mkdir()
+        web_app, ids, _before = _seed_r1_automatic_recap_app(
+            case_path,
+            monkeypatch,
+            extra_filenames=("E03.mkv",),
+        )
+        with web_app.state.sessions() as session:
+            collection = session.get(CatalogCollection, ids["collection"])
+            season = session.get(CatalogTitle, ids["season"])
+            for index in range(1, extra_count + 1):
+                session.add(Video(
+                    relative_path=f"Show/Bonus extra {index:02}.mkv",
+                    root_folder="Show",
+                    filename=f"Bonus extra {index:02}.mkv",
+                    size=100 + index,
+                    mtime_ns=100 + index,
+                    file_type="bonus",
+                    content_type_manual="bonus",
+                    catalog_collection=collection,
+                    catalog_title=season,
+                ))
+            finalize_collection_hierarchy(collection)
+            session.commit()
+            engine = session.get_bind()
+
+        statements = 0
+
+        def count_statement(*_args):
+            nonlocal statements
+            statements += 1
+
+        event.listen(engine, "before_cursor_execute", count_statement)
+        try:
+            response = _public_classify_video(
+                web_app,
+                ids["collection"],
+                ids["E03.mkv"],
+                "bonus",
+            )
+            assert response.status_code == 303
+        finally:
+            event.remove(engine, "before_cursor_execute", count_statement)
+        return statements
+
+    assert statement_count("one", 1) == statement_count("many", 40)
 
 
 def _seed_recap_title_hierarchy_app(

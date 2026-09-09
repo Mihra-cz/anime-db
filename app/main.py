@@ -92,7 +92,11 @@ from .external_subtitle_compatibility import (
 )
 from .migrations import migrate_schema_at_startup
 from .hierarchy_authority import activate_manual_hierarchy_snapshot
-from .hierarchy_evaluation import HierarchyIssueCode, finalize_hierarchy_write
+from .hierarchy_evaluation import (
+    HierarchyIssueCode,
+    finalize_hierarchy_write,
+    strict_hierarchy_write_guard,
+)
 from .hierarchy_review import (
     SIMPLE_DEFINITION_FIELDS,
     apply_manual_split, apply_single_title_confirmation,
@@ -1197,13 +1201,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             status_code=400,
                             detail=str(exc),
                         ) from exc
-                assign_video_catalog_title(video, None)
-                video.catalog_collection = None
-                replace_explicit_video_selector_authority([video], None)
-                session.flush()
-                if old_collection is not None:
-                    session.expire(old_collection, ["titles", "videos"])
-                    finalize_hierarchy_write([old_collection])
+                with strict_hierarchy_write_guard(
+                    session,
+                    [old_collection] if old_collection is not None else [],
+                ):
+                    assign_video_catalog_title(video, None)
+                    video.catalog_collection = None
+                    replace_explicit_video_selector_authority([video], None)
+                    session.flush()
+                    if old_collection is not None:
+                        session.expire(old_collection, ["titles", "videos"])
+                        finalize_hierarchy_write([old_collection])
             session.commit()
         return local_redirect_response(f"/unassigned-videos#video-{video_id}")
 
@@ -1226,47 +1234,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             collection = session.scalar(select(CatalogCollection).where(
                 CatalogCollection.relative_root_path == virtual_root
             ))
-            if collection is None:
-                collection = CatalogCollection(
-                    local_title=name, normalized_local_title=normalize_title(name),
-                    relative_root_path=virtual_root, manual_display_title=name,
+            affected = [old_collection] if old_collection is not None else []
+            if collection is not None:
+                affected.append(collection)
+            with strict_hierarchy_write_guard(session, affected):
+                if collection is None:
+                    collection = CatalogCollection(
+                        local_title=name, normalized_local_title=normalize_title(name),
+                        relative_root_path=virtual_root, manual_display_title=name,
+                    )
+                    session.add(collection)
+                    session.flush()
+                title_path = f"{virtual_root}/title"
+                title = session.scalar(select(CatalogTitle).where(
+                    CatalogTitle.relative_root_path == title_path
+                ))
+                if title is None:
+                    title = CatalogTitle(
+                        collection=collection, local_title=name,
+                        normalized_local_title=normalize_title(name),
+                        relative_root_path=title_path,
+                    )
+                    session.add(title)
+                collection.local_title = name
+                collection.normalized_local_title = normalize_title(name)
+                collection.manual_display_title = name
+                title.local_title = name
+                title.normalized_local_title = normalize_title(name)
+                title.manual_display_title = name
+                activate_manual_hierarchy_snapshot(
+                    title,
+                    part_type=part_type,
+                    season_number=None,
+                    part_number=None,
+                    season_label=labels[part_type],
+                    sort_order=None,
+                    verified_at=utc_now(),
                 )
-                session.add(collection)
+                video.catalog_collection = collection
+                assign_video_catalog_title(video, title)
                 session.flush()
-            title_path = f"{virtual_root}/title"
-            title = session.scalar(select(CatalogTitle).where(
-                CatalogTitle.relative_root_path == title_path
-            ))
-            if title is None:
-                title = CatalogTitle(
-                    collection=collection, local_title=name,
-                    normalized_local_title=normalize_title(name),
-                    relative_root_path=title_path,
-                )
-                session.add(title)
-            collection.local_title = name
-            collection.normalized_local_title = normalize_title(name)
-            collection.manual_display_title = name
-            title.local_title = name
-            title.normalized_local_title = normalize_title(name)
-            title.manual_display_title = name
-            activate_manual_hierarchy_snapshot(
-                title,
-                part_type=part_type,
-                season_number=None,
-                part_number=None,
-                season_label=labels[part_type],
-                sort_order=None,
-                verified_at=utc_now(),
-            )
-            video.catalog_collection = collection
-            assign_video_catalog_title(video, title)
-            session.flush()
-            replace_explicit_video_selector_authority([video], title)
-            finalize_hierarchy_write([
-                affected for affected in (old_collection, collection)
-                if affected is not None
-            ])
+                replace_explicit_video_selector_authority([video], title)
+                finalize_hierarchy_write([
+                    item for item in (old_collection, collection)
+                    if item is not None
+                ])
             session.commit()
         return local_redirect_response(f"/root-videos#video-{video_id}")
 
@@ -3536,10 +3548,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selected = [video for video in collection.videos if video.id in selected_ids]
                 if not selected_ids or len(selected) != len(selected_ids):
                     raise ValueError("Výběr videí není platný.")
-                apply_sequential_numbering(
-                    selected, start_episode, confirm_manual_conflicts=confirm_conflicts,
-                )
-                refresh_collection_state(collection)
+                with strict_hierarchy_write_guard(session, [collection]):
+                    apply_sequential_numbering(
+                        selected, start_episode, confirm_manual_conflicts=confirm_conflicts,
+                    )
+                    refresh_collection_state(collection)
                 session.commit()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4158,13 +4171,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
             try:
                 offset = int(episode_start_offset) if episode_start_offset.strip() else None
-                set_title_numbering(
-                    title, "unknown" if numbering_mode == "auto" else numbering_mode, offset
-                )
-                if title.collection is not None:
-                    refresh_collection_state(title.collection)
-                else:
-                    recalculate_title_numbering(title, list(title.videos))
+                with strict_hierarchy_write_guard(
+                    session,
+                    [title.collection] if title.collection is not None else [],
+                ):
+                    set_title_numbering(
+                        title,
+                        "unknown" if numbering_mode == "auto" else numbering_mode,
+                        offset,
+                    )
+                    if title.collection is not None:
+                        refresh_collection_state(title.collection)
+                    else:
+                        recalculate_title_numbering(title, list(title.videos))
                 session.commit()
             except ValueError as exc:
                 session.rollback()
@@ -4189,12 +4208,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if video is None or video.catalog_title_id is None:
                 raise HTTPException(status_code=404, detail="Video nebylo nalezeno")
             try:
-                set_video_episode_number_from_input(video, manual_episode_number)
                 title = video.catalog_title
-                if title.collection is not None:
-                    refresh_collection_state(title.collection)
-                else:
-                    recalculate_title_numbering(title, list(title.videos))
+                with strict_hierarchy_write_guard(
+                    session,
+                    [title.collection] if title.collection is not None else [],
+                ):
+                    set_video_episode_number_from_input(video, manual_episode_number)
+                    if title.collection is not None:
+                        refresh_collection_state(title.collection)
+                    else:
+                        recalculate_title_numbering(title, list(title.videos))
                 session.commit()
             except ValueError as exc:
                 session.rollback()
@@ -4264,14 +4287,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 if not confirm_apply:
                     raise ValueError("Sekvenční číslování je nutné explicitně potvrdit.")
-                apply_sequential_numbering(
-                    list(title.videos), sequence_start,
-                    confirm_manual_conflicts=confirm_manual_conflicts,
-                )
-                if title.collection is not None:
-                    refresh_collection_state(title.collection)
-                else:
-                    recalculate_title_numbering(title, list(title.videos))
+                with strict_hierarchy_write_guard(
+                    session,
+                    [title.collection] if title.collection is not None else [],
+                ):
+                    apply_sequential_numbering(
+                        list(title.videos), sequence_start,
+                        confirm_manual_conflicts=confirm_manual_conflicts,
+                    )
+                    if title.collection is not None:
+                        refresh_collection_state(title.collection)
+                    else:
+                        recalculate_title_numbering(title, list(title.videos))
                 session.commit()
             except ValueError as exc:
                 session.rollback()

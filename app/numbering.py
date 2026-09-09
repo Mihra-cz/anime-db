@@ -1627,6 +1627,7 @@ def apply_deterministic_bulk_renumber(
     from .hierarchy_evaluation import (
         evaluate_collection_hierarchy,
         finalize_hierarchy_write,
+        strict_hierarchy_write_guard,
     )
 
     evaluation = evaluate_collection_hierarchy(
@@ -1654,7 +1655,7 @@ def apply_deterministic_bulk_renumber(
     expected_final_numbers = tuple(
         range(1, proposal.rows[-1].proposed_episode + 1)
     )
-    with session.begin_nested():
+    with strict_hierarchy_write_guard(session, [title.collection]):
         for row in proposal.rows:
             for change in row.physical_changes:
                 video = videos_by_id.get(change.video_id)
