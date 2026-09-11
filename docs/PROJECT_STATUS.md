@@ -112,7 +112,12 @@ fallback inference, nikoli nová autoritativní ruční klasifikace.
   pro aktivní neúplné legacy snapshoty omezenou kompatibilní projekci.
 - Autorita výběru videí pro manual split je nezávislá na výsledném assignmentu:
   explicitní rozsah, filename pattern nebo `ManualSplitRuleVideo`. Samotné
-  `Video.catalog_title_id` se na selector automaticky nepovyšuje.
+  `Video.catalog_title_id` se na selector automaticky nepovyšuje. Rozsah a
+  filename pattern jsou autoritou nad celou collection, proto obsah, který
+  nepokrývají, vyžaduje review. Explicitní `ManualSplitRuleVideo` je autoritou
+  pouze nad konkrétně vyjmenovanými videi: chrání jejich ruční assignment, ale
+  collection do manual-split režimu sám nepřepíná a po budoucích souborech
+  shodu s pravidlem nevyžaduje.
 - `Video.file_type` je uložená parserová klasifikace. Obecný effective typ má
   prioritu video manual → konkrétní filename/raw typ → supplementary kontext
   title. Bonus/Extras container proto nezakrývá konkrétní Special/OVA/OP evidence.

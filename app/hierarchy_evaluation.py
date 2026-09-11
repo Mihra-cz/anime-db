@@ -828,7 +828,15 @@ def finalize_hierarchy_write(
     *,
     recalculate: bool = True,
 ) -> dict[int, HierarchyEvaluationResult]:
-    """Finish ordinary writes with the existing shared assignment pipeline."""
+    """Finish ordinary writes with the existing shared assignment pipeline.
+
+    Re-applying *already persisted* manual-split authority is reconciliation,
+    not a new user decision, so it stays tolerant: an existing invalid Recap
+    placement is preserved for structured review instead of aborting every
+    later write.  Whether the write itself introduced a new violation is the
+    job of ``strict_hierarchy_write_guard``; the explicit ``apply_manual_split``
+    workflow keeps its own strict assignment semantics.
+    """
     unique = _unique_collections(collections)
 
     for collection in unique:
@@ -840,7 +848,11 @@ def finalize_hierarchy_write(
                 collection,
                 list(collection.videos),
             )
-            apply_manual_split_decisions(split, collection)
+            apply_manual_split_decisions(
+                split,
+                collection,
+                allow_invalid_recap_review=True,
+            )
 
     results: dict[int, HierarchyEvaluationResult] = {}
     for collection in unique:

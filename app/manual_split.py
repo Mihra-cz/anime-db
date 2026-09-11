@@ -253,12 +253,23 @@ def evaluate_manual_split_assignment(
         if rule.definition.filename_pattern else None
         for rule in rules
     )
-    has_any_selector = any(
-        rule.definition.video_ids
-        or rule.definition.episode_start is not None
+    # A range or a filename pattern is authority over the whole collection, so
+    # content it does not cover is a real review problem.  An explicit M:N
+    # selection is authority over the videos it lists only.  When the caller
+    # submits the definitions itself (the manual-split form) the set is still a
+    # complete statement about the collection; when they are reconstructed from
+    # persisted rows, a bare pin must not turn every other -- especially every
+    # future -- video into an unmatched review item.
+    has_collection_scope_selector = any(
+        rule.definition.episode_start is not None
+        or rule.definition.episode_end is not None
         or pattern is not None
         for rule, pattern in zip(rules, patterns)
     )
+    has_any_selector = has_collection_scope_selector or any(
+        rule.definition.video_ids for rule in rules
+    )
+    selector_covers_collection = has_collection_scope_selector or not persisted_targets
     decisions: list[ManualSplitVideoDecision] = []
     for video in videos:
         number = _manual_split_number(
@@ -308,7 +319,7 @@ def evaluate_manual_split_assignment(
             kind = ManualSplitDecisionKind.UNIQUE
         elif len(matching_rules) > 1:
             kind = ManualSplitDecisionKind.CONFLICT
-        elif rules and _requires_rule_assignment(
+        elif rules and selector_covers_collection and _requires_rule_assignment(
             video,
             rules,
             persisted_targets=persisted_targets,
@@ -380,12 +391,25 @@ def synchronize_manual_split_authority(
             ))
 
 
+def has_persisted_manual_split_rule(title: CatalogTitle) -> bool:
+    """Return whether the part claims a share of the *whole* collection.
+
+    Only a range or a filename pattern partitions the collection.  An explicit
+    M:N selection is authority over the listed videos alone: it protects the
+    user's decision about them without making every other file of the anime
+    depend on a rule match.
+    """
+    return bool(
+        title.episode_start is not None
+        or title.episode_end is not None
+        or title.episode_filename_pattern
+    )
+
+
 def has_persisted_manual_split_selector(title: CatalogTitle) -> bool:
     return bool(
         title.manual_split_rule_videos
-        or title.episode_start is not None
-        or title.episode_end is not None
-        or title.episode_filename_pattern
+        or has_persisted_manual_split_rule(title)
     )
 
 
@@ -393,6 +417,14 @@ def manual_split_titles(collection: CatalogCollection) -> list[CatalogTitle]:
     return [
         title for title in collection.titles
         if has_persisted_manual_split_selector(title)
+    ]
+
+
+def manual_split_rule_titles(collection: CatalogCollection) -> list[CatalogTitle]:
+    """Parts whose persisted authority claims collection-wide coverage."""
+    return [
+        title for title in collection.titles
+        if has_persisted_manual_split_rule(title)
     ]
 
 

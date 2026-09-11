@@ -123,6 +123,7 @@ from .hierarchy_review import (
     single_title_confirmation_suggestion, supplementary_assignment_recommendations,
     supplementary_video_suggestions, set_manual_title_hierarchy,
     complementary_season_part_proposal_for_videos,
+    video_source_collections,
 )
 from .hierarchy_review_presentation import (
     build_hierarchy_review_collection_presentation,
@@ -1163,6 +1164,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 and insufficient_video_assignment(video) is None
             ):
                 raise HTTPException(status_code=404, detail="Nezařazené video nebylo nalezeno")
+            old_sources = video_source_collections([video])
             old_collection = video.catalog_collection
             target_title = None
             if target_title_id.strip():
@@ -1201,17 +1203,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             status_code=400,
                             detail=str(exc),
                         ) from exc
-                with strict_hierarchy_write_guard(
-                    session,
-                    [old_collection] if old_collection is not None else [],
-                ):
+                with strict_hierarchy_write_guard(session, list(old_sources)):
                     assign_video_catalog_title(video, None)
                     video.catalog_collection = None
                     replace_explicit_video_selector_authority([video], None)
                     session.flush()
-                    if old_collection is not None:
-                        session.expire(old_collection, ["titles", "videos"])
-                        finalize_hierarchy_write([old_collection])
+                    for source in old_sources:
+                        session.expire(source, ["titles", "videos"])
+                    if old_sources:
+                        finalize_hierarchy_write(list(old_sources))
             session.commit()
         return local_redirect_response(f"/unassigned-videos#video-{video_id}")
 
@@ -1229,12 +1229,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             video = session.get(Video, video_id)
             if video is None or not is_root_video(video):
                 raise HTTPException(status_code=404, detail="Root video nebylo nalezeno")
-            old_collection = video.catalog_collection
+            old_sources = video_source_collections([video])
             virtual_root = f"@root/{video.id}"
             collection = session.scalar(select(CatalogCollection).where(
                 CatalogCollection.relative_root_path == virtual_root
             ))
-            affected = [old_collection] if old_collection is not None else []
+            affected = list(old_sources)
             if collection is not None:
                 affected.append(collection)
             with strict_hierarchy_write_guard(session, affected):
@@ -1275,10 +1275,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 assign_video_catalog_title(video, title)
                 session.flush()
                 replace_explicit_video_selector_authority([video], title)
-                finalize_hierarchy_write([
-                    item for item in (old_collection, collection)
-                    if item is not None
-                ])
+                finalize_hierarchy_write([*old_sources, collection])
             session.commit()
         return local_redirect_response(f"/root-videos#video-{video_id}")
 
@@ -3135,14 +3132,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             collection = session.get(CatalogCollection, collection_id)
             if collection is None:
                 raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
-            if hierarchy_status == "verified":
-                try:
-                    confirm_effective_collection_hierarchy(collection)
-                except ValueError as exc:
-                    session.rollback()
-                    raise HTTPException(status_code=400, detail=str(exc)) from exc
-            refresh_collection_state(collection)
-            session.commit()
+            try:
+                # The confirmation and the shared finalization are one explicit
+                # write: automatic inference must not commit a newly finalized
+                # structural violation through the status form.
+                with strict_hierarchy_write_guard(session, [collection]):
+                    if hierarchy_status == "verified":
+                        confirm_effective_collection_hierarchy(collection)
+                    refresh_collection_state(collection)
+                session.commit()
+            except ValueError as exc:
+                session.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         return local_redirect_response(f"/hierarchy-review/{collection_id}")
 
     @app.post("/hierarchy-review/{collection_id}/reevaluate-automatic")

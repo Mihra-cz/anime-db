@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from collections import defaultdict
 import logging
@@ -30,6 +31,7 @@ from app.manual_split import (
     apply_manual_split_decisions,
     evaluate_persisted_manual_split,
     historical_manual_split_ambiguities,
+    manual_split_rule_titles,
     manual_split_titles,
     persisted_manual_split_authority_collections,
 )
@@ -463,6 +465,10 @@ def _scan_library(
         for title, target in collection_grouping_authority_targets(session).items()
     }
     protected_collection_paths: set[str] = set()
+    # Structural context is only final after the shared inference has run, so a
+    # Recap whose Season owner is still a raw path title is retried later
+    # instead of being written off as unassigned.
+    deferred_reconciliation: list[tuple[Video, CatalogTitle]] = []
     for video in current_videos:
         authority_collections = persisted_manual_split_authority_collections(video)
         if video.manual_split_rule_videos:
@@ -537,9 +543,8 @@ def _scan_library(
         existing_title = assigned_manual_title or reassigned_path_title
         if existing_title is not None:
             if not reconcile_video_catalog_title(video, existing_title):
-                logger.warning(
-                    "Video %s zůstává pro review: Recap nemá Season kontext.",
-                    video.relative_path,
+                _defer_structural_reconciliation(
+                    deferred_reconciliation, video, existing_title,
                 )
             video.catalog_collection = existing_title.collection
             continue
@@ -553,7 +558,10 @@ def _scan_library(
             session.add(collection)
             session.flush()
             collections[collection.relative_root_path] = collection
-        split_titles = manual_split_titles(collection)
+        # Videos with their own explicit M:N authority already returned above.
+        # Only collection-wide range/pattern authority may defer the ordinary
+        # path assignment of the remaining, unrelated videos.
+        split_titles = manual_split_rule_titles(collection)
         if split_titles:
             video.catalog_collection = collection
             continue
@@ -579,9 +587,8 @@ def _scan_library(
             catalog_title.original_folder_name = title_data.original_folder_name
             catalog_title.sort_order = title_data.sort_order
         if not reconcile_video_catalog_title(video, catalog_title):
-            logger.warning(
-                "Video %s zůstává pro review: Recap nemá Season kontext.",
-                video.relative_path,
+            _defer_structural_reconciliation(
+                deferred_reconciliation, video, catalog_title,
             )
     session.flush()
     videos_by_collection_path: dict[str, list[Video]] = {}
@@ -619,6 +626,11 @@ def _scan_library(
                 video.catalog_collection_id, []
             ).append(video)
     session.expire_all()
+    deferred_by_collection: dict[int, list[tuple[Video, CatalogTitle]]] = {}
+    for video, title in deferred_reconciliation:
+        owner = title.collection
+        if owner is not None and owner.id is not None:
+            deferred_by_collection.setdefault(owner.id, []).append((video, title))
     for collection in session.scalars(select(CatalogCollection).options(
         selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record)
     )).all():
@@ -629,10 +641,55 @@ def _scan_library(
             recalculate_collection_numbering(collection, videos_by_title)
             continue
         finalize_collection_hierarchy(collection, collection_videos)
+        if _retry_deferred_reconciliation(
+            session, collection, deferred_by_collection.get(collection.id, ()),
+        ):
+            finalize_collection_hierarchy(collection, collection_videos)
+    for video, title in deferred_reconciliation:
+        if video.catalog_title is None:
+            logger.warning(
+                "Video %s zůstává pro review: Recap nemá Season kontext.",
+                video.relative_path,
+            )
     session.commit()
     logger.info("Sken dokončen: found=%d created=%d updated=%d unchanged=%d removed=%d errors=%d",
                 result.found, result.created, result.updated, result.unchanged, result.removed, result.errors)
     return result
+
+
+def _defer_structural_reconciliation(
+    deferred: list[tuple[Video, CatalogTitle]],
+    video: Video,
+    title: CatalogTitle,
+) -> None:
+    """Remember an assignment that only the final structural context can decide."""
+    if video.catalog_title is None:
+        deferred.append((video, title))
+
+
+def _retry_deferred_reconciliation(
+    session: Session,
+    collection: CatalogCollection,
+    deferred: Sequence[tuple[Video, CatalogTitle]],
+) -> bool:
+    """Re-apply refused assignments against the already inferred structure.
+
+    ``apply_automatic_structural_inference`` runs inside the shared finalization,
+    so a direct-root part becomes an authoritative Season only after every video
+    has been placed.  A Recap rejected against the raw path type is therefore
+    retried once the collection is final; the scanner stays tolerant and simply
+    leaves it unassigned for review when the context is genuinely missing.
+    """
+    applied = False
+    for video, title in deferred:
+        if video.catalog_title is not None:
+            continue
+        if reconcile_video_catalog_title(video, title):
+            video.catalog_collection = collection
+            applied = True
+    if applied:
+        session.flush()
+    return applied
 
 
 def scan_library(

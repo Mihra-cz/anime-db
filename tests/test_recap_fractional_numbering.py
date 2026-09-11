@@ -691,7 +691,7 @@ def _seed_r1_automatic_recap_app(
     existing_bonus: bool = False,
     manual_recap: bool = False,
 ):
-    """Scan the public R1 graph, then explicitly attach its Recap to auto S1."""
+    """Scan the public R1 graph; the Recap lands in the inferred automatic S1."""
     library = tmp_path / "library"
     root = library / "Show"
     root.mkdir(parents=True)
@@ -721,7 +721,9 @@ def _seed_r1_automatic_recap_app(
         videos = {video.filename: video for video in collection.videos}
         recap = videos["Recap 3.5.mkv"]
         assert season.effective_season_number == 1
-        assert recap.catalog_title_id is None
+        # The scanner evaluates the Recap against the finalized structural
+        # context, so a direct-root automatic S1 already owns it.
+        assert recap.catalog_title_id == season.id
         ids = {
             "collection": collection.id,
             "season": season.id,
@@ -751,16 +753,6 @@ def _seed_r1_automatic_recap_app(
                 title.id for title in collection.titles
                 if title.effective_part_type == "bonus"
             )
-
-    response = _route_endpoint(
-        web_app,
-        "/root-videos/{video_id}/assignment",
-    )(
-        ids["recap"],
-        target_title_id=str(ids["season"]),
-        confirm_manual=True,
-    )
-    assert response.status_code == 303
 
     if manual_recap:
         assert _public_classify_video(

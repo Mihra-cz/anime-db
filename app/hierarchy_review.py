@@ -1313,6 +1313,31 @@ def apply_single_title_confirmation(
     season_number: int | None, season_label: str | None,
     part_number: int | None = None,
 ) -> CatalogTitle:
+    """Confirm the one ambiguous part and validate its actual finalized result."""
+    session = object_session(collection)
+    if session is None:
+        return _apply_single_title_confirmation(
+            collection,
+            part_type=part_type,
+            season_number=season_number,
+            season_label=season_label,
+            part_number=part_number,
+        )
+    with strict_hierarchy_write_guard(session, [collection]):
+        return _apply_single_title_confirmation(
+            collection,
+            part_type=part_type,
+            season_number=season_number,
+            season_label=season_label,
+            part_number=part_number,
+        )
+
+
+def _apply_single_title_confirmation(
+    collection: CatalogCollection, *, part_type: str,
+    season_number: int | None, season_label: str | None,
+    part_number: int | None = None,
+) -> CatalogTitle:
     suggestion = single_title_confirmation_suggestion(collection)
     if suggestion is None:
         raise ValueError("Kolekce už nesplňuje podmínky ručního potvrzení jediné části.")
@@ -2246,6 +2271,27 @@ def preview_assignments(
     return preview
 
 
+def video_source_collections(
+    videos: list[Video] | tuple[Video, ...],
+) -> set[CatalogCollection]:
+    """Return every collection a structural video move actually takes evidence from.
+
+    ``Video.catalog_collection`` is a redundant link that can legitimately be
+    missing or disagree with the assigned part; `app/unassigned_videos.py` lists
+    exactly those states as repairable. The collection that owns the current
+    ``CatalogTitle`` is affected by the move either way, so it must be guarded
+    and finalized together with the redundant one.
+    """
+    sources: set[CatalogCollection] = set()
+    for video in videos:
+        if video.catalog_collection is not None:
+            sources.add(video.catalog_collection)
+        title = video.catalog_title
+        if title is not None and title.collection is not None:
+            sources.add(title.collection)
+    return sources
+
+
 def _load_collection_for_assignment(session: Session, collection_id: int) -> CatalogCollection:
     collection = session.scalar(select(CatalogCollection).options(
         selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
@@ -2665,37 +2711,38 @@ def confirm_existing_split_season_parts(
     }
     titles_by_id = {title.id: title for title in collection.titles}
     now = utc_now()
-    for item in proposal.items:
-        title = titles_by_id[item.title_id]
-        activate_manual_hierarchy_snapshot(
-            title,
-            part_type="season",
-            season_number=season_number,
-            part_number=item.proposed_part_number,
-            season_label=title.effective_season_label or f"S{season_number}",
-            sort_order=title.sort_order_manual,
-            verified_at=now,
-        )
-    _validate_split_season_structure(collection)
-    refresh_collection_state(collection, recalculate=False)
-    if membership != {
-        video.id: video.catalog_title_id for video in collection.videos
-    }:
-        raise ValueError("Potvrzení Part ordinalů nesmí změnit video membership.")
-    if numbering != {
-        video.id: (
-            video.local_episode_number,
-            video.season_episode_number,
-            video.absolute_episode_number,
-            video.external_episode_number,
-        )
-        for video in collection.videos
-    }:
-        raise ValueError("Potvrzení Part ordinalů nesmí změnit canonical numbering.")
-    if duplicate_links != {
-        video.id: video.duplicate_of_video_id for video in collection.videos
-    }:
-        raise ValueError("Potvrzení Part ordinalů nesmí změnit duplicate vazby.")
+    with strict_hierarchy_write_guard(session, [collection]):
+        for item in proposal.items:
+            title = titles_by_id[item.title_id]
+            activate_manual_hierarchy_snapshot(
+                title,
+                part_type="season",
+                season_number=season_number,
+                part_number=item.proposed_part_number,
+                season_label=title.effective_season_label or f"S{season_number}",
+                sort_order=title.sort_order_manual,
+                verified_at=now,
+            )
+        _validate_split_season_structure(collection)
+        refresh_collection_state(collection, recalculate=False)
+        if membership != {
+            video.id: video.catalog_title_id for video in collection.videos
+        }:
+            raise ValueError("Potvrzení Part ordinalů nesmí změnit video membership.")
+        if numbering != {
+            video.id: (
+                video.local_episode_number,
+                video.season_episode_number,
+                video.absolute_episode_number,
+                video.external_episode_number,
+            )
+            for video in collection.videos
+        }:
+            raise ValueError("Potvrzení Part ordinalů nesmí změnit canonical numbering.")
+        if duplicate_links != {
+            video.id: video.duplicate_of_video_id for video in collection.videos
+        }:
+            raise ValueError("Potvrzení Part ordinalů nesmí změnit duplicate vazby.")
     return proposal
 
 
@@ -2721,10 +2768,7 @@ def assign_known_videos_to_title(
     ).where(CatalogTitle.id == target_title_id))
     if target is None or target.collection is None:
         raise ValueError("Cílová část nepatří k platné collection.")
-    sources = {
-        video.catalog_collection for video in selected
-        if video.catalog_collection is not None
-    }
+    sources = video_source_collections(selected)
     affected = sources | {target.collection}
     with strict_hierarchy_write_guard(session, list(affected)):
         for video in selected:
@@ -2750,16 +2794,14 @@ def create_title_for_known_videos(
         raise ValueError("Vyberte alespoň jedno video.")
     selected = list(session.scalars(select(Video).options(
         selectinload(Video.catalog_collection),
+        selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
     ).where(Video.id.in_(selected_ids))).all())
     if len(selected) != len(selected_ids):
         raise ValueError("Výběr obsahuje neexistující video.")
     collection = session.get(CatalogCollection, collection_id)
     if collection is None:
         raise ValueError("Kolekce nebyla nalezena.")
-    sources = {
-        video.catalog_collection for video in selected
-        if video.catalog_collection is not None
-    }
+    sources = video_source_collections(selected)
     affected = sources | {collection}
     with strict_hierarchy_write_guard(session, list(affected)):
         for video in selected:
@@ -2796,13 +2838,11 @@ def create_anime_for_known_videos(
         raise ValueError("Vyberte alespoň jedno video.")
     selected = list(session.scalars(select(Video).options(
         selectinload(Video.catalog_collection),
+        selectinload(Video.catalog_title).selectinload(CatalogTitle.collection),
     ).where(Video.id.in_(selected_ids))).all())
     if len(selected) != len(selected_ids):
         raise ValueError("Výběr obsahuje neexistující video.")
-    sources = {
-        video.catalog_collection for video in selected
-        if video.catalog_collection is not None
-    }
+    sources = video_source_collections(selected)
     with strict_hierarchy_write_guard(session, list(sources)):
         collection = create_manual_collection(session, collection_title)
         return create_title_for_known_videos(

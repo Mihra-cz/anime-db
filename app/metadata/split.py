@@ -8,7 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.catalog import detect_episode_number
-from app.hierarchy_evaluation import catalog_title_hierarchy_is_verified
+from app.hierarchy_evaluation import (
+    catalog_title_hierarchy_is_verified,
+    strict_hierarchy_write_guard,
+)
 from app.hierarchy_review import create_title_from_videos, refresh_collection_state
 from app.hierarchy_types import PART_TYPE_LABELS, PART_TYPES
 from app.media_parts import media_part_total
@@ -543,44 +546,53 @@ def apply_metadata_split(
         raise ValueError("Titul není přiřazený ke kolekci.")
 
     moved = evaluation.matching_videos
-    new_title = create_title_from_videos(
-        session,
-        collection.id,
-        [video.id for video in moved],
-        local_title=local_title or "",
-        part_type=source.effective_part_type,
-        season_number=source.effective_season_number,
-        season_label=source.effective_season_label,
-        part_number=source.effective_part_number,
-    )
-
-    # Existing range/pattern authorities remain authoritative.  If the new
-    # explicit selector would overlap any of them, abort the whole transaction
-    # instead of silently weakening an older manual decision.
-    manual_split = evaluate_persisted_manual_split(collection, list(collection.videos))
-    moved_ids = {video.id for video in moved}
-    invalid_decisions = [
-        decision
-        for decision in manual_split.decisions
-        if decision.video.id in moved_ids
-        and (
-            decision.kind != ManualSplitDecisionKind.UNIQUE
-            or decision.target_catalog_title is not new_title
-        )
-    ]
-    if invalid_decisions:
-        raise ValueError(
-            "Metadata split je v konfliktu s existující manual-split authority; "
-            "nejprve upravte hierarchy pravidla."
+    # The whole semantic split, including the final resulting-state
+    # finalization, is one explicit atomic write.  A partial split must not
+    # survive a resulting hierarchy that breaks the Recap invariant.
+    with strict_hierarchy_write_guard(session, [collection]):
+        new_title = create_title_from_videos(
+            session,
+            collection.id,
+            [video.id for video in moved],
+            local_title=local_title or "",
+            part_type=source.effective_part_type,
+            season_number=source.effective_season_number,
+            season_label=source.effective_season_label,
+            part_number=source.effective_part_number,
         )
 
-    _move_confirmed_metadata(source, new_title, evaluation)
-    session.flush()
-    remaining = tuple(
-        sorted(source.videos, key=lambda video: (video.relative_path.casefold(), video.id or 0))
-    )
-    recalculate_title_numbering(source, list(remaining), external_linked=False)
-    recalculate_title_numbering(new_title, list(moved), external_linked=True)
-    refresh_collection_state(collection)
-    session.flush()
+        # Existing range/pattern authorities remain authoritative.  If the new
+        # explicit selector would overlap any of them, abort the whole
+        # transaction instead of silently weakening an older manual decision.
+        manual_split = evaluate_persisted_manual_split(
+            collection, list(collection.videos),
+        )
+        moved_ids = {video.id for video in moved}
+        invalid_decisions = [
+            decision
+            for decision in manual_split.decisions
+            if decision.video.id in moved_ids
+            and (
+                decision.kind != ManualSplitDecisionKind.UNIQUE
+                or decision.target_catalog_title is not new_title
+            )
+        ]
+        if invalid_decisions:
+            raise ValueError(
+                "Metadata split je v konfliktu s existující manual-split authority; "
+                "nejprve upravte hierarchy pravidla."
+            )
+
+        _move_confirmed_metadata(source, new_title, evaluation)
+        session.flush()
+        remaining = tuple(
+            sorted(
+                source.videos,
+                key=lambda video: (video.relative_path.casefold(), video.id or 0),
+            )
+        )
+        recalculate_title_numbering(source, list(remaining), external_linked=False)
+        recalculate_title_numbering(new_title, list(moved), external_linked=True)
+        refresh_collection_state(collection)
+        session.flush()
     return MetadataSplitResult(source, new_title, moved, remaining)

@@ -26,6 +26,7 @@ from .manual_split import (
     apply_manual_split_decisions,
     evaluate_persisted_manual_split,
     historical_manual_split_ambiguities,
+    manual_split_rule_titles,
     manual_split_titles,
     persisted_manual_split_authority_collections,
 )
@@ -535,7 +536,9 @@ def migrate_schema(engine) -> None:
             # Aktivní manual split se musí nejprve vyhodnotit jako celek.
             # Existující assignment zůstává na videu zachován, ale unassigned
             # video se nesmí před vyhodnocením připojit k prvnímu path title.
-            if not manual_split_titles(collection):
+            # Videa s vlastní explicitní M:N authority sem nedojdou; odložit
+            # přiřazení smí pouze collection-wide range/pattern authority.
+            if not manual_split_rule_titles(collection):
                 reconcile_video_catalog_title(video, title)
 
         apply_collection_grouping_authority(session)

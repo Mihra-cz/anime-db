@@ -680,8 +680,13 @@ def test_scanner_does_not_create_authority_for_new_video(tmp_path, monkeypatch):
         }
 
         assert authority == {("Explicit target", "E01.mkv")}
-        assert videos["E02.mkv"].catalog_title_id is None
+        # An explicit M:N pin is authority over the videos it lists.  It keeps
+        # E01 where the user put it, but it must not make every later file of
+        # the anime depend on a rule match: E02 is assigned by the ordinary
+        # structural inference and gains no selector authority of its own.
+        assert videos["E02.mkv"].catalog_title_id == collection.titles[0].id
         assert videos["E02.mkv"].manual_split_rule_videos == []
+        assert videos["E01.mkv"].catalog_title.local_title == "Explicit target"
 
 
 def test_complete_hierarchy_override_without_selectors_keeps_structural_assignment(
