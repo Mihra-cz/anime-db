@@ -25,6 +25,7 @@ from app.hierarchy_review import (
 from app.manual_split import (
     ManualSplitDecisionKind,
     evaluate_persisted_manual_split,
+    manual_split_rule_titles,
     manual_split_titles,
 )
 from app.migrations import migrate_schema
@@ -1117,3 +1118,161 @@ def test_manual_split_issue_message_is_not_business_identity():
     assert translated.related_catalog_titles == issue.related_catalog_titles
     assert derive_hierarchy_status(collection, (issue,)) == "conflict"
     assert derive_hierarchy_status(collection, (translated,)) == "conflict"
+
+
+def _bare_pin_definitions(collection: CatalogCollection, pinned: Video):
+    return [
+        _definition(
+            title_id=None,
+            name="Pinned part",
+            start=None,
+            end=None,
+            sort_order=2,
+            season=2,
+            video_ids=(pinned.id,),
+        ),
+    ]
+
+
+def test_bare_explicit_pin_does_not_unassign_the_rest_of_the_collection(
+    tmp_path,
+    monkeypatch,
+):
+    """An explicit form apply must use the same coverage rule as the persisted one.
+
+    A definition that only lists ``video_ids`` is authority over those videos.
+    It must not be read as a complete statement about the collection, because
+    the persisted lifecycle would immediately disagree and the next scan would
+    silently reassign everything the apply had just unassigned.
+    """
+    library = tmp_path / "library"
+    _write_library(library, ("E01.mkv", "E02.mkv", "E03.mkv"))
+    monkeypatch.setattr(
+        "app.scanner.service.probe_video",
+        lambda *_args, **_kwargs: PROBE_RESULT,
+    )
+    engine = create_engine(f"sqlite:///{tmp_path / 'bare-pin.db'}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, library)
+        collection = _load_collection(session)
+        automatic_title_id = collection.titles[0].id
+        pinned = next(
+            video for video in collection.videos if video.filename == "E01.mkv"
+        )
+        definitions = _bare_pin_definitions(collection, pinned)
+
+        preview = preview_assignments(list(collection.videos), definitions)
+        assert _decision_signature(preview) == (
+            ("E01.mkv", "unique", (0,)),
+            ("E02.mkv", "not_required", ()),
+            ("E03.mkv", "not_required", ()),
+        )
+        assert preview.unmatched_video_ids == ()
+
+        applied = apply_manual_split(session, collection.id, definitions)
+        assert _decision_signature(applied) == _decision_signature(preview)
+        session.flush()
+        after_apply = _snapshot(collection)
+        session.commit()
+
+    assert after_apply["assignment"] == (
+        ("E01.mkv", "Pinned part"),
+        ("E02.mkv", "Show"),
+        ("E03.mkv", "Show"),
+    )
+    assert after_apply["authority"] == (("Pinned part", "E01.mkv"),)
+    assert after_apply["manual_issues"] == ()
+    assert HierarchyIssueCode.UNASSIGNED_VIDEO.value not in after_apply["all_codes"]
+
+    with Session(engine) as session:
+        scan_library(session, library)
+        collection = _load_collection(session)
+        after_scan = _snapshot(collection)
+        # A bare pin is not collection-wide authority, so the collection never
+        # enters manual-split rule mode and the rescan changes nothing.
+        assert manual_split_rule_titles(collection) == []
+        assert [title.local_title for title in manual_split_titles(collection)] == [
+            "Pinned part",
+        ]
+        others = {
+            video.filename: video.catalog_title_id
+            for video in collection.videos
+            if video.filename != "E01.mkv"
+        }
+        assert others == {
+            "E02.mkv": automatic_title_id,
+            "E03.mkv": automatic_title_id,
+        }
+
+    assert after_scan == after_apply
+
+
+@pytest.mark.parametrize(
+    ("filenames", "start", "end", "pattern", "uncovered"),
+    [
+        (("E01.mkv", "E02.mkv", "E09.mkv"), 1, 2, None, "E09.mkv"),
+        (("E01.mkv", "E02.mkv", "E03.mkv"), None, None, r"E0[12]\.mkv$", "E03.mkv"),
+    ],
+    ids=("episode-range", "filename-pattern"),
+)
+def test_collection_scope_selectors_still_report_uncovered_videos(
+    tmp_path,
+    monkeypatch,
+    filenames,
+    start,
+    end,
+    pattern,
+    uncovered,
+):
+    """Range and filename pattern remain authority over the whole collection."""
+    library = tmp_path / "library"
+    _write_library(library, filenames)
+    monkeypatch.setattr(
+        "app.scanner.service.probe_video",
+        lambda *_args, **_kwargs: PROBE_RESULT,
+    )
+    engine = create_engine(f"sqlite:///{tmp_path / 'scope.db'}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, library)
+        collection = _load_collection(session)
+        definitions = [
+            _definition(
+                title_id=collection.titles[0].id,
+                name="Season 1",
+                start=start,
+                end=end,
+                sort_order=1,
+                pattern=pattern,
+            ),
+        ]
+        preview = preview_assignments(list(collection.videos), definitions)
+        assert [
+            decision.video.filename
+            for decision in preview.unmatched_decisions
+        ] == [uncovered]
+
+        apply_manual_split(session, collection.id, definitions)
+        session.flush()
+        after_apply = _snapshot(collection)
+        session.commit()
+
+    assert (uncovered, None) in after_apply["assignment"]
+    assert after_apply["manual_issues"] == ((
+        HierarchyIssueCode.MANUAL_SPLIT_UNMATCHED.value,
+        "video",
+        (uncovered,),
+        (),
+    ),)
+
+    with Session(engine) as session:
+        collection = _load_collection(session)
+        assert [title.local_title for title in manual_split_rule_titles(collection)] == [
+            "Season 1",
+        ]
+        scan_library(session, library)
+        collection = _load_collection(session)
+        assert _snapshot(collection) == after_apply

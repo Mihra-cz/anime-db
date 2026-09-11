@@ -255,11 +255,11 @@ def evaluate_manual_split_assignment(
     )
     # A range or a filename pattern is authority over the whole collection, so
     # content it does not cover is a real review problem.  An explicit M:N
-    # selection is authority over the videos it lists only.  When the caller
-    # submits the definitions itself (the manual-split form) the set is still a
-    # complete statement about the collection; when they are reconstructed from
-    # persisted rows, a bare pin must not turn every other -- especially every
-    # future -- video into an unmatched review item.
+    # selection is authority over the videos it lists only: it protects the
+    # user's decision about them without turning every other -- especially
+    # every future -- video into an unmatched review item.  Coverage therefore
+    # follows the selectors themselves, identically for the submitted form
+    # definitions and for the ones reconstructed from persisted rows.
     has_collection_scope_selector = any(
         rule.definition.episode_start is not None
         or rule.definition.episode_end is not None
@@ -269,7 +269,7 @@ def evaluate_manual_split_assignment(
     has_any_selector = has_collection_scope_selector or any(
         rule.definition.video_ids for rule in rules
     )
-    selector_covers_collection = has_collection_scope_selector or not persisted_targets
+    selector_covers_collection = has_collection_scope_selector
     decisions: list[ManualSplitVideoDecision] = []
     for video in videos:
         number = _manual_split_number(

@@ -1712,7 +1712,10 @@ def test_manual_split_edit_and_remove_synchronize_explicit_authority_exactly():
             (title_id, videos[1].id),
             (title_id, videos[2].id),
         }
-        assert videos[0].catalog_title_id is None
+        # Explicit selection is authority over the listed videos only, so
+        # dropping a video from it removes exactly that authority; the video
+        # keeps the assignment it already had instead of becoming unmatched.
+        assert videos[0].catalog_title_id == title_id
 
         apply_manual_split(
             session,
@@ -1727,7 +1730,7 @@ def test_manual_split_edit_and_remove_synchronize_explicit_authority_exactly():
             (title_id, remaining_video_id),
         }
         stored = session.scalars(select(Video).order_by(Video.id)).all()
-        assert [video.catalog_title_id for video in stored] == [None, None, title_id]
+        assert [video.catalog_title_id for video in stored] == [title_id] * 3
 
 
 def test_manual_split_forms_serialize_authority_without_assignment_backfill():
