@@ -17,7 +17,10 @@ from .catalog import (
 )
 from .hierarchy_authority import manual_hierarchy_snapshot_uses_legacy_projection
 from .models import CatalogCollection, CatalogTitle, Video, utc_now
-from .supplementary import ORDINAL_TYPES, representation_conflict, supplementary_ordinal
+from .supplementary import (
+    ORDINAL_TYPES, incomplete_representation_segments, representation_conflict,
+    supplementary_ordinal,
+)
 
 NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
 
@@ -29,6 +32,14 @@ class SequentialNumberingRow:
     current_episode: int | None
     proposed_episode: int
     manual_conflict: bool
+    logical_group_index: int = 0
+
+
+@dataclass(frozen=True)
+class SequentialNumberingGroup:
+    """One logical episode slot with every physical representation it owns."""
+
+    videos: tuple[Video, ...]
 
 
 @dataclass
@@ -118,6 +129,7 @@ class TitleNumberingSummary:
     confirmed_duplicates: int
     invalid_duplicate_references: int
     variant_inconsistent_confirmed_duplicates: int
+    identity_inconsistent_confirmed_duplicates: int = 0
 
     supplemental: bool = False
 
@@ -373,14 +385,22 @@ class LogicalEpisodePartition:
 
     @property
     def unresolved_video_groups(self) -> tuple[tuple[Video, ...], ...]:
-        if self.unassigned_videos and len(self.videos) > 1:
+        """Competing representations only; Media Part segments are one of them.
+
+        More than one video per lane is a conflict only when the lane is not a
+        single representation split into a complete Media Part set.  The shared
+        physical-representation resolver decides that for both identity axes.
+        """
+        if self.unassigned_videos and self.confirmed_variants:
             # A NULL assignment can still be a copy of any known lane or another
             # legitimate lane. Keep the whole collision visible for review.
             return (self.videos,)
         return tuple(
-            variant.videos
-            for variant in self.confirmed_variants
-            if len(variant.videos) > 1
+            lane for lane in (
+                self.unassigned_videos,
+                *(variant.videos for variant in self.confirmed_variants),
+            )
+            if len(lane) > 1 and incomplete_representation_segments(list(lane))
         )
 
 
@@ -563,6 +583,89 @@ def _video_variant_group_id(video: Video) -> int | None:
     return group.id if group is not None else None
 
 
+def loaded_duplicate_primary(
+    video: Video,
+    *,
+    known_videos: Mapping[int, Video] | None = None,
+    allow_relationship_load: bool = True,
+) -> Video | None:
+    """Resolve the confirmed primary from loaded state, a known scope, or the FK."""
+    primary = video.__dict__.get("duplicate_of")
+    if primary is not None:
+        return primary
+    primary_id = video.duplicate_of_video_id
+    if primary_id is None:
+        return None
+    if known_videos is not None and primary_id in known_videos:
+        return known_videos[primary_id]
+    return video.duplicate_of if allow_relationship_load else None
+
+
+def _duplicate_relation_identity(
+    video: Video,
+    *,
+    title_names: dict[str, list[CatalogTitle]] | None = None,
+) -> tuple | None:
+    """Values a confirmed duplicate relation is bound to, or None when unknown."""
+    title_key = _catalog_title_identity_key(video)
+    numbering = video_numbering_identity(video, title_names=title_names)
+    if title_key is None or numbering is None:
+        return None
+    return (title_key, video.catalog_collection_id, numbering)
+
+
+def duplicate_relation_is_current(
+    video: Video,
+    *,
+    title_names: dict[str, list[CatalogTitle]] | None = None,
+    known_videos: Mapping[int, Video] | None = None,
+    allow_relationship_load: bool = True,
+) -> bool:
+    """Whether a stored duplicate relation still describes one logical identity.
+
+    ``set_duplicate_group_primary`` accepts a relation only for one shared
+    CatalogTitle, collection and numbering identity.  This is the same contract
+    re-evaluated against current data, so a later numbering, content type or
+    reassignment write cannot keep collapsing two different logical identities.
+
+    Manual evidence is never rewritten here.  An identity that cannot be
+    determined at all never invalidates a human decision; the relation simply
+    stays trusted until the current identity says otherwise.
+    """
+    primary = loaded_duplicate_primary(
+        video,
+        known_videos=known_videos,
+        allow_relationship_load=allow_relationship_load,
+    )
+    if primary is None:
+        return True
+    secondary_key = _duplicate_relation_identity(video, title_names=title_names)
+    primary_key = _duplicate_relation_identity(primary, title_names=title_names)
+    if secondary_key is None or primary_key is None:
+        return True
+    return secondary_key == primary_key
+
+
+def collapses_into_duplicate_primary(
+    video: Video,
+    *,
+    title_names: dict[str, list[CatalogTitle]] | None = None,
+    known_videos: Mapping[int, Video] | None = None,
+    allow_relationship_load: bool = True,
+) -> bool:
+    """Whether the video is a secondary a still-current relation folds away.
+
+    This is the only place that decides that a physical row is not an active
+    representation because of manual duplicate evidence.
+    """
+    return is_nonprimary_duplicate_video(video) and duplicate_relation_is_current(
+        video,
+        title_names=title_names,
+        known_videos=known_videos,
+        allow_relationship_load=allow_relationship_load,
+    )
+
+
 def logical_episode_partitions(
     videos: list[Video],
     *,
@@ -581,6 +684,20 @@ def logical_episode_partitions(
     same title scope and representation authority without mutating Video rows.
     """
     title_names = supplementary_context_map(videos) if numbering_inputs is None else None
+    known_videos = (
+        {video.id: video for video in videos if video.id is not None}
+        if numbering_inputs is None else None
+    )
+
+    def collapsed(video: Video) -> bool:
+        # Pre-projection inference supplies its own numbering and must not read
+        # stored identity, so a relation cannot be re-validated against it.
+        if numbering_inputs is not None:
+            return is_nonprimary_duplicate_video(video)
+        return collapses_into_duplicate_primary(
+            video, title_names=title_names, known_videos=known_videos,
+        )
+
     by_identity: dict[LogicalEpisodeIdentity, list[Video]] = {}
     for video in videos:
         if numbering_inputs is None:
@@ -597,7 +714,7 @@ def logical_episode_partitions(
                 LogicalEpisodeIdentity(title_key, number)
                 if title_key is not None and number is not None else None
             )
-        if identity is not None and not is_nonprimary_duplicate_video(video):
+        if identity is not None and not collapsed(video):
             by_identity.setdefault(identity, []).append(video)
 
     partitions = []
@@ -738,6 +855,24 @@ def confirmed_duplicate_variant_conflicts(
             for video in group.videos
             if (group_id := _video_variant_group_id(video)) is not None
         }) > 1
+    )
+
+
+def confirmed_duplicate_identity_conflicts(
+    videos: list[Video],
+) -> tuple[EpisodeDuplicateGroup, ...]:
+    """Return confirmed relations that no longer match one current identity.
+
+    The manual evidence is deliberately kept; only its authority over logical
+    grouping is withdrawn, and the group stays visible as an explicit conflict.
+    """
+    title_names = supplementary_context_map(videos)
+    return tuple(
+        group for group in confirmed_duplicate_groups(videos)
+        if any(
+            not duplicate_relation_is_current(video, title_names=title_names)
+            for video in group.videos
+        )
     )
 
 
@@ -1029,24 +1164,97 @@ def deterministic_video_order_key(video: Video):
     )
 
 
+def _media_part_slots(lane: list[Video]) -> list[list[Video]]:
+    """Split one lane into representations; a 1..N run is a single segment set."""
+    slots: list[list[Video]] = []
+    previous_part: int | None = None
+    for video in lane:
+        part = video.media_part_number
+        part = part if isinstance(part, int) and not isinstance(part, bool) else None
+        if slots and previous_part is not None and part == previous_part + 1:
+            slots[-1].append(video)
+        else:
+            slots.append([video])
+        previous_part = part
+    return slots
+
+
+def sequential_numbering_groups(
+    videos: list[Video],
+) -> tuple[SequentialNumberingGroup, ...]:
+    """Group the selection into logical episode slots, never into physical rows.
+
+    A slot is one logical episode identity: every confirmed variant lane
+    contributes its own representation at the same position, a complete Media
+    Part run is one representation, and a still-current confirmed duplicate
+    secondary follows its primary.  Lanes are aligned by position because a
+    sequential pass has no authoritative numbering to align on; an incomplete
+    lane therefore shifts only itself, exactly like the flat pass it replaces.
+    """
+    ordered = deterministic_video_order(videos)
+    known_videos = {video.id: video for video in ordered if video.id is not None}
+    secondaries: dict[int, list[Video]] = {}
+    active: list[Video] = []
+    for video in ordered:
+        primary = loaded_duplicate_primary(video, known_videos=known_videos)
+        if (
+            is_nonprimary_duplicate_video(video)
+            and primary is not None
+            and primary.id in known_videos
+            and duplicate_relation_is_current(video, known_videos=known_videos)
+        ):
+            secondaries.setdefault(primary.id, []).append(video)
+        else:
+            active.append(video)
+
+    lanes: dict[int | None, list[Video]] = {}
+    for video in active:
+        lanes.setdefault(_video_variant_group_id(video), []).append(video)
+    lane_slots = [
+        _media_part_slots(lane_videos)
+        for _key, lane_videos in sorted(
+            lanes.items(), key=lambda item: (item[0] is not None, item[0] or 0)
+        )
+    ]
+
+    groups = []
+    for index in range(max((len(slots) for slots in lane_slots), default=0)):
+        members: list[Video] = []
+        for slots in lane_slots:
+            if index < len(slots):
+                for video in slots[index]:
+                    members.append(video)
+                    if video.id is not None:
+                        members.extend(secondaries.get(video.id, ()))
+        groups.append(SequentialNumberingGroup(
+            tuple(sorted(members, key=deterministic_video_order_key))
+        ))
+    return tuple(groups)
+
+
 def preview_sequential_numbering(
     videos: list[Video], start_episode: int
 ) -> list[SequentialNumberingRow]:
     if start_episode <= 0:
         raise ValueError("Počáteční číslo epizody musí být kladné.")
+    groups = sequential_numbering_groups(videos)
+    proposed_by_video: dict[int, tuple[int, int]] = {}
+    for index, group in enumerate(groups):
+        for video in group.videos:
+            proposed_by_video[id(video)] = (start_episode + index, index)
     rows = []
-    for index, video in enumerate(deterministic_video_order(videos)):
-        proposed = start_episode + index
-        current = video.season_episode_number
+    for video in deterministic_video_order(videos):
+        proposed, group_index = proposed_by_video[id(video)]
         rows.append(SequentialNumberingRow(
             video_id=video.id,
             filename=video.filename,
-            current_episode=current,
+            current_episode=video.season_episode_number,
             proposed_episode=proposed,
             manual_conflict=(
                 video.episode_number_manual_override is not None
                 and video.episode_number_manual_override != proposed
             ),
+            logical_group_index=group_index,
         ))
     return rows
 
@@ -1215,7 +1423,11 @@ def summarize_title_numbering(
         )
         for video in videos
     ]
-    confirmed_duplicate = [is_nonprimary_duplicate_video(video) for video in videos]
+    known_videos = {video.id: video for video in videos if video.id is not None}
+    confirmed_duplicate = [
+        collapses_into_duplicate_primary(video, known_videos=known_videos)
+        for video in videos
+    ]
     unnumbered_standard = 0 if supplemental else sum(
         state.is_standard
         and state.season_episode_number is None
@@ -1255,6 +1467,9 @@ def summarize_title_numbering(
         if partition.unresolved_video_groups
     }))
     logical_episode_count = len(partitions)
+    # Both confirmed-duplicate axes need the full relation graph; skip that
+    # work entirely for the overwhelmingly common title without any relation.
+    confirmed_duplicate_count = sum(is_confirmed_duplicate(video) for video in videos)
     return TitleNumberingSummary(
         total=len(videos),
         standard_total=logical_episode_count,
@@ -1275,12 +1490,17 @@ def summarize_title_numbering(
         episode_max=episode_max,
         gaps=gaps,
         duplicate_numbers=duplicates,
-        confirmed_duplicates=sum(is_confirmed_duplicate(video) for video in videos),
+        confirmed_duplicates=confirmed_duplicate_count,
         invalid_duplicate_references=sum(
             bool(video.duplicate_primary_missing) for video in videos
         ),
-        variant_inconsistent_confirmed_duplicates=len(
-            confirmed_duplicate_variant_conflicts(videos)
+        variant_inconsistent_confirmed_duplicates=(
+            len(confirmed_duplicate_variant_conflicts(videos))
+            if confirmed_duplicate_count else 0
+        ),
+        identity_inconsistent_confirmed_duplicates=(
+            len(confirmed_duplicate_identity_conflicts(videos))
+            if confirmed_duplicate_count else 0
         ),
         supplemental=supplemental,
     )
@@ -1462,6 +1682,7 @@ def deterministic_bulk_renumber_proposal(
         or summary.duplicate_numbers
         or summary.invalid_duplicate_references
         or summary.variant_inconsistent_confirmed_duplicates
+        or summary.identity_inconsistent_confirmed_duplicates
         or unresolved_duplicate_groups(title_videos_list, catalog_title=title)
     ):
         return None
@@ -1519,7 +1740,11 @@ def deterministic_bulk_renumber_proposal(
 
     by_primary_id: dict[int, list[Video]] = {}
     for video in title_videos_list:
-        if video.duplicate_of_video_id is not None:
+        # Only a still-current relation may follow its primary; a stale one is
+        # already an active representation inside its own logical partition.
+        if video.duplicate_of_video_id is not None and (
+            collapses_into_duplicate_primary(video)
+        ):
             by_primary_id.setdefault(video.duplicate_of_video_id, []).append(video)
 
     rows: list[BulkRenumberLogicalChange] = []

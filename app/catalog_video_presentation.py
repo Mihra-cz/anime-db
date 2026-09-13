@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .models import CatalogTitle, Video, VideoVariantGroup
-from .numbering import LogicalEpisodeIdentity, logical_episode_partitions
+from .numbering import (
+    LogicalEpisodeIdentity, collapses_into_duplicate_primary,
+    logical_episode_partitions,
+)
 
 
 CONTENT_VARIANT_LABELS = {
@@ -155,7 +158,11 @@ def build_catalog_title_video_presentation(
     }
     known_duplicates_by_primary: dict[int, list[Video]] = {}
     for video in known:
-        if video.duplicate_of_video_id is not None:
+        # A stale relation no longer folds the secondary into its old lane; the
+        # video is an active representation of its own current identity.
+        if video.duplicate_of_video_id is not None and (
+            collapses_into_duplicate_primary(video)
+        ):
             known_duplicates_by_primary.setdefault(
                 video.duplicate_of_video_id, []
             ).append(video)

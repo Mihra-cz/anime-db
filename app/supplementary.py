@@ -107,9 +107,37 @@ def variant_group_id(video: Video) -> int | None:
     return group.id if group else None
 
 
+def _representation_lanes(videos: list[Video]) -> dict[int | None, list[Video]]:
+    """Split physical representations by confirmed variant lane.
+
+    NULL stays an explicit bucket and never becomes a default lane.  The
+    standard axis already carries the same split in ``LogicalEpisodePartition``.
+    """
+    lanes: dict[int | None, list[Video]] = defaultdict(list)
+    for video in videos:
+        lanes[variant_group_id(video)].append(video)
+    return lanes
+
+
+def incomplete_representation_segments(videos: list[Video]) -> bool:
+    """Whether one lane is not a single representation split into Media Parts.
+
+    A complete distinct ``1..N`` Media Part set is one representation, so it is
+    never a competing representation.  Missing, repeated or partially assigned
+    ordinals leave the physical axis unresolved.
+    """
+    from .media_parts import media_part_total
+
+    parts = [video.media_part_number for video in videos]
+    if all(part is None for part in parts):
+        return len(videos) > 1
+    if None in parts:
+        return True
+    return media_part_total(videos) != len(videos)
+
+
 def representation_conflict(videos: list[Video]) -> bool:
     """Distinct confirmed lanes and complete physical parts are separate axes."""
-    from .media_parts import media_part_total
     # Variant groups belong to one title; unlike explicit physical segments,
     # groups from different titles cannot explain a shared ordinal.
     if any(variant_group_id(v) is not None for v in videos) and len({
@@ -117,19 +145,12 @@ def representation_conflict(videos: list[Video]) -> bool:
         else id(v.__dict__.get("catalog_title")) for v in videos
     }) > 1:
         return True
-    lanes: dict[int | None, list[Video]] = defaultdict(list)
-    for video in videos:
-        lanes[variant_group_id(video)].append(video)
+    lanes = _representation_lanes(videos)
     if len(lanes) > 1 and None in lanes:
         return True
-    for items in lanes.values():
-        parts = [video.media_part_number for video in items]
-        if all(part is None for part in parts):
-            if len(items) > 1:
-                return True
-        elif None in parts or media_part_total(items) != len(items):
-            return True
-    return False
+    return any(
+        incomplete_representation_segments(items) for items in lanes.values()
+    )
 
 
 @dataclass(frozen=True)
