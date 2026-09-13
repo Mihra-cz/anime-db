@@ -794,6 +794,13 @@ def strict_hierarchy_write_guard(
     Callers run their ordinary mutation and shared hierarchy finalization inside
     the guard.  Existing legacy violations are captured before the mutation and
     therefore do not block an unrelated or corrective write by themselves.
+
+    The savepoint is only a validation boundary; the surrounding workflow stays
+    the transaction owner and is the only place allowed to commit.  Releasing
+    this savepoint therefore keeps the mutation pending in the caller's
+    transaction, so a later failure anywhere before that commit still rolls the
+    whole workflow back.  ``make_engine`` configures SQLite so this holds; see
+    ``app/database.py``.
     """
     affected = _unique_collections(collections)
     violations_before = _recap_season_context_violations(affected)
