@@ -41,6 +41,7 @@ from app.models import (
 )
 from app.numbering import recalculate_collection_numbering
 from app.probe import ProbeError, probe_video
+from app.subtitle_review import rejected_video_ids
 from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, safe_subtitle_matches
 from app.video_variants import (
     assign_video_catalog_title,
@@ -250,8 +251,16 @@ def _sync_external_subtitles(
         match_method, candidates = safe_subtitle_matches(
             videos_by_parent.get(path.parent, []), path,
         )
+        safe_video = None
         if len(candidates) == 1:
-            video = video_by_relative[candidates[0].relative_to(library_root).as_posix()]
+            candidate_video = video_by_relative[
+                candidates[0].relative_to(library_root).as_posix()
+            ]
+            if unresolved is None or candidate_video.id not in rejected_video_ids(unresolved):
+                safe_video = candidate_video
+
+        if safe_video is not None:
+            video = safe_video
             keep = min(linked, key=lambda row: row.id or 0) if linked else None
             if keep is None:
                 keep = ExternalSubtitle(relative_path=relative_path)

@@ -817,6 +817,76 @@ def test_unresolved_manual_decisions_and_rejections_survive_rescan(
         assert session.scalar(select(func.count()).select_from(ExternalSubtitle)) == 0
 
 
+def test_scanner_does_not_auto_match_rejected_candidate_after_sibling_disappears(
+    tmp_path: Path, monkeypatch,
+):
+    show = tmp_path / "Show"
+    show.mkdir()
+    mkv_path = show / "Show - 01.mkv"
+    mp4_path = show / "Show - 01.mp4"
+    mkv_path.write_bytes(b"mkv video")
+    mp4_path.write_bytes(b"mp4 video")
+    (show / "Show - 01.ass").write_text("subtitle", encoding="utf-8")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        unresolved = session.scalar(select(UnresolvedExternalSubtitle))
+        assert unresolved is not None
+        mkv_video = session.scalar(select(Video).where(Video.filename == "Show - 01.mkv"))
+        set_subtitle_candidate_rejected(unresolved, mkv_video.id, True)
+        session.commit()
+
+        mp4_path.unlink()
+        scan_library(session, tmp_path, confirm_deletions=True)
+        assert session.scalar(select(func.count()).select_from(ExternalSubtitle)) == 0
+        unresolved = session.scalar(select(UnresolvedExternalSubtitle))
+        assert unresolved is not None
+        assert unresolved.status == "unresolved"
+        assert unresolved.rejected_video_ids_json == f"[{mkv_video.id}]"
+
+        scan_library(session, tmp_path)
+        unresolved = session.scalar(select(UnresolvedExternalSubtitle))
+        assert session.scalar(select(func.count()).select_from(ExternalSubtitle)) == 0
+        assert unresolved.status == "unresolved"
+        assert unresolved.rejected_video_ids_json == f"[{mkv_video.id}]"
+
+
+def test_scanner_auto_matches_non_rejected_sibling_after_rejected_candidate_disappears(
+    tmp_path: Path, monkeypatch,
+):
+    show = tmp_path / "Show"
+    show.mkdir()
+    mkv_path = show / "Show - 01.mkv"
+    mp4_path = show / "Show - 01.mp4"
+    mkv_path.write_bytes(b"mkv video")
+    mp4_path.write_bytes(b"mp4 video")
+    (show / "Show - 01.ass").write_text("subtitle", encoding="utf-8")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: PROBE_RESULT)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        unresolved = session.scalar(select(UnresolvedExternalSubtitle))
+        mkv_video = session.scalar(select(Video).where(Video.filename == "Show - 01.mkv"))
+        mp4_video = session.scalar(select(Video).where(Video.filename == "Show - 01.mp4"))
+        set_subtitle_candidate_rejected(unresolved, mkv_video.id, True)
+        session.commit()
+
+        mkv_path.unlink()
+        scan_library(session, tmp_path, confirm_deletions=True)
+        linked = session.scalar(select(ExternalSubtitle))
+        assert linked is not None
+        assert linked.match_method == "automatic"
+        assert [(row.video_id, row.status) for row in linked.compatibilities] == [
+            (mp4_video.id, "automatic_match")
+        ]
+        assert session.scalar(select(func.count()).select_from(UnresolvedExternalSubtitle)) == 0
+
+
 def test_language_suffix_is_automatic_but_release_name_and_true_orphan_are_preserved(
     tmp_path: Path, monkeypatch,
 ):
