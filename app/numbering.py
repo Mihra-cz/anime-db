@@ -1164,32 +1164,78 @@ def deterministic_video_order_key(video: Video):
     )
 
 
-def _media_part_slots(lane: list[Video]) -> list[list[Video]]:
-    """Split one lane into representations; a 1..N run is a single segment set."""
-    slots: list[list[Video]] = []
-    previous_part: int | None = None
-    for video in lane:
-        part = video.media_part_number
-        part = part if isinstance(part, int) and not isinstance(part, bool) else None
-        if slots and previous_part is not None and part == previous_part + 1:
-            slots[-1].append(video)
+SEQUENTIAL_MEDIA_PART_GROUPING_ERROR = (
+    "Sekvenční číslování nelze bezpečně použít: Media Part segmenty netvoří "
+    "jednu úplnou representation 1..N."
+)
+SEQUENTIAL_REPRESENTATION_GROUPING_ERROR = (
+    "Sekvenční číslování nelze bezpečně použít: více fyzických videí sdílí "
+    "logickou identitu bez úplné Media Part nebo duplicate evidence."
+)
+SEQUENTIAL_VARIANT_ALIGNMENT_ERROR = (
+    "Sekvenční číslování nelze bezpečně použít: korespondence variantních řad "
+    "není jednoznačně doložena současnými logickými identitami."
+)
+
+
+def _validated_sequential_representation(
+    videos: list[Video],
+) -> tuple[Video, ...]:
+    """Accept one physical representation using the shared Media Part contract."""
+    if incomplete_representation_segments(videos):
+        if any(video.media_part_number is not None for video in videos):
+            raise ValueError(SEQUENTIAL_MEDIA_PART_GROUPING_ERROR)
+        raise ValueError(SEQUENTIAL_REPRESENTATION_GROUPING_ERROR)
+    return tuple(sorted(videos, key=deterministic_video_order_key))
+
+
+def _sequential_lane_slots(
+    videos: list[Video],
+    *,
+    title_names: dict[str, list[CatalogTitle]],
+) -> tuple[tuple[LogicalEpisodeIdentity | None, tuple[Video, ...]], ...]:
+    """Group one lane only where current identity or Media Parts prove membership."""
+    known: dict[LogicalEpisodeIdentity, list[Video]] = {}
+    unknown_plain: list[Video] = []
+    unknown_parts: list[Video] = []
+    for video in videos:
+        identity = logical_episode_identity(video, title_names=title_names)
+        if identity is not None:
+            known.setdefault(identity, []).append(video)
+        elif video.media_part_number is not None:
+            unknown_parts.append(video)
         else:
-            slots.append([video])
-        previous_part = part
-    return slots
+            unknown_plain.append(video)
+
+    slots = [
+        (identity, _validated_sequential_representation(members))
+        for identity, members in known.items()
+    ]
+    slots.extend(
+        (None, _validated_sequential_representation([video]))
+        for video in unknown_plain
+    )
+    if unknown_parts:
+        slots.append(
+            (None, _validated_sequential_representation(unknown_parts))
+        )
+    return tuple(sorted(
+        slots,
+        key=lambda slot: min(
+            deterministic_video_order_key(video) for video in slot[1]
+        ),
+    ))
 
 
 def sequential_numbering_groups(
     videos: list[Video],
 ) -> tuple[SequentialNumberingGroup, ...]:
-    """Group the selection into logical episode slots, never into physical rows.
+    """Group only identities proven by current authority and physical parts.
 
-    A slot is one logical episode identity: every confirmed variant lane
-    contributes its own representation at the same position, a complete Media
-    Part run is one representation, and a still-current confirmed duplicate
-    secondary follows its primary.  Lanes are aligned by position because a
-    sequential pass has no authoritative numbering to align on; an incomplete
-    lane therefore shifts only itself, exactly like the flat pass it replaces.
+    One lane keeps the explicit sequential workflow's deterministic order.
+    Multiple variant lanes are joined only by already known logical identities;
+    their position, length and filenames never infer correspondence. Confirmed
+    duplicate secondaries follow their current primary.
     """
     ordered = deterministic_video_order(videos)
     known_videos = {video.id: video for video in ordered if video.id is not None}
@@ -1210,26 +1256,52 @@ def sequential_numbering_groups(
     lanes: dict[int | None, list[Video]] = {}
     for video in active:
         lanes.setdefault(_video_variant_group_id(video), []).append(video)
+    title_names = supplementary_context_map(active)
     lane_slots = [
-        _media_part_slots(lane_videos)
+        _sequential_lane_slots(lane_videos, title_names=title_names)
         for _key, lane_videos in sorted(
             lanes.items(), key=lambda item: (item[0] is not None, item[0] or 0)
         )
     ]
 
-    groups = []
-    for index in range(max((len(slots) for slots in lane_slots), default=0)):
-        members: list[Video] = []
-        for slots in lane_slots:
-            if index < len(slots):
-                for video in slots[index]:
-                    members.append(video)
-                    if video.id is not None:
-                        members.extend(secondaries.get(video.id, ()))
-        groups.append(SequentialNumberingGroup(
-            tuple(sorted(members, key=deterministic_video_order_key))
+    def complete_group(members: tuple[Video, ...]) -> SequentialNumberingGroup:
+        expanded = list(members)
+        for video in members:
+            if video.id is not None:
+                expanded.extend(secondaries.get(video.id, ()))
+        return SequentialNumberingGroup(tuple(sorted(
+            expanded, key=deterministic_video_order_key,
+        )))
+
+    if len(lane_slots) <= 1:
+        return tuple(
+            complete_group(members)
+            for _identity, members in (lane_slots[0] if lane_slots else ())
+        )
+
+    if None in lanes:
+        raise ValueError(SEQUENTIAL_VARIANT_ALIGNMENT_ERROR)
+    if any(identity is None for slots in lane_slots for identity, _members in slots):
+        raise ValueError(SEQUENTIAL_VARIANT_ALIGNMENT_ERROR)
+    by_lane = [dict(slots) for slots in lane_slots]
+    identity_sets = [set(items) for items in by_lane]
+    if any(items != identity_sets[0] for items in identity_sets[1:]):
+        raise ValueError(SEQUENTIAL_VARIANT_ALIGNMENT_ERROR)
+
+    return tuple(
+        complete_group(tuple(
+            video
+            for lane in by_lane
+            for video in lane[identity]
         ))
-    return tuple(groups)
+        for identity in sorted(
+            identity_sets[0],
+            key=lambda item: (
+                item.catalog_title_key,
+                item.season_episode_number,
+            ),
+        )
+    )
 
 
 def preview_sequential_numbering(

@@ -334,6 +334,7 @@ def test_b4_a_variant_lanes_stay_one_logical_episode():
     ]
     for index, video in enumerate(videos, start=1):
         video.id = index
+    recalculate_title_numbering(title, videos)
 
     assert _sequence(videos) == {
         "BD Show - 01.mkv": 1, "TV Show - 01.mkv": 1,
@@ -373,6 +374,10 @@ def test_b4_c_media_parts_stay_one_logical_episode():
     ]
     for index, video in enumerate(videos, start=1):
         video.id = index
+    _project_known_episode_numbers(
+        title,
+        [(videos[0], 1), (videos[1], 1), (videos[2], 2), (videos[3], 2)],
+    )
 
     assert _sequence(videos) == {
         "Show - 01 - p1.mkv": 1, "Show - 01 - p2.mkv": 1,
@@ -404,6 +409,10 @@ def test_b4_d_variant_lanes_with_media_parts_stay_one_logical_episode():
     ]
     for index, video in enumerate(videos, start=1):
         video.id = index
+    _project_known_episode_numbers(title, [
+        (videos[0], 1), (videos[1], 1), (videos[2], 2), (videos[3], 2),
+        (videos[4], 1), (videos[5], 1), (videos[6], 2), (videos[7], 2),
+    ])
 
     groups = sequential_numbering_groups(videos)
     assert [len(group.videos) for group in groups] == [4, 4]
@@ -426,10 +435,14 @@ def test_b4_preview_and_apply_use_the_same_logical_groups():
     videos = [
         _video(collection, title, "BD Show - 01 - p1.mkv", 1, group=bd, media_part=1),
         _video(collection, title, "BD Show - 01 - p2.mkv", 2, group=bd, media_part=2),
-        _video(collection, title, "Show - 01.mkv", 3),
+        _video(collection, title, "BD Show - 02.mkv", 3, group=bd),
     ]
     for index, video in enumerate(videos, start=1):
         video.id = index
+    _project_known_episode_numbers(
+        title,
+        [(videos[0], 1), (videos[1], 1), (videos[2], 2)],
+    )
 
     preview = preview_sequential_numbering(videos, 1)
     applied = apply_sequential_numbering(videos, 1)
@@ -692,8 +705,8 @@ def test_b5_media_part_grouping_survives_reload_and_recalculation():
         assert collection.hierarchy_status == "verified"
 
 
-def test_b4_sequential_numbering_result_survives_shared_finalization():
-    """Sekvenční pass sjednotí lanes, ale nepotvrzenou lane sám nevyřeší."""
+def test_b4_ambiguous_lanes_are_rejected_and_survive_shared_finalization():
+    """Potvrzená a NULL lane bez logical identity se nesmí pozičně sjednotit."""
     with _session() as session:
         collection = _collection()
         title = _season(collection)
@@ -711,7 +724,8 @@ def test_b4_sequential_numbering_result_survives_shared_finalization():
         session.add(bd)
         session.flush()
 
-        apply_sequential_numbering(list(title.videos), 1)
+        with pytest.raises(ValueError, match="variantních řad"):
+            apply_sequential_numbering(list(title.videos), 1)
         refresh_collection_state(collection)
         session.commit()
 
@@ -721,18 +735,11 @@ def test_b4_sequential_numbering_result_survives_shared_finalization():
         numbers = {
             video.filename: video.season_episode_number for video in title.videos
         }
-        assert numbers == {
-            "BD Show - a.mkv": 1, "TV Show - a.mkv": 1,
-            "BD Show - b.mkv": 2, "TV Show - b.mkv": 2,
-        }
+        assert set(numbers.values()) == {None}
         assert summarize_title_numbering(
             list(title.videos), title,
-        ).logical_episode_count == 2
-        # Nepotvrzená (NULL) lane vedle potvrzené zůstává viditelnou kolizí;
-        # sekvenční pass ji sjednotí do jedné logické epizody, ale neřeší ji.
-        assert HierarchyIssueCode.CANONICAL_DUPLICATE.value in _blocking_codes(
-            collection,
-        )
+        ).logical_episode_count == 0
+        assert collection.hierarchy_status == "review_required"
 
 
 def test_confirmed_duplicate_inside_a_media_part_set_stays_one_logical_episode():
@@ -755,3 +762,234 @@ def test_confirmed_duplicate_inside_a_media_part_set_stays_one_logical_episode()
     assert summary.duplicate_numbers == ()
     assert summary.identity_inconsistent_confirmed_duplicates == 0
     assert unresolved_duplicate_groups(videos, catalog_title=title) == ()
+
+
+# ---------------------------------------------------------------------------
+# Closure re-audit R4/R5 – manual-first sequential grouping
+# ---------------------------------------------------------------------------
+
+def _project_known_episode_numbers(
+    title: CatalogTitle,
+    assignments: list[tuple[Video, int]],
+) -> None:
+    for video, number in assignments:
+        set_video_episode_number_from_input(video, str(number))
+    recalculate_title_numbering(title, [video for video, _number in assignments])
+
+
+def test_r5_reversed_filename_order_keeps_complete_media_parts_in_one_slot():
+    collection = _collection()
+    title = _season(collection)
+    mp2 = _video(collection, title, "a.mkv", 1, media_part=2)
+    mp1 = _video(collection, title, "z.mkv", 2, media_part=1)
+    _identified(collection, title, [mp2, mp1])
+    _project_known_episode_numbers(title, [(mp2, 1), (mp1, 1)])
+
+    rows = preview_sequential_numbering([mp2, mp1], 1)
+    applied = apply_sequential_numbering(
+        [mp2, mp1], 1, confirm_manual_conflicts=True,
+    )
+
+    assert {row.filename: row.proposed_episode for row in rows} == {
+        "a.mkv": 1,
+        "z.mkv": 1,
+    }
+    assert applied == rows
+    assert mp2.episode_number_manual_override == 1
+    assert mp1.episode_number_manual_override == 1
+
+
+@pytest.mark.parametrize(
+    ("parts", "filenames"),
+    (
+        ((1, 2), ("a.mkv", "z.mkv")),
+        ((2, 1), ("a.mkv", "z.mkv")),
+    ),
+)
+def test_r5_complete_media_parts_ignore_physical_order(parts, filenames):
+    collection = _collection()
+    title = _season(collection)
+    videos = [
+        _video(collection, title, filename, index, media_part=part)
+        for index, (part, filename) in enumerate(zip(parts, filenames), 1)
+    ]
+    _identified(collection, title, videos)
+    _project_known_episode_numbers(title, [(video, 1) for video in videos])
+
+    groups = sequential_numbering_groups(videos)
+
+    assert len(groups) == 1
+    assert set(groups[0].videos) == set(videos)
+
+
+@pytest.mark.parametrize("parts", ((1, 1), (1, 3), (1, None)))
+def test_r5_invalid_media_part_set_refuses_sequential_numbering(parts):
+    collection = _collection()
+    title = _season(collection)
+    videos = [
+        _video(collection, title, f"item-{index}.mkv", index, media_part=part)
+        for index, part in enumerate(parts, 1)
+    ]
+    _identified(collection, title, videos)
+    _project_known_episode_numbers(title, [(video, 1) for video in videos])
+    before = [video.episode_number_manual_override for video in videos]
+
+    with pytest.raises(ValueError, match="Media Part"):
+        preview_sequential_numbering(videos, 1)
+    with pytest.raises(ValueError, match="Media Part"):
+        apply_sequential_numbering(
+            videos, 1, confirm_manual_conflicts=True,
+        )
+
+    assert [video.episode_number_manual_override for video in videos] == before
+
+
+def test_r5_confirmed_variant_lanes_each_keep_complete_media_parts():
+    collection = _collection()
+    title = _season(collection)
+    bd = VideoVariantGroup(
+        id=100, catalog_title=title, manual_label="BD",
+        release_source="bd", content_variant=None, verified_at=utc_now(),
+    )
+    tv = VideoVariantGroup(
+        id=200, catalog_title=title, manual_label="TV",
+        release_source="tv", content_variant=None, verified_at=utc_now(),
+    )
+    videos = [
+        _video(collection, title, "BD-z.mkv", 1, group=bd, media_part=1),
+        _video(collection, title, "BD-a.mkv", 2, group=bd, media_part=2),
+        _video(collection, title, "TV-z.mkv", 3, group=tv, media_part=1),
+        _video(collection, title, "TV-a.mkv", 4, group=tv, media_part=2),
+    ]
+    _identified(collection, title, videos)
+    _project_known_episode_numbers(title, [(video, 1) for video in videos])
+
+    groups = sequential_numbering_groups(videos)
+
+    assert len(groups) == 1
+    assert set(groups[0].videos) == set(videos)
+
+
+def _variant_sequence(
+    lane_numbers: tuple[tuple[int, ...], ...],
+) -> tuple[CatalogCollection, CatalogTitle, list[Video]]:
+    collection = _collection()
+    title = _season(collection)
+    videos = []
+    for group_id, (label, numbers) in enumerate(
+        zip(("BD", "TV", "WEB"), lane_numbers),
+        100,
+    ):
+        group = VideoVariantGroup(
+            id=group_id,
+            catalog_title=title,
+            manual_label=label,
+            release_source=label.casefold(),
+            content_variant=None,
+            verified_at=utc_now(),
+        )
+        videos.extend(
+            _video(
+                collection,
+                title,
+                f"{label} Show - {number:02}.mkv",
+                len(videos) + 1,
+                group=group,
+            )
+            for number in numbers
+        )
+    _identified(collection, title, videos)
+    recalculate_title_numbering(title, videos)
+    return collection, title, videos
+
+
+@pytest.mark.parametrize(
+    "lane_numbers",
+    (
+        ((1, 2), (2,)),
+        ((1,), (1, 2)),
+        ((1, 3), (2, 3), (1, 2)),
+    ),
+)
+def test_r4_incomplete_variant_lanes_refuse_positional_alignment(lane_numbers):
+    _collection_row, _title, videos = _variant_sequence(lane_numbers)
+    before = [video.episode_number_manual_override for video in videos]
+
+    with pytest.raises(ValueError, match="variantních řad"):
+        preview_sequential_numbering(videos, 1)
+    with pytest.raises(ValueError, match="variantních řad"):
+        apply_sequential_numbering(videos, 1, confirm_manual_conflicts=True)
+
+    assert [video.episode_number_manual_override for video in videos] == before
+
+
+def test_r4_single_lane_remains_sequenceable():
+    collection = _collection()
+    title = _season(collection)
+    videos = [
+        _video(collection, title, "b.mkv", 2),
+        _video(collection, title, "a.mkv", 1),
+    ]
+    _identified(collection, title, videos)
+
+    rows = apply_sequential_numbering(videos, 3)
+
+    assert {row.filename: row.proposed_episode for row in rows} == {
+        "a.mkv": 3,
+        "b.mkv": 4,
+    }
+
+
+def test_r4_matching_known_logical_identities_allow_confirmed_variant_lanes():
+    _collection_row, _title, videos = _variant_sequence(((1, 2), (1, 2)))
+
+    rows = apply_sequential_numbering(videos, 3)
+
+    assert {
+        row.filename: row.proposed_episode for row in rows
+    } == {
+        "BD Show - 01.mkv": 3,
+        "TV Show - 01.mkv": 3,
+        "BD Show - 02.mkv": 4,
+        "TV Show - 02.mkv": 4,
+    }
+
+
+def test_r4_unassigned_lane_is_not_confirmed_by_matching_episode_numbers():
+    collection = _collection()
+    title = _season(collection)
+    bd = VideoVariantGroup(
+        id=100, catalog_title=title, manual_label="BD",
+        release_source="bd", content_variant=None, verified_at=utc_now(),
+    )
+    videos = [
+        _video(collection, title, "BD Show - 01.mkv", 1, group=bd),
+        _video(collection, title, "Show - 01.mkv", 2),
+    ]
+    _identified(collection, title, videos)
+    recalculate_title_numbering(title, videos)
+
+    with pytest.raises(ValueError, match="variantních řad"):
+        preview_sequential_numbering(videos, 1)
+
+    assert [video.episode_number_manual_override for video in videos] == [None, None]
+
+
+def test_r4_incomplete_lane_does_not_change_logical_completeness_or_hierarchy():
+    collection, title, videos = _variant_sequence(((1, 2), (2,)))
+    refresh_collection_state(collection)
+    before = {
+        video.filename: video.season_episode_number for video in videos
+    }
+
+    with pytest.raises(ValueError, match="variantních řad"):
+        preview_sequential_numbering(videos, 1)
+
+    summary = summarize_title_numbering(videos, title)
+    assert summary.logical_episode_count == 2
+    assert summary.gaps == ()
+    assert summary.duplicate_numbers == ()
+    assert _blocking_codes(collection) == set()
+    assert {
+        video.filename: video.season_episode_number for video in videos
+    } == before

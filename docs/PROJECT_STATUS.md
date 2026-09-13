@@ -200,7 +200,11 @@ Standardní `LogicalEpisodeIdentity` je `(CatalogTitle, season_episode_number)`.
 Není to samostatná persistentní Episode tabulka. Lokální, season, absolute
 a external čísla nejsou zaměnitelná; canonical pole jsou řízené projekce
 z numbering autority a lokální evidence. Ruční číslo/numbering režim mají
-své explicitní workflow včetně náhledu hromadné opravy.
+své explicitní workflow včetně náhledu hromadné opravy. Sekvenční numbering
+seskupuje úplné Media Parts podle jejich ordinálů uvnitř již známé logical
+identity, nikdy podle pořadí filename. Více variantních lanes spojí pouze tehdy,
+když mají všechny přesně stejnou množinu již známých logical identities; bez
+takového důkazu preview i apply operaci odmítnou místo pozičního odhadu.
 Standardní Episode musí mít logical episode number vždy, i jako singleton;
 chybějící číslo vyžaduje review. Toto pravidlo nemění strukturální čísla
 Season/Part/Cour.
