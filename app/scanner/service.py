@@ -15,6 +15,7 @@ from app.catalog import (
     classify_video, is_root_video, meaningful_root_collection, normalize_language, normalize_title,
 )
 from app.hierarchy import derive_library_hierarchy
+from app.hierarchy_assignment import preserved_manual_assignment_title
 from app.hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from app.hierarchy_evaluation import finalize_collection_hierarchy
 from app.external_subtitle_compatibility import (
@@ -532,24 +533,11 @@ def _scan_library(
         if legacy_conflict_collection is not None:
             video.catalog_collection = legacy_conflict_collection
             continue
-        assigned_manual_title = (
-            video.catalog_title
-            if video.catalog_title is not None
-            and manual_hierarchy_snapshot_requires_preservation(video.catalog_title)
-            and video.catalog_title.collection is not None
-            else None
+        existing_title = preserved_manual_assignment_title(
+            video,
+            identity,
+            titles,
         )
-        path_title = titles.get(title_data.relative_root_path)
-        reassigned_path_title = (
-            path_title
-            if path_title is not None
-            and manual_hierarchy_snapshot_requires_preservation(path_title)
-            and path_title.collection is not None
-            and path_title.collection.relative_root_path
-            != collection_data.relative_root_path
-            else None
-        )
-        existing_title = assigned_manual_title or reassigned_path_title
         if existing_title is not None:
             if not reconcile_video_catalog_title(video, existing_title):
                 _defer_structural_reconciliation(

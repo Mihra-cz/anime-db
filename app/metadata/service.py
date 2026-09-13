@@ -9,6 +9,7 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.hierarchy_evaluation import finalize_hierarchy_write
 from app.models import CatalogTitle, ExternalTitleLink, MetadataCandidate, TitleMetadata
 from app.numbering import recalculate_title_numbering
 from app.hierarchy import parse_explicit_part
@@ -153,6 +154,36 @@ def _write_metadata(
     return metadata
 
 
+def _numbering_evidence(
+    session: Session,
+    title: CatalogTitle,
+) -> tuple[bool, int | None]:
+    metadata = session.get(TitleMetadata, title.id)
+    return metadata is not None, metadata.episode_count if metadata is not None else None
+
+
+def _finalize_numbering_evidence_change(
+    session: Session,
+    title: CatalogTitle,
+    before: tuple[bool, int | None],
+) -> None:
+    """Finish only projections that depend on metadata presence or episode count."""
+    session.flush()
+    session.expire(title, ["metadata_record"])
+    after = _numbering_evidence(session, title)
+    if after == before:
+        return
+    if title.collection is not None:
+        finalize_hierarchy_write([title.collection])
+    else:
+        recalculate_title_numbering(
+            title,
+            list(title.videos),
+            external_linked=after[0],
+        )
+    session.flush()
+
+
 def confirm_anilist_candidate(
     session: Session,
     title: CatalogTitle,
@@ -196,6 +227,7 @@ def confirm_anilist_candidate(
             "Toto AniList ID je už primární vazbou jiného lokálního titulu. "
             "Potvrďte vědomé použití stejného externího ID."
         )
+    numbering_before = _numbering_evidence(session, title)
     timestamp = now or datetime.now(timezone.utc)
     for link in session.scalars(select(ExternalTitleLink).where(
         ExternalTitleLink.catalog_title_id == title.id,
@@ -231,7 +263,7 @@ def confirm_anilist_candidate(
         ))
     if candidate is not None:
         candidate.confirmed_at = timestamp
-    session.flush()
+    _finalize_numbering_evidence_change(session, title, numbering_before)
     return link
 
 
@@ -250,25 +282,27 @@ def refresh_title_metadata(
     data = provider.fetch_title(link.external_id)
     if data.external_id != link.external_id:
         raise ValueError("AniList vrátil neočekávanou identitu titulu.")
+    numbering_before = _numbering_evidence(session, title)
     timestamp = now or datetime.now(timezone.utc)
     link.external_url = data.site_url
     metadata = _write_metadata(session, title, data, timestamp)
-    session.flush()
-    recalculate_title_numbering(title, list(title.videos), external_linked=True)
+    _finalize_numbering_evidence_change(session, title, numbering_before)
     return metadata
 
 
 def unlink_title_metadata(session: Session, title: CatalogTitle) -> None:
+    numbering_before = _numbering_evidence(session, title)
     for link in session.scalars(select(ExternalTitleLink).where(
         ExternalTitleLink.catalog_title_id == title.id,
     )):
         link.is_primary = False
     if metadata := session.get(TitleMetadata, title.id):
+        title.metadata_record = None
         session.delete(metadata)
     title.preferred_metadata_provider = None
     title.preferred_external_id = None
     title.metadata_status = "unlinked"
-    recalculate_title_numbering(title, list(title.videos), external_linked=False)
+    _finalize_numbering_evidence_change(session, title, numbering_before)
 
 
 def set_manual_display_title(session: Session, title: CatalogTitle, value: str) -> None:

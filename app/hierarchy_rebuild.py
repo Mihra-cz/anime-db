@@ -15,6 +15,7 @@ from .catalog import (
     normalize_title,
 )
 from .hierarchy import CollectionIdentity, HierarchyIdentity, TitleIdentity, derive_library_hierarchy
+from .hierarchy_assignment import preserved_manual_assignment_title
 from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .hierarchy_evaluation import (
     HierarchyEvaluationResult,
@@ -609,22 +610,11 @@ def _manual_assignment_candidate(
     identity: HierarchyIdentity,
     titles_by_path: dict[str, CatalogTitle],
 ) -> tuple[CatalogTitle | None, ReconciliationReason | None]:
-    current = video.catalog_title
-    if (
-        current is not None
-        and manual_hierarchy_snapshot_requires_preservation(current)
-        and current.collection is not None
-    ):
-        return current, ReconciliationReason.MANUAL_CURRENT_ASSIGNMENT
-    path_title = titles_by_path.get(identity.title.relative_root_path)
-    if (
-        path_title is not None
-        and manual_hierarchy_snapshot_requires_preservation(path_title)
-        and path_title.collection is not None
-        and path_title.collection.relative_root_path
-        != identity.collection.relative_root_path
-    ):
-        return path_title, ReconciliationReason.MANUAL_PATH_AUTHORITY
+    candidate = preserved_manual_assignment_title(video, identity, titles_by_path)
+    if candidate is not None and candidate is video.catalog_title:
+        return candidate, ReconciliationReason.MANUAL_CURRENT_ASSIGNMENT
+    if candidate is not None:
+        return candidate, ReconciliationReason.MANUAL_PATH_AUTHORITY
     return None, None
 
 

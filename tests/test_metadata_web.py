@@ -710,13 +710,16 @@ def test_metadata_change_uses_stored_candidates_and_preserves_local_hierarchy(tm
             stored_title.part_type, stored_title.season_number,
             stored_title.season_label, stored_title.numbering_mode,
         ) == unchanged_title
+        # Confirmation preserves local/path identity while completing the
+        # metadata-dependent provider numbering projection in the same POST.
+        expected_video = (*unchanged_video[:8], 1, *unchanged_video[9:])
         assert (
             stored_video.catalog_title_id, stored_video.catalog_collection_id,
             stored_video.filename, stored_video.relative_path, stored_video.root_folder,
             stored_video.local_episode_number, stored_video.season_episode_number,
             stored_video.absolute_episode_number, stored_video.external_episode_number,
             stored_video.episode_number_source, stored_video.episode_number_confidence,
-        ) == unchanged_video
+        ) == expected_video
         primary = session.scalar(select(ExternalTitleLink).where(
             ExternalTitleLink.catalog_title_id == title_id,
             ExternalTitleLink.is_primary.is_(True),

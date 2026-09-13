@@ -117,7 +117,10 @@ fallback inference, nikoli nová autoritativní ruční klasifikace.
   nepokrývají, vyžaduje review. Explicitní `ManualSplitRuleVideo` je autoritou
   pouze nad konkrétně vyjmenovanými videi: chrání jejich ruční assignment, ale
   collection do manual-split režimu sám nepřepíná a po budoucích souborech
-  shodu s pravidlem nevyžaduje.
+  shodu s pravidlem nevyžaduje. Při odebrání posledního explicitního selectoru
+  se uvolněný assignment ještě před commitem znovu odvodí z běžné path
+  hierarchy; jiný selector, collection-scope range/pattern i chráněný manual
+  hierarchy snapshot mají nad automatic projekcí dál přednost.
 - `Video.file_type` je uložená parserová klasifikace. Obecný effective typ má
   prioritu video manual → konkrétní filename/raw typ → supplementary kontext
   title. Bonus/Extras container proto nezakrývá konkrétní Special/OVA/OP evidence.
@@ -304,6 +307,11 @@ Potvrzení metadata completion vyžaduje `linked_manual` a primární ruční
 metadata payload nestačí. Service spravuje link, normalizovaný `TitleMetadata`,
 obnovení, odpojení a lock. Lock brání běžnému refreshi/přepsání bez příslušného
 explicitního potvrzení. Metadata se nepoužívají k tichému přepsání ruční hierarchy.
+Změna existence potvrzeného metadata payloadu nebo jeho `episode_count` je
+současně změnou numbering evidence: metadata service proto ve stejné transakci
+spustí shared finalization právě owning collection. Změna synopsis, artworku
+nebo provider identity při stejné existenci payloadu a stejném countu tuto
+projekci nespouští.
 
 ### Requirement a completion
 

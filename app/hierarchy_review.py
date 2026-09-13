@@ -12,16 +12,25 @@ import re
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, object_session, selectinload
 
-from .catalog import GENERIC_ROOTS, detect_episode_number, normalize_title, effective_video_content_type
+from .catalog import (
+    GENERIC_ROOTS,
+    detect_episode_number,
+    effective_video_content_type,
+    is_root_video,
+    meaningful_root_collection,
+    normalize_title,
+)
 from .collection_presentation import (
     CollectionPresentation,
     build_collection_presentation,
     validate_effective_recap_season_context,
 )
-from .hierarchy import derive_library_hierarchy, parse_explicit_part
+from .hierarchy import HierarchyIdentity, derive_library_hierarchy, parse_explicit_part
+from .hierarchy_assignment import preserved_manual_assignment_title
 from .hierarchy_authority import (
     activate_manual_hierarchy_snapshot,
     clear_manual_hierarchy_snapshot,
+    manual_hierarchy_snapshot_requires_preservation,
     split_season_structure_issues,
     structural_hierarchy_issue,
 )
@@ -53,6 +62,7 @@ from .manual_split import (
     apply_manual_split_decisions,
     compile_manual_split_pattern,
     definition_from_title,
+    evaluate_persisted_manual_split,
     evaluate_manual_split_assignment,
     has_persisted_manual_split_selector,
     replace_explicit_video_selector_authority,
@@ -82,6 +92,7 @@ from .title_naming import (
 from .title_order import catalog_title_sort_key
 from .video_variants import (
     assign_video_catalog_title,
+    reconcile_video_catalog_title,
     validate_video_catalog_title_assignment,
 )
 
@@ -847,21 +858,61 @@ def _stored_title_paths(decision: CollectionGroupingDecision) -> tuple[str, ...]
 
 def collection_grouping_authority_targets(
     session: Session,
+    *,
+    title_paths: set[str] | None = None,
 ) -> dict[CatalogTitle, CatalogCollection]:
-    """Resolve valid persisted grouping decisions without changing membership."""
+    """Resolve valid persisted grouping decisions without changing membership.
+
+    A path scope limits database loading to the connected manual decisions.  It
+    is used by title-scoped write finalization; scanner reconciliation keeps the
+    existing whole-library form.
+    """
     decisions = list(session.scalars(
         select(CollectionGroupingDecision).order_by(
             CollectionGroupingDecision.updated_at,
             CollectionGroupingDecision.id,
         )
     ).all())
+    requested_paths = set(title_paths) if title_paths is not None else None
+    if requested_paths is not None:
+        connected_paths = set(requested_paths)
+        selected_decision_keys: set[int] = set()
+        changed = True
+        while changed:
+            changed = False
+            for decision in decisions:
+                if id(decision) in selected_decision_keys:
+                    continue
+                stored_paths = set(_stored_title_paths(decision))
+                if decision.decision == "merged" and stored_paths & connected_paths:
+                    selected_decision_keys.add(id(decision))
+                    connected_paths.update(stored_paths)
+                    changed = True
+        decisions = [
+            decision for decision in decisions
+            if id(decision) in selected_decision_keys
+        ]
+        target_paths = {
+            decision.target_collection_path
+            for decision in decisions
+            if decision.target_collection_path
+        }
+        collections_query = select(CatalogCollection).where(
+            CatalogCollection.relative_root_path.in_(target_paths)
+        )
+        titles_query = select(CatalogTitle).where(
+            CatalogTitle.relative_root_path.in_(connected_paths)
+        )
+    else:
+        collections_query = select(CatalogCollection)
+        titles_query = select(CatalogTitle)
     collections = {
         collection.relative_root_path: collection
-        for collection in session.scalars(select(CatalogCollection)).all()
+        for collection in session.scalars(collections_query).all()
     }
     titles = {
         title.relative_root_path: title
-        for title in session.scalars(select(CatalogTitle)).all()
+        for title in session.scalars(titles_query).all()
     }
     projected_collections = {
         title: title.collection for title in titles.values()
@@ -885,7 +936,10 @@ def collection_grouping_authority_targets(
                 resulting_collections = {
                     target
                     if other.catalog_title_id in selected_ids
-                    else projected_collections.get(other.catalog_title)
+                    else projected_collections.get(
+                        other.catalog_title,
+                        other.catalog_title.collection,
+                    )
                     for other in link.video.manual_split_rule_videos
                     if other.catalog_title is not None
                 }
@@ -901,7 +955,12 @@ def collection_grouping_authority_targets(
         for title in selected:
             projected_collections[title] = target
             assignments[title] = target
-    return assignments
+    if requested_paths is None:
+        return assignments
+    return {
+        title: target for title, target in assignments.items()
+        if title.relative_root_path in requested_paths
+    }
 
 
 def apply_collection_grouping_authority(session: Session) -> None:
@@ -2972,8 +3031,61 @@ def apply_manual_split(
     if preview.conflicts and not confirm_conflicts:
         raise ValueError("Rozsahy nebo pravidla se překrývají; je nutné explicitní potvrzení.")
     _validate_manual_split_recap_context(collection, definitions, preview)
-    with strict_hierarchy_write_guard(session, [collection]):
-        existing = {title.id: title for title in collection.titles}
+    existing = {title.id: title for title in collection.titles}
+    released_video_ids = {
+        link.video_id
+        for definition in definitions
+        if definition.title_id is not None
+        for title in (existing.get(definition.title_id),)
+        if title is not None
+        for link in title.manual_split_rule_videos
+        if link.video_id not in set(definition.video_ids)
+    }
+    released_hierarchy = derive_library_hierarchy([
+        video.relative_path for video in collection.videos
+    ]) if released_video_ids else {}
+    released_title_paths = {
+        released_hierarchy[video.relative_path].title.relative_root_path
+        for video in collection.videos
+        if video.id in released_video_ids and not is_root_video(video)
+    }
+    titles_by_path = {
+        title.relative_root_path: title
+        for title in session.scalars(select(CatalogTitle).where(
+            CatalogTitle.relative_root_path.in_(released_title_paths)
+        )).all()
+    } if released_title_paths else {}
+    grouping_targets = collection_grouping_authority_targets(
+        session,
+        title_paths=released_title_paths,
+    ) if released_title_paths else {}
+    released_collection_paths = {
+        released_hierarchy[video.relative_path].collection.relative_root_path
+        for video in collection.videos
+        if video.id in released_video_ids and not is_root_video(video)
+    }
+    collections_by_path = {
+        item.relative_root_path: item
+        for item in session.scalars(select(CatalogCollection).where(
+            CatalogCollection.relative_root_path.in_(released_collection_paths)
+        )).all()
+    } if released_collection_paths else {}
+    affected = {collection}
+    affected.update(
+        video.catalog_title.collection
+        for video in collection.videos
+        if video.id in released_video_ids
+        and video.catalog_title is not None
+        and video.catalog_title.collection is not None
+    )
+    affected.update(
+        title.collection
+        for title in titles_by_path.values()
+        if title.collection is not None
+    )
+    affected.update(grouping_targets.values())
+    affected.update(collections_by_path.values())
+    with strict_hierarchy_write_guard(session, list(affected)):
         resolved: list[CatalogTitle] = []
         now = utc_now()
         for position, definition in enumerate(definitions, 1):
@@ -3028,8 +3140,121 @@ def apply_manual_split(
             catalog_titles=resolved,
         )
         session.flush()
-        refresh_collection_state(collection)
+        affected.update(_reconcile_released_manual_split_assignments(
+            session,
+            collection,
+            released_video_ids,
+            released_hierarchy,
+            titles_by_path,
+            collections_by_path,
+            grouping_targets,
+        ))
+        finalize_hierarchy_write(list(affected))
     return preview
+
+
+def _reconcile_released_manual_split_assignments(
+    session: Session,
+    collection: CatalogCollection,
+    released_video_ids: set[int],
+    hierarchy: Mapping[str, HierarchyIdentity],
+    titles_by_path: dict[str, CatalogTitle],
+    collections_by_path: dict[str, CatalogCollection],
+    grouping_targets: dict[CatalogTitle, CatalogCollection],
+) -> set[CatalogCollection]:
+    """Finalize automatic assignments whose explicit selector just disappeared."""
+    if not released_video_ids:
+        return set()
+    decisions = {
+        decision.video.id: decision
+        for decision in evaluate_persisted_manual_split(
+            collection,
+            list(collection.videos),
+        ).decisions
+        if decision.video.id is not None
+    }
+    affected: set[CatalogCollection] = set()
+    for video in collection.videos:
+        if video.id not in released_video_ids:
+            continue
+        decision = decisions.get(video.id)
+        if (
+            video.manual_split_rule_videos
+            or decision is not None
+            and decision.kind != ManualSplitDecisionKind.NOT_REQUIRED
+        ):
+            continue
+        previous_collection = (
+            video.catalog_title.collection
+            if video.catalog_title is not None
+            and video.catalog_title.collection is not None
+            else video.catalog_collection
+        )
+        if previous_collection is not None:
+            affected.add(previous_collection)
+        if is_root_video(video):
+            target_collection = meaningful_root_collection(video)
+            target_title = (
+                video.catalog_title
+                if video.catalog_title is not None
+                and video.catalog_title.collection is target_collection
+                else None
+            )
+            assign_video_catalog_title(video, target_title)
+            video.catalog_collection = target_collection
+            if target_collection is not None:
+                affected.add(target_collection)
+            continue
+
+        identity = hierarchy[video.relative_path]
+        manual_target = preserved_manual_assignment_title(
+            video,
+            identity,
+            titles_by_path,
+        )
+        if manual_target is not None:
+            video.catalog_collection = manual_target.collection
+            affected.add(manual_target.collection)
+            continue
+
+        target_collection = collections_by_path.get(
+            identity.collection.relative_root_path
+        )
+        if target_collection is None:
+            target_collection = CatalogCollection(
+                local_title=identity.collection.local_title,
+                normalized_local_title=normalize_title(identity.collection.local_title),
+                relative_root_path=identity.collection.relative_root_path,
+            )
+            session.add(target_collection)
+            collections_by_path[target_collection.relative_root_path] = target_collection
+        target_title = titles_by_path.get(identity.title.relative_root_path)
+        if target_title is None:
+            target_title = CatalogTitle(
+                collection=target_collection,
+                local_title=identity.title.local_title,
+                normalized_local_title=normalize_title(identity.title.local_title),
+                relative_root_path=identity.title.relative_root_path,
+            )
+            session.add(target_title)
+            titles_by_path[target_title.relative_root_path] = target_title
+        if not manual_hierarchy_snapshot_requires_preservation(target_title):
+            target_title.collection = grouping_targets.get(
+                target_title,
+                target_collection,
+            )
+        if not manual_hierarchy_snapshot_requires_preservation(target_title):
+            target_title.part_type = identity.title.part_type
+            target_title.season_number = identity.title.season_number
+            target_title.part_number = identity.title.part_number
+            target_title.season_label = identity.title.season_label
+            target_title.original_folder_name = identity.title.original_folder_name
+            target_title.sort_order = identity.title.sort_order
+        video.catalog_collection = target_title.collection
+        reconcile_video_catalog_title(video, target_title)
+        affected.add(target_title.collection)
+    session.flush()
+    return affected
 
 
 def definitions_as_json(collection: CatalogCollection) -> str:
