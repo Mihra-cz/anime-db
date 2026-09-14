@@ -73,7 +73,7 @@ from .models import (
     ManualSplitRuleVideo, Video, utc_now,
 )
 from .numbering import (
-    clear_duplicate_group, effective_video_numbering, is_nonprimary_duplicate_video,
+    clear_duplicate_group, collapses_into_duplicate_primary, effective_video_numbering,
     set_duplicate_group_primary,
     supplementary_context_map, validate_recap_number_for_content_type,
     video_numbering_identity,
@@ -1696,9 +1696,10 @@ def _safe_contiguous_episode_range(
     if not videos:
         return None
     video_ids = {video.id for video in videos}
+    known_videos = {video.id: video for video in videos if video.id is not None}
     numbered: list[tuple[int, int]] = []
     for video in videos:
-        if is_nonprimary_duplicate_video(video):
+        if collapses_into_duplicate_primary(video, known_videos=known_videos):
             if video.duplicate_of_video_id not in video_ids:
                 return None
             continue

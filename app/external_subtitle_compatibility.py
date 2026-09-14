@@ -24,7 +24,7 @@ from .models import (
 )
 from .numbering import (
     LogicalEpisodeIdentity,
-    is_nonprimary_duplicate_video,
+    collapses_into_duplicate_primary,
     logical_episode_identity,
 )
 from .subtitles import safe_subtitle_matches
@@ -632,7 +632,9 @@ def candidate_variant_videos(
         eligible = [
             video for video in index.videos_by_identity.get(anchor_identity, ())
             if (
-                not is_nonprimary_duplicate_video(video)
+                not collapses_into_duplicate_primary(
+                    video, known_videos=index.videos_by_id,
+                )
                 or video.id == anchor.id
                 or video.id in compat_by_video_id
             )

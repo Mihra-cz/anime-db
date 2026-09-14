@@ -798,7 +798,7 @@ def test_candidates_are_same_logical_episode_only_and_ignore_duplicate_topology(
     engine = make_engine(f"sqlite:///{tmp_path / 'candidates.db'}")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
-        collection, title, tv_group, bd_group, bd, tv, subtitle = _variant_asset(session)
+        collection, title, bd_group, tv_group, bd, tv, subtitle = _variant_asset(session)
         episode_two = _video(
             title, collection, filename="Nande - 02.mkv", episode=2, group=bd_group
         )

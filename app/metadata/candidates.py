@@ -17,7 +17,7 @@ from app.supplementary import supplementary_inventory
 from app.numbering import (
     SUPPLEMENTAL_PART_TYPES,
     effective_video_numbering,
-    is_nonprimary_duplicate_video,
+    collapses_into_duplicate_primary,
     summarize_title_numbering,
 )
 
@@ -155,8 +155,12 @@ def local_episode_count_evidence(
     """
     video_list = list(title.videos if videos is None else videos)
     summary = summarize_title_numbering(video_list, title)
+    known_videos = {
+        video.id: video for video in video_list if video.id is not None
+    }
     active = tuple(
-        video for video in video_list if not is_nonprimary_duplicate_video(video)
+        video for video in video_list
+        if not collapses_into_duplicate_primary(video, known_videos=known_videos)
     )
     physical_count = len(video_list)
     active_count = len(active)

@@ -4,7 +4,7 @@ from collections import Counter
 from collections.abc import Iterable
 
 from .models import Video
-from .numbering import is_nonprimary_duplicate_video
+from .numbering import collapses_into_duplicate_primary
 
 
 MEDIA_PART_NUMBER_ERROR = "Část média musí být kladné celé číslo."
@@ -26,14 +26,20 @@ def set_media_part_number(video: Video, value: int | None) -> Video:
 
 
 def active_media_part_videos(videos: Iterable[Video]) -> tuple[Video, ...]:
-    """Return valid primary segments; confirmed secondary copies are not parts."""
+    """Return valid segments; only currently VALID duplicate copies fold away."""
+    candidates = tuple(videos)
+    known_videos = {
+        video.id: video for video in candidates if video.id is not None
+    }
     return tuple(
-        video for video in videos
+        video for video in candidates
         if (
             isinstance(video.media_part_number, int)
             and not isinstance(video.media_part_number, bool)
             and video.media_part_number >= 1
-            and not is_nonprimary_duplicate_video(video)
+            and not collapses_into_duplicate_primary(
+                video, known_videos=known_videos,
+            )
         )
     )
 

@@ -271,7 +271,7 @@ def test_confirmed_duplicate_across_distinct_known_groups_is_explicit_blocker():
 
     assert len(conflicts) == 1
     assert summary.variant_inconsistent_confirmed_duplicates == 1
-    assert HierarchyIssueCode.CONFIRMED_DUPLICATE in _codes(result)
+    assert HierarchyIssueCode.CONFIRMED_DUPLICATE not in _codes(result)
     issue = next(
         issue for issue in result.issues
         if issue.code == HierarchyIssueCode.CONFIRMED_DUPLICATE_VARIANT_CONFLICT

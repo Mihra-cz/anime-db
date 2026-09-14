@@ -18,7 +18,7 @@ from .collection_presentation import (
 )
 from .models import CatalogCollection, CatalogTitle, Video, VideoVariantGroup, utc_now
 from .numbering import (
-    is_nonprimary_duplicate_video,
+    collapses_into_duplicate_primary,
     logical_episode_identity,
     set_video_episode_override,
 )
@@ -619,9 +619,14 @@ def _prospective_collision_counts(
     prospective: dict[int, tuple[str, int | str] | None],
 ) -> tuple[int, int]:
     by_identity: dict[object, list[Video]] = {}
+    known_videos = {
+        video.id: video for video in title.videos if video.id is not None
+    }
     for video in title.videos:
         identity = logical_episode_identity(video, catalog_title=title)
-        if identity is not None and not is_nonprimary_duplicate_video(video):
+        if identity is not None and not collapses_into_duplicate_primary(
+            video, known_videos=known_videos,
+        ):
             by_identity.setdefault(identity, []).append(video)
     unresolved = 0
     duplicate_collisions = 0
@@ -719,7 +724,9 @@ def preview_video_variant_assignments(
             or len(collision_identities) != 1
             or None in collision_identities
             or any(
-                is_nonprimary_duplicate_video(video)
+                collapses_into_duplicate_primary(
+                    video, known_videos=selected_by_id,
+                )
                 for video in selected_by_id.values()
             )
         ):
@@ -959,9 +966,14 @@ def repeated_variant_lane_proposal(
     ):
         return None
     by_identity: dict[object, list[Video]] = {}
+    known_videos = {
+        video.id: video for video in title.videos if video.id is not None
+    }
     for video in title.videos:
         identity = logical_episode_identity(video, catalog_title=title)
-        if identity is not None and not is_nonprimary_duplicate_video(video):
+        if identity is not None and not collapses_into_duplicate_primary(
+            video, known_videos=known_videos,
+        ):
             by_identity.setdefault(identity, []).append(video)
     pairs: list[VariantLanePair] = []
     proposal_hint: str | None = None

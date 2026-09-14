@@ -209,12 +209,14 @@ Standardní Episode musí mít logical episode number vždy, i jako singleton;
 chybějící číslo vyžaduje review. Toto pravidlo nemění strukturální čísla
 Season/Part/Cour.
 
-Potvrzená duplicate secondary nezvyšuje počet logických epizod ani potvrzených
-variant, ale zůstává fyzickým videem. Autoritou je vazba `duplicate_of_video_id`,
-ne nullable `duplicate_status_manual` (ruční podezření/posouzení). Platné potvrzené
-kopie jsou cleanup informace, nikoli samy blocking hierarchy problém.
-Chybějící primary či vazba mezi různými potvrzenými variantami zůstává problémem;
-nevzniká automatická náhrada primary ani mazání souborů.
+`duplicate_of_video_id` je zachovaná ruční evidence potvrzené duplicity, nikoli
+sama důkaz její současné effective platnosti. Shared resolver rozlišuje `VALID`
+(obě současné identity jsou známé a shodné), `INVALID` (současná data prokazují
+rozpor nebo chybí primary) a `UNKNOWN` (identitu nelze bezpečně ověřit). Pouze
+`VALID` secondary se kolabuje a nezvyšuje logical/variant/completion count.
+`INVALID` i `UNKNOWN` zůstávají aktivní a ruční evidence se nemaže; první je
+konflikt, druhý review bez automatického odhadu. Nevzniká automatická náhrada
+primary ani mazání souborů.
 
 `VideoVariantGroup` je ruční skupina v rámci title, s volitelným release source
 a content variant. `NULL` assignment je neurčeno, ne implicitní výchozí varianta.
@@ -373,8 +375,10 @@ Pouze interní EN slouží jako fallback; externí EN je technická evidence.
 
 Media Check nad fakty vede požadavek a nullable ruční „CZ/SK nedostupné“.
 Pozitivní CZ/SK evidence má před tímto markerem faktickou přednost, aniž jej
-automaticky smaže. Potvrzená duplicate secondary nevytváří další povinnou
-completion jednotku; jiné fyzické reprezentace se posuzují samostatně.
+automaticky smaže. Pouze secondary s aktuálně `VALID` duplicate relation
+nevytváří další povinnou completion jednotku; `INVALID` a `UNKNOWN` evidence
+zůstává samostatnou completion položkou a jiné fyzické reprezentace se rovněž
+posuzují samostatně.
 
 Úzká OP/ED/NCOP/NCED policy nevyžaduje titulky a unknown audio je zde neutrální;
 skutečná absence audia (`no_audio`) zůstává problémem. Video manual klasifikace je první autorita,

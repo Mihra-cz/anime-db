@@ -153,6 +153,7 @@ def build_catalog_title_video_presentation(
     known = tuple(known_videos) if known_videos is not None else visible
     visible_ids = {video.id for video in visible if video.id is not None}
     known_ids = {video.id for video in known if video.id is not None}
+    known_by_id = {video.id: video for video in known if video.id is not None}
     visible_order = {
         video.id: index for index, video in enumerate(visible) if video.id is not None
     }
@@ -161,7 +162,7 @@ def build_catalog_title_video_presentation(
         # A stale relation no longer folds the secondary into its old lane; the
         # video is an active representation of its own current identity.
         if video.duplicate_of_video_id is not None and (
-            collapses_into_duplicate_primary(video)
+            collapses_into_duplicate_primary(video, known_videos=known_by_id)
         ):
             known_duplicates_by_primary.setdefault(
                 video.duplicate_of_video_id, []

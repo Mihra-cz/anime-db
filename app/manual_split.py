@@ -10,7 +10,7 @@ from .video_variants import (
     assign_video_catalog_title,
     reconcile_video_catalog_title,
 )
-from .numbering import effective_video_numbering, is_nonprimary_duplicate_video
+from .numbering import collapses_into_duplicate_primary, effective_video_numbering
 from .title_order import catalog_title_sort_key
 
 
@@ -169,10 +169,11 @@ def _requires_rule_assignment(
     *,
     persisted_targets: bool,
     use_fresh_numbering: bool,
+    known_videos: dict[int, Video],
 ) -> bool:
     """Preserve current authority boundaries for non-episodic/secondary content."""
     if (
-        is_nonprimary_duplicate_video(video)
+        collapses_into_duplicate_primary(video, known_videos=known_videos)
         or effective_video_numbering(
             video,
             use_current_title=not use_fresh_numbering,
@@ -271,6 +272,7 @@ def evaluate_manual_split_assignment(
     )
     selector_covers_collection = has_collection_scope_selector
     decisions: list[ManualSplitVideoDecision] = []
+    known_videos = {video.id: video for video in videos if video.id is not None}
     for video in videos:
         number = _manual_split_number(
             video, use_fresh_numbering=use_fresh_numbering,
@@ -324,6 +326,7 @@ def evaluate_manual_split_assignment(
             rules,
             persisted_targets=persisted_targets,
             use_fresh_numbering=use_fresh_numbering,
+            known_videos=known_videos,
         ):
             kind = ManualSplitDecisionKind.UNMATCHED
         else:

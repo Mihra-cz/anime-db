@@ -35,10 +35,12 @@ from app.models import (
     utc_now,
 )
 from app.numbering import (
+    DuplicateRelationState,
     apply_sequential_numbering,
     collapses_into_duplicate_primary,
     confirmed_duplicate_identity_conflicts,
-    duplicate_relation_is_current,
+    confirmed_duplicate_identity_unknowns,
+    duplicate_relation_state,
     logical_episode_partitions,
     preview_sequential_numbering,
     recalculate_title_numbering,
@@ -183,8 +185,11 @@ def test_confirmed_duplicate_collapses_only_while_the_relation_matches():
         session.expire_all()
         collection = session.get(CatalogCollection, ids["collection"])
         title = session.get(CatalogTitle, ids["title"])
+        secondary = session.get(Video, ids["secondary"])
 
         summary = summarize_title_numbering(list(title.videos), title)
+        assert duplicate_relation_state(secondary) == DuplicateRelationState.VALID
+        assert collapses_into_duplicate_primary(secondary) is True
         assert summary.logical_episode_count == 1
         assert summary.identity_inconsistent_confirmed_duplicates == 0
         assert _blocking_codes(collection) == set()
@@ -214,7 +219,7 @@ def test_b3_a_stale_duplicate_after_episode_number_write_is_not_collapsed():
         assert secondary.season_episode_number == 2
         # Ruční evidence zůstává zachovaná.
         assert secondary.duplicate_of_video_id == primary.id
-        assert duplicate_relation_is_current(secondary) is False
+        assert duplicate_relation_state(secondary) == DuplicateRelationState.INVALID
         assert collapses_into_duplicate_primary(secondary) is False
 
         partitions = logical_episode_partitions(list(title.videos), catalog_title=title)
@@ -228,7 +233,7 @@ def test_b3_a_stale_duplicate_after_episode_number_write_is_not_collapsed():
 
         blocking = _blocking_codes(collection)
         assert HierarchyIssueCode.CONFIRMED_DUPLICATE_IDENTITY_CONFLICT.value in blocking
-        assert HierarchyIssueCode.CONFIRMED_DUPLICATE.value in _issue_codes(collection)
+        assert HierarchyIssueCode.CONFIRMED_DUPLICATE.value not in _issue_codes(collection)
         assert collection.hierarchy_status == "review_required"
 
 
@@ -255,7 +260,7 @@ def test_b3_b_stale_duplicate_after_reassignment_to_another_title():
 
         assert secondary.catalog_title_id == second.id
         assert secondary.duplicate_of_video_id == primary.id
-        assert duplicate_relation_is_current(secondary) is False
+        assert duplicate_relation_state(secondary) == DuplicateRelationState.INVALID
 
         assert summarize_title_numbering(
             list(first.videos), first,
@@ -286,17 +291,133 @@ def test_b3_stale_relation_conflict_is_reported_as_one_group():
         }
 
 
-def test_b3_unknown_identity_never_invalidates_manual_evidence():
-    """Nezjistitelná identita nesmí ruční rozhodnutí zneplatnit."""
+def test_r3_unknown_identity_preserves_evidence_without_effective_collapse():
+    """UNKNOWN preserves the human evidence but is never treated as VALID."""
     collection = _collection()
     title = _season(collection)
     primary = _video(collection, title, "Show - 01.mkv", 1)
     secondary = _video(collection, title, "Neznámý soubor.mkv", 2)
     secondary.duplicate_of = primary
 
-    assert duplicate_relation_is_current(secondary) is True
-    assert collapses_into_duplicate_primary(secondary) is True
+    assert duplicate_relation_state(secondary) == DuplicateRelationState.UNKNOWN
+    assert collapses_into_duplicate_primary(secondary) is False
     assert confirmed_duplicate_identity_conflicts([primary, secondary]) == ()
+    assert len(confirmed_duplicate_identity_unknowns([primary, secondary])) == 1
+
+
+def test_r3_unknown_duplicate_identity_does_not_collapse_or_verify():
+    collection = _collection()
+    title = _season(collection)
+    primary = _video(collection, title, "Show - 01.mkv", 1)
+    secondary = _video(collection, title, "Neznámý soubor.mkv", 2)
+    _identified(collection, title, [primary, secondary])
+    for video in (primary, secondary):
+        set_video_episode_number_from_input(video, "1")
+    recalculate_title_numbering(title, [primary, secondary])
+    set_duplicate_group_primary([primary, secondary], primary)
+    secondary.duplicate_of_video_id = primary.id
+
+    set_video_episode_number_from_input(secondary, "")
+    recalculate_title_numbering(title, [primary, secondary])
+    result = evaluate_collection_hierarchy(collection, [primary, secondary])
+
+    assert secondary.duplicate_of_video_id == primary.id
+    assert secondary.season_episode_number is None
+    assert duplicate_relation_state(secondary) == DuplicateRelationState.UNKNOWN
+    assert collapses_into_duplicate_primary(secondary) is False
+    assert HierarchyIssueCode.CONFIRMED_DUPLICATE_IDENTITY_UNKNOWN in {
+        issue.code for issue in result.issues
+    }
+    assert HierarchyIssueCode.UNKNOWN_OR_MISSING_NUMBERING in {
+        issue.code for issue in result.issues
+    }
+    assert result.status == "review_required"
+
+
+@pytest.mark.parametrize(
+    ("primary_number", "secondary_number"),
+    ((None, 1), (None, None)),
+)
+def test_r3_unknown_primary_or_both_unknown_stays_review(
+    primary_number, secondary_number,
+):
+    collection = _collection()
+    title = _season(collection)
+    primary = _video(collection, title, "Primary unknown.mkv", 1)
+    secondary = _video(collection, title, "Secondary unknown.mkv", 2)
+    _identified(collection, title, [primary, secondary])
+    for video in (primary, secondary):
+        set_video_episode_number_from_input(video, "1")
+    recalculate_title_numbering(title, [primary, secondary])
+    set_duplicate_group_primary([primary, secondary], primary)
+    secondary.duplicate_of_video_id = primary.id
+    set_video_episode_number_from_input(
+        primary, "" if primary_number is None else str(primary_number),
+    )
+    set_video_episode_number_from_input(
+        secondary, "" if secondary_number is None else str(secondary_number),
+    )
+    recalculate_title_numbering(title, [primary, secondary])
+
+    result = evaluate_collection_hierarchy(collection, [primary, secondary])
+
+    assert duplicate_relation_state(secondary) == DuplicateRelationState.UNKNOWN
+    assert collapses_into_duplicate_primary(secondary) is False
+    assert HierarchyIssueCode.CONFIRMED_DUPLICATE_IDENTITY_UNKNOWN in {
+        issue.code for issue in result.issues
+    }
+    assert result.status == "review_required"
+
+
+@pytest.mark.parametrize("missing_mode", ("marker", "dangling_fk"))
+def test_r3_missing_primary_is_invalid_and_does_not_collapse(missing_mode):
+    collection = _collection()
+    title = _season(collection)
+    secondary = _video(collection, title, "Show - 01.mkv", 1)
+    if missing_mode == "marker":
+        secondary.duplicate_primary_missing = True
+    else:
+        secondary.duplicate_of_video_id = 999
+
+    assert duplicate_relation_state(secondary) == DuplicateRelationState.INVALID
+    assert collapses_into_duplicate_primary(secondary) is False
+
+
+def test_r3_unknown_relation_survives_commit_reload_and_shared_evaluation():
+    with _session() as session:
+        collection = _collection()
+        title = _season(collection)
+        primary = _video(collection, title, "Show - 01.mkv", 1)
+        secondary = _video(collection, title, "Unknown copy.mkv", 2)
+        session.add(collection)
+        session.flush()
+        for video in (primary, secondary):
+            set_video_episode_number_from_input(video, "1")
+        recalculate_title_numbering(title, [primary, secondary])
+        set_duplicate_group_primary([primary, secondary], primary)
+        session.flush()
+        set_video_episode_number_from_input(secondary, "")
+        recalculate_title_numbering(title, [primary, secondary])
+        refresh_collection_state(collection)
+        session.commit()
+        ids = collection.id, secondary.id
+
+        session.expire_all()
+        reloaded_collection = session.get(CatalogCollection, ids[0])
+        reloaded_secondary = session.get(Video, ids[1])
+        result = evaluate_collection_hierarchy(
+            reloaded_collection, list(reloaded_collection.videos),
+        )
+
+        assert reloaded_secondary.duplicate_of_video_id is not None
+        assert duplicate_relation_state(
+            reloaded_secondary,
+        ) == DuplicateRelationState.UNKNOWN
+        assert collapses_into_duplicate_primary(reloaded_secondary) is False
+        assert HierarchyIssueCode.CONFIRMED_DUPLICATE_IDENTITY_UNKNOWN in {
+            issue.code for issue in result.issues
+        }
+        assert result.status == "review_required"
 
 
 # ---------------------------------------------------------------------------

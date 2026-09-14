@@ -66,18 +66,18 @@ def test_media_part_display_requires_a_complete_contiguous_set_for_total():
     assert media_part_sequence_warning(gap) is not None
 
 
-def test_confirmed_secondary_duplicate_does_not_increase_total_or_conflict():
+def test_unknown_duplicate_relation_does_not_hide_media_part_conflict():
     primary_one = video(1, filename="One.mkv")
     primary_two = video(2, filename="Two.mkv")
     duplicate_one = video(1, filename="One copy.mkv")
     duplicate_one.duplicate_of = primary_one
     siblings = [primary_one, primary_two, duplicate_one]
 
-    assert media_part_total(siblings) == 2
-    assert duplicate_media_part_ordinals(siblings) == ()
-    assert media_part_label(primary_one, siblings) == "Část média 1/2"
-    assert media_part_label(primary_two, siblings) == "Část média 2/2"
-    assert media_part_label(duplicate_one, siblings) == "Část média 1/2"
+    assert media_part_total(siblings) is None
+    assert duplicate_media_part_ordinals(siblings) == (1,)
+    assert media_part_label(primary_one, siblings) == "Část média 1"
+    assert media_part_label(primary_two, siblings) == "Část média 2"
+    assert media_part_label(duplicate_one, siblings) == "Část média 1"
 
 
 def test_duplicate_active_primary_ordinal_has_local_diagnostic():

@@ -318,28 +318,33 @@ def supplementary_inventory(
             if key is not None else None
         )
         identities[video] = identity
-        if not (
-            video.duplicate_of_video_id is not None
-            or video.__dict__.get("duplicate_of") is not None
-            or video.duplicate_primary_missing
-        ):
-            if state.number is None or identity is None:
-                unknown.append(video)
-            else:
-                by_identity[identity].append(video)
+    # Import locally because numbering uses the supplementary identity primitives.
+    from .numbering import (
+        DuplicateRelationState,
+        duplicate_relation_state,
+    )
+
+    duplicate_identities = {
+        video: (
+            (scopes[video], identity)
+            if identity is not None and identity.ordinal is not None else None
+        )
+        for video, identity in identities.items()
+    }
     for video, identity in identities.items():
-        primary = video.__dict__.get("duplicate_of") or by_id.get(video.duplicate_of_video_id)
-        if video.duplicate_primary_missing or video.duplicate_of_video_id is not None or primary is not None:
-            if (primary is None or primary not in identities or identity is None
-                or identities[primary] != identity or primary is video
-                or scopes[primary] != scopes[video]
-                or primary.duplicate_of_video_id is not None
-                or primary.__dict__.get("duplicate_of") is not None
-                or primary.duplicate_primary_missing
-                or (variant_group_id(video) is not None and variant_group_id(primary) is not None
-                    and variant_group_id(video) != variant_group_id(primary))
-                or video.media_part_number != primary.media_part_number):
-                invalid.append(video)
+        relation_state = duplicate_relation_state(
+            video,
+            known_videos=by_id,
+            current_identities=duplicate_identities,
+        )
+        if relation_state == DuplicateRelationState.INVALID:
+            invalid.append(video)
+        if relation_state == DuplicateRelationState.VALID:
+            continue
+        if identity is None or identity.ordinal is None:
+            unknown.append(video)
+        else:
+            by_identity[identity].append(video)
     unnumbered = defaultdict(list)
     for video in unknown:
         # Physical-part authority is title-local; never combine two containers

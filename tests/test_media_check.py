@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import event, select
 from starlette.requests import Request
 
-from app.catalog import set_manual_hardsub
+from app.catalog import is_media_completion_video, set_manual_hardsub
 from app.config import Settings
 from app.database import Base
 from app.main import create_app
@@ -22,7 +22,12 @@ from app.models import (
     ExternalSubtitleCompatibility, InternalSubtitle,
     TitleMetadata, UnresolvedExternalSubtitle, Video,
 )
-from app.numbering import set_video_episode_number_from_input
+from app.numbering import (
+    DuplicateRelationState,
+    collapses_into_duplicate_primary,
+    duplicate_relation_state,
+    set_video_episode_number_from_input,
+)
 from app.subtitle_review import build_unresolved_subtitle_rows
 
 
@@ -580,6 +585,9 @@ def test_confirmed_duplicate_copy_keeps_facts_without_new_completion_unit():
     copy.duplicate_of = primary
     copy.duplicate_of_video_id = primary.id
 
+    assert duplicate_relation_state(copy) == DuplicateRelationState.VALID
+    assert is_media_completion_video(copy) is False
+
     results = build_media_check_results(
         [primary, copy], subtitle_filter="all", page_size=10,
     )
@@ -612,6 +620,71 @@ def test_confirmed_duplicate_copy_keeps_facts_without_new_completion_unit():
     assert build_media_check_results(
         [primary, copy], subtitle_filter="available", page_size=10,
     ).total_filtered == 1
+
+
+def test_r7_stale_duplicate_secondary_is_media_check_completion_unit():
+    collection, title = _collection()
+    primary = _video(
+        1, external=("cs",), title=title, collection=collection,
+    )
+    secondary = _video(2, title=title, collection=collection)
+    secondary.duplicate_of = primary
+    secondary.duplicate_of_video_id = primary.id
+
+    assert duplicate_relation_state(secondary) == DuplicateRelationState.INVALID
+    assert collapses_into_duplicate_primary(secondary) is False
+    assert is_media_completion_video(secondary) is True
+    results = build_media_check_results(
+        [primary, secondary], subtitle_filter="unresolved", page_size=10,
+    )
+    assert results.total_filtered == 1
+    assert results.rows[0].video is secondary
+    assert results.rows[0].evaluation.completion_required is True
+
+
+def test_r7_unknown_duplicate_secondary_remains_completion_unit():
+    collection, title = _collection()
+    primary = _video(
+        1, external=("cs",), title=title, collection=collection,
+    )
+    secondary = _video(2, title=title, collection=collection)
+    secondary.filename = "Unknown copy.mkv"
+    secondary.relative_path = "Anime/Media Show/Season 1/Unknown copy.mkv"
+    secondary.local_episode_number = None
+    secondary.season_episode_number = None
+    secondary.duplicate_of = primary
+    secondary.duplicate_of_video_id = primary.id
+
+    assert duplicate_relation_state(secondary) == DuplicateRelationState.UNKNOWN
+    assert collapses_into_duplicate_primary(secondary) is False
+    assert is_media_completion_video(secondary) is True
+
+    results = build_media_check_results(
+        [primary, secondary], subtitle_filter="unresolved", page_size=10,
+    )
+    assert results.total_filtered == 1
+    assert results.rows[0].video is secondary
+    assert results.rows[0].evaluation.completion_required is True
+
+
+@pytest.mark.parametrize("missing_mode", ("marker", "dangling_fk"))
+def test_r7_missing_primary_secondary_remains_completion_unit(missing_mode):
+    collection, title = _collection()
+    secondary = _video(1, title=title, collection=collection)
+    if missing_mode == "marker":
+        secondary.duplicate_primary_missing = True
+    else:
+        secondary.duplicate_of_video_id = 999
+
+    assert duplicate_relation_state(secondary) == DuplicateRelationState.INVALID
+    assert collapses_into_duplicate_primary(secondary) is False
+    assert is_media_completion_video(secondary) is True
+
+    results = build_media_check_results(
+        [secondary], subtitle_filter="unresolved", page_size=10,
+    )
+    assert results.total_filtered == 1
+    assert results.rows[0].video is secondary
 
 
 def _request(web_app, path: str) -> Request:

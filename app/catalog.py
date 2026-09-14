@@ -1084,12 +1084,16 @@ def is_film_video(video: Video) -> bool:
     return effective_video_content_type(video) == "film"
 
 
-def is_media_completion_video(video: Video) -> bool:
-    """Confirmed duplicate copies are physical facts, not completion units."""
+def is_media_completion_video(
+    video: Video,
+    *,
+    known_videos: Mapping[int, Video] | None = None,
+) -> bool:
+    """Only a currently VALID duplicate copy is not a completion unit."""
     # Local import avoids the catalog <-> numbering import cycle.
-    from .numbering import is_nonprimary_duplicate_video
+    from .numbering import collapses_into_duplicate_primary
 
-    return not is_nonprimary_duplicate_video(video)
+    return not collapses_into_duplicate_primary(video, known_videos=known_videos)
 
 
 def video_matches_filter(

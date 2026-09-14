@@ -118,9 +118,14 @@ def test_complete_media_parts_and_duplicates_do_not_make_multiple_identities(num
     copy = video(title, "OVA P1 copy.mkv", 3, media_part_number=1,
                  episode_number_manual_override=number, duplicate_of_video_id=1)
     inventory = supplementary_inventory([a, b, copy], collection_scope=True)
-    assert inventory.logical_identity_count == 1
-    assert not inventory.invalid_duplicates
-    assert not review([a, b, copy])
+    if number is None:
+        assert inventory.logical_identity_count == 3
+        assert inventory.requires_review
+        assert review([a, b, copy])
+    else:
+        assert inventory.logical_identity_count == 1
+        assert not inventory.invalid_duplicates
+        assert not review([a, b, copy])
     c = video(title, "another OVA.mkv", 4)
     assert review([a, b, copy, c])[title.id][0].code == "missing_supplementary_ordinal"
 
@@ -129,8 +134,10 @@ def test_unnumbered_duplicate_does_not_require_singleton_ordinal():
     _, title = collection_graph("ova")
     a = video(title, "OVA.mkv", 1)
     b = video(title, "OVA copy.mkv", 2, duplicate_of_video_id=1)
-    assert supplementary_inventory([a, b]).logical_identity_count == 1
-    assert not review([a, b])
+    inventory = supplementary_inventory([a, b])
+    assert inventory.logical_identity_count == 2
+    assert inventory.requires_review
+    assert review([a, b])
 
 
 @pytest.mark.parametrize("kind", ["bonus", "film", "other", "nced"])

@@ -39,7 +39,7 @@ from .models import (
     TitleMetadata,
     Video,
 )
-from .numbering import effective_video_numbering, is_nonprimary_duplicate_video
+from .numbering import collapses_into_duplicate_primary, effective_video_numbering
 from .video_variants import assign_video_catalog_title
 
 
@@ -658,6 +658,7 @@ def _build_assignment_intents(
     blocked_video_ids: set[int] = set()
     legacy_ambiguous_video_ids: set[int] = set()
     video_ids = {video.id for video in videos if video.id is not None}
+    videos_by_id = {video.id: video for video in videos if video.id is not None}
     authority_targets: dict[int, list[CatalogTitle]] = {}
     for title in titles:
         title_collection_path = (
@@ -854,7 +855,7 @@ def _build_assignment_intents(
                     ),
                 )
             elif (
-                is_nonprimary_duplicate_video(video)
+                collapses_into_duplicate_primary(video, known_videos=videos_by_id)
                 or effective_video_numbering(
                     video,
                     use_current_title=False,

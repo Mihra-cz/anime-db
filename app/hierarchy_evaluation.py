@@ -39,10 +39,11 @@ from .models import CatalogCollection, CatalogTitle, Video, utc_now
 from .numbering import (
     confirmed_duplicate_groups,
     confirmed_duplicate_identity_conflicts,
+    confirmed_duplicate_identity_unknowns,
     confirmed_duplicate_variant_conflicts,
     effective_video_numbering,
     is_confirmed_duplicate,
-    is_nonprimary_duplicate_video,
+    collapses_into_duplicate_primary,
     recalculate_collection_numbering,
     summarize_title_numbering,
     unresolved_duplicate_groups,
@@ -69,6 +70,11 @@ MISSING_DUPLICATE_PRIMARY_REVIEW_REASON = (
 CONFIRMED_DUPLICATE_IDENTITY_CONFLICT_REVIEW_REASON = (
     "Potvrzená duplicita už neodpovídá současné logické identitě obou videí; "
     "ruční rozhodnutí zůstává uložené a vyžaduje kontrolu."
+)
+CONFIRMED_DUPLICATE_IDENTITY_UNKNOWN_REVIEW_REASON = (
+    "Nelze bezpečně ověřit, zda potvrzená duplicita stále odpovídá současné "
+    "logické identitě obou videí; ruční rozhodnutí zůstává uložené a vyžaduje "
+    "kontrolu."
 )
 CONFIRMED_DUPLICATE_VARIANT_CONFLICT_REVIEW_REASON = (
     "Potvrzená duplicita propojuje dvě různé potvrzené video varianty; "
@@ -112,6 +118,7 @@ class HierarchyIssueCode(StrEnum):
     CONFIRMED_DUPLICATE = "confirmed_duplicate"
     CONFIRMED_DUPLICATE_VARIANT_CONFLICT = "confirmed_duplicate_variant_conflict"
     CONFIRMED_DUPLICATE_IDENTITY_CONFLICT = "confirmed_duplicate_identity_conflict"
+    CONFIRMED_DUPLICATE_IDENTITY_UNKNOWN = "confirmed_duplicate_identity_unknown"
     DUPLICATE_PRIMARY_MISSING = "duplicate_primary_missing"
     LONG_FLAT_SERIES = "long_flat_series"
     SOFT_LONG_FLAT_SERIES = "soft_long_flat_series"
@@ -296,6 +303,10 @@ def hierarchy_primary_note(
             CONFIRMED_DUPLICATE_IDENTITY_CONFLICT_REVIEW_REASON,
         ),
         (
+            HierarchyIssueCode.CONFIRMED_DUPLICATE_IDENTITY_UNKNOWN,
+            CONFIRMED_DUPLICATE_IDENTITY_UNKNOWN_REVIEW_REASON,
+        ),
+        (
             HierarchyIssueCode.CONFIRMED_DUPLICATE_VARIANT_CONFLICT,
             CONFIRMED_DUPLICATE_VARIANT_CONFLICT_REVIEW_REASON,
         ),
@@ -326,6 +337,9 @@ def evaluate_collection_hierarchy(
     """Evaluate current final data without mutating hierarchy or numbering."""
     titles = list(collection.titles)
     all_videos = list(collection.videos if videos is None else videos)
+    known_videos = {
+        video.id: video for video in all_videos if video.id is not None
+    }
     titles_by_id = {
         title.id: title for title in titles if title.id is not None
     }
@@ -457,7 +471,9 @@ def evaluate_collection_hierarchy(
 
         if not summary.supplemental:
             for video in title_videos:
-                if is_nonprimary_duplicate_video(video):
+                if collapses_into_duplicate_primary(
+                    video, known_videos=known_videos,
+                ):
                     continue
                 state = effective_video_numbering(video, title)
                 if state.is_nonstandard:
@@ -641,17 +657,14 @@ def evaluate_collection_hierarchy(
         frozenset(group.videos)
         for group in confirmed_duplicate_identity_conflicts(all_videos)
     }
+    unknown_members = {
+        frozenset(group.videos)
+        for group in confirmed_duplicate_identity_unknowns(all_videos)
+    }
     for group in confirmed_groups:
         represented_confirmed_videos.update(group.videos)
-        add_issue(
-            HierarchyIssueCode.CONFIRMED_DUPLICATE,
-            CONFIRMED_DUPLICATES_CLEANUP_NOTICE,
-            HierarchyIssueScope.VIDEO,
-            blocking=False,
-            title=_common_catalog_title(group.videos),
-            target_videos=group.videos,
-        )
-        if frozenset(group.videos) in conflicting_members:
+        members = frozenset(group.videos)
+        if members in conflicting_members:
             add_issue(
                 HierarchyIssueCode.CONFIRMED_DUPLICATE_VARIANT_CONFLICT,
                 CONFIRMED_DUPLICATE_VARIANT_CONFLICT_REVIEW_REASON,
@@ -660,12 +673,30 @@ def evaluate_collection_hierarchy(
                 title=_common_catalog_title(group.videos),
                 target_videos=group.videos,
             )
-        if frozenset(group.videos) in stale_members:
+        elif members in stale_members:
             add_issue(
                 HierarchyIssueCode.CONFIRMED_DUPLICATE_IDENTITY_CONFLICT,
                 CONFIRMED_DUPLICATE_IDENTITY_CONFLICT_REVIEW_REASON,
                 HierarchyIssueScope.VIDEO,
                 blocking=True,
+                title=_common_catalog_title(group.videos),
+                target_videos=group.videos,
+            )
+        elif members in unknown_members:
+            add_issue(
+                HierarchyIssueCode.CONFIRMED_DUPLICATE_IDENTITY_UNKNOWN,
+                CONFIRMED_DUPLICATE_IDENTITY_UNKNOWN_REVIEW_REASON,
+                HierarchyIssueScope.VIDEO,
+                blocking=True,
+                title=_common_catalog_title(group.videos),
+                target_videos=group.videos,
+            )
+        else:
+            add_issue(
+                HierarchyIssueCode.CONFIRMED_DUPLICATE,
+                CONFIRMED_DUPLICATES_CLEANUP_NOTICE,
+                HierarchyIssueScope.VIDEO,
+                blocking=False,
                 title=_common_catalog_title(group.videos),
                 target_videos=group.videos,
             )

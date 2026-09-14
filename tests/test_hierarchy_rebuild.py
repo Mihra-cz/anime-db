@@ -968,7 +968,7 @@ def test_fractional_recap_manual_change_invalidates_rebuild_plan(monkeypatch):
         assert effective_recap_episode_number(recap) == Decimal("5.5")
 
 
-def test_confirmed_secondary_duplicate_is_preserved_and_excluded_from_structure():
+def test_unverifiable_confirmed_secondary_is_preserved_for_review_during_rebuild():
     engine = _engine()
     with Session(engine) as session:
         primary = _video("Anime/Show/Show - 01.mkv")
@@ -984,7 +984,10 @@ def test_confirmed_secondary_duplicate_is_preserved_and_excluded_from_structure(
         assert (title_item.desired.part_type, title_item.desired.season_number) == (
             "season", 1,
         )
-        assert "confirmed_duplicate" in {item.code for item in plan.issues}
+        assert "confirmed_duplicate_identity_unknown" in {
+            item.code for item in plan.issues
+        }
+        assert "confirmed_duplicate" not in {item.code for item in plan.issues}
 
         apply_hierarchy_rebuild_plan(session, plan)
         session.commit()

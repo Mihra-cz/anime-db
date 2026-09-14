@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from enum import StrEnum
 import hashlib
 import json
 import re
@@ -130,6 +131,7 @@ class TitleNumberingSummary:
     invalid_duplicate_references: int
     variant_inconsistent_confirmed_duplicates: int
     identity_inconsistent_confirmed_duplicates: int = 0
+    unverifiable_confirmed_duplicates: int = 0
 
     supplemental: bool = False
 
@@ -152,6 +154,10 @@ class TitleNumberingSummary:
         return bool(
             self.unnumbered_standard or self.unknown or self.nonstandard
             or self.gaps or self.duplicate_numbers
+            or self.invalid_duplicate_references
+            or self.variant_inconsistent_confirmed_duplicates
+            or self.identity_inconsistent_confirmed_duplicates
+            or self.unverifiable_confirmed_duplicates
         )
 
 
@@ -198,13 +204,18 @@ class EpisodeDuplicateGroup:
 
 
 def is_confirmed_duplicate(video: Video) -> bool:
+    """Whether historical manual duplicate evidence exists."""
     # Persisted FK is sufficient; the loaded relation also covers unflushed edits.
     # A scalar read model must not lazy-load the primary merely to test existence.
     return video.duplicate_of_video_id is not None or video.__dict__.get("duplicate_of") is not None
 
 
-def is_nonprimary_duplicate_video(video: Video) -> bool:
-    return is_confirmed_duplicate(video) or video.duplicate_primary_missing
+class DuplicateRelationState(StrEnum):
+    """Current effective validity of preserved manual duplicate evidence."""
+
+    VALID = "valid"
+    INVALID = "invalid"
+    UNKNOWN = "unknown"
 
 
 RECAP_NUMBER_INPUT = re.compile(r"^(?P<base>[1-9]\d*)(?:\.(?P<digit>\d))?$")
@@ -614,36 +625,71 @@ def _duplicate_relation_identity(
     return (title_key, video.catalog_collection_id, numbering)
 
 
-def duplicate_relation_is_current(
+def duplicate_relation_state(
     video: Video,
     *,
     title_names: dict[str, list[CatalogTitle]] | None = None,
     known_videos: Mapping[int, Video] | None = None,
     allow_relationship_load: bool = True,
-) -> bool:
-    """Whether a stored duplicate relation still describes one logical identity.
+    current_identities: Mapping[Video, tuple | None] | None = None,
+) -> DuplicateRelationState | None:
+    """Resolve current validity without rewriting manual duplicate evidence.
 
     ``set_duplicate_group_primary`` accepts a relation only for one shared
     CatalogTitle, collection and numbering identity.  This is the same contract
     re-evaluated against current data, so a later numbering, content type or
     reassignment write cannot keep collapsing two different logical identities.
 
-    Manual evidence is never rewritten here.  An identity that cannot be
-    determined at all never invalidates a human decision; the relation simply
-    stays trusted until the current identity says otherwise.
+    Missing or contradictory current facts are INVALID.  If either present
+    identity cannot be determined, the state is UNKNOWN rather than valid.
+    ``None`` means that the video has no duplicate-secondary evidence at all.
     """
+    if video.duplicate_primary_missing:
+        return DuplicateRelationState.INVALID
+    if not is_confirmed_duplicate(video):
+        return None
     primary = loaded_duplicate_primary(
         video,
         known_videos=known_videos,
         allow_relationship_load=allow_relationship_load,
     )
     if primary is None:
-        return True
-    secondary_key = _duplicate_relation_identity(video, title_names=title_names)
-    primary_key = _duplicate_relation_identity(primary, title_names=title_names)
+        return (
+            DuplicateRelationState.INVALID
+            if allow_relationship_load
+            else DuplicateRelationState.UNKNOWN
+        )
+    if (
+        primary is video
+        or primary.duplicate_primary_missing
+        or is_confirmed_duplicate(primary)
+    ):
+        return DuplicateRelationState.INVALID
+    secondary_group = _video_variant_group_id(video)
+    primary_group = _video_variant_group_id(primary)
+    if (
+        secondary_group is not None
+        and primary_group is not None
+        and secondary_group != primary_group
+    ):
+        return DuplicateRelationState.INVALID
+    secondary_key = (
+        current_identities.get(video)
+        if current_identities is not None
+        else _duplicate_relation_identity(video, title_names=title_names)
+    )
+    primary_key = (
+        current_identities.get(primary)
+        if current_identities is not None
+        else _duplicate_relation_identity(primary, title_names=title_names)
+    )
     if secondary_key is None or primary_key is None:
-        return True
-    return secondary_key == primary_key
+        return DuplicateRelationState.UNKNOWN
+    return (
+        DuplicateRelationState.VALID
+        if secondary_key == primary_key
+        else DuplicateRelationState.INVALID
+    )
 
 
 def collapses_into_duplicate_primary(
@@ -652,18 +698,18 @@ def collapses_into_duplicate_primary(
     title_names: dict[str, list[CatalogTitle]] | None = None,
     known_videos: Mapping[int, Video] | None = None,
     allow_relationship_load: bool = True,
+    current_identities: Mapping[Video, tuple | None] | None = None,
 ) -> bool:
-    """Whether the video is a secondary a still-current relation folds away.
+    """Whether current evidence proves that this secondary may fold away.
 
     This is the only place that decides that a physical row is not an active
     representation because of manual duplicate evidence.
     """
-    return is_nonprimary_duplicate_video(video) and duplicate_relation_is_current(
-        video,
-        title_names=title_names,
-        known_videos=known_videos,
+    return duplicate_relation_state(
+        video, title_names=title_names, known_videos=known_videos,
         allow_relationship_load=allow_relationship_load,
-    )
+        current_identities=current_identities,
+    ) == DuplicateRelationState.VALID
 
 
 def logical_episode_partitions(
@@ -675,27 +721,42 @@ def logical_episode_partitions(
 ) -> tuple[LogicalEpisodePartition, ...]:
     """Partition active standard videos by logical episode and confirmed lane.
 
-    Confirmed duplicate secondaries and missing-primary remnants are not active
-    representations. NULL stays an explicit unassigned bucket and never becomes
-    a default variant.
+    Only currently VALID duplicate secondaries are not active representations.
+    INVALID/UNKNOWN evidence and missing-primary remnants stay active. NULL
+    remains an explicit unassigned bucket and never becomes a default variant.
 
     Direct-root inference runs before canonical numbering is projected. It can
     supply already resolved standard numbering inputs instead, retaining the
     same title scope and representation authority without mutating Video rows.
     """
     title_names = supplementary_context_map(videos) if numbering_inputs is None else None
-    known_videos = (
-        {video.id: video for video in videos if video.id is not None}
-        if numbering_inputs is None else None
+    projected_duplicate_identities = (
+        {
+            video: (
+                (
+                    _catalog_title_identity_key(video, catalog_title),
+                    video.catalog_collection_id,
+                    VideoNumberingIdentity("standard", number),
+                )
+                if (
+                    number is not None
+                    and _catalog_title_identity_key(video, catalog_title) is not None
+                ) else None
+            )
+            for video, number in numbering_inputs.items()
+        }
+        if numbering_inputs is not None else None
     )
+    duplicate_scope = {
+        video.id: video for video in videos if video.id is not None
+    }
 
     def collapsed(video: Video) -> bool:
-        # Pre-projection inference supplies its own numbering and must not read
-        # stored identity, so a relation cannot be re-validated against it.
-        if numbering_inputs is not None:
-            return is_nonprimary_duplicate_video(video)
         return collapses_into_duplicate_primary(
-            video, title_names=title_names, known_videos=known_videos,
+            video,
+            title_names=title_names,
+            known_videos=duplicate_scope,
+            current_identities=projected_duplicate_identities,
         )
 
     by_identity: dict[LogicalEpisodeIdentity, list[Video]] = {}
@@ -785,12 +846,15 @@ def unresolved_duplicate_groups(
     # Keep the existing season/context separation, then evaluate physical axes.
     by_identity: dict[VideoNumberingIdentity, list[Video]] = {}
     title_names = supplementary_context_map(videos)
+    known_videos = {video.id: video for video in videos if video.id is not None}
     for video in videos:
         identity = video_numbering_identity(video, title_names=title_names)
         if (
             identity is not None
             and identity.kind == "supplementary"
-            and not is_confirmed_duplicate(video)
+            and not collapses_into_duplicate_primary(
+                video, title_names=title_names, known_videos=known_videos,
+            )
         ):
             by_identity.setdefault(identity, []).append(video)
     groups.extend(
@@ -867,11 +931,35 @@ def confirmed_duplicate_identity_conflicts(
     grouping is withdrawn, and the group stays visible as an explicit conflict.
     """
     title_names = supplementary_context_map(videos)
+    known_videos = {video.id: video for video in videos if video.id is not None}
+    variant_conflicts = {
+        frozenset(group.videos)
+        for group in confirmed_duplicate_variant_conflicts(videos)
+    }
+    return tuple(
+        group for group in confirmed_duplicate_groups(videos)
+        if frozenset(group.videos) not in variant_conflicts and any(
+            duplicate_relation_state(
+                video, title_names=title_names, known_videos=known_videos,
+            ) == DuplicateRelationState.INVALID
+            for video in group.duplicate_copies
+        )
+    )
+
+
+def confirmed_duplicate_identity_unknowns(
+    videos: list[Video],
+) -> tuple[EpisodeDuplicateGroup, ...]:
+    """Return preserved relations whose current identity cannot be verified."""
+    title_names = supplementary_context_map(videos)
+    known_videos = {video.id: video for video in videos if video.id is not None}
     return tuple(
         group for group in confirmed_duplicate_groups(videos)
         if any(
-            not duplicate_relation_is_current(video, title_names=title_names)
-            for video in group.videos
+            duplicate_relation_state(
+                video, title_names=title_names, known_videos=known_videos,
+            ) == DuplicateRelationState.UNKNOWN
+            for video in group.duplicate_copies
         )
     )
 
@@ -1244,10 +1332,9 @@ def sequential_numbering_groups(
     for video in ordered:
         primary = loaded_duplicate_primary(video, known_videos=known_videos)
         if (
-            is_nonprimary_duplicate_video(video)
-            and primary is not None
+            primary is not None
             and primary.id in known_videos
-            and duplicate_relation_is_current(video, known_videos=known_videos)
+            and collapses_into_duplicate_primary(video, known_videos=known_videos)
         ):
             secondaries.setdefault(primary.id, []).append(video)
         else:
@@ -1574,6 +1661,10 @@ def summarize_title_numbering(
             len(confirmed_duplicate_identity_conflicts(videos))
             if confirmed_duplicate_count else 0
         ),
+        unverifiable_confirmed_duplicates=(
+            len(confirmed_duplicate_identity_unknowns(videos))
+            if confirmed_duplicate_count else 0
+        ),
         supplemental=supplemental,
     )
 
@@ -1755,6 +1846,7 @@ def deterministic_bulk_renumber_proposal(
         or summary.invalid_duplicate_references
         or summary.variant_inconsistent_confirmed_duplicates
         or summary.identity_inconsistent_confirmed_duplicates
+        or summary.unverifiable_confirmed_duplicates
         or unresolved_duplicate_groups(title_videos_list, catalog_title=title)
     ):
         return None
@@ -1811,11 +1903,14 @@ def deterministic_bulk_renumber_proposal(
         return None
 
     by_primary_id: dict[int, list[Video]] = {}
+    known_videos = {
+        video.id: video for video in title_videos_list if video.id is not None
+    }
     for video in title_videos_list:
         # Only a still-current relation may follow its primary; a stale one is
         # already an active representation inside its own logical partition.
         if video.duplicate_of_video_id is not None and (
-            collapses_into_duplicate_primary(video)
+            collapses_into_duplicate_primary(video, known_videos=known_videos)
         ):
             by_primary_id.setdefault(video.duplicate_of_video_id, []).append(video)
 

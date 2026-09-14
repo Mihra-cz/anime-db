@@ -25,7 +25,7 @@ from app.models import (
 from app.numbering import (
     SUPPLEMENTAL_PART_TYPES,
     effective_video_numbering,
-    is_nonprimary_duplicate_video,
+    collapses_into_duplicate_primary,
     recalculate_title_numbering,
     summarize_title_numbering,
 )
@@ -193,13 +193,16 @@ def evaluate_metadata_split(
     if confirmed is None or title.effective_part_type not in PART_TYPES:
         return None
     metadata, primary = confirmed
+    title_videos = tuple(title.videos)
+    known_videos = {
+        video.id: video for video in title_videos if video.id is not None
+    }
     logical_videos = tuple(
         sorted(
             (
-                video for video in title.videos
-                if (
-                    video.duplicate_of_video_id is None
-                    and not video.duplicate_primary_missing
+                video for video in title_videos
+                if not collapses_into_duplicate_primary(
+                    video, known_videos=known_videos,
                 )
             ),
             key=lambda video: (video.relative_path.casefold(), video.id or 0),
@@ -294,8 +297,10 @@ def _media_part_logical_total(
         video.duplicate_primary_missing for video in videos
     ):
         return None
+    known_videos = {video.id: video for video in videos if video.id is not None}
     active = tuple(
-        video for video in videos if not is_nonprimary_duplicate_video(video)
+        video for video in videos
+        if not collapses_into_duplicate_primary(video, known_videos=known_videos)
     )
     total = media_part_total(active)
     if total is None or total != len(active):
@@ -342,10 +347,11 @@ def _supplementary_information(
 ) -> str | None:
     if title.effective_part_type in SUPPLEMENTAL_PART_TYPES:
         return None
+    known_videos = {video.id: video for video in videos if video.id is not None}
     count = sum(
         effective_video_numbering(video, title).is_supplementary
         for video in videos
-        if not is_nonprimary_duplicate_video(video)
+        if not collapses_into_duplicate_primary(video, known_videos=known_videos)
     )
     if count == 1:
         detail = (
@@ -418,13 +424,15 @@ def evaluate_metadata_range_presentation(
     if (
         summary.invalid_duplicate_references
         or summary.variant_inconsistent_confirmed_duplicates
+        or summary.identity_inconsistent_confirmed_duplicates
+        or summary.unverifiable_confirmed_duplicates
         or any(video.duplicate_primary_missing for video in video_list)
     ):
         return MetadataRangePresentation(
             comparison,
             split_evaluation=split_evaluation,
             warning=(
-                "Lokální skupina obsahuje poškozenou nebo konfliktní duplicate "
+                "Lokální skupina obsahuje neověřitelnou nebo konfliktní duplicate "
                 "vazbu; metadata rozsah proto zůstává nevyřešený."
             ),
         )

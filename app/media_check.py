@@ -199,13 +199,16 @@ def build_media_check_evaluation(
     *,
     external_subtitle_state: VideoExternalSubtitleState | None = None,
     language_profile: VideoLanguageProfile | None = None,
+    known_videos: Mapping[int, Video] | None = None,
 ) -> MediaCheckEvaluation:
     """Combine Commit-7 facts with the independent Media Check decision."""
     factual = language_profile or build_video_language_profile(video)
     subtitle_required = (
         _media_check_content_type(video) not in OPENING_ENDING_CONTENT_TYPES
     )
-    completion_required = is_media_completion_video(video)
+    completion_required = is_media_completion_video(
+        video, known_videos=known_videos,
+    )
     manual_recorded = (
         video.czsk_availability_manual == CZSK_AVAILABILITY_UNAVAILABLE
     )
@@ -330,6 +333,7 @@ def _build_row(
     title_name: str | None = None,
     detection: EpisodeNumberDetection | None = None,
     language_profile: VideoLanguageProfile | None = None,
+    known_videos: Mapping[int, Video] | None = None,
     audio_tracks: tuple[MediaAudioTrack, ...] = (),
     internal_subtitles: tuple[MediaInternalSubtitle, ...] = (),
 ) -> MediaCheckRow:
@@ -359,6 +363,7 @@ def _build_row(
             video,
             external_subtitle_state=external_subtitle_state,
             language_profile=language_profile,
+            known_videos=known_videos,
         ),
         collection_name=collection_name,
         title_name=title_name,
@@ -467,6 +472,7 @@ def build_media_check_results(
     }
     collection_names: dict[tuple[str, int | str], str] = {}
     title_names: dict[tuple[str, int], str] = {}
+    known_videos = {video.id: video for video in videos if video.id is not None}
 
     def row_for(video: Video) -> MediaCheckRow:
         title = video.catalog_title
@@ -513,6 +519,7 @@ def build_media_check_results(
                 language_profiles.get(video)
                 if language_profiles is not None else None
             ),
+            known_videos=known_videos,
             audio_tracks=(audio_tracks or {}).get(video.id, ()),
             internal_subtitles=(internal_subtitles or {}).get(video.id, ()),
         )
