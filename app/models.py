@@ -422,6 +422,14 @@ class ExternalSubtitle(Base):
     match_method: Mapped[str] = mapped_column(
         String, default="automatic", server_default="automatic", index=True,
     )
+    # Candidate rejection is authority about the (physical subtitle, video)
+    # pair, not a property of whichever transient row currently represents
+    # the subtitle.  This mirrors UnresolvedExternalSubtitle's own field so a
+    # detour through an automatic or manual match -- and back -- carries the
+    # human decision forward instead of losing it with the deleted row.
+    rejected_video_ids_json: Mapped[str] = mapped_column(
+        Text, default="[]", server_default="[]",
+    )
     compatibilities: Mapped[list[ExternalSubtitleCompatibility]] = relationship(
         back_populates="external_subtitle", cascade="all, delete-orphan"
     )

@@ -43,7 +43,9 @@ logger = logging.getLogger(__name__)
 # SQLite's native application-version marker separates one-time compatibility
 # reconstruction from ordinary stable startup. Version 2 adds only a nullable
 # workflow column to version 1; it does not require another library rebuild.
-STARTUP_COMPATIBILITY_VERSION = 2
+# Version 3 adds only ExternalSubtitle's rejection-memory column (R6 closure)
+# to version 2; it likewise needs no library reconstruction.
+STARTUP_COMPATIBILITY_VERSION = 3
 
 
 AutomaticStructuralInput = tuple[str, int | None, int | None, str | None]
@@ -87,6 +89,14 @@ def _retire_external_subtitle_video_id(engine) -> bool:
         try:
             cursor.execute("PRAGMA foreign_keys=OFF")
             cursor.execute("BEGIN IMMEDIATE")
+            # ``columns`` (fetched above, before this DDL rebuild) already
+            # reflects the ordinary additive migration that normally runs
+            # first; select a literal default only for a table this rebuild
+            # reaches without having gone through that step.
+            select_rejected = (
+                "rejected_video_ids_json" if "rejected_video_ids_json" in columns
+                else "'[]' AS rejected_video_ids_json"
+            )
             cursor.execute(
                 "CREATE TABLE external_subtitles_ownerless_migration ("
                 "id INTEGER NOT NULL, "
@@ -96,6 +106,7 @@ def _retire_external_subtitle_video_id(engine) -> bool:
                 "normalized_language VARCHAR NOT NULL DEFAULT 'unknown', "
                 "manual_language VARCHAR NULL, "
                 "match_method VARCHAR NOT NULL DEFAULT 'automatic', "
+                "rejected_video_ids_json TEXT NOT NULL DEFAULT '[]', "
                 "PRIMARY KEY (id), "
                 "UNIQUE (relative_path), "
                 "CONSTRAINT ck_external_subtitle_match_method "
@@ -105,9 +116,10 @@ def _retire_external_subtitle_video_id(engine) -> bool:
             cursor.execute(
                 "INSERT INTO external_subtitles_ownerless_migration "
                 "(id, relative_path, codec, language, normalized_language, "
-                "manual_language, match_method) "
+                "manual_language, match_method, rejected_video_ids_json) "
                 "SELECT id, relative_path, codec, language, normalized_language, "
-                "manual_language, match_method FROM external_subtitles"
+                f"manual_language, match_method, {select_rejected} "
+                "FROM external_subtitles"
             )
             cursor.execute("DROP TABLE external_subtitles")
             cursor.execute(
@@ -209,6 +221,23 @@ def _migrate_metadata_requirement(connection) -> None:
         ))
 
 
+def _migrate_external_subtitle_rejected_ids(connection) -> None:
+    """Add ExternalSubtitle's rejection-memory column (R6 closure).
+
+    Mirrors UnresolvedExternalSubtitle.rejected_video_ids_json so a subtitle
+    that graduates out of the unresolved table keeps its persisted candidate
+    rejections instead of losing them with the deleted row.
+    """
+    existing = {
+        column["name"] for column in inspect(connection).get_columns("external_subtitles")
+    }
+    if "rejected_video_ids_json" not in existing:
+        connection.execute(text(
+            "ALTER TABLE external_subtitles ADD COLUMN rejected_video_ids_json "
+            "TEXT NOT NULL DEFAULT '[]'"
+        ))
+
+
 def migrate_schema(engine) -> None:
     """Apply the small, idempotent SQLite schema migration needed by v0.2."""
     inspector = inspect(engine)
@@ -250,6 +279,7 @@ def migrate_schema(engine) -> None:
             ("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'"),
             ("manual_language", "VARCHAR NULL"),
             ("match_method", "VARCHAR NOT NULL DEFAULT 'automatic'"),
+            ("rejected_video_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
         ],
         "title_metadata": [("cover_image_url", "VARCHAR NULL")],
         "catalog_titles": [
@@ -785,6 +815,9 @@ def migrate_schema_at_startup(engine) -> bool:
             # Preserve current numbering and other derived data after manual
             # UI work; this additive schema upgrade needs no reconstruction.
             _migrate_metadata_requirement(connection)
+        if current in (1, 2):
+            # Additive rejection-memory column only; no reconstruction needed.
+            _migrate_external_subtitle_rejected_ids(connection)
         connection.execute(text(
             f"PRAGMA user_version = {STARTUP_COMPATIBILITY_VERSION}"
         ))

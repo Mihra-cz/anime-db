@@ -42,7 +42,7 @@ from app.models import (
 )
 from app.numbering import recalculate_collection_numbering
 from app.probe import ProbeError, probe_video
-from app.subtitle_review import rejected_video_ids
+from app.subtitle_review import relative_path_rejected_video_ids, transfer_rejected_video_ids
 from app.subtitles import SUBTITLE_EXTENSIONS, read_and_detect, safe_subtitle_matches
 from app.video_variants import (
     assign_video_catalog_title,
@@ -233,6 +233,9 @@ def _sync_external_subtitles(
             keep.codec = data["codec"]
             keep.language = data["language"]
             keep.normalized_language = data["normalized_language"]
+            transfer_rejected_video_ids(
+                [*([unresolved] if unresolved is not None else []), *linked], keep,
+            )
             for row in linked:
                 if row is not keep:
                     session.delete(row)
@@ -245,6 +248,7 @@ def _sync_external_subtitles(
             unresolved.extension = data["extension"]
             unresolved.language = data["language"]
             unresolved.normalized_language = data["normalized_language"]
+            transfer_rejected_video_ids(linked, unresolved)
             for row in linked:
                 session.delete(row)
             continue
@@ -257,7 +261,13 @@ def _sync_external_subtitles(
             candidate_video = video_by_relative[
                 candidates[0].relative_to(library_root).as_posix()
             ]
-            if unresolved is None or candidate_video.id not in rejected_video_ids(unresolved):
+            # Candidate rejection is pair authority, not a property of the
+            # currently-unresolved row: a past detour through a different
+            # automatic or manual match may have carried it onto a linked
+            # ExternalSubtitle instead. One canonical resolver decides.
+            if candidate_video.id not in relative_path_rejected_video_ids(
+                unresolved, linked,
+            ):
                 safe_video = candidate_video
 
         if safe_video is not None:
@@ -271,6 +281,11 @@ def _sync_external_subtitles(
             keep.normalized_language = data["normalized_language"]
             if keep.match_method != "manual":
                 keep.match_method = "automatic"
+            # Carry every other row's rejection memory onto the surviving one
+            # before they are discarded, so a later detour cannot forget it.
+            transfer_rejected_video_ids(
+                [*([unresolved] if unresolved is not None else []), *linked], keep,
+            )
             synchronize_automatic_match(session, keep, video)
             for row in linked:
                 if row is not keep:
@@ -288,6 +303,9 @@ def _sync_external_subtitles(
             keep.codec = data["codec"]
             keep.language = data["language"]
             keep.normalized_language = data["normalized_language"]
+            transfer_rejected_video_ids(
+                [*([unresolved] if unresolved is not None else []), *linked], keep,
+            )
             remove_automatic_matches(session, keep)
             for row in linked:
                 if row is not keep:
@@ -296,8 +314,6 @@ def _sync_external_subtitles(
                 session.delete(unresolved)
             continue
 
-        for row in linked:
-            session.delete(row)
         if unresolved is None:
             unresolved = UnresolvedExternalSubtitle(
                 relative_path=relative_path,
@@ -305,6 +321,11 @@ def _sync_external_subtitles(
                 extension=data["extension"],
             )
             session.add(unresolved)
+        # The physical subtitle is falling back to unresolved: any rejection
+        # recorded while it was linked (a past detour) must not be lost.
+        transfer_rejected_video_ids(linked, unresolved)
+        for row in linked:
+            session.delete(row)
         unresolved.filename = data["filename"]
         unresolved.extension = data["extension"]
         unresolved.language = data["language"]

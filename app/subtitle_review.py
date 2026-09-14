@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 import json
@@ -50,7 +51,18 @@ class SubtitleCandidateIndex:
     normalized_stems: Mapping[Video, str]
 
 
-def rejected_video_ids(subtitle: UnresolvedExternalSubtitle) -> set[int]:
+def rejected_video_ids(
+    subtitle: UnresolvedExternalSubtitle | ExternalSubtitle,
+) -> set[int]:
+    """Read one row's own persisted candidate rejections.
+
+    Both row types carry the same field: an ``UnresolvedExternalSubtitle``
+    while the physical subtitle has no established match yet, an
+    ``ExternalSubtitle`` once it does.  Callers that need the authoritative
+    answer for a physical subtitle path -- which may currently be represented
+    by either row type, or have carried rejections through a past detour
+    between the two -- must use ``relative_path_rejected_video_ids`` instead.
+    """
     try:
         values = json.loads(subtitle.rejected_video_ids_json or "[]")
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -62,9 +74,46 @@ def rejected_video_ids(subtitle: UnresolvedExternalSubtitle) -> set[int]:
 
 
 def _store_rejected_video_ids(
-    subtitle: UnresolvedExternalSubtitle, video_ids: set[int],
+    subtitle: UnresolvedExternalSubtitle | ExternalSubtitle, video_ids: set[int],
 ) -> None:
     subtitle.rejected_video_ids_json = json.dumps(sorted(video_ids))
+
+
+def relative_path_rejected_video_ids(
+    unresolved: UnresolvedExternalSubtitle | None,
+    linked: Iterable[ExternalSubtitle] = (),
+) -> set[int]:
+    """Canonical answer: which videos were rejected for this subtitle path.
+
+    Candidate rejection is a fact about the (physical subtitle, video) pair,
+    not a property of whichever row currently represents the subtitle.  This
+    unions every row that might carry evidence for the path, so an automatic
+    or manual detour through a different match -- and back -- can never
+    resurrect a video the user already rejected.  Every automatic-match
+    decision must go through this one resolver.
+    """
+    ids: set[int] = set(rejected_video_ids(unresolved)) if unresolved is not None else set()
+    for subtitle in linked:
+        ids |= rejected_video_ids(subtitle)
+    return ids
+
+
+def transfer_rejected_video_ids(
+    sources: Iterable[UnresolvedExternalSubtitle | ExternalSubtitle],
+    target: UnresolvedExternalSubtitle | ExternalSubtitle,
+) -> None:
+    """Carry persisted candidate rejections forward across a lifecycle step.
+
+    A rescan, a manual link, or a reopen/unlink replaces which row represents
+    a physical subtitle path.  The pair-specific rejection evidence on the
+    row(s) being superseded must move onto the row that replaces them rather
+    than being silently dropped along with the deleted row.
+    """
+    merged = rejected_video_ids(target)
+    for source in sources:
+        merged |= rejected_video_ids(source)
+    if merged != rejected_video_ids(target):
+        _store_rejected_video_ids(target, merged)
 
 
 def build_subtitle_candidate_index(
@@ -273,6 +322,9 @@ def manually_link_subtitle(
     )
     session.add(linked)
     confirm_compatible(session, linked, video)
+    # A manual link is a positive decision about `video`; it must not erase a
+    # separate, still-standing human rejection of some other candidate.
+    transfer_rejected_video_ids([subtitle], linked)
     session.delete(subtitle)
     return linked
 
@@ -296,6 +348,9 @@ def reopen_manual_subtitle_link(
         status="unresolved",
     )
     session.add(unresolved)
+    # Reopening a manual link must not forget rejections recorded before or
+    # during that link -- they are decisions about a different candidate.
+    transfer_rejected_video_ids([subtitle], unresolved)
     session.delete(subtitle)
     return unresolved
 
