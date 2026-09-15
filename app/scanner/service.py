@@ -15,7 +15,10 @@ from app.catalog import (
     classify_video, is_root_video, meaningful_root_collection, normalize_language, normalize_title,
 )
 from app.hierarchy import derive_library_hierarchy
-from app.hierarchy_assignment import preserved_manual_assignment_title
+from app.hierarchy_assignment import (
+    preserved_membership_title,
+    structural_placement_collection,
+)
 from app.hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from app.hierarchy_evaluation import finalize_collection_hierarchy
 from app.external_subtitle_compatibility import (
@@ -554,17 +557,13 @@ def _scan_library(
         if legacy_conflict_collection is not None:
             video.catalog_collection = legacy_conflict_collection
             continue
-        existing_title = preserved_manual_assignment_title(
-            video,
-            identity,
-            titles,
-        )
-        if existing_title is not None:
-            if not reconcile_video_catalog_title(video, existing_title):
+        preserved_title = preserved_membership_title(video)
+        if preserved_title is not None:
+            if not reconcile_video_catalog_title(video, preserved_title):
                 _defer_structural_reconciliation(
-                    deferred_reconciliation, video, existing_title,
+                    deferred_reconciliation, video, preserved_title,
                 )
-            video.catalog_collection = existing_title.collection
+            video.catalog_collection = preserved_title.collection
             continue
         collection = collections.get(collection_data.relative_root_path)
         if collection is None:
@@ -592,8 +591,12 @@ def _scan_library(
             )
             session.add(catalog_title)
             titles[catalog_title.relative_root_path] = catalog_title
+        # Explicit collection-merge authority wins; a protected manual snapshot
+        # then keeps the title's own placement.  Neither decides membership of
+        # this video: that already followed from its own canonical path.
         assignment_collection = grouping_targets.get(
-            catalog_title.relative_root_path, collection,
+            catalog_title.relative_root_path,
+            structural_placement_collection(catalog_title, collection),
         )
         video.catalog_collection = assignment_collection
         catalog_title.collection = assignment_collection

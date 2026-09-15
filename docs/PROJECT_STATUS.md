@@ -118,9 +118,22 @@ fallback inference, nikoli nová autoritativní ruční klasifikace.
   pouze nad konkrétně vyjmenovanými videi: chrání jejich ruční assignment, ale
   collection do manual-split režimu sám nepřepíná a po budoucích souborech
   shodu s pravidlem nevyžaduje. Při odebrání posledního explicitního selectoru
-  se uvolněný assignment ještě před commitem znovu odvodí z běžné path
-  hierarchy; jiný selector, collection-scope range/pattern i chráněný manual
-  hierarchy snapshot mají nad automatic projekcí dál přednost.
+  se uvolněný assignment ještě před commitem finalizuje, a to výhradně použitím
+  jediného už existujícího title na vlastní kanonické cestě videa. Pokud by
+  assignment vyžadoval domněnku nebo založení nové `CatalogCollection` či
+  `CatalogTitle`, zůstane video unassigned a jde do review; odebrání lidské
+  autority nikdy nezakládá novou strukturu. Jiný selector, collection-scope
+  range/pattern i chráněný manual hierarchy snapshot nad vlastním dosavadním
+  zařazením videa mají dál přednost. Uvolněná videa se finalizují nad neměnným
+  snapshotem právě zasažených ID, ne nad živou ORM relationship, kterou write
+  současně mění.
+- Strukturální autorita a membership autorita jsou oddělené osy. Manual
+  hierarchy snapshot chrání strukturu a umístění svého vlastního title, a proto
+  potvrzený merge nebo přesun přežije automatickou rekonstrukci. Sám o sobě
+  ale není důvodem přiřadit do toho title jiné video nalezené pod jeho cestou:
+  membership vzniká jen z explicitní autority, z chráněného dosavadního
+  zařazení videa, nebo z jednoznačné path inference. Nejednoznačnost je review,
+  ne automatický odhad.
 - `Video.file_type` je uložená parserová klasifikace. Obecný effective typ má
   prioritu video manual → konkrétní filename/raw typ → supplementary kontext
   title. Bonus/Extras container proto nezakrývá konkrétní Special/OVA/OP evidence.

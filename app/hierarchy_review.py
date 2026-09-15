@@ -26,11 +26,13 @@ from .collection_presentation import (
     validate_effective_recap_season_context,
 )
 from .hierarchy import HierarchyIdentity, derive_library_hierarchy, parse_explicit_part
-from .hierarchy_assignment import preserved_manual_assignment_title
+from .hierarchy_assignment import (
+    automatic_assignment_title,
+    preserved_membership_title,
+)
 from .hierarchy_authority import (
     activate_manual_hierarchy_snapshot,
     clear_manual_hierarchy_snapshot,
-    manual_hierarchy_snapshot_requires_preservation,
     split_season_structure_issues,
     structural_hierarchy_issue,
 )
@@ -858,61 +860,21 @@ def _stored_title_paths(decision: CollectionGroupingDecision) -> tuple[str, ...]
 
 def collection_grouping_authority_targets(
     session: Session,
-    *,
-    title_paths: set[str] | None = None,
 ) -> dict[CatalogTitle, CatalogCollection]:
-    """Resolve valid persisted grouping decisions without changing membership.
-
-    A path scope limits database loading to the connected manual decisions.  It
-    is used by title-scoped write finalization; scanner reconciliation keeps the
-    existing whole-library form.
-    """
+    """Resolve valid persisted grouping decisions without changing membership."""
     decisions = list(session.scalars(
         select(CollectionGroupingDecision).order_by(
             CollectionGroupingDecision.updated_at,
             CollectionGroupingDecision.id,
         )
     ).all())
-    requested_paths = set(title_paths) if title_paths is not None else None
-    if requested_paths is not None:
-        connected_paths = set(requested_paths)
-        selected_decision_keys: set[int] = set()
-        changed = True
-        while changed:
-            changed = False
-            for decision in decisions:
-                if id(decision) in selected_decision_keys:
-                    continue
-                stored_paths = set(_stored_title_paths(decision))
-                if decision.decision == "merged" and stored_paths & connected_paths:
-                    selected_decision_keys.add(id(decision))
-                    connected_paths.update(stored_paths)
-                    changed = True
-        decisions = [
-            decision for decision in decisions
-            if id(decision) in selected_decision_keys
-        ]
-        target_paths = {
-            decision.target_collection_path
-            for decision in decisions
-            if decision.target_collection_path
-        }
-        collections_query = select(CatalogCollection).where(
-            CatalogCollection.relative_root_path.in_(target_paths)
-        )
-        titles_query = select(CatalogTitle).where(
-            CatalogTitle.relative_root_path.in_(connected_paths)
-        )
-    else:
-        collections_query = select(CatalogCollection)
-        titles_query = select(CatalogTitle)
     collections = {
         collection.relative_root_path: collection
-        for collection in session.scalars(collections_query).all()
+        for collection in session.scalars(select(CatalogCollection)).all()
     }
     titles = {
         title.relative_root_path: title
-        for title in session.scalars(titles_query).all()
+        for title in session.scalars(select(CatalogTitle)).all()
     }
     projected_collections = {
         title: title.collection for title in titles.values()
@@ -955,12 +917,7 @@ def collection_grouping_authority_targets(
         for title in selected:
             projected_collections[title] = target
             assignments[title] = target
-    if requested_paths is None:
-        return assignments
-    return {
-        title: target for title, target in assignments.items()
-        if title.relative_root_path in requested_paths
-    }
+    return assignments
 
 
 def apply_collection_grouping_authority(session: Session) -> None:
@@ -3056,21 +3013,6 @@ def apply_manual_split(
             CatalogTitle.relative_root_path.in_(released_title_paths)
         )).all()
     } if released_title_paths else {}
-    grouping_targets = collection_grouping_authority_targets(
-        session,
-        title_paths=released_title_paths,
-    ) if released_title_paths else {}
-    released_collection_paths = {
-        released_hierarchy[video.relative_path].collection.relative_root_path
-        for video in collection.videos
-        if video.id in released_video_ids and not is_root_video(video)
-    }
-    collections_by_path = {
-        item.relative_root_path: item
-        for item in session.scalars(select(CatalogCollection).where(
-            CatalogCollection.relative_root_path.in_(released_collection_paths)
-        )).all()
-    } if released_collection_paths else {}
     affected = {collection}
     affected.update(
         video.catalog_title.collection
@@ -3084,8 +3026,6 @@ def apply_manual_split(
         for title in titles_by_path.values()
         if title.collection is not None
     )
-    affected.update(grouping_targets.values())
-    affected.update(collections_by_path.values())
     with strict_hierarchy_write_guard(session, list(affected)):
         resolved: list[CatalogTitle] = []
         now = utc_now()
@@ -3147,8 +3087,6 @@ def apply_manual_split(
             released_video_ids,
             released_hierarchy,
             titles_by_path,
-            collections_by_path,
-            grouping_targets,
         ))
         finalize_hierarchy_write(list(affected))
     return preview
@@ -3160,12 +3098,21 @@ def _reconcile_released_manual_split_assignments(
     released_video_ids: set[int],
     hierarchy: Mapping[str, HierarchyIdentity],
     titles_by_path: dict[str, CatalogTitle],
-    collections_by_path: dict[str, CatalogCollection],
-    grouping_targets: dict[CatalogTitle, CatalogCollection],
 ) -> set[CatalogCollection]:
-    """Finalize automatic assignments whose explicit selector just disappeared."""
+    """Finalize automatic assignments whose explicit selector just disappeared.
+
+    The working set is an immutable snapshot of exactly the videos whose own
+    selector authority was released, because the loop below changes the very
+    collection relationship it would otherwise iterate.  Removing a human
+    decision never grants the right to make a new structural one: automatic
+    inference may only reuse one already existing unambiguous target, and a
+    video it cannot place that way is left unassigned for review.
+    """
     if not released_video_ids:
         return set()
+    released_videos = [
+        video for video in collection.videos if video.id in released_video_ids
+    ]
     decisions = {
         decision.video.id: decision
         for decision in evaluate_persisted_manual_split(
@@ -3175,9 +3122,7 @@ def _reconcile_released_manual_split_assignments(
         if decision.video.id is not None
     }
     affected: set[CatalogCollection] = set()
-    for video in collection.videos:
-        if video.id not in released_video_ids:
-            continue
+    for video in released_videos:
         decision = decisions.get(video.id)
         if (
             video.manual_split_rule_videos
@@ -3208,52 +3153,21 @@ def _reconcile_released_manual_split_assignments(
             continue
 
         identity = hierarchy[video.relative_path]
-        manual_target = preserved_manual_assignment_title(
-            video,
-            identity,
-            titles_by_path,
+        target_title = preserved_membership_title(video) or automatic_assignment_title(
+            identity, titles_by_path,
         )
-        if manual_target is not None:
-            video.catalog_collection = manual_target.collection
-            affected.add(manual_target.collection)
+        target_collection = (
+            target_title.collection if target_title is not None else None
+        )
+        if target_title is None or target_collection is None:
+            # Creating a collection or title here would turn the removal of a
+            # human decision into a new automatic structural one.  The video
+            # stays visible in its current collection and goes to review.
+            assign_video_catalog_title(video, None)
             continue
-
-        target_collection = collections_by_path.get(
-            identity.collection.relative_root_path
-        )
-        if target_collection is None:
-            target_collection = CatalogCollection(
-                local_title=identity.collection.local_title,
-                normalized_local_title=normalize_title(identity.collection.local_title),
-                relative_root_path=identity.collection.relative_root_path,
-            )
-            session.add(target_collection)
-            collections_by_path[target_collection.relative_root_path] = target_collection
-        target_title = titles_by_path.get(identity.title.relative_root_path)
-        if target_title is None:
-            target_title = CatalogTitle(
-                collection=target_collection,
-                local_title=identity.title.local_title,
-                normalized_local_title=normalize_title(identity.title.local_title),
-                relative_root_path=identity.title.relative_root_path,
-            )
-            session.add(target_title)
-            titles_by_path[target_title.relative_root_path] = target_title
-        if not manual_hierarchy_snapshot_requires_preservation(target_title):
-            target_title.collection = grouping_targets.get(
-                target_title,
-                target_collection,
-            )
-        if not manual_hierarchy_snapshot_requires_preservation(target_title):
-            target_title.part_type = identity.title.part_type
-            target_title.season_number = identity.title.season_number
-            target_title.part_number = identity.title.part_number
-            target_title.season_label = identity.title.season_label
-            target_title.original_folder_name = identity.title.original_folder_name
-            target_title.sort_order = identity.title.sort_order
-        video.catalog_collection = target_title.collection
+        video.catalog_collection = target_collection
         reconcile_video_catalog_title(video, target_title)
-        affected.add(target_title.collection)
+        affected.add(target_collection)
     session.flush()
     return affected
 

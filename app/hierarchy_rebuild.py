@@ -15,7 +15,11 @@ from .catalog import (
     normalize_title,
 )
 from .hierarchy import CollectionIdentity, HierarchyIdentity, TitleIdentity, derive_library_hierarchy
-from .hierarchy_assignment import preserved_manual_assignment_title
+from .hierarchy_assignment import (
+    automatic_assignment_title,
+    preserved_membership_title,
+    structural_placement_collection,
+)
 from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .hierarchy_evaluation import (
     HierarchyEvaluationResult,
@@ -52,8 +56,6 @@ class ReconciliationAction(StrEnum):
 
 class ReconciliationReason(StrEnum):
     AUTOMATIC_PATH = "automatic_path"
-    MANUAL_CURRENT_ASSIGNMENT = "manual_current_assignment"
-    MANUAL_PATH_AUTHORITY = "manual_path_authority"
     MANUAL_SPLIT_UNIQUE = "manual_split_unique"
     MANUAL_SPLIT_CONFLICT = "manual_split_conflict"
     MANUAL_SPLIT_UNMATCHED = "manual_split_unmatched"
@@ -605,17 +607,33 @@ def _current_title_path(video: Video) -> str | None:
     return video.catalog_title.relative_root_path if video.catalog_title is not None else None
 
 
-def _manual_assignment_candidate(
+def _assignment_candidate(
     video: Video,
     identity: HierarchyIdentity,
     titles_by_path: dict[str, CatalogTitle],
-) -> tuple[CatalogTitle | None, ReconciliationReason | None]:
-    candidate = preserved_manual_assignment_title(video, identity, titles_by_path)
-    if candidate is not None and candidate is video.catalog_title:
-        return candidate, ReconciliationReason.MANUAL_CURRENT_ASSIGNMENT
-    if candidate is not None:
-        return candidate, ReconciliationReason.MANUAL_PATH_AUTHORITY
-    return None, None
+    collections_by_path: dict[str, CatalogCollection],
+) -> tuple[CatalogTitle, str] | None:
+    """Resolve the title this video keeps, or the existing one its path points at.
+
+    Membership is either already the video's own protected placement or plain
+    path inference.  A foreign title's manual snapshot is never a reason to pull
+    this video in; it only answers where that title itself belongs, which is how
+    a merged title keeps its collection.
+    """
+    candidate = preserved_membership_title(video) or automatic_assignment_title(
+        identity, titles_by_path,
+    )
+    if candidate is None:
+        return None
+    placement = structural_placement_collection(
+        candidate,
+        collections_by_path.get(identity.collection.relative_root_path),
+    )
+    return candidate, (
+        placement.relative_root_path
+        if placement is not None
+        else identity.collection.relative_root_path
+    )
 
 
 def _manual_split_title_blockers(
@@ -651,7 +669,7 @@ def _build_assignment_intents(
     collections_by_path = {item.relative_root_path: item for item in collections}
     titles_by_path = {item.relative_root_path: item for item in titles}
     preliminary_paths: dict[int, str | None] = {}
-    manual_candidates: dict[int, tuple[CatalogTitle | None, ReconciliationReason | None]] = {}
+    path_candidates: dict[int, tuple[CatalogTitle, str] | None] = {}
     grouped: dict[str, list[Video]] = {}
     blockers: list[RebuildBlocker] = []
     blocked_collection_paths: set[str] = set()
@@ -706,7 +724,7 @@ def _build_assignment_intents(
                 prevents_apply=True,
             ))
         if is_root_video(video):
-            manual_candidates[video.id] = (None, None)
+            path_candidates[video.id] = None
             collection = meaningful_root_collection(video)
             path = (
                 next(iter(explicit_collection_paths))
@@ -718,8 +736,10 @@ def _build_assignment_intents(
                 grouped.setdefault(path, []).append(video)
             continue
         identity = hierarchy[video.relative_path]
-        candidate, reason = _manual_assignment_candidate(video, identity, titles_by_path)
-        manual_candidates[video.id] = (candidate, reason)
+        candidate = _assignment_candidate(
+            video, identity, titles_by_path, collections_by_path,
+        )
+        path_candidates[video.id] = candidate
         legacy_conflict_collection = (
             video.catalog_collection
             if video.catalog_title is None
@@ -731,8 +751,8 @@ def _build_assignment_intents(
         path = (
             next(iter(explicit_collection_paths))
             if len(explicit_collection_paths) == 1
-            else candidate.collection.relative_root_path
-            if candidate is not None and candidate.collection is not None
+            else candidate[1]
+            if candidate is not None
             else legacy_conflict_collection.relative_root_path
             if legacy_conflict_collection is not None
             else identity.collection.relative_root_path
@@ -787,7 +807,7 @@ def _build_assignment_intents(
     for video in videos:
         assert video.id is not None
         preliminary_path = preliminary_paths[video.id]
-        candidate, candidate_reason = manual_candidates[video.id]
+        candidate = path_candidates[video.id]
         if video.id in blocked_video_ids or preliminary_path in blocked_collection_paths:
             current_title = video.catalog_title
             current_collection = (
@@ -832,12 +852,11 @@ def _build_assignment_intents(
             # membership is rebuilt from the physical identity.  Supplementary
             # and secondary duplicate compatibility remains non-destructive.
             if candidate is not None:
-                assert candidate.collection is not None
                 intents[video.id] = _AssignmentIntent(
-                    candidate.collection.relative_root_path,
-                    candidate.relative_root_path,
+                    candidate[1],
+                    candidate[0].relative_root_path,
                     decision,
-                    candidate_reason or ReconciliationReason.CURRENT,
+                    ReconciliationReason.AUTOMATIC_PATH,
                 )
             elif is_root_video(video):
                 collection = meaningful_root_collection(video)
@@ -901,12 +920,11 @@ def _build_assignment_intents(
                     ReconciliationReason.ROOT_PRESERVED,
                 )
         elif candidate is not None:
-            assert candidate.collection is not None and candidate_reason is not None
             intents[video.id] = _AssignmentIntent(
-                candidate.collection.relative_root_path,
-                candidate.relative_root_path,
+                candidate[1],
+                candidate[0].relative_root_path,
                 decision,
-                candidate_reason,
+                ReconciliationReason.AUTOMATIC_PATH,
             )
         else:
             identity = hierarchy[video.relative_path]
