@@ -68,7 +68,7 @@ Přejmenování, přesuny, import či fyzický cleanup médií nejsou současné
 - Persistence: SQLAlchemy nad SQLite, foreign keys zapnuté pro každé spojení.
   Idempotentní compatibility migrace mají verzovaný startup přes `user_version`;
   stabilní restart neprovádí novou rekonstrukci celé knihovny. Aktuální
-  compatibility verze je 2; upgrade 1→2 je aditivní, bez rekonstrukce.
+  compatibility verze je 3; upgrade 1→2 i 2→3 je aditivní, bez rekonstrukce.
 - Scanner: rekurzivní evidence MKV/MP4/M4V/AVI, technická data přes `ffprobe`,
   párování a jazyková evidence externích titulků. Velikost a `mtime` určují,
   zda je nutné opakovat probe. Manuální autority se zachovávají.

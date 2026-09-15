@@ -1539,7 +1539,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if title_video_presentation is not None
                 else ungrouped_presented_video_rows(
                     videos,
-                    {video.id for video in title_candidates if video.id is not None},
+                    {
+                        video.id: video for video in title_candidates
+                        if video.id is not None
+                    },
                 )
             ),
             "title_video_presentation": title_video_presentation,
@@ -1597,8 +1600,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
             ),
             "unresolved_duplicate_video_ids": detail_unresolved_duplicate_ids,
-            "title_video_ids": {
-                video.id for video in title_candidates if video.id is not None
+            # The duplicate tri-state resolver needs the real request-local
+            # videos, not only their ids, to decide whether a stored relation
+            # still holds.
+            "title_known_videos": {
+                video.id: video for video in title_candidates
+                if video.id is not None
             },
             "derive_season_info": derive_season_info,
             "derive_episode_number": derive_episode_number,

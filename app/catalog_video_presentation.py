@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -111,17 +112,38 @@ class CatalogTitleVideoPresentation:
 
 
 def physical_video_rows(
-    videos: Iterable[Video], known_video_ids: set[int] | None = None,
+    videos: Iterable[Video], known_videos: Mapping[int, Video] | None = None,
 ) -> tuple[PhysicalVideoPresentation, ...]:
+    """Fold only a currently VALID duplicate secondary under its primary.
+
+    ``duplicate_of_video_id`` is preserved human evidence, not proof that the
+    relation still holds, so the tri-state answer comes from the shared
+    canonical resolver instead of the foreign key.  INVALID and UNKNOWN
+    secondaries stay separate active rows, which is the same conservative
+    reading numbering, hierarchy and Media Check use.
+
+    ``known_videos`` is the request-local scope the resolver needs.  A relation
+    it cannot verify is UNKNOWN and therefore never collapses; there is no
+    "no context, trust the foreign key" fallback.
+    """
     ordered = tuple(videos)
     included_ids = {video.id for video in ordered if video.id is not None}
-    available_ids = included_ids if known_video_ids is None else known_video_ids
+    available_ids = included_ids if known_videos is None else set(known_videos)
+    resolver_scope: dict[int, Video] = dict(known_videos or {})
+    for video in ordered:
+        if video.id is not None:
+            resolver_scope.setdefault(video.id, video)
+    collapsed_ids: set[int] = set()
     duplicate_copies_by_primary: dict[int, list[Video]] = {}
     for video in ordered:
-        if video.duplicate_of_video_id in included_ids:
-            duplicate_copies_by_primary.setdefault(
-                video.duplicate_of_video_id, []
-            ).append(video)
+        primary_id = video.duplicate_of_video_id
+        if primary_id not in included_ids or not collapses_into_duplicate_primary(
+            video, known_videos=resolver_scope,
+        ):
+            continue
+        duplicate_copies_by_primary.setdefault(primary_id, []).append(video)
+        if video.id is not None:
+            collapsed_ids.add(video.id)
     return tuple(
         PhysicalVideoPresentation(
             video=video,
@@ -133,7 +155,7 @@ def physical_video_rows(
             ),
         )
         for video in ordered
-        if video.duplicate_of_video_id not in included_ids
+        if video.id not in collapsed_ids
     )
 
 
@@ -151,8 +173,6 @@ def build_catalog_title_video_presentation(
     """
     visible = tuple(visible_videos)
     known = tuple(known_videos) if known_videos is not None else visible
-    visible_ids = {video.id for video in visible if video.id is not None}
-    known_ids = {video.id for video in known if video.id is not None}
     known_by_id = {video.id: video for video in known if video.id is not None}
     visible_order = {
         video.id: index for index, video in enumerate(visible) if video.id is not None
@@ -218,7 +238,7 @@ def build_catalog_title_video_presentation(
             consumed_visible_ids.update(
                 video.id for video in selected_members if video.id is not None
             )
-            physical_rows = physical_video_rows(selected_members, known_ids)
+            physical_rows = physical_video_rows(selected_members, known_by_id)
             if not physical_rows:
                 continue
             lane = VariantLanePresentation(
@@ -258,7 +278,7 @@ def build_catalog_title_video_presentation(
     other_visible = tuple(
         video for video in visible if video.id not in consumed_visible_ids
     )
-    other_rows = physical_video_rows(other_visible, known_ids)
+    other_rows = physical_video_rows(other_visible, known_by_id)
 
     # Merge grouped logical episodes and non-standard/supplementary rows in the
     # caller's numeric presentation order.  A manual Recap 14.5 can therefore
@@ -311,9 +331,13 @@ def build_catalog_title_video_presentation(
 
 
 def ungrouped_presented_video_rows(
-    videos: Iterable[Video], known_video_ids: set[int] | None = None,
+    videos: Iterable[Video], known_videos: Mapping[int, Video] | None = None,
 ) -> tuple[PresentedVideoRow, ...]:
-    """Compatibility presentation for detached/direct template rendering."""
+    """Compatibility presentation for detached/direct template rendering.
+
+    It shares ``physical_video_rows`` and therefore the canonical duplicate
+    tri-state; this path must not keep a second, foreign-key-only reading.
+    """
     return tuple(
         PresentedVideoRow(
             physical=row,
@@ -322,5 +346,5 @@ def ungrouped_presented_video_rows(
                 if (group := _loaded_variant_group(row.video)) is not None else None
             ),
         )
-        for row in physical_video_rows(videos, known_video_ids)
+        for row in physical_video_rows(videos, known_videos)
     )
