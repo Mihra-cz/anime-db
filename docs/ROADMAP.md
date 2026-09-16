@@ -24,7 +24,7 @@ Průběžné test counts, session logy a jednotlivé commity sem nepatří.
 | V2 | Hotovo | Strukturovaný katalog |
 | V3 | Hotovo | Překlady a ruční validace |
 | V4 | Hotovo | Použitelné webové rozhraní |
-| V5 | Uzavírání | Stabilní hierarchie, metadata a číslování včetně navazující stabilizace |
+| V5 | Hotovo | Stabilní hierarchie, metadata a číslování včetně navazující stabilizace |
 | V6 | Plánováno | Řízená reorganizace knihovny na NAS podle ověřených dat |
 | V7 | Plánováno | Bezpečný import a deduplikace |
 | V8 | Orientační / k revizi | Automatické sledování NASu |
@@ -66,7 +66,7 @@ Stav: Hotovo.
 
 ## V5 – Stabilní hierarchie, metadata a číslování
 
-**Stav: Uzavírání**
+**Stav: Hotovo**
 
 ### Cíl V5
 
@@ -91,29 +91,36 @@ reálnými případy. Nezahrnuje fyzické přejmenování, přesun nebo import m
   GET bez semantic writes a lifecycle parity.
 
 Současné funkční kontrakty a auditovaný baseline popisuje PROJECT_STATUS.
-Historický metadata closure checkpoint není potvrzením uzavření celého
-navazujícího V5 rozsahu.
+Historický metadata closure checkpoint není totéž co dnešní finální V5
+closure audit.
 
-### Zbývá do uzavření V5
+### Uzavření V5
 
-Samostatná revize AGENTS.md byla dokončena.
+Finální nezávislý V5 closure audit skončil s verdiktem **PASS** (checkpoint
+`659fb89`). Stabilizace manual-first authority a lifecycle napříč hierarchy,
+duplicitami, variantami a groupingem byla dokončena a žádný známý V5 closure
+blocker nezůstává otevřený.
 
-1. Finální V5 closure audit.
-
-Žádná další feature není tímto dokumentačním rozdělením přidána do V5.
+Closure V5 neznamená, že je produkční DB ručně kompletně uklizená, ani že
+V6 byla zahájena — obojí zůstává samostatným krokem podle gate níže.
 
 ### Vstupní gate V6 po uzavření V5
 
 Formální closure V5 **nespouští V6 automaticky**. Před zahájením V6 následuje:
 
-1. Ruční cleanup produkční DB pomocí existujících V5 workflow.
-2. Dořešení skutečných review položek bez mass automatic fixes.
-3. Fresh read-only hierarchy audit.
-4. Fresh read-only metadata audit.
-5. Fresh read-only Media Check audit.
-6. Fresh read-only supplementary audit.
-7. V6 completeness/precondition audit.
-8. Teprve potom zahájení V6.
+1. UX/UI polish existujících V5 workflow — beze změny domain semantics a
+   bez nových authority heuristik; platí `člověk > automatika; nejistota →
+   Review`. Není to nová verze, neotvírá V6 a nesmí měnit authority/domain
+   kontrakty V5 — slouží pouze ke zjednodušení a sjednocení obsluhy
+   existujících workflow před ručním cleanupem DB.
+2. Ruční cleanup produkční DB pomocí existujících V5 workflow.
+3. Dořešení skutečných review položek bez mass automatic fixes.
+4. Fresh read-only hierarchy audit.
+5. Fresh read-only metadata audit.
+6. Fresh read-only Media Check audit.
+7. Fresh read-only supplementary audit.
+8. V6 completeness/precondition audit.
+9. Teprve potom zahájení V6.
 
 Toto je vstupní gate, nikoli další samostatná verze. Historické produkční
 inventury ani zelený dílčí badge nenahrazují nové posouzení připravenosti.

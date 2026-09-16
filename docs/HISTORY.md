@@ -300,3 +300,11 @@ verzí označují tehdejší rozsah, nikoli automaticky dnešní closure stav.
 
 - Společné lidské language labely pro selecty a audio/subtitle/compatibility presentation.
 - Zachování dosavadních canonical kódů, ISO normalizace, hodnot formulářů a Media Check požadavků.
+
+### 2026-09-16 — Uzavření V5
+
+`659fb89` — Sjednocení katalogové prezentace s tri-state duplicitami
+
+- Finální nezávislý V5 closure audit skončil s verdiktem PASS.
+- Stabilní manual-first authority/lifecycle baseline nad hierarchy, duplicitami,
+  variantami a groupingem; žádný known V5 closure blocker nezůstává otevřený.

@@ -51,10 +51,16 @@ nejsou součástí aplikačního kontraktu a nejsou zde vydávány za ověřené
 
 ## Aktuální rozsah a baseline
 
-Auditovaný baseline implementace: `7a77ebb` — Sjednocení Recap authority napříč
-hierarchy a Media Check.
-Aktuální fáze: **V5 – Uzavírání**.
+Auditovaný baseline implementace: `659fb89` — Sjednocení katalogové prezentace
+s tri-state duplicitami.
+Aktuální fáze: **V5 – Hotovo** (Pre-V6 gate / polish a cleanup).
 Podrobný vývojový plán a zbývající kroky jsou výhradně v [ROADMAP.md](ROADMAP.md).
+
+### Authority contract
+
+Human authority > automatic inference. Automatika rozhoduje pouze při
+jednoznačném důkazu. Nejednoznačnost se předává do Review, nikoli řeší
+odhadem. Derived projection pouze dopočítává důsledky známé authority.
 
 Aplikace do knihovny médií nezapisuje. Scanner a explicitní uživatelská workflow
 mění aplikační databázi; metadata workflow může také ukládat lokální artwork
