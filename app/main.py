@@ -128,6 +128,7 @@ from .hierarchy_review import (
 from .hierarchy_review_presentation import (
     build_hierarchy_review_collection_presentation,
 )
+from .status_presentation import METADATA_BADGES, media_collection_badge
 from .hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPE_CHOICES
 from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
@@ -370,21 +371,28 @@ def _homepage_collection_rows(
 
 def _load_collection_titles_with_artwork(
     sessions, collection_ids: set[int] | None = None,
-) -> dict[int, tuple[CatalogTitle, ...]]:
+) -> tuple[dict[int, tuple[CatalogTitle, ...]], dict]:
     """Load collection cover authority in one bounded eager query."""
     if collection_ids is not None and not collection_ids:
-        return {}
+        return {}, {}
     statement = select(CatalogCollection).options(
-        joinedload(CatalogCollection.titles).joinedload(CatalogTitle.artwork)
+        joinedload(CatalogCollection.titles).joinedload(CatalogTitle.artwork),
+        joinedload(CatalogCollection.titles).joinedload(
+            CatalogTitle.videos
+        ).joinedload(Video.duplicate_of),
     )
     if collection_ids is not None:
         statement = statement.where(CatalogCollection.id.in_(collection_ids))
     with sessions() as session:
         collections = session.scalars(statement).unique().all()
-        return {
-            collection.id: tuple(collection.titles)
-            for collection in collections
-        }
+        return (
+            {collection.id: tuple(collection.titles) for collection in collections},
+            {
+                collection.id: build_hierarchy_review_collection_presentation(
+                    collection
+                ) for collection in collections
+            },
+        )
 
 
 def _catalog_thumbnail_urls(
@@ -433,7 +441,7 @@ def _load_videos(
 
 
 def _load_catalog_overview(sessions):
-    """Load catalog rows plus batched scalar subtitle evidence, without track ORM graphs."""
+    """Load catalog and Media Check evidence once for read-only workbench badges."""
     with sessions() as session:
         videos = list(session.scalars(select(Video).options(
             joinedload(Video.catalog_title).joinedload(
@@ -448,6 +456,10 @@ def _load_catalog_overview(sessions):
             ).joinedload(CatalogTitle.metadata_record),
             joinedload(Video.duplicate_of),
             joinedload(Video.video_variant_group),
+            joinedload(Video.audio_tracks),
+            joinedload(Video.external_subtitle_compatibilities).joinedload(
+                ExternalSubtitleCompatibility.external_subtitle
+            ).selectinload(ExternalSubtitle.compatibilities),
         ).order_by(Video.relative_path)).unique().all())
         internal_rows = session.execute(select(
             InternalSubtitle.video_id,
@@ -501,11 +513,60 @@ def _load_catalog_overview(sessions):
         ))
         for video in videos
     }
-    return videos, build_catalog_request_index(
+    request_index = build_catalog_request_index(
         videos,
         translation_statuses=statuses,
         external_subtitle_paths=external_paths,
     )
+    profiles = {
+        video: build_video_language_profile_from_evidence(
+            video,
+            audio_tracks=(
+                AudioLanguageTrack(
+                    stream_index=track.stream_index,
+                    codec=track.codec,
+                    raw_language=track.language or "unknown",
+                    detected_language=normalize_language(track.language),
+                    manual_language=track.manual_language,
+                    effective_language=(
+                        normalize_language(track.manual_language)
+                        if track.manual_language is not None
+                        else normalize_language(track.language)
+                    ),
+                ) for track in video.audio_tracks
+            ),
+            internal_languages=internal_by_video.get(video.id, ()),
+            external_languages=effective_external_by_video.get(video.id, ()),
+        ) for video in videos
+    }
+    candidate_index = build_compatibility_candidate_index(
+        videos, detections=request_index.detections,
+    )
+    states = build_video_external_subtitle_states(
+        videos, candidate_index=candidate_index,
+    )
+    known_videos = {video.id: video for video in videos if video.id is not None}
+    media_by_collection: dict[int, list] = {}
+    for video in videos:
+        collection = (
+            video.catalog_title.collection
+            if video.catalog_title is not None else video.catalog_collection
+        )
+        if collection is None:
+            continue
+        media_by_collection.setdefault(collection.id, []).append(
+            build_media_check_evaluation(
+                video,
+                external_subtitle_state=states.get(video.id),
+                language_profile=profiles[video],
+                known_videos=known_videos,
+            )
+        )
+    media_badges = {
+        collection_id: media_collection_badge(evaluations)
+        for collection_id, evaluations in media_by_collection.items()
+    }
+    return videos, request_index, media_badges
 
 
 def _load_media_check_data(sessions):
@@ -1004,8 +1065,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         explicit_sort = sort is not None
         sort, direction = normalize_group_sort(sort or "title", direction or "asc", "")
-        videos, request_index = _load_catalog_overview(sessions)
-        collection_titles = _load_collection_titles_with_artwork(sessions)
+        videos, request_index, media_statuses = _load_catalog_overview(sessions)
+        collection_titles, hierarchy_statuses = _load_collection_titles_with_artwork(sessions)
         thumbnail_urls = _catalog_thumbnail_urls(
             collection_titles, settings.metadata_artwork_directory,
         )
@@ -1034,6 +1095,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             _add_video(totals, video, separate_films=True, status=status)
         return templates.TemplateResponse(request, "index.html", {
             "collections": collection_rows,
+            "hierarchy_statuses": hierarchy_statuses,
+            "media_statuses": media_statuses,
+            "metadata_badges": METADATA_BADGES,
             "folders": sorted(folders.items()), "totals": totals, "message": message,
             "error": error, "confirm_deletions": confirm_deletions,
             "q": normalize_search_query(q),
@@ -1054,7 +1118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             videos, "all",
             title_name_preference=get_preferred_title_language(request),
         )
-        collection_titles = _load_collection_titles_with_artwork(
+        collection_titles, hierarchy_statuses = _load_collection_titles_with_artwork(
             sessions,
             {
                 group.catalog_collection_id
@@ -1062,6 +1126,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if group.catalog_collection_id is not None
             },
         )
+        media_statuses = {}
         def sort_url(column: str) -> str:
             return catalog_state_url(
                 "all", "", column,
@@ -1076,6 +1141,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "catalog_thumbnail_urls": _catalog_thumbnail_urls(
                 collection_titles, settings.metadata_artwork_directory,
             ),
+            "hierarchy_statuses": hierarchy_statuses,
+            "media_statuses": media_statuses,
+            "metadata_badges": METADATA_BADGES,
         })
 
     def unassigned_videos_response(
@@ -1345,13 +1413,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
-        videos, request_index = _load_catalog_overview(sessions)
+        videos, request_index, media_statuses = _load_catalog_overview(sessions)
         results = build_catalog_results(
             videos, filter_name, q, sort, direction,
             title_name_preference=get_preferred_title_language(request),
             request_index=request_index,
         )
-        collection_titles = _load_collection_titles_with_artwork(
+        collection_titles, hierarchy_statuses = _load_collection_titles_with_artwork(
             sessions,
             {
                 group.catalog_collection_id
@@ -1376,6 +1444,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "catalog_thumbnail_urls": _catalog_thumbnail_urls(
                 collection_titles, settings.metadata_artwork_directory,
             ),
+            "hierarchy_statuses": hierarchy_statuses,
+            "media_statuses": media_statuses,
+            "metadata_badges": METADATA_BADGES,
         })
 
     @app.get("/catalog/{filter_name}/series", response_class=HTMLResponse)
@@ -2006,6 +2077,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ).order_by(CatalogCollection.local_title)).all())
             return templates.TemplateResponse(request, "hierarchy_review_detail.html", {
                 "collection": collection, "videos": videos,
+                "hierarchy_badge": build_hierarchy_review_collection_presentation(
+                    collection
+                ).badge,
                 "review_diagnostics": review_diagnostics,
                 "unassigned_diagnostic_issues": tuple(
                     issue for issue in review_diagnostics.issues
@@ -2137,6 +2211,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if presentation.requires_review:
                     rows.append({
                         "collection": collection,
+                        "badge": presentation.badge,
                         "numbering_unknown": presentation.numbering_unknown,
                         "video_count": video_counts.get(collection.id, 0),
                         "supplementary_reviews": presentation.supplementary_reviews,
@@ -2150,6 +2225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "id": collection.id,
                         "display_title": display_title,
                         "badge": presentation.badge,
+                        "soft_badge": presentation.soft_badge,
                     })
             all_collection_rows.sort(key=lambda row: (
                 row["display_title"].casefold(), row["id"],
@@ -2968,11 +3044,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Neznámý přehled metadat")
         with sessions() as session:
             titles = list(session.scalars(select(CatalogTitle).options(
-                selectinload(CatalogTitle.collection), selectinload(CatalogTitle.metadata_record),
+                selectinload(CatalogTitle.collection).selectinload(
+                    CatalogCollection.titles
+                ).selectinload(CatalogTitle.videos).selectinload(Video.duplicate_of),
+                selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogTitle.metadata_candidates), selectinload(CatalogTitle.artwork),
                 selectinload(CatalogTitle.external_links),
                 selectinload(CatalogTitle.videos).selectinload(Video.duplicate_of),
             ).order_by(CatalogTitle.local_title)).all())
+            hierarchy_by_collection = {}
+            for title in titles:
+                collection = title.collection
+                if (
+                    collection is not None
+                    and collection.id not in hierarchy_by_collection
+                ):
+                    hierarchy_by_collection[collection.id] = (
+                        build_hierarchy_review_collection_presentation(
+                            collection
+                        ).badge
+                    )
             rows = []
             for title in titles:
                 completion = resolve_metadata_completion(title, title.videos)
@@ -3000,10 +3091,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     rows.append({"title": title, "candidate_count": len(active), "best_score": best,
                                  "last_search": max((candidate.updated_at for candidate in title.metadata_candidates), default=None),
                                  "split_evaluation": split_evaluation,
-                                 "completion": completion})
+                                 "completion": completion,
+                                 "hierarchy_badge": hierarchy_by_collection.get(
+                                     title.catalog_collection_id
+                                 )})
         return templates.TemplateResponse(request, "metadata_review.html", {
             "rows": rows, "status": status, "batch_result": batch_result,
             "default_batch_limit": settings.metadata_batch_search_limit,
+            "metadata_badges": METADATA_BADGES,
         })
 
     @app.get("/metadata-review", response_class=HTMLResponse)

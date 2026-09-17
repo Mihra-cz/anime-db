@@ -11,12 +11,12 @@ from app.main import create_app
 from app.models import CatalogCollection, CatalogTitle, Video
 
 
-def _request(web_app) -> Request:
+def _request(web_app, path="/hierarchy-review") -> Request:
     return Request({
         "type": "http",
         "app": web_app,
         "method": "GET",
-        "path": "/hierarchy-review",
+        "path": path,
         "root_path": "",
         "scheme": "http",
         "query_string": b"",
@@ -253,9 +253,9 @@ def test_empty_placeholders_and_technical_root_are_not_in_all_anime(
     ("name", "status_key", "label"),
     (
         ("Alpha Verified", "verified", "Ověřeno"),
-        ("Bravo Automatic", "automatic_ok", "Automaticky OK"),
+        ("Bravo Automatic", "automatic_ok", "Auto OK"),
         ("Charlie Review", "review_required", "Vyžaduje kontrolu"),
-        ("Foxtrot Long", "long_episode_set", "Zvláštně dlouhá sada epizod"),
+        ("Foxtrot Long", "automatic_ok", "Auto OK"),
     ),
 )
 def test_all_anime_badges_use_shared_precedence(
@@ -270,6 +270,45 @@ def test_all_anime_badges_use_shared_precedence(
 
     assert f'data-hierarchy-status="{status_key}"' in row
     assert f">{label}</span>" in row
+
+
+def test_long_episode_notice_is_informational_beside_automatic_badge(
+    hierarchy_index_app,
+):
+    web_app, _ids = hierarchy_index_app
+    row = re.search(
+        r'data-collection-name="Foxtrot Long">(.*?)</li>',
+        _all_index(_render_index(web_app)),
+    ).group(1)
+    assert 'data-hierarchy-status="automatic_ok"' in row
+    assert 'severity-info">Zvláštně dlouhá sada epizod</span>' in row
+
+
+@pytest.mark.parametrize("path", ("/", "/catalog/all"))
+def test_catalog_workbench_renders_shared_statuses_and_direct_links(
+    hierarchy_index_app, path,
+):
+    web_app, ids = hierarchy_index_app
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == (
+            "/" if path == "/" else "/catalog/{filter_name}"
+        )
+    )
+    if path == "/":
+        response = endpoint(_request(web_app, path), q="")
+    else:
+        response = endpoint(_request(web_app, path), "all", q="")
+    assert response.status_code == 200
+    html = response.body.decode()
+    assert 'class="responsive-cards catalog-workbench"' in html
+    assert 'class="catalog-title-link"' in html
+    assert f'href="/hierarchy-review/{ids["verified"]}"' in html
+    assert 'severity-verified' in html
+    assert 'Vyžaduje kontrolu' in html
+    assert 'Metadata chybí' in html
+    assert 'Média: problém' in html
+    assert 'href="/media-check?q=' in html
 
 
 @pytest.mark.parametrize("stored_status", ("verified", "automatic"))
@@ -350,7 +389,7 @@ def test_all_anime_is_closed_by_default_and_rows_only_contain_name_and_badge(
     )
     assert row_contents
     assert all(content.count("<a ") == 1 for content in row_contents)
-    assert all(content.count("<span ") == 1 for content in row_contents)
+    assert all(content.count("<span ") in {1, 2} for content in row_contents)
     assert all("<small" not in content for content in row_contents)
 
 

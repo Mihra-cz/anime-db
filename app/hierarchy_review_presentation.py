@@ -6,6 +6,7 @@ from .models import CatalogCollection, CatalogTitle
 from .numbering import TitleNumberingSummary, summarize_title_numbering
 from .structural_inference import automatic_flat_sequence_notice
 from .supplementary import SupplementaryReviewIssue, collection_supplementary_review
+from .status_presentation import HIERARCHY_BADGES, LONG_EPISODE_SET_BADGE, StatusBadge
 
 
 @dataclass(frozen=True)
@@ -15,40 +16,12 @@ class SupplementaryReviewPresentation:
 
 
 @dataclass(frozen=True)
-class HierarchyReviewBadge:
-    key: str
-    label: str
-    severity: str
-
-
-@dataclass(frozen=True)
 class HierarchyReviewCollectionPresentation:
-    badge: HierarchyReviewBadge
+    badge: StatusBadge
+    soft_badge: StatusBadge | None
     numbering_unknown: int
     supplementary_reviews: tuple[SupplementaryReviewPresentation, ...]
     requires_review: bool
-
-
-REVIEW_REQUIRED_BADGE = HierarchyReviewBadge(
-    key="review_required",
-    label="Vyžaduje kontrolu",
-    severity="warning",
-)
-LONG_EPISODE_SET_BADGE = HierarchyReviewBadge(
-    key="long_episode_set",
-    label="Zvláštně dlouhá sada epizod",
-    severity="warning",
-)
-VERIFIED_BADGE = HierarchyReviewBadge(
-    key="verified",
-    label="Ověřeno",
-    severity="success",
-)
-AUTOMATIC_OK_BADGE = HierarchyReviewBadge(
-    key="automatic_ok",
-    label="Automaticky OK",
-    severity="success",
-)
 
 
 def build_hierarchy_review_collection_presentation(
@@ -85,17 +58,18 @@ def build_hierarchy_review_collection_presentation(
         or any(summary.requires_review for summary in summaries)
         or supplementary_reviews
     )
-    if requires_review:
-        badge = REVIEW_REQUIRED_BADGE
-    elif has_long_episode_set:
-        badge = LONG_EPISODE_SET_BADGE
-    elif collection.hierarchy_status == "verified":
-        badge = VERIFIED_BADGE
+    if collection.hierarchy_status == "conflict":
+        badge = HIERARCHY_BADGES["conflict"]
+    elif requires_review:
+        badge = HIERARCHY_BADGES["review_required"]
     else:
-        badge = AUTOMATIC_OK_BADGE
+        badge = HIERARCHY_BADGES.get(
+            collection.hierarchy_status, HIERARCHY_BADGES["automatic"]
+        )
 
     return HierarchyReviewCollectionPresentation(
         badge=badge,
+        soft_badge=LONG_EPISODE_SET_BADGE if has_long_episode_set else None,
         numbering_unknown=sum(summary.unknown for summary in summaries),
         supplementary_reviews=tuple(supplementary_reviews),
         requires_review=requires_review,

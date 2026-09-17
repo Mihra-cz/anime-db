@@ -13,7 +13,6 @@ import unicodedata
 from .hierarchy_authority import manual_hierarchy_snapshot_is_complete
 from .hierarchy_types import (
     MAIN_CONTENT_PART_TYPES,
-    PART_TYPE_LABELS,
     SUPPLEMENTARY_PART_TYPES,
     VIDEO_CONTENT_TYPE_LABELS,
 )
@@ -451,14 +450,15 @@ def catalog_title_series_label(title: CatalogTitle) -> str:
         ) or "—"
     if part_type == "cour" and title.effective_part_number is not None:
         return f"Cour {title.effective_part_number}"
-    if season_label:
-        return season_label
-    return {
+    structural_label = {
         "film": "Film", "ova": "OVA", "special": "Special",
         "preview": "Preview", "recap": "Recap", "bonus": "Bonus",
-        "other": "Other",
+        "other": "Jiné",
         "migration_review": "Kontrola migrace",
     }.get(title.effective_part_type, "—")
+    if structural_label == "—":
+        return season_label or structural_label
+    return " · ".join((structural_label, season_label)) if season_label else structural_label
 
 
 def language_display_label(
@@ -1846,16 +1846,9 @@ def effective_video_content_display(video: Video) -> VideoContentDisplay:
     """
     manual_value = (video.content_type_manual or "").strip().casefold()
     is_manual = bool(manual_value)
-    hierarchy_value = hierarchy_video_content_type(video) if not is_manual else None
     detection = detect_episode_number(video.filename)
     value = effective_video_content_type(video, detection=detection)
-    label = (
-        VIDEO_CONTENT_TYPE_LABELS.get(value, value)
-        if is_manual
-        else PART_TYPE_LABELS.get(value, value)
-        if hierarchy_value is not None
-        else value
-    )
+    label = VIDEO_CONTENT_TYPE_LABELS.get(value, value)
     # Local import avoids the catalog -> numbering -> catalog module cycle.
     from .numbering import format_episode_position, effective_recap_episode_number
     from .supplementary import supplementary_ordinal

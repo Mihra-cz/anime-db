@@ -84,8 +84,10 @@ def test_catalog_thumbnails_are_fixed_decorative_and_responsive():
     assert 'aria-hidden="true"' in thumbnail
     assert 'alt=""' in thumbnail
     assert 'onerror="this.hidden=true"' in thumbnail
-    assert "artwork_thumbnail(row.thumbnail_url)" in index
-    assert "artwork_thumbnail(thumbnail_url)" in catalog
+    row = source("_catalog_workbench_row.html")
+    assert "workbench_row(group, row.href, row.thumbnail_url" in index
+    assert "workbench_row(group, href, (catalog_thumbnail_urls" in catalog
+    assert "artwork_thumbnail(thumbnail_url)" in row
     assert "artwork_thumbnail(item.thumbnail_url)" in collection
     assert "item.show_artwork" in collection
     assert "primary_cover_artwork" not in collection

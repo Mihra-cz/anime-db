@@ -1642,7 +1642,7 @@ def test_fractional_video_can_be_classified_directly_without_confirming_title(
         web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
     ).body.decode()
 
-    assert "stav <strong>review_required</strong>" in rendered
+    assert 'stav <span class="status-badge severity-warning">Vyžaduje kontrolu</span>' in rendered
     assert "<dt>Logických standardních epizod</dt><dd>12</dd>" in rendered
     assert "<dt>Rozsah</dt><dd>E1–E12</dd>" in rendered
     assert "<dt>Nestandardní</dt><dd>1</dd>" in rendered
@@ -1707,7 +1707,7 @@ def test_fractional_video_can_be_classified_directly_without_confirming_title(
         "Video bylo ručně klasifikováno jako recap.</div>"
     ) in after
     assert "Důvod kontroly: Nestandardní číslování" not in after
-    assert "stav <strong>automatic</strong>" in after
+    assert 'stav <span class="status-badge severity-success">Auto OK</span>' in after
     assert "· Hierarchie ověřena" not in after
     assert "<dt>Nestandardní</dt><dd>0</dd>" in after
     assert "Číslování vyřešeno" in after
@@ -1857,7 +1857,7 @@ def test_fractional_supplementary_position_and_effective_type_match_in_views(
     assert "OVA · ručně zařazeno" in ova_row
     assert ">other<" not in ova_row
     assert "E14.5" not in ova_row
-    assert '<td data-label="Typ" class="content-type-column">episode' in automatic_row
+    assert '<td data-label="Typ" class="content-type-column">Epizoda' in automatic_row
     assert 'class="inline-form video-content-type-form"' in automatic_row
 
     with web_app.state.sessions() as session:
@@ -1920,7 +1920,7 @@ def test_hierarchy_review_renders_nonblocking_long_sequence_notice(
         web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
     ).body.decode()
 
-    assert "stav <strong>automatic</strong>" in rendered
+    assert 'stav <span class="status-badge severity-success">Auto OK</span>' in rendered
     card = rendered.split('class="panel hierarchy-title-card"', 1)[1].split(
         "</article>", 1,
     )[0]
@@ -1974,7 +1974,7 @@ def test_hierarchy_review_offers_existing_confirmation_and_split_for_over_24(
         web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
     ).body.decode()
 
-    assert "stav <strong>review_required</strong>" in rendered
+    assert 'stav <span class="status-badge severity-warning">Vyžaduje kontrolu</span>' in rendered
     assert "Neobvykle dlouhá souvislá řada: E1–E25" in rendered
     assert "Informativní upozornění:" not in rendered
     assert "Doporučené zařazení: Season 1 (S1)" in rendered
@@ -2289,7 +2289,7 @@ def test_existing_duplicate_seasons_render_review_warning_without_backfill(tmp_p
         web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
     ).body.decode()
 
-    assert "stav <strong>review_required</strong>" in rendered
+    assert 'stav <span class="status-badge severity-warning">Vyžaduje kontrolu</span>' in rendered
     assert "Season 1 už v této kolekci existuje" in rendered
     assert "Chybějící Part 1 se automaticky nedoplňuje" in rendered
     for title_id in title_ids:
@@ -3051,7 +3051,7 @@ def test_historical_incomplete_part_snapshot_is_not_shown_as_verified(tmp_path):
         web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
     ).body.decode()
 
-    assert "stav <strong>review_required</strong>" in review_html
+    assert 'stav <span class="status-badge severity-warning">Vyžaduje kontrolu</span>' in review_html
     assert "Historické ruční zařazení není úplné." in review_html
     for ordinal, title_id in zip((1, 2), title_ids, strict=True):
         card = review_html.split(
@@ -3274,7 +3274,7 @@ def test_season_two_confirmation_clears_period_hint_reason_and_renders_verified(
         web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
     ).body.decode()
 
-    assert "stav <strong>verified</strong> · Hierarchie ověřena" in rendered
+    assert 'stav <span class="status-badge severity-verified">Ověřeno</span> · Hierarchie ověřena' in rendered
     assert "Interní suffix: L18 · videí: 12" in rendered
     assert PERIOD_HINT_REVIEW_REASON not in rendered
     assert '<option value="verified" selected>Hierarchie ověřena</option>' in rendered

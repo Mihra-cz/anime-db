@@ -21,7 +21,7 @@
 {% block content %}
 <p><a href="/hierarchy-review">← Přehled kontrol</a> · <a href="/collections/{{ collection.id }}">Otevřít kolekci</a></p>
 <h1>{{ collection.local_title }}</h1>
-<p>{{ collection.relative_root_path }} · stav <strong>{{ collection.hierarchy_status }}</strong>{% if collection.hierarchy_status == 'verified' and collection.hierarchy_verified_at %} · Hierarchie ověřena{% endif %}</p>
+<p>{{ collection.relative_root_path }} · stav {% if hierarchy_badge is defined %}<span class="status-badge severity-{{ hierarchy_badge.severity }}">{{ hierarchy_badge.label }}</span>{% else %}<strong>{{ collection.hierarchy_status }}</strong>{% endif %}{% if collection.hierarchy_status == 'verified' and collection.hierarchy_verified_at %} · Hierarchie ověřena{% endif %}</p>
 <p>Interní suffix: {{ collection.local_period_hint or '—' }} · videí: {{ videos|length }}</p>
 {% if message %}<div class="notice success" id="operation-result">{{ message }}</div>{% endif %}
 {% if (collection.hierarchy_verified_at or collection.hierarchy_status == 'verified') and numbering_unknown %}<p class="warning">Hierarchie byla ověřena, ale {{ numbering_unknown }} {{ 'video stále nemá' if numbering_unknown == 1 else 'videa stále nemají' if numbering_unknown in [2, 3, 4] else 'videí stále nemá' }} určené číslo epizody.</p>{% endif %}

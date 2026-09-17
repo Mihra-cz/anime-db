@@ -55,10 +55,26 @@
   <p>Nalezeno <strong>{{ results.total_filtered }}</strong> videí · stránka {{ results.page }}/{{ results.total_pages }}</p>
   <form id="media-check-bulk-form" class="inline-form" method="post" action="/media-check/czsk-availability">
     <input type="hidden" name="return_to" value="{{ return_to }}">
+    <span id="media-check-selected-count" aria-live="polite">Vybráno 0 videí</span>
     <button type="submit" name="action" value="unavailable">Označit CZ/SK jako nedostupné</button>
     <button class="button-secondary" type="submit" name="action" value="clear">Zrušit označení nedostupnosti</button>
   </form>
 </div>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const form = document.getElementById('media-check-bulk-form');
+  const choices = Array.from(document.querySelectorAll('input[form="media-check-bulk-form"][name="video_ids"]:not(:disabled)'));
+  const count = document.getElementById('media-check-selected-count');
+  const selected = () => choices.filter(input => input.checked).length;
+  const update = () => { count.textContent = 'Vybráno ' + selected() + ' videí'; };
+  choices.forEach(input => input.addEventListener('change', update));
+  form.addEventListener('submit', event => {
+    const size = selected();
+    const action = event.submitter?.value === 'clear' ? 'Zrušit označení nedostupnosti' : 'Označit CZ/SK jako nedostupné';
+    if (!size || !window.confirm(action + ' u ' + size + ' vybraných videí?')) event.preventDefault();
+  });
+});
+</script>
 
 <section class="panel media-check-list">
   <div class="table-wrap">

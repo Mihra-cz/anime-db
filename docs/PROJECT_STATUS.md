@@ -426,12 +426,20 @@ audio stopy nebo external assetu přebíjí detekovaný, nikoli jeho raw záznam
 
 - Hlavní katalog seskupuje aktivní collections, nabízí search, sort a současné
   filtry. Hierarchy, Metadata a media/translation informace mají různé významy.
+- Katalogový pracovní přehled dává název, lokální thumbnail a odvozené badge
+  Hierarchie, Média a Metadata do čtyř čitelných sloupců; počty a technická
+  cesta jsou rozbalitelné. Hierarchy badge používá stejný read-only resolver
+  jako Hierarchy Review, metadata existující completion aggregate a media
+  existující Media Check evaluátor. Ověřeno, Auto OK, Review, Konflikt a
+  neblokující informace zůstávají vizuálně odlišné.
 - Collection detail skládá hlavní části a supplementary skupiny. Doplněk se
   vnoří jen při jednom přesném matchi effective season čísla; chybějící nebo
   nejednoznačný match zůstává anime-level. Jednoznačná jediná část může otevřít
   přímo title detail, aniž zmizí anime-level sourozenec.
 - Hierarchy Review je strukturální pracovní fronta i přímý navigační index.
   Metadata Check a Media Check jsou samostatná workflow, nikoli další hierarchy statusy.
+- Media Check ukazuje počet vybraných videí před hromadnou změnou CZ/SK markeru
+  a žádá explicitní potvrzení rozsahu; serverová validace se nemění.
 - Katalog má malé 44px portrait thumbnails. V collection detailu je artwork
   u všech `CollectionPresentation.primary_parts` a navíc anime-level Film/OVA/Special.
   Podřízené Film/OVA/Special ani běžné extras nemají cover, placeholder či prázdné

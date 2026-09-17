@@ -394,11 +394,11 @@ def test_homepage_and_title_detail_render_counts_lanes_forms_and_search(tmp_path
     logical = homepage.split('class="panel logical-catalog"', 1)[1].split(
         'class="panel physical-folders"', 1
     )[0]
-    assert '<td data-label="Videa">38</td>' in logical
-    assert '<td data-label="Epizody">13</td>' in logical
-    assert '<td data-label="Varianty">25</td>' in logical
-    assert '<td data-label="Varianty">—</td>' in logical
-    assert '<td data-label="Bonusy">13</td>' in logical
+    assert '<dt>Videa</dt><dd>38</dd>' in logical
+    assert '<dt>Epizody</dt><dd>13</dd>' in logical
+    assert '<dt>Varianty</dt><dd>25</dd>' in logical
+    assert '<dt>Varianty</dt><dd>—</dd>' in logical
+    assert '<dt>Bonusy</dt><dd>13</dd>' in logical
 
     detail = endpoints["/titles/{catalog_title_id}"](
         _request(web_app, f"/titles/{title_id}"), title_id,

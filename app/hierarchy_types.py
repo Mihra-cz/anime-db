@@ -12,7 +12,7 @@ PART_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
     ("preview", "Preview"),
     ("recap", "Recap"),
     ("bonus", "Bonus"),
-    ("other", "Other"),
+    ("other", "Jiné"),
 )
 # ``cour`` remains accepted for persisted legacy rows and old technical JSON,
 # but it is not offered as a new user-facing hierarchy choice.
@@ -32,7 +32,7 @@ VIDEO_CONTENT_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
     ("special", "Special"),
     ("ova", "OVA"),
     ("bonus", "Bonus"),
-    ("other", "Other"),
+    ("other", "Jiné"),
     ("op", "OP"),
     ("ed", "ED"),
     ("ncop", "NCOP"),

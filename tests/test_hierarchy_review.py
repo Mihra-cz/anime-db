@@ -549,7 +549,7 @@ def test_single_generic_title_gets_editable_part_confirmation_suggestion():
     ("part", "Part"), ("cour", "Cour"),
     ("film", "Film"), ("ova", "OVA"), ("special", "Special"),
     ("preview", "Preview"), ("recap", "Recap"), ("bonus", "Bonus"),
-    ("other", "Other"),
+    ("other", "Jiné"),
 ])
 def test_confirmation_proposal_has_human_label_for_supported_part_types(
     part_type, expected,
