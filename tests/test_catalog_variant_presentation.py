@@ -301,7 +301,7 @@ def test_supplementary_video_stays_ungrouped_but_shows_variant_label():
     assert presentation.display_rows[0].compact_variant_label == "TV · Censored"
 
 
-def test_homepage_and_title_detail_render_counts_lanes_forms_and_search(tmp_path):
+def test_homepage_and_readonly_title_detail_render_counts_statuses_and_search(tmp_path):
     web_app = create_app(Settings(
         anime_path=tmp_path,
         database_url=f"sqlite:///{tmp_path / 'catalog-variant.db'}",
@@ -385,6 +385,7 @@ def test_homepage_and_title_detail_render_counts_lanes_forms_and_search(tmp_path
         ))
         session.commit()
         title_id = title.id
+        collection_id = collection.id
 
     endpoints = {
         route.path: route.endpoint for route in web_app.routes
@@ -403,16 +404,17 @@ def test_homepage_and_title_detail_render_counts_lanes_forms_and_search(tmp_path
     detail = endpoints["/titles/{catalog_title_id}"](
         _request(web_app, f"/titles/{title_id}"), title_id,
     ).body.decode()
-    assert detail.count('class="logical-episode-heading"') == 13
-    assert detail.count('class="variant-lane-heading"') == 25
-    assert "TV · Censored" in detail and "BD · Uncensored" in detail
-    assert "Zdroj TV" in detail and "Zdroj BD" in detail
-    assert 'action="/videos/' in detail
-    assert '/hardsub"' in detail
-    assert '/episode-number"' in detail
-    assert '/media-part"' in detail
-    assert '/audio-tracks/' in detail
-    assert '/external-subtitles/' in detail
+    assert detail.count('id="video-') == 38
+    assert "Nande - 01.mp4" in detail
+    assert "Nande - 01 Ver.TV.mp4" in detail
+    assert f'href="/hierarchy-review/{collection_id}/titles/{title_id}"' in detail
+    assert f'href="/metadata-review/{title_id}"' in detail
+    assert f'href="/media-check/titles/{title_id}"' in detail
+    assert 'action="/videos/' not in detail
+    assert 'name="manual_episode_number"' not in detail
+    assert 'name="media_part_number"' not in detail
+    assert 'name="audio_' not in detail
+    assert '/external-subtitles/' not in detail
     assert "CZ (ASS)" in detail
     assert "JA · aac" in detail
 

@@ -8,3 +8,6 @@
 .candidate { min-width: 0; padding: 1rem; border: 1px solid #364258; border-radius: 10px; background: #101722; }
 .candidate img { display: block; max-width: min(180px, 100%); height: auto; border-radius: 8px; }
 .candidate form { margin-top: .75rem; }
+.metadata-actions .button-secondary { display: inline-block; }
+.metadata-candidate-workflow { margin: 1rem 0; padding: 1rem; border: 1px solid #46536a; border-radius: 10px; background: #101722; scroll-margin-top: 1rem; }
+.metadata-candidate-workflow .search-form { margin-top: 0; }

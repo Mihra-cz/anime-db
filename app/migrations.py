@@ -43,9 +43,10 @@ logger = logging.getLogger(__name__)
 # SQLite's native application-version marker separates one-time compatibility
 # reconstruction from ordinary stable startup. Version 2 adds only a nullable
 # workflow column to version 1; it does not require another library rebuild.
-# Version 3 adds only ExternalSubtitle's rejection-memory column (R6 closure)
-# to version 2; it likewise needs no library reconstruction.
-STARTUP_COMPATIBILITY_VERSION = 3
+# Version 3 adds only ExternalSubtitle's rejection-memory column (R6 closure).
+# Version 4 adds only InternalSubtitle.manual_language; neither requires a
+# library reconstruction or inferred backfill.
+STARTUP_COMPATIBILITY_VERSION = 4
 
 
 AutomaticStructuralInput = tuple[str, int | None, int | None, str | None]
@@ -238,6 +239,19 @@ def _migrate_external_subtitle_rejected_ids(connection) -> None:
         ))
 
 
+def _migrate_internal_subtitle_manual_language(connection) -> None:
+    """Add nullable human authority without deriving it from factual evidence."""
+    existing = {
+        column["name"] for column in inspect(connection).get_columns(
+            "internal_subtitles"
+        )
+    }
+    if "manual_language" not in existing:
+        connection.execute(text(
+            "ALTER TABLE internal_subtitles ADD COLUMN manual_language VARCHAR NULL"
+        ))
+
+
 def migrate_schema(engine) -> None:
     """Apply the small, idempotent SQLite schema migration needed by v0.2."""
     inspector = inspect(engine)
@@ -274,7 +288,10 @@ def migrate_schema(engine) -> None:
             ("duplicate_of_video_id", "INTEGER NULL REFERENCES videos(id) ON DELETE SET NULL"),
             ("duplicate_primary_missing", "BOOLEAN NOT NULL DEFAULT 0"),
         ],
-        "internal_subtitles": [("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'")],
+        "internal_subtitles": [
+            ("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'"),
+            ("manual_language", "VARCHAR NULL"),
+        ],
         "external_subtitles": [
             ("normalized_language", "VARCHAR NOT NULL DEFAULT 'unknown'"),
             ("manual_language", "VARCHAR NULL"),
@@ -818,6 +835,10 @@ def migrate_schema_at_startup(engine) -> bool:
         if current in (1, 2):
             # Additive rejection-memory column only; no reconstruction needed.
             _migrate_external_subtitle_rejected_ids(connection)
+        if current in (1, 2, 3):
+            # Nullable human override only; existing factual language evidence
+            # is preserved and every historical row starts with NULL authority.
+            _migrate_internal_subtitle_manual_language(connection)
         connection.execute(text(
             f"PRAGMA user_version = {STARTUP_COMPATIBILITY_VERSION}"
         ))

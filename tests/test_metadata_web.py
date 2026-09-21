@@ -144,7 +144,7 @@ def test_detail_template_displays_anilist_candidates():
         id=1, local_title="Local Test", normalized_local_title="local test",
         relative_root_path="Anime/Local Test", metadata_status="unlinked",
     )
-    rendered = templates.env.get_template("series.html").render(
+    rendered = templates.env.get_template("metadata_edit.html").render(
         request=type("Request", (), {"url_for": lambda self, *args, **kwargs: "/static/style.css"})(),
         series=type("Series", (), {"name": "Local Test", "relative_path": "Anime/Local Test"})(),
         catalog_title=title, metadata_status_labels={"unlinked": "Bez metadat"},
@@ -174,7 +174,7 @@ def test_remote_candidate_image_can_be_disabled():
         id=1, local_title="Local", normalized_local_title="local",
         relative_root_path="Anime/Local", metadata_status="unlinked",
     )
-    rendered = templates.env.get_template("series.html").render(
+    rendered = templates.env.get_template("metadata_edit.html").render(
         request=type("Request", (), {"url_for": lambda self, *args, **kwargs: "/static/style.css"})(),
         series=type("Series", (), {"name": "Local", "relative_path": "Anime/Local"})(),
         catalog_title=title, metadata_status_labels={"unlinked": "Bez metadat"},
@@ -192,7 +192,7 @@ def test_remote_candidate_image_can_be_disabled():
 
 
 def test_manual_metadata_query_is_not_normalized_again():
-    source = templates.env.get_template("series.html").render(
+    source = templates.env.get_template("metadata_edit.html").render(
         request=type("Request", (), {"url_for": lambda self, *args, **kwargs: "/static/style.css"})(),
         series=type("Series", (), {"name": "Local", "relative_path": "Anime/Local"})(),
         catalog_title=CatalogTitle(
@@ -286,16 +286,24 @@ def test_empty_title_detail_shows_metadata_warning_and_delete_action(tmp_path):
 
     endpoint = next(
         route.endpoint for route in web_app.routes
-        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+        if getattr(route, "path", None) == (
+            "/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+        )
     )
     rendered = endpoint(
-        web_request(web_app, f"/titles/{title_id}"), title_id,
+        web_request(
+            web_app,
+            f"/hierarchy-review/{collection_id}/titles/{title_id}",
+        ), collection_id, title_id,
     ).body.decode()
 
     assert "Odstranit prázdnou část" in rendered
-    assert f'action="/titles/{title_id}/delete-empty"' in rendered
-    assert "Současně bude odstraněno 2 vlastněných metadata/reference záznamů" in rendered
-    assert "collection ani NAS se nemění" in rendered
+    assert (
+        f'action="/hierarchy-review/{collection_id}/delete-empty-title"'
+        in rendered
+    )
+    assert "Současně se odstraní 2 vlastněných metadata/reference záznamů" in rendered
+    assert "Collection ani NAS se nemění" in rendered
 
     delete_endpoint = next(
         route.endpoint for route in web_app.routes
@@ -509,12 +517,13 @@ def test_first_metadata_search_redirects_to_visible_persisted_candidates(tmp_pat
     assert response.status_code == 303
     parsed = urlparse(response.headers["location"])
     query = parse_qs(parsed.query)
-    assert parsed.path == f"/titles/{title_id}"
+    assert parsed.path == f"/metadata-review/{title_id}"
+    assert parsed.fragment == "metadata-candidates"
     assert query["show_metadata_candidates"] == ["true"]
     assert query["metadata_query"] == ["Example"]
     assert provider.search_calls == ["Example"]
 
-    rendered = endpoints["/titles/{catalog_title_id}"](
+    rendered = endpoints["/metadata-review/{catalog_title_id}"](
         web_request(web_app, parsed.path), title_id,
         show_metadata_candidates=True, metadata_query="Example",
         message=query["message"][0],
@@ -524,8 +533,93 @@ def test_first_metadata_search_redirects_to_visible_persisted_candidates(tmp_pat
     assert "First Romaji" in rendered
     assert "Second Romaji" in rendered
     assert "nalezeno 2 kandidátů" in rendered
+    assert 'id="metadata-candidates"' in rendered
+    assert 'value="Example"' in rendered
+    # A title without a confirmed link keeps persisted candidates visible on GET.
+    default_get = endpoints["/metadata-review/{catalog_title_id}"](
+        web_request(web_app, parsed.path), title_id,
+    ).body.decode()
+    assert "First Romaji" in default_get
     # Navazující GET pouze načetl uložené výsledky a druhý search nebyl potřeba.
     assert provider.search_calls == ["Example"]
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_metadata_first_search_http_flow_opens_results_without_second_post(tmp_path, confirmed):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'metadata-http-flow.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    provider = RecordingMetadataProvider([
+        metadata_candidate("102", "New Candidate", "New Candidate", "新規"),
+    ])
+    web_app.state.metadata_provider = provider
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        title = CatalogTitle(
+            local_title="Example", normalized_local_title="example",
+            relative_root_path="Anime/Example",
+            metadata_status="linked_manual" if confirmed else "unlinked",
+        )
+        session.add(title)
+        session.flush()
+        if confirmed:
+            session.add(TitleMetadata(
+                catalog_title_id=title.id, display_title="Current Title",
+                metadata_provider="anilist", metadata_external_id="101",
+            ))
+            session.add(ExternalTitleLink(
+                catalog_title_id=title.id, provider="anilist", external_id="101",
+                match_method="manual_search", is_primary=True, is_manual=True,
+                verified_at=utc_now(),
+            ))
+        session.commit()
+        title_id = title.id
+
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    metadata_detail = endpoints["/metadata-review/{catalog_title_id}"]
+    initial = metadata_detail(
+        web_request(web_app, f"/metadata-review/{title_id}"), title_id,
+    ).body.decode()
+    assert "Výběr externích metadat" not in initial
+    if confirmed:
+        assert "Změnit metadata" in initial
+        assert 'id="metadata-candidates"' not in initial
+        opened = metadata_detail(
+            web_request(web_app, f"/metadata-review/{title_id}"), title_id,
+            show_metadata_candidates=True,
+        ).body.decode()
+        assert 'id="metadata-candidates"' in opened
+        assert provider.search_calls == []
+    else:
+        assert 'id="metadata-candidates"' in initial
+
+    searched = endpoints[
+        "/catalog/{filter_name}/titles/{catalog_title_id}/metadata/search"
+    ](
+        "all", title_id, metadata_query="Needle", q="", sort="",
+        direction="", video_sort="", video_direction="",
+    )
+    assert searched.status_code == 303
+    location = urlparse(searched.headers["location"])
+    query = parse_qs(location.query)
+    assert location.path == f"/metadata-review/{title_id}"
+    assert location.fragment == "metadata-candidates"
+    result = metadata_detail(
+        web_request(web_app, location.path), title_id,
+        show_metadata_candidates=True,
+        metadata_query=query["metadata_query"][0],
+        message=query["message"][0],
+    ).body.decode()
+    assert "Výběr externích metadat" in result
+    assert "New Candidate" in result
+    assert 'value="Needle"' in result
+    assert provider.search_calls == ["Needle"]
 
 
 def test_metadata_search_exposes_only_safe_provider_message(tmp_path):
@@ -563,8 +657,21 @@ def test_metadata_search_exposes_only_safe_provider_message(tmp_path):
     )
 
     assert response.status_code == 303
-    query = parse_qs(urlparse(response.headers["location"]).query)
+    location = urlparse(response.headers["location"])
+    query = parse_qs(location.query)
     assert query["metadata_error"] == [expected]
+    assert query["show_metadata_candidates"] == ["true"]
+    assert location.fragment == "metadata-candidates"
+    detail = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == "/metadata-review/{catalog_title_id}"
+    )
+    rendered = detail(
+        web_request(web_app, location.path), title_id,
+        show_metadata_candidates=True, metadata_error=expected,
+    ).body.decode()
+    assert 'id="metadata-candidates"' in rendered
+    assert expected in rendered
 
 
 def test_metadata_change_uses_stored_candidates_and_preserves_local_hierarchy(tmp_path):
@@ -631,7 +738,7 @@ def test_metadata_change_uses_stored_candidates_and_preserves_local_hierarchy(tm
     confirm = endpoints[
         "/catalog/{filter_name}/titles/{catalog_title_id}/metadata/confirm"
     ]
-    detail = endpoints["/titles/{catalog_title_id}"]
+    detail = endpoints["/metadata-review/{catalog_title_id}"]
 
     search(
         "all", title_id, metadata_query="Example", q="", sort="",
@@ -649,24 +756,85 @@ def test_metadata_change_uses_stored_candidates_and_preserves_local_hierarchy(tm
     )
 
     normal = detail(
-        web_request(web_app, f"/titles/{title_id}"), title_id
+        web_request(web_app, f"/metadata-review/{title_id}"), title_id
     ).body.decode()
     assert "Original Romaji" in normal
     assert "Aktuální vazba: <strong>anilist</strong> · ID 201" in normal
     assert "Změnit metadata" in normal
-    assert "Vyhledat metadata znovu" in normal
+    assert "Vyhledat metadata znovu" not in normal
+    assert 'id="metadata-candidates"' not in normal
     assert "Changed Romaji" not in normal
     assert "Výběr externích metadat" not in normal
 
     search_calls_before_change_view = list(provider.search_calls)
     change_view = detail(
-        web_request(web_app, f"/titles/{title_id}"), title_id,
+        web_request(web_app, f"/metadata-review/{title_id}"), title_id,
         show_metadata_candidates=True,
     ).body.decode()
     assert "Výběr externích metadat" in change_view
+    assert 'id="metadata-candidates"' in change_view
+    assert "Vyhledat metadata znovu" in change_view
     assert "Changed Romaji" in change_view
     assert "Aktuálně přiřazeno" in change_view
     assert provider.search_calls == search_calls_before_change_view
+
+    with web_app.state.sessions() as session:
+        session.get(CatalogTitle, title_id).metadata_locked = True
+        session.commit()
+    locked = confirm(
+        "all", title_id, external_id="202", candidate_id=candidates["202"],
+        confirm_conflict=False, confirm_locked=False, q="", sort="",
+        direction="", detail_sort="", detail_direction="",
+    )
+    locked_url = urlparse(locked.headers["location"])
+    locked_query = parse_qs(locked_url.query)
+    assert locked_url.fragment == "metadata-candidates"
+    assert locked_query["show_metadata_candidates"] == ["true"]
+    assert locked_query["require_locked_confirmation"] == ["true"]
+    locked_page = detail(
+        web_request(web_app, locked_url.path), title_id,
+        show_metadata_candidates=True, pending_external_id="202",
+        require_locked_confirmation=True,
+    ).body.decode()
+    assert 'name="confirm_locked"' in locked_page
+    assert "Changed Romaji" in locked_page
+
+    with web_app.state.sessions() as session:
+        session.get(CatalogTitle, title_id).metadata_locked = False
+        other = CatalogTitle(
+            local_title="Other", normalized_local_title="other",
+            relative_root_path="Anime/Other",
+        )
+        session.add(other)
+        session.flush()
+        conflicting_link = ExternalTitleLink(
+            catalog_title_id=other.id, provider="anilist", external_id="202",
+            match_method="manual", is_primary=True, is_manual=True,
+            verified_at=utc_now(),
+        )
+        session.add(conflicting_link)
+        session.commit()
+        conflicting_link_id = conflicting_link.id
+    conflict = confirm(
+        "all", title_id, external_id="202", candidate_id=candidates["202"],
+        confirm_conflict=False, confirm_locked=False, q="", sort="",
+        direction="", detail_sort="", detail_direction="",
+    )
+    conflict_url = urlparse(conflict.headers["location"])
+    conflict_query = parse_qs(conflict_url.query)
+    assert conflict_url.fragment == "metadata-candidates"
+    assert conflict_query["show_metadata_candidates"] == ["true"]
+    assert conflict_query["require_conflict_confirmation"] == ["true"]
+    conflict_page = detail(
+        web_request(web_app, conflict_url.path), title_id,
+        show_metadata_candidates=True, pending_external_id="202",
+        require_conflict_confirmation=True,
+    ).body.decode()
+    assert 'name="confirm_conflict"' in conflict_page
+    assert "Changed Romaji" in conflict_page
+    with web_app.state.sessions() as session:
+        session.get(ExternalTitleLink, conflicting_link_id).is_primary = False
+        session.commit()
 
     provider.results.append(metadata_candidate(
         "203", "Fresh Romaji", "Fresh English", "新規"
@@ -678,16 +846,19 @@ def test_metadata_change_uses_stored_candidates_and_preserves_local_hierarchy(tm
     assert refreshed.status_code == 303
     assert provider.search_calls == ["Example", "Example fresh"]
     refreshed_page = detail(
-        web_request(web_app, f"/titles/{title_id}"), title_id,
+        web_request(web_app, f"/metadata-review/{title_id}"), title_id,
         show_metadata_candidates=True, metadata_query="Example fresh",
     ).body.decode()
     assert "Fresh Romaji" in refreshed_page
 
-    confirm(
+    confirmed_change = confirm(
         "all", title_id, external_id="202", candidate_id=candidates["202"],
         confirm_conflict=False, confirm_locked=False, q="", sort="",
         direction="", detail_sort="", detail_direction="",
     )
+    confirmed_url = urlparse(confirmed_change.headers["location"])
+    assert confirmed_url.fragment == "metadata"
+    assert "show_metadata_candidates" not in parse_qs(confirmed_url.query)
     for preference, expected in (
         ("romaji", "Changed Romaji"),
         ("english", "Changed English"),
@@ -695,12 +866,12 @@ def test_metadata_change_uses_stored_candidates_and_preserves_local_hierarchy(tm
     ):
         rendered = detail(
             web_request(
-                web_app, f"/titles/{title_id}",
+                web_app, f"/metadata-review/{title_id}",
                 cookie=f"{PREFERRED_TITLE_LANGUAGE_COOKIE}={preference}",
             ),
             title_id,
         ).body.decode()
-        assert f"<h1>{expected}</h1>" in rendered
+        assert f"<h1>Metadata · {expected}</h1>" in rendered
 
     with web_app.state.sessions() as session:
         stored_title = session.get(CatalogTitle, title_id)
@@ -841,7 +1012,7 @@ def test_collection_and_hierarchy_review_share_cookie_title_preference(tmp_path)
         )
         session.add(video)
         session.commit()
-        collection_id = collection.id
+        collection_id, title_id = collection.id, title.id
         title_id = title.id
     endpoints = {
         route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")
@@ -865,7 +1036,10 @@ def test_collection_and_hierarchy_review_share_cookie_title_preference(tmp_path)
 
     assert f'href="/titles/{title_id}?' in collection_page
     assert ">暗殺教室</a>" in collection_page
-    assert f'href="/titles/{title_id}">暗殺教室</a>' in hierarchy_page
+    assert (
+        f'href="/hierarchy-review/{collection_id}/titles/{title_id}">'
+        "暗殺教室</a>"
+    ) in hierarchy_page
     assert "Lokální část: <strong>Serie 1</strong>" in hierarchy_page
 
 
@@ -1158,11 +1332,17 @@ def test_bungo_bulk_duplicate_resolution_keeps_physical_cleanup_warning(tmp_path
     assert f'<a href="/hierarchy-review/{collection_id}">' not in queue
     assert f'<a href="/hierarchy-review/{collection_id}">' in all_collections
 
-    title_detail = endpoints["/titles/{catalog_title_id}"](
-        web_request(web_app, f"/titles/{title_id}"), title_id,
+    title_detail = endpoints[
+        "/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+    ](
+        web_request(
+            web_app,
+            f"/hierarchy-review/{collection_id}/titles/{title_id}",
+        ), collection_id, title_id,
     ).body.decode()
-    assert title_detail.count("+ 1 potvrzená duplicitní kopie") == 13
-    assert "Fyzický cleanup dosud nebyl proveden." in title_detail
+    assert "Potvrzené duplicity (13)" in title_detail
+    assert title_detail.count("· Potvrzená duplicita") == 13
+    assert "fyzické řešení zatím nebylo provedeno" in title_detail
 
 
 def test_manual_duplicate_endpoint_marks_and_clears_without_other_changes(tmp_path):
@@ -1227,10 +1407,15 @@ def test_manual_duplicate_endpoint_marks_and_clears_without_other_changes(tmp_pa
 
     detail_endpoint = next(
         route.endpoint for route in web_app.routes
-        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+        if getattr(route, "path", None) == (
+            "/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+        )
     )
     rendered = detail_endpoint(
-        web_request(web_app, f"/titles/{title_id}"), title_id,
+        web_request(
+            web_app,
+            f"/hierarchy-review/{collection_id}/titles/{title_id}",
+        ), collection_id, title_id,
     ).body.decode()
     assert "Ruční podezření na duplicitu" in rendered
     assert "Zrušit ruční označení" in rendered
@@ -1293,25 +1478,29 @@ def test_all_duplicates_filter_renders_unresolved_and_confirmed_not_manual_only(
         session.flush()
         confirmed.duplicate_of_video_id = primary.id
         session.commit()
-        title_id = title.id
+        collection_id, title_id = collection.id, title.id
 
     endpoint = next(
         route.endpoint for route in web_app.routes
-        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+        if getattr(route, "path", None) == (
+            "/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+        )
     )
     rendered = endpoint(
-        web_request(web_app, f"/titles/{title_id}"), title_id,
-        filter_name="all-duplicates",
+        web_request(
+            web_app,
+            f"/hierarchy-review/{collection_id}/titles/{title_id}",
+        ), collection_id, title_id,
     ).body.decode()
 
     assert "Všechny duplicity" in rendered
     assert "AUTO-ONE.mkv" in rendered
     assert "AUTO-TWO-SUSPECTED.mkv" in rendered
     assert "CONFIRMED-SUSPECTED.mkv" in rendered
-    assert "NORMAL.mkv" not in rendered
-    assert "MANUAL-ONLY.mkv" not in rendered
-    assert "PRIMARY.mkv" not in rendered
-    assert rendered.count("Automaticky nalezený problém") == 2
+    assert "NORMAL.mkv" in rendered
+    assert "MANUAL-ONLY.mkv" in rendered
+    assert "PRIMARY.mkv" in rendered
+    assert rendered.count('class="automatic-duplicate-badge"') == 2
     assert "Potvrzená duplicita" in rendered
     assert "Ruční podezření na duplicitu" in rendered
     assert "Neplatný vztah duplicity" not in rendered
@@ -1371,7 +1560,10 @@ def test_manual_duplicate_review_section_is_collapsed_and_shows_counts():
 
     assert "details class=" in opening_tag
     assert " open" not in opening_tag
-    assert "Ruční podezření na duplicitu · 3 videí · označeno: 1" in rendered
+    assert (
+        "Všechny duplicity a ruční podezření · 3 videí · ručně označeno: 1"
+        in rendered
+    )
     assert "Toto označení je nezávislá poznámka" in rendered
     assert "Zrušit ruční označení" in rendered
 
@@ -1830,6 +2022,14 @@ def test_fractional_supplementary_position_and_effective_type_match_in_views(
     hierarchy_html = endpoints["/hierarchy-review/{collection_id}"](
         web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
     ).body.decode()
+    hierarchy_edit_html = endpoints[
+        "/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+    ](
+        web_request(
+            web_app,
+            f"/hierarchy-review/{collection_id}/titles/{title_id}",
+        ), collection_id, title_id,
+    ).body.decode()
     title_html = endpoints["/titles/{catalog_title_id}"](
         web_request(web_app, f"/titles/{title_id}"), title_id,
     ).body.decode()
@@ -1849,16 +2049,21 @@ def test_fractional_supplementary_position_and_effective_type_match_in_views(
     automatic_row = title_html.split(
         f'id="video-{automatic_video_id}"', 1,
     )[1].split("</tr>", 1)[0]
-    assert "<strong>5.5</strong><small>Nekanonická pozice</small>" in recap_row
-    assert "Recap · ručně zařazeno" in recap_row
+    assert "<strong>5.5</strong>" in recap_row
+    assert "Recap" in recap_row
     assert ">other<" not in recap_row
     assert "E5.5" not in recap_row
-    assert "<strong>14.5</strong><small>Nekanonická pozice</small>" in ova_row
-    assert "OVA · ručně zařazeno" in ova_row
+    assert "<strong>14.5</strong>" in ova_row
+    assert "OVA" in ova_row
     assert ">other<" not in ova_row
     assert "E14.5" not in ova_row
-    assert '<td data-label="Typ" class="content-type-column">Epizoda' in automatic_row
-    assert 'class="inline-form video-content-type-form"' in automatic_row
+    assert '<td data-label="Typ">Epizoda' in automatic_row
+    assert '<form' not in automatic_row
+    assert (
+        f'action="/hierarchy-review/{collection_id}/titles/{title_id}/videos/'
+        in hierarchy_edit_html
+    )
+    assert 'name="content_type"' in hierarchy_edit_html
 
     with web_app.state.sessions() as session:
         collection = session.get(CatalogCollection, collection_id)
@@ -1910,7 +2115,7 @@ def test_hierarchy_review_renders_nonblocking_long_sequence_notice(
         session.add(collection)
         refresh_collection_state(collection)
         session.commit()
-        collection_id = collection.id
+        collection_id, title_id = collection.id, title.id
 
     endpoint = next(
         route.endpoint for route in web_app.routes
@@ -2023,7 +2228,7 @@ def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_pat
         )
         session.add(collection)
         session.commit()
-        collection_id = collection.id
+        collection_id, title_id = collection.id, title.id
 
     endpoints = {
         route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")
@@ -2035,18 +2240,26 @@ def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_pat
     review_html = endpoints["/hierarchy-review/{collection_id}"](
         web_request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
     ).body.decode()
+    title_review_html = endpoints[
+        "/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+    ](
+        web_request(
+            web_app,
+            f"/hierarchy-review/{collection_id}/titles/{title_id}",
+        ), collection_id, title_id,
+    ).body.decode()
 
     expected_part_types = tuple(value for value, _ in PART_TYPE_CHOICES)
     collection_choices = select_option_values(collection_html, "part_type_manual")
-    review_manual_choices = select_option_values(review_html, "part_type_manual")
+    review_manual_choices = select_option_values(title_review_html, "part_type_manual")
     review_split_choices = select_option_values(review_html, "part_type")
     video_choices = select_option_values(review_html, "content_type")
 
-    assert collection_choices
+    assert collection_choices == []
     assert review_manual_choices
     assert review_split_choices
     assert all(tuple(value for value in choices if value) == expected_part_types
-               for choices in collection_choices + review_manual_choices)
+               for choices in review_manual_choices)
     assert all(choices == expected_part_types for choices in review_split_choices)
     assert all(choices == ("", *(value for value, _ in VIDEO_CONTENT_TYPE_CHOICES))
                for choices in video_choices)
@@ -2055,24 +2268,24 @@ def test_part_type_choices_are_shared_by_collection_and_hierarchy_review(tmp_pat
     assert "title" not in expected_part_types
     assert all("film" in choices for choices in video_choices)
     assert (
-        f'action="/collections/{collection_id}/titles/{title.id}/hierarchy"'
-        in review_html
+        f'action="/hierarchy-review/{collection_id}/titles/{title_id}/edit"'
+        in title_review_html
     )
-    disabled_save = (
-        'class="manual-hierarchy-save" type="submit" disabled'
-    )
-    assert disabled_save in collection_html
-    assert disabled_save in review_html
-    assert 'src="/static/hierarchy_fields.js"' in collection_html
-    assert 'src="/static/hierarchy_fields.js"' in review_html
-    assert 'name="part_number_manual"' in collection_html
-    assert 'name="part_number_manual"' in review_html
-    assert "Číslo sezóny" in collection_html
-    assert "Číslo Part" in collection_html
+    assert 'class="manual-hierarchy-form"' not in collection_html
+    assert 'src="/static/hierarchy_fields.js"' not in collection_html
+    assert 'src="/static/hierarchy_fields.js"' in title_review_html
+    assert 'name="part_number_manual"' not in collection_html
+    assert 'name="part_number_manual"' in title_review_html
+    assert "Číslo sezóny" in title_review_html
+    assert "Číslo Part" in title_review_html
     assert "Cour" not in collection_html
     assert "S1 · Part 2" in collection_html
     assert "S1 · Part 2" in review_html
-    assert 'name="return_to" value="hierarchy_review"' in review_html
+    assert (
+        'name="return_to" value="/hierarchy-review/'
+        f'{collection_id}/titles/{title_id}#title-structure"'
+        in title_review_html
+    )
     assert "Typ celé části" in review_html
     assert "Klasifikace vybraných videí" in review_html
 
@@ -3167,8 +3380,8 @@ def test_choyoyu_recommendation_is_read_only_and_uses_existing_summary(tmp_path)
     )
     assert response.status_code == 303
 
-    detail = endpoints["/titles/{catalog_title_id}"](
-        web_request(web_app, f"/titles/{title_id}"), title_id,
+    detail = endpoints["/metadata-review/{catalog_title_id}"](
+        web_request(web_app, f"/metadata-review/{title_id}"), title_id,
     ).body.decode()
     assert (
         'name="metadata_query" maxlength="200" required '
@@ -3263,8 +3476,8 @@ def test_season_two_confirmation_clears_period_hint_reason_and_renders_verified(
         assert title.local_title == "Asobi Asobase (L18)"
         assert collection.local_title == "Asobi Asobase (L18)"
 
-    detail = endpoints["/titles/{catalog_title_id}"](
-        web_request(web_app, f"/titles/{title_id}"), title_id,
+    detail = endpoints["/metadata-review/{catalog_title_id}"](
+        web_request(web_app, f"/metadata-review/{title_id}"), title_id,
     ).body.decode()
     assert 'name="metadata_query" maxlength="200" required value="Asobi Asobase"' in detail
     assert 'value="Asobi Asobase Season 2"' not in detail
@@ -3277,7 +3490,7 @@ def test_season_two_confirmation_clears_period_hint_reason_and_renders_verified(
     assert 'stav <span class="status-badge severity-verified">Ověřeno</span> · Hierarchie ověřena' in rendered
     assert "Interní suffix: L18 · videí: 12" in rendered
     assert PERIOD_HINT_REVIEW_REASON not in rendered
-    assert '<option value="verified" selected>Hierarchie ověřena</option>' in rendered
+    assert "Potvrdit hierarchii" not in rendered
     assert "Lokální část: <strong>Asobi Asobase (L18)</strong>" in rendered
     assert "strukturální identita: <strong>S2</strong>" in rendered
     assert "typ: <strong>season</strong>" in rendered
@@ -3402,33 +3615,20 @@ def test_episode_table_prioritizes_readable_data_and_preserves_editing_and_value
         derive_episode_number=lambda _: 1,
     )
 
-    assert "<th><a class=\"sort-link\" href=\"#\">Název" in rendered
-    assert '<strong>Manual Show</strong><small class="technical-filename">Title - 01.mkv</small>' in rendered
-    assert ">S1<" in rendered
-    assert "<strong>E1</strong>" in rendered
+    assert "<h1>Manual Show</h1>" in rendered
+    assert "<strong>Title - 01.mkv</strong>" in rendered
+    assert "<strong>S01E01</strong>" in rendered
     assert "<small>A4</small>" in rendered
-    assert '<small class="technical-meta">L1 · X1</small>' in rendered
-    assert "S1 A4 E1" not in rendered
-    assert ">24:10<" in rendered
+    assert "24:10" in rendered
     assert "CZ (ASS)" in rendered
     assert "SK (SRT)" in rendered
-    assert "Audio stav: <strong>JP audio</strong>" in rendered
-    assert "detekováno ? · ručně JA · efektivně JA" in rendered
-    assert "CZ/SK titulky: <strong>ano</strong>" in rendered
-    assert "Internal EN fallback: <strong>nepotřebný</strong>" in rendered
-    assert "Výsledek: <strong>CZ/SK</strong>" in rendered
-    assert "Automaticky: EN · efektivně: SK" in rendered
-    assert 'action="/videos/1/external-subtitles/7/language"' in rendered
-    assert 'action="/videos/1/audio-tracks/8/language"' in rendered
-    assert 'name="manual_language"' in rendered
-    assert rendered.count("<th>Titulky</th>") == 1
-    assert ">Ano<small>CZ</small>" in rendered
-    assert "Hardsub potvrzen" in rendered
-    assert "Číslování ručně ověřeno" in rendered
-    assert 'action="/videos/1/episode-number"' in rendered
-    assert 'action="/videos/1/media-part"' in rendered
-    assert "Část média" in rendered
-    assert 'action="/videos/1/hardsub"' in rendered
+    assert "JA · aac" in rendered
+    assert "Hardsub: CZ" in rendered
+    assert '<form class="media-video-editor"' not in rendered
+    assert 'name="audio_8"' not in rendered
+    assert 'name="manual_language"' not in rendered
+    assert 'name="manual_episode_number"' not in rendered
+    assert 'name="media_part_number"' not in rendered
     assert (
         video.local_episode_number, video.season_episode_number,
         video.absolute_episode_number, video.external_episode_number,
@@ -3517,14 +3717,23 @@ def test_media_part_web_workflow_is_separate_from_hierarchy_and_metadata(tmp_pat
         filter_name="all", q="", sort=None, direction=None,
     ).body.decode()
     assert "S1 · Part 2" in detail_html
-    assert "Fyzické členění: <strong>2 části média</strong>" in detail_html
+    assert "<dt>Fyzické členění</dt><dd>2 části média</dd>" in detail_html
     assert "Fyzické členění: 2 části média" in collection_html
     assert "Část média 1/2" in detail_html
     assert "Část média 2/2" in detail_html
     assert "MP1" not in detail_html
-    assert f'action="/videos/{first_id}/media-part"' in detail_html
-    assert f'action="/videos/{second_id}/media-part"' in detail_html
-    assert f'action="/videos/{duplicate_id}/media-part"' in detail_html
+    assert f'action="/titles/{title_id}/videos/{first_id}/edit"' not in detail_html
+    assert f'action="/titles/{title_id}/videos/{second_id}/edit"' not in detail_html
+    assert f'action="/videos/{duplicate_id}/media-part"' not in detail_html
+    hierarchy_html = endpoints[
+        "/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+    ](
+        web_request(
+            web_app,
+            f"/hierarchy-review/{collection_id}/titles/{title_id}",
+        ), collection_id, title_id,
+    ).body.decode()
+    assert 'name="media_part_number"' in hierarchy_html
     assert "více aktivních primárních videí" not in detail_html
     duplicate_block = detail_html.split("Segment A copy.mkv", 1)[1]
     assert "Část média 1/2" in duplicate_block
@@ -3614,14 +3823,14 @@ def test_episode_table_uses_metadata_title_and_safe_empty_subtitle_fallback():
         derive_episode_number=lambda _: None,
     )
 
-    assert '<strong>Metadata Show</strong><small class="technical-filename">OVA.mkv</small>' in rendered
-    assert ">OVA<" in rendered
-    assert '<td data-label="Titulky" class="subtitle-list">—<small>' in rendered
-    assert rendered.count("Výsledek: <strong>Chybí vhodné titulky</strong>") == 2
-    assert '<td data-label="Hardsub" class="compact-column">Ne</td>' in rendered
-    assert '<td data-label="Hardsub" class="compact-column">Neznámé</td>' in rendered
-    assert "Hardsub nepřítomen" in rendered
-    assert '<td data-label="Ověření" class="verification-column">Neověřeno</td>' in rendered
+    assert "<h1>Metadata Show</h1>" in rendered
+    assert "<strong>OVA.mkv</strong>" in rendered
+    assert "<strong>Unknown.mkv</strong>" in rendered
+    assert "OVA" in rendered
+    assert rendered.count('data-label="Titulky / hardsub"') == 2
+    assert "Hardsub: žádný · ověřeno" in rendered
+    assert "Hardsub: neověřeno" in rendered
+    assert 'name="hardsub"' not in rendered
 
 
 def test_existing_manual_video_edits_still_persist_without_changing_hierarchy(tmp_path):

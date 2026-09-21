@@ -21,7 +21,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<9"]
+test = [
+  "pytest>=8,<9",
+  "httpx2>=2,<3",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -30,4 +33,4 @@ testpaths = ["tests"]
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["templates/*.html", "static/*.css"]
+app = ["templates/*.html", "static/*.css", "static/*.js"]

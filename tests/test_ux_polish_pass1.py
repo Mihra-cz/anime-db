@@ -75,13 +75,21 @@ def test_catalog_markup_prioritizes_title_and_links_to_workflows():
 def test_hidden_and_bulk_controls_have_progressive_disclosure_safety():
     css = Path("app/static/style.css").read_text()
     fields = Path("app/static/hierarchy_fields.js").read_text()
-    media = Path("app/templates/media_check.html").read_text()
+    media = Path("app/templates/media_edit.html").read_text()
+    media_bulk = Path("app/templates/_media_bulk_editor.html").read_text()
+    dirty = Path("app/static/local_edit_dirty.js").read_text()
+    confirmation = Path("app/templates/edit_confirmation.html").read_text()
     hierarchy = Path("app/templates/hierarchy_review.html").read_text()
     assert '[hidden] { display: none !important; }' in css
     assert 'input:disabled, select:disabled, textarea:disabled' in css
     assert 'field.hidden = !visible' in fields
     assert 'input.disabled = !visible' in fields
-    assert 'id="media-check-selected-count" aria-live="polite"' in media
-    assert 'window.confirm(action + ' in media
+    assert 'data-selected-count aria-live="polite"' in media_bulk
+    assert 'data-media-bulk-form' in media_bulk
+    assert "bulk_editor('media-title-bulk'" in media
+    assert "'/media-check/titles/' ~ catalog_title.id ~ '/bulk-edit'" in media
+    assert 'data-edit-form' in media
+    assert 'button.disabled = !changed' in dirty
+    assert "Opravdu chcete uložit tyto změny?" in confirmation
     assert 'id="empty-collection-count" aria-live="polite"' in hierarchy
     assert 'window.confirm(' in hierarchy

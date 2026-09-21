@@ -35,6 +35,7 @@ from .numbering import (
 
 
 CZSK_AVAILABILITY_UNAVAILABLE = "unavailable"
+CZSK_AVAILABILITY_SEEKING = "seeking"
 MEDIA_CHECK_PAGE_SIZE = 50
 
 MediaCheckSubtitleStatus = Literal[
@@ -100,6 +101,7 @@ class MediaCheckEvaluation:
     subtitle_required: bool
     manual_unavailable_recorded: bool
     manual_unavailable_effective: bool
+    manual_seeking_recorded: bool
     hardsub_review_recommended: bool
     completion_required: bool
     has_unknown_cs_sk_candidate: bool
@@ -127,6 +129,7 @@ class MediaInternalSubtitle:
     codec: str | None
     language: str
     normalized_language: str
+    manual_language: str | None
     title: str | None
 
 
@@ -172,9 +175,11 @@ def set_czsk_availability_manual(video: Video, value: str | None) -> None:
     if not normalized:
         video.czsk_availability_manual = None
         return
-    if normalized != CZSK_AVAILABILITY_UNAVAILABLE:
+    if normalized not in {
+        CZSK_AVAILABILITY_SEEKING, CZSK_AVAILABILITY_UNAVAILABLE,
+    }:
         raise ValueError("Neplatné ruční rozhodnutí o dostupnosti CZ/SK titulků.")
-    video.czsk_availability_manual = CZSK_AVAILABILITY_UNAVAILABLE
+    video.czsk_availability_manual = normalized
 
 
 OPENING_ENDING_CONTENT_TYPES = frozenset({"op", "ed", "ncop", "nced"})
@@ -211,6 +216,9 @@ def build_media_check_evaluation(
     )
     manual_recorded = (
         video.czsk_availability_manual == CZSK_AVAILABILITY_UNAVAILABLE
+    )
+    seeking_recorded = (
+        video.czsk_availability_manual == CZSK_AVAILABILITY_SEEKING
     )
     has_unknown_cs_sk_candidate = bool(
         external_subtitle_state
@@ -262,6 +270,7 @@ def build_media_check_evaluation(
         subtitle_required=subtitle_required,
         manual_unavailable_recorded=manual_recorded,
         manual_unavailable_effective=manual_effective,
+        manual_seeking_recorded=seeking_recorded,
         hardsub_review_recommended=(
             subtitle_required
             and factual.subtitle_status != "preferred"

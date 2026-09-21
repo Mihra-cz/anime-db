@@ -11,6 +11,7 @@ from app.catalog import (
     effective_video_content_type,
     set_audio_track_manual_language,
     set_external_subtitle_manual_language,
+    set_internal_subtitle_manual_language,
     set_manual_hardsub,
 )
 from app.hierarchy_review import (
@@ -654,9 +655,15 @@ def test_media_language_overrides_survive_rescan_detected_change_and_startup(
     video_path.write_bytes(b"video")
     (video_path.parent / "E01.srt").write_text("subtitle", encoding="utf-8")
     audio_language = "unknown"
+    internal_language = "unknown"
+    internal_title = "English"
     monkeypatch.setattr("app.scanner.service.probe_video", lambda _, **__: {
         **PROBE_RESULT,
         "audio": [{"stream_index": 1, "codec": "aac", "language": audio_language}],
+        "subtitles": [{
+            "stream_index": 4, "codec": "ass", "language": internal_language,
+            "title": internal_title,
+        }],
     })
     detected_language = "unknown"
     monkeypatch.setattr(
@@ -672,16 +679,21 @@ def test_media_language_overrides_survive_rescan_detected_change_and_startup(
         scanned_video = session.scalar(select(Video))
         subtitle_id = subtitle.id
         audio_track = scanned_video.audio_tracks[0]
+        internal_subtitle = scanned_video.internal_subtitles[0]
+        internal_subtitle_id = internal_subtitle.id
         audio_track_id = audio_track.id
         assert scanned_video.manual_hardsub_cs is False
         assert scanned_video.manual_hardsub_sk is False
         assert scanned_video.manual_hardsub_verified_at is None
         scanned_video.czsk_availability_manual = "unavailable"
         set_audio_track_manual_language(audio_track, "ja")
+        set_internal_subtitle_manual_language(internal_subtitle, "cs")
         set_external_subtitle_manual_language(subtitle, "cs")
         session.commit()
 
         audio_language = "eng"
+        internal_language = "jpn"
+        internal_title = "Japanese"
         detected_language = "eng"
         video_path.write_bytes(b"changed video")
         scan_library(session, tmp_path)
@@ -689,9 +701,15 @@ def test_media_language_overrides_survive_rescan_detected_change_and_startup(
         subtitle = session.get(ExternalSubtitle, subtitle_id)
         video = session.scalar(select(Video))
         audio_track = video.audio_tracks[0]
+        internal_subtitle = video.internal_subtitles[0]
         assert audio_track.id == audio_track_id
         assert audio_track.language == "eng"
         assert audio_track.manual_language == "ja"
+        assert internal_subtitle.id == internal_subtitle_id
+        assert internal_subtitle.language == "jpn"
+        assert internal_subtitle.normalized_language == "ja"
+        assert internal_subtitle.title == "Japanese"
+        assert internal_subtitle.manual_language == "cs"
         assert subtitle.language == "eng"
         assert subtitle.normalized_language == "en"
         assert subtitle.manual_language == "cs"
@@ -706,7 +724,9 @@ def test_media_language_overrides_survive_rescan_detected_change_and_startup(
         subtitle = session.get(ExternalSubtitle, subtitle_id)
         video = session.scalar(select(Video))
         audio_track = video.audio_tracks[0]
+        internal_subtitle = video.internal_subtitles[0]
         assert audio_track.manual_language == "ja"
+        assert internal_subtitle.manual_language == "cs"
         assert subtitle.manual_language == "cs"
         assert video.czsk_availability_manual == "unavailable"
         profile = build_video_language_profile(video)

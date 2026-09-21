@@ -98,10 +98,45 @@ def test_stable_application_startup_skips_compatibility_rebuild_and_writes(tmp_p
         assert migrate_schema_at_startup(engine) is False
     finally:
         event.remove(engine, "before_cursor_execute", record)
-
     assert writes == []
     assert _semantic_database_snapshot(engine) == before
 
+
+def test_startup_version_three_adds_internal_subtitle_manual_language_once(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'v3-internal-language.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE internal_subtitles DROP COLUMN manual_language"
+        ))
+        connection.execute(text(
+            "INSERT INTO videos "
+            "(id, relative_path, root_folder, filename, size, mtime_ns, file_type, "
+            "manual_hardsub_cs, manual_hardsub_sk, episode_number_source, "
+            "duplicate_primary_missing) VALUES "
+            "(1, 'Show/E01.mkv', 'Show', 'E01.mkv', 1, 1, 'episode', 0, 0, "
+            "'unknown', 0)"
+        ))
+        connection.execute(text(
+            "INSERT INTO internal_subtitles "
+            "(id, video_id, stream_index, codec, language, normalized_language, title) "
+            "VALUES (1, 1, 4, 'ass', 'eng', 'en', 'English')"
+        ))
+        connection.execute(text("PRAGMA user_version = 3"))
+
+    assert migrate_schema_at_startup(engine) is True
+    assert migrate_schema_at_startup(engine) is False
+    columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("internal_subtitles")
+    }
+    assert "manual_language" in columns
+    with Session(engine) as session:
+        subtitle = session.get(InternalSubtitle, 1)
+        assert (
+            subtitle.language, subtitle.normalized_language,
+            subtitle.title, subtitle.manual_language,
+        ) == ("eng", "en", "English", None)
 
 def test_stable_startup_does_not_touch_catalog_titles(tmp_path):
     database_path = tmp_path / "stable-startup.db"
@@ -932,6 +967,9 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
     assert [
         column["name"] for column in inspect(engine).get_columns("videos")
     ].count("czsk_availability_manual") == 1
+    assert [
+        column["name"] for column in inspect(engine).get_columns("internal_subtitles")
+    ].count("manual_language") == 1
 
     with Session(engine) as session:
         assert session.scalar(select(Video.file_type)) == "ncop"
@@ -957,8 +995,12 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         assert audio_track.language == "unknown"
         assert audio_track.manual_language is None
         audio_track.manual_language = "ja"
-        assert session.scalar(select(InternalSubtitle.language)) == "unknown"
-        assert session.scalar(select(InternalSubtitle.normalized_language)) == "en"
+        internal_subtitle = session.scalar(select(InternalSubtitle))
+        assert internal_subtitle.language == "unknown"
+        assert internal_subtitle.normalized_language == "en"
+        assert internal_subtitle.title == "English (UK)"
+        assert internal_subtitle.manual_language is None
+        internal_subtitle.manual_language = "cs"
         subtitle = session.scalar(select(ExternalSubtitle))
         assert subtitle.normalized_language == "en"
         assert subtitle.manual_language is None
@@ -1004,6 +1046,9 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         column["name"] for column in inspect(engine).get_columns("external_subtitles")
     ].count("manual_language") == 1
     assert [
+        column["name"] for column in inspect(engine).get_columns("internal_subtitles")
+    ].count("manual_language") == 1
+    assert [
         column["name"] for column in inspect(engine).get_columns("external_subtitles")
     ].count("match_method") == 1
     with Session(engine) as session:
@@ -1013,6 +1058,11 @@ def test_migrates_existing_database_and_backfills_values(tmp_path):
         assert video.czsk_availability_manual == "unavailable"
         assert session.scalar(select(CollectionGroupingDecision)).decision == "separate"
         assert session.scalar(select(AudioTrack.manual_language)) == "ja"
+        internal_subtitle = session.scalar(select(InternalSubtitle))
+        assert internal_subtitle.language == "unknown"
+        assert internal_subtitle.normalized_language == "en"
+        assert internal_subtitle.title == "English (UK)"
+        assert internal_subtitle.manual_language == "cs"
         assert session.scalar(select(ExternalSubtitle.manual_language)) == "cs"
         assert session.scalar(select(ExternalSubtitle.match_method)) == "automatic"
         session.add(UnresolvedExternalSubtitle(

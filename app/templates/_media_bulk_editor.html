@@ -1,0 +1,29 @@
+{% macro edit_error_summary(error) -%}
+{% if error %}<section class="notice error media-edit-error" role="alert" tabindex="-1">
+  <h2>{{ error.rejected }}</h2><p>{{ error.reason }}</p>
+  {% if error.requested_changes %}<h3>Požadované změny</h3><ul>{% for item in error.requested_changes %}<li>{{ item }}</li>{% endfor %}</ul>{% endif %}
+  {% if error.problem_items %}<h3>Problematické položky</h3><ul>{% for item in error.problem_items %}<li>{{ item }}</li>{% endfor %}</ul>{% endif %}
+  {% if error.next_steps %}<h3>Jak pokračovat</h3><ul>{% for item in error.next_steps %}<li>{{ item }}</li>{% endfor %}</ul>{% endif %}
+</section>{% endif %}
+{%- endmacro %}
+
+{% macro bulk_editor(form_id, action, return_to, submitted, selected_video_ids, scope=none) -%}
+<form id="{{ form_id }}" class="panel media-bulk-editor" method="post" action="{{ action }}" data-media-bulk-form>
+  <input type="hidden" name="return_to" value="{{ return_to }}">
+  {% if scope %}{% for name, value in scope.items() %}<input type="hidden" name="scope_{{ name }}" value="{{ value }}">{% endfor %}{% endif %}
+  <strong>Upravit označená videa</strong>
+  <span data-selected-count aria-live="polite">Vybráno: {{ selected_video_ids|length }} videí</span>
+  <p>„Neměnit“ danou vlastnost vynechá. Jazyk lze hromadně změnit jen tehdy, když má každé vybrané video právě jednu odpovídající stopu.</p>
+  <div class="media-bulk-fields">
+    {% set bulk_audio_value = submitted.get('bulk_audio', '') %}
+    {% set bulk_internal_value = submitted.get('bulk_internal_subtitle', '') %}
+    {% set bulk_hardsub_value = submitted.get('hardsub', '') %}
+    {% set bulk_availability_value = submitted.get('availability', '') %}
+    <label>Audio <select name="bulk_audio"><option value="">Neměnit</option><option value="auto" {% if bulk_audio_value == 'auto' %}selected{% endif %}>Automaticky</option>{% for language, label in manual_language_choices %}<option value="{{ language }}" {% if bulk_audio_value == language %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>Interní titulky <select name="bulk_internal_subtitle"><option value="">Neměnit</option><option value="auto" {% if bulk_internal_value == 'auto' %}selected{% endif %}>Automaticky</option>{% for language, label in manual_language_choices %}<option value="{{ language }}" {% if bulk_internal_value == language %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>Hardsub <select name="hardsub"><option value="">Neměnit</option>{% for value, label in [('unknown','Neověřeno'),('none','Žádný · ověřeno'),('cs','CZ'),('sk','SK'),('both','CZ i SK')] %}<option value="{{ value }}" {% if bulk_hardsub_value == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>CZ/SK dostupnost <select name="availability"><option value="">Neměnit</option><option value="clear" {% if bulk_availability_value == 'clear' %}selected{% endif %}>Neurčeno</option><option value="seeking" {% if bulk_availability_value == 'seeking' %}selected{% endif %}>Sháním</option><option value="unavailable" {% if bulk_availability_value == 'unavailable' %}selected{% endif %}>Neexistují</option></select></label>
+  </div>
+  <button type="submit" data-media-bulk-submit>Uložit změny</button>
+</form>
+{%- endmacro %}

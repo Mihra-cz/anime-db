@@ -13,6 +13,7 @@ from app.metadata.artwork import (
     ArtworkCacheError,
     cache_cover,
     collection_artwork_thumbnail_url,
+    local_artwork_original_url,
     local_artwork_thumbnail_url,
     primary_cover_artwork,
 )
@@ -116,6 +117,24 @@ def test_local_artwork_url_rejects_missing_and_unsafe_thumbnail_paths(tmp_path):
     assert local_artwork_thumbnail_url(
         stored_artwork(2, "../outside.webp"), root,
     ) is None
+
+
+def test_local_artwork_original_url_uses_only_existing_safe_local_file(tmp_path):
+    root = tmp_path / "artwork"
+    original = root / "anilist" / "1" / "cover-original.jpg"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"original")
+
+    assert local_artwork_original_url(
+        stored_artwork(1, "anilist/1/cover-thumb.webp"), root,
+    ) == "/artwork/anilist/1/cover-original.jpg"
+    assert local_artwork_original_url(
+        stored_artwork(2, "anilist/2/cover-thumb.webp"), root,
+    ) is None
+
+    unsafe = stored_artwork(3, "anilist/3/cover-thumb.webp")
+    unsafe.local_path = "../outside.jpg"
+    assert local_artwork_original_url(unsafe, root) is None
 
 
 @pytest.mark.parametrize(("mime", "fmt", "suffix"), [

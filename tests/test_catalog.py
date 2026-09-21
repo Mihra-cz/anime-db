@@ -17,6 +17,7 @@ from app.catalog import (
     classify_video,
     derive_episode_number,
     detect_episode_number,
+    effective_internal_subtitle_language,
     effective_video_content_display,
     effective_video_content_type,
     filename_display_title,
@@ -29,6 +30,7 @@ from app.catalog import (
     normalize_language,
     title_filename_display_title,
     set_manual_hardsub,
+    set_internal_subtitle_manual_language,
     sort_title_videos,
     subtitle_track_display,
     title_videos,
@@ -118,6 +120,27 @@ def test_manual_language_choices_keep_canonical_values_and_use_czech_labels():
         "hun": "HU – Maďarština",
         "unknown": "? – Neznámý jazyk",
     }
+
+
+def test_internal_subtitle_manual_language_overrides_and_clears_detected_evidence():
+    track = InternalSubtitle(
+        stream_index=4, codec="ass", language="eng",
+        normalized_language="en", title="English",
+    )
+
+    assert effective_internal_subtitle_language(track) == "en"
+    set_internal_subtitle_manual_language(track, "cze")
+    assert track.language == "eng"
+    assert track.normalized_language == "en"
+    assert track.manual_language == "cs"
+    assert effective_internal_subtitle_language(track) == "cs"
+
+    set_internal_subtitle_manual_language(track, "")
+    assert track.manual_language is None
+    assert effective_internal_subtitle_language(track) == "en"
+
+    with pytest.raises(ValueError, match="Neplatný jazyk"):
+        set_internal_subtitle_manual_language(track, "xx")
 
 
 def test_uses_english_title_when_language_is_unknown():

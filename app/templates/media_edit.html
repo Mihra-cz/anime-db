@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% from "_external_subtitle_compatibility.html" import asset_card %}
+{% from "_media_bulk_editor.html" import bulk_editor, edit_error_summary with context %}
+{% macro selected_value(name, current, video_id=none) %}{% if submitted and (video_id is none or submitted.get('error_video_id') == video_id|string) and name in submitted %}{{ submitted[name] }}{% else %}{{ current }}{% endif %}{% endmacro %}
+{% block main_class %}content-shell content-wide{% endblock %}
+{% block title %}Média · {{ catalog_title_display_title(catalog_title, title_name_preference) }} · AnimeDB{% endblock %}
+{% block content %}
+<nav class="detail-backlinks" aria-label="Návrat"><a href="/titles/{{ catalog_title.id }}">← Zpět na detail části</a><a href="/media-check">← Media Check</a></nav>
+<h1>Média · {{ catalog_title_display_title(catalog_title, title_name_preference) }}</h1>
+<p>Všechna videa části. Detekovaná data zůstávají factual evidence; formuláře ukládají pouze explicitní human override.</p>
+{% if message %}<div class="notice success">{{ message }}</div>{% endif %}
+{{ edit_error_summary(edit_error) }}
+
+{{ bulk_editor('media-title-bulk', '/media-check/titles/' ~ catalog_title.id ~ '/bulk-edit', '/media-check/titles/' ~ catalog_title.id, submitted, submitted_video_ids) }}
+
+<section class="media-title-video-list">
+{% for row in results.rows %}{% set video = row.video %}{% set evaluation = row.evaluation %}{% set profile = evaluation.factual %}{% set external_state = row.external_subtitle_state %}
+  <article class="panel media-title-video{% if focus_video_id == video.id %} is-focus-target{% endif %}" id="video-{{ video.id }}">
+    <header class="media-title-video-heading">
+      <label class="media-select"><input form="media-title-bulk" type="checkbox" name="video_ids" value="{{ video.id }}" data-media-select {% if video.id in submitted_video_ids %}checked{% endif %}><span class="visually-hidden">Vybrat {{ video.filename }}</span></label>
+      <div><h2>{{ row.episode_label }} · {{ video.filename }}</h2><small class="technical-path">{{ video.relative_path }}</small></div>
+      <div class="media-video-statuses"><span class="status-badge severity-{{ evaluation.audio_severity }}">{{ audio_status_labels[profile.audio_status] }}</span><span class="status-badge severity-{{ evaluation.subtitle_severity }}">{{ subtitle_status_labels[evaluation.subtitle_status] }}</span></div>
+    </header>
+    <details class="media-controls" {% if focus_video_id == video.id or submitted.get('error_video_id') == video.id|string %}open{% endif %}><summary>Upravit video</summary>
+      <form class="media-video-editor{% if submitted.get('error_video_id') == video.id|string %} has-field-error{% endif %}" data-edit-form{% if submitted.get('error_video_id') == video.id|string %} data-dirty-on-load="true"{% endif %} method="post" action="/media-check/titles/{{ catalog_title.id }}/videos/{{ video.id }}/edit">
+        <input type="hidden" name="return_to" value="/media-check/titles/{{ catalog_title.id }}?focus_video={{ video.id }}#video-{{ video.id }}">
+        <div class="media-control-grid">
+          <section><h3>Audio stopy</h3>
+          {% for track in row.audio_tracks %}
+            {% set field = 'audio_' ~ track.id %}{% set current = track.manual_language or '' %}{% set chosen = submitted.get(field, current) if submitted.get('error_video_id') == video.id|string else current %}
+            <article class="media-track"><p><strong>Stream {{ track.stream_index }}</strong> · {{ track.codec or '?' }}<small>detekováno: {{ language_display_label(track.language, include_name=true) }} · efektivně: {{ language_display_label(effective_audio_track_language(track), include_name=true) }}</small></p><label>Ruční jazyk <select name="{{ field }}"><option value="" {% if not chosen %}selected{% endif %}>automaticky</option>{% if chosen and chosen not in manual_language_values %}<option value="{{ chosen }}" selected>Neplatná odeslaná hodnota: {{ chosen }}</option>{% endif %}{% for language, label in manual_language_choices %}<option value="{{ language }}" {% if chosen == language %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label></article>
+          {% else %}<p>Video nemá evidovanou audio stopu.</p>{% endfor %}
+          </section>
+          <section><h3>Interní titulky</h3>
+          {% for track in row.internal_subtitles %}
+            {% set field = 'internal_subtitle_' ~ track.id %}{% set current = track.manual_language or '' %}{% set chosen = submitted.get(field, current) if submitted.get('error_video_id') == video.id|string else current %}
+            <article class="media-track"><p><strong>Stream {{ track.stream_index }}</strong> · {{ track.codec or '?' }}{% if track.title %} · {{ track.title }}{% endif %}<small>raw: {{ language_display_label(track.language, include_name=true) }} · detekováno: {{ language_display_label(track.normalized_language, include_name=true) }} · efektivně: {{ language_display_label(effective_internal_subtitle_language(track), include_name=true) }}</small></p><label>Ruční jazyk <select name="{{ field }}"><option value="" {% if not chosen %}selected{% endif %}>automaticky</option>{% if chosen and chosen not in manual_language_values %}<option value="{{ chosen }}" selected>Neplatná odeslaná hodnota: {{ chosen }}</option>{% endif %}{% for language, label in manual_language_choices %}<option value="{{ language }}" {% if chosen == language %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label></article>
+          {% else %}<p>Video nemá evidovanou interní subtitle stopu.</p>{% endfor %}
+          </section>
+          {% set current_hardsub = 'both' if video.manual_hardsub_cs and video.manual_hardsub_sk else 'cs' if video.manual_hardsub_cs else 'sk' if video.manual_hardsub_sk else 'none' if video.manual_hardsub_verified_at else 'unknown' %}
+          {% set chosen_hardsub = submitted.get('hardsub', current_hardsub) if submitted.get('error_video_id') == video.id|string else current_hardsub %}
+          <section><h3>Hardsub</h3><label>Ruční stav <select name="hardsub">{% for value, label in [('unknown','neověřeno'),('none','žádný · ověřeno'),('cs','CZ'),('sk','SK'),('both','CZ i SK')] %}<option value="{{ value }}" {% if chosen_hardsub == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label></section>
+          {% set current_availability = video.czsk_availability_manual or 'clear' %}{% set chosen_availability = submitted.get('availability', current_availability) if submitted.get('error_video_id') == video.id|string else current_availability %}
+          <section><h3>Externí CZ/SK dostupnost</h3>{% if profile.has_cs_or_sk %}<p><span class="status-badge severity-success">Mám</span><small>Derived z pozitivní CZ/SK evidence; nejde o ruční volbu.</small></p>{% endif %}<label>Ruční workflow <select name="availability"><option value="clear" {% if chosen_availability == 'clear' %}selected{% endif %}>Neurčeno</option><option value="seeking" {% if chosen_availability == 'seeking' %}selected{% endif %}>Sháním</option><option value="unavailable" {% if chosen_availability == 'unavailable' %}selected{% endif %}>Neexistují</option></select></label></section>
+        </div>
+        <button type="submit">Uložit</button>
+      </form>
+
+      <section class="external-subtitle-assets"><h3>Externí subtitle assets</h3>
+        {% for subtitle in external_state.compatible_subtitles %}{{ asset_card(subtitle, video, compatibility_presentations.get(subtitle.id), return_to, 'available') }}{% else %}<p>Bez kompatibilních externích titulků.</p>{% endfor %}
+        {% if external_state.unknown_candidate_subtitles %}<h4>K posouzení</h4>{% for subtitle in external_state.unknown_candidate_subtitles %}{{ asset_card(subtitle, video, compatibility_presentations.get(subtitle.id), return_to, 'unknown') }}{% endfor %}{% endif %}
+        {% if external_state.incompatible_subtitles %}<h4>Nekompatibilní</h4>{% for subtitle in external_state.incompatible_subtitles %}{{ asset_card(subtitle, video, compatibility_presentations.get(subtitle.id), return_to, 'incompatible') }}{% endfor %}{% endif %}
+      </section>
+    </details>
+  </article>
+{% else %}<div class="panel">Část neobsahuje žádná videa.</div>{% endfor %}
+</section>
+
+<script src="/static/media_bulk_editor.js"></script>
+<script src="/static/local_edit_dirty.js"></script>
+{% endblock %}

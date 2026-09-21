@@ -357,6 +357,32 @@ def _sync_audio_tracks(
                 video.audio_tracks.remove(track)
 
 
+def _sync_internal_subtitles(
+    session: Session, video: Video, track_data: list[dict]
+) -> None:
+    """Refresh factual fields by stream index and preserve human language authority."""
+    with session.no_autoflush:
+        existing = {track.stream_index: track for track in video.internal_subtitles}
+        incoming = {int(track["stream_index"]): track for track in track_data}
+
+        for stream_index, data in incoming.items():
+            normalized = normalize_language(data.get("language"), data.get("title"))
+            track = existing.get(stream_index)
+            if track is None:
+                video.internal_subtitles.append(InternalSubtitle(
+                    **data, normalized_language=normalized,
+                ))
+            else:
+                track.codec = data.get("codec")
+                track.language = data.get("language") or "unknown"
+                track.normalized_language = normalized
+                track.title = data.get("title")
+
+        for stream_index, track in existing.items():
+            if stream_index not in incoming:
+                video.internal_subtitles.remove(track)
+
+
 def _scan_library(
     session: Session,
     root: Path,
@@ -420,13 +446,7 @@ def _scan_library(
                 video.duration, video.video_codec = metadata["duration"], metadata["video_codec"]
                 video.width, video.height = metadata["width"], metadata["height"]
                 _sync_audio_tracks(session, video, metadata["audio"])
-                video.internal_subtitles = [
-                    InternalSubtitle(
-                        **track,
-                        normalized_language=normalize_language(track.get("language"), track.get("title")),
-                    )
-                    for track in metadata["subtitles"]
-                ]
+                _sync_internal_subtitles(session, video, metadata["subtitles"])
                 if is_new:
                     result.created += 1
                 else:

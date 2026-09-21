@@ -419,8 +419,11 @@ dosavadní interní kódy, např. `cs`, `ja`, `deu`, `kor`, `zho`. Display resol
 přidává české názvy: např. **CZ – Čeština**, **JA – Japonština**, **KO – Korejština**,
 **ZH – Čínština**, **? – Neznámý jazyk**. Používají jej jazykové selecty,
 audio/internal/external detail a compatibility UI; kompaktní badge mohou
-zůstat krátké. Hodnoty formulářů a URL se kvůli labelům nemění. Ruční jazyk
-audio stopy nebo external assetu přebíjí detekovaný, nikoli jeho raw záznam.
+zůstat krátké. Hodnoty formulářů a URL se kvůli labelům nemění. Audio i již
+existující interní subtitle stopa mají nullable ruční language override;
+external subtitle má stejnou autoritu na úrovni sdíleného assetu. Override
+přebíjí efektivní prezentaci, nikdy scannerem zjištěný raw/normalized záznam,
+a jeho vymazání vrací detected hodnotu.
 
 ## UI a navigace
 
@@ -438,8 +441,32 @@ audio stopy nebo external assetu přebíjí detekovaný, nikoli jeho raw záznam
   přímo title detail, aniž zmizí anime-level sourozenec.
 - Hierarchy Review je strukturální pracovní fronta i přímý navigační index.
   Metadata Check a Media Check jsou samostatná workflow, nikoli další hierarchy statusy.
-- Media Check ukazuje počet vybraných videí před hromadnou změnou CZ/SK markeru
-  a žádá explicitní potvrzení rozsahu; serverová validace se nemění.
+- `/titles/{id}` je read-only přehled effective stavu. Tři sdílené statusové
+  badge vedou do title-scoped editorů Hierarchie, Metadata a Média; běžná
+  authority se na katalogovém detailu neupravuje.
+- Title-scoped Hierarchy Edit vlastní typ části, číslování, content type,
+  Media Part, varianty, duplicity a membership/confirmation workflow.
+  Globální Hierarchy Review zůstává strukturální pracovní frontou. Nabízí
+  lokální uložení a atomické „Uložit všechny změny“
+  pouze pro úpravy existujících variant groups a ruční pozice Recapu. Dávka
+  používá stejné domain helpers jako lokální uložení a jediný commit; příkazy,
+  náhledy, potvrzení a destruktivní akce do ní nepatří.
+- Title-scoped Metadata Edit vlastní requirement, provider vazbu, kandidáty,
+  artwork, lock/update/unlink a metadata split. Po potvrzení metadata vazby
+  standardně ukazuje potvrzená
+  metadata a výběr ostatních kandidátů zavře. „Změnit metadata“ pouze otevře
+  uložené kandidáty; provider search spouští až samostatná akce a první POST
+  přesměruje přímo na viditelné výsledky.
+- Title-scoped Media Edit zobrazuje všechna videa části. Jedno atomické
+  preview/confirm/save mění přesně určené audio a internal-subtitle stopy,
+  hardsub a ruční CZ/SK workflow marker. External subtitle language zůstává
+  samostatný asset-level zápis. `None`, `seeking` a `unavailable` se prezentují
+  jako Neurčeno, Sháním a Neexistují; „Mám“ je pouze factual derived stav.
+- Hromadný editor je jeden sticky toolbar nad Media Edit seznamem. Prázdná hodnota znamená
+  „Neměnit“. Bulk language změna pokračuje pouze tehdy, když každé vybrané
+  video má přesně jednu stopu daného druhu; nula nebo více stop odmítne celou
+  dávku před potvrzením. Každé odmítnutí popíše důvod, problematické položky a
+  bezpečný další krok; partial update se neprovádí.
 - Katalog má malé 44px portrait thumbnails. V collection detailu je artwork
   u všech `CollectionPresentation.primary_parts` a navíc anime-level Film/OVA/Special.
   Podřízené Film/OVA/Special ani běžné extras nemají cover, placeholder či prázdné

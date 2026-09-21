@@ -64,6 +64,20 @@ def local_artwork_thumbnail_url(artwork: Artwork | None, root: Path) -> str | No
     return f"/artwork/{quote(relative, safe='/')}"
 
 
+def local_artwork_original_url(artwork: Artwork | None, root: Path) -> str | None:
+    """Resolve a cached original to the existing safe local artwork mount."""
+    if artwork is None or not artwork.local_path:
+        return None
+    try:
+        resolved = resolve_local_path(root, artwork.local_path)
+    except ArtworkCacheError:
+        return None
+    if not resolved.is_file():
+        return None
+    relative = PurePosixPath(artwork.local_path).as_posix()
+    return f"/artwork/{quote(relative, safe='/')}"
+
+
 def collection_artwork_thumbnail_url(
     titles: Iterable[CatalogTitle], root: Path,
 ) -> str | None:

@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlencode, urlparse
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -30,6 +30,7 @@ from .catalog import (
     catalog_collection_display_title,
     catalog_title_display_title,
     catalog_title_series_label,
+    catalog_video_identity,
     detected_audio_track_language,
     detect_episode_number,
     derive_episode_number,
@@ -66,6 +67,9 @@ from .catalog import (
     video_matches_search,
 )
 from .config import Settings, get_settings
+from .media_edit_save import (
+    MediaEditValidationError, apply_media_edits, load_media_videos,
+)
 from .collection_presentation import (
     build_collection_presentation,
     is_collection_part_artwork_worthy,
@@ -121,7 +125,7 @@ from .hierarchy_review import (
     preview_assignments, separate_nonstandard_videos, simple_definition_rows,
     set_manual_duplicate_status,
     single_title_confirmation_suggestion, supplementary_assignment_recommendations,
-    supplementary_video_suggestions, set_manual_title_hierarchy,
+    supplementary_video_suggestions,
     complementary_season_part_proposal_for_videos,
     video_source_collections,
 )
@@ -136,6 +140,7 @@ from .metadata.artwork import (
     ArtworkCacheError,
     cache_cover,
     collection_artwork_thumbnail_url,
+    local_artwork_original_url,
     local_artwork_thumbnail_url,
     primary_cover_artwork,
 )
@@ -169,7 +174,14 @@ from .metadata.split import (
 )
 from .title_order import catalog_title_sort_key
 from .metadata.completion import (
-    METADATA_REQUIREMENT_CHOICES, resolve_metadata_completion, set_metadata_requirement,
+    METADATA_REQUIREMENT_CHOICES, has_confirmed_metadata,
+    resolve_metadata_completion, set_metadata_requirement,
+)
+from .page_edit_save import (
+    MissingEditTarget, apply_episode_position_edit, apply_hierarchy_page_edits,
+    apply_title_hierarchy_edit, apply_title_hierarchy_form_edit,
+    apply_title_numbering_edit,
+    apply_title_video_hierarchy_edit, hierarchy_number_field_label,
 )
 from .video_variants import (
     VIDEO_VARIANT_CONTENT_VARIANT_CHOICES,
@@ -206,8 +218,7 @@ from .numbering import (
     confirmed_duplicate_groups, preview_sequential_numbering,
     deterministic_bulk_renumber_proposal, effective_video_numbering,
     effective_video_sort_position, manual_episode_number_input_value,
-    recalculate_title_numbering, set_title_numbering,
-    set_video_episode_number_from_input,
+    recalculate_title_numbering,
     summarize_title_numbering, unresolved_duplicate_groups,
 )
 from .scanner import LibrarySafetyError, scan_library
@@ -300,6 +311,8 @@ templates.env.globals.update(
     manual_hardsub_state=manual_hardsub_state,
     detect_episode_number=detect_episode_number,
     effective_video_content_display=effective_video_content_display,
+    effective_video_numbering=effective_video_numbering,
+    hierarchy_number_field_label=hierarchy_number_field_label,
     part_type_choices=PART_TYPE_CHOICES,
     video_content_type_choices=VIDEO_CONTENT_TYPE_CHOICES,
     media_part_label=media_part_label,
@@ -464,6 +477,7 @@ def _load_catalog_overview(sessions):
         internal_rows = session.execute(select(
             InternalSubtitle.video_id,
             InternalSubtitle.normalized_language,
+            InternalSubtitle.manual_language,
             InternalSubtitle.title,
         )).all()
         external_rows = session.execute(select(
@@ -485,9 +499,10 @@ def _load_catalog_overview(sessions):
     effective_external_by_video: dict[int, set[str]] = {}
     detected_external_by_video: dict[int, set[str]] = {}
     external_paths_by_video_id: dict[int, list[str]] = {}
-    for video_id, language, title in internal_rows:
+    for video_id, language, manual_language, title in internal_rows:
         internal_by_video.setdefault(video_id, set()).add(
-            normalize_language(language, title)
+            normalize_language(manual_language) if manual_language is not None
+            else normalize_language(language, title)
         )
     for video_id, detected_language, manual_language, relative_path in external_rows:
         detected = normalize_language(detected_language)
@@ -603,6 +618,7 @@ def _load_media_check_data(sessions):
             InternalSubtitle.codec,
             InternalSubtitle.language,
             InternalSubtitle.normalized_language,
+            InternalSubtitle.manual_language,
             InternalSubtitle.title,
         )).all()
 
@@ -619,10 +635,11 @@ def _load_media_check_data(sessions):
         ))
     for (
         subtitle_id, video_id, stream_index, codec, raw_language,
-        language, title,
+        language, manual_language, title,
     ) in internal_rows:
         internal_by_video.setdefault(video_id, set()).add(
-            normalize_language(language, title)
+            normalize_language(manual_language) if manual_language is not None
+            else normalize_language(language, title)
         )
         internal_rows_by_video.setdefault(video_id, []).append(
             MediaInternalSubtitle(
@@ -631,6 +648,7 @@ def _load_media_check_data(sessions):
                 codec=codec,
                 language=raw_language or "unknown",
                 normalized_language=language or "unknown",
+                manual_language=manual_language,
                 title=title,
             )
         )
@@ -686,7 +704,23 @@ def _load_catalog_title(session, catalog_title_id: int | None):
         ).selectinload(CatalogTitle.metadata_record),
         selectinload(CatalogTitle.collection).selectinload(
             CatalogCollection.titles
-        ).selectinload(CatalogTitle.videos).joinedload(Video.catalog_title),
+        ).joinedload(CatalogTitle.collection),
+        selectinload(CatalogTitle.collection).selectinload(
+            CatalogCollection.titles
+        ).selectinload(CatalogTitle.videos).joinedload(
+            Video.catalog_title
+        ).joinedload(CatalogTitle.collection),
+        selectinload(CatalogTitle.collection).selectinload(
+            CatalogCollection.titles
+        ).selectinload(CatalogTitle.videos).selectinload(Video.duplicate_of),
+        selectinload(CatalogTitle.collection).selectinload(
+            CatalogCollection.titles
+        ).selectinload(CatalogTitle.videos).selectinload(Video.duplicate_copies),
+        selectinload(CatalogTitle.collection).selectinload(
+            CatalogCollection.titles
+        ).selectinload(CatalogTitle.videos).selectinload(
+            Video.video_variant_group
+        ),
         selectinload(CatalogTitle.metadata_candidates),
         selectinload(CatalogTitle.artwork),
         selectinload(CatalogTitle.videos),
@@ -845,6 +879,9 @@ def _metadata_template_values(
         [item for item in (title.metadata_candidates if title else []) if show_rejected or item.rejected_at is None],
         key=lambda item: (item.rejected_at is not None, -(item.match_score or 0), item.candidate_title.casefold()),
     )
+    candidate_workflow_open = show_candidates or bool(
+        title and stored_candidates and not has_confirmed_metadata(title)
+    )
     primary_external_link = next(
         (link for link in (title.external_links if title else []) if link.is_primary), None
     )
@@ -874,15 +911,16 @@ def _metadata_template_values(
             range_presentation.warning if range_presentation else None
         ),
         "primary_external_link": primary_external_link,
-        "metadata_candidates": stored_candidates if show_candidates else [],
+        "metadata_candidates": stored_candidates if candidate_workflow_open else [],
         "candidate_reasons": {
             item.id: decode_match_reasons(item) for item in stored_candidates
         },
         "has_metadata_candidates": bool(stored_candidates),
-        "show_metadata_candidates": show_candidates,
+        "show_metadata_candidates": candidate_workflow_open,
         "low_score_threshold": LOW_SCORE_THRESHOLD,
         "show_rejected": show_rejected,
         "has_rejected_candidates": bool(title and any(item.rejected_at for item in title.metadata_candidates)),
+        "local_cover_original_url": local_artwork_original_url(artwork, artwork_root),
         "local_cover_url": local_artwork_thumbnail_url(artwork, artwork_root),
         "show_remote_cover": bool(not artwork and allow_remote_images and metadata and metadata.cover_image_url),
     }
@@ -956,7 +994,16 @@ def metadata_return_url(
     if detail_sort:
         parameters.update(video_sort=detail_sort, video_direction=detail_direction)
     parameters.update({key: value for key, value in messages.items() if value})
-    return f"/titles/{catalog_title_id}?{urlencode(parameters)}#metadata"
+    anchor = "metadata-candidates" if messages.get("show_metadata_candidates") == "true" else "metadata"
+    return f"/metadata-review/{catalog_title_id}?{urlencode(parameters)}#{anchor}"
+
+
+def metadata_video_identity(video: Video, title: CatalogTitle) -> str:
+    """Compact canonical identity for metadata context without inventing episodes."""
+    return catalog_video_identity(video, title)
+
+
+templates.env.globals["metadata_video_identity"] = metadata_video_identity
 
 
 def toggled_direction(column: str, active_sort: str, active_direction: str) -> str:
@@ -1465,6 +1512,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         show_metadata_candidates: bool = False,
         metadata_query: str | None = None,
         media_part_message: str | None = None,
+        edit_submitted: dict[str, str] | None = None,
     ):
         if filter_name not in FILTER_LABELS:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
@@ -1635,6 +1683,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 title_candidates
             ),
             "media_part_message": media_part_message,
+            "edit_submitted": edit_submitted or {},
             "title_is_empty": bool(catalog_title and not title_candidates),
             "title_owned_metadata_count": (
                 bool(catalog_title.metadata_record)
@@ -1656,6 +1705,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             }),
             "catalog_title_display_title": catalog_title_display_title,
             "catalog_title_series_label": catalog_title_series_label,
+            "metadata_video_identity": metadata_video_identity,
             "subtitle_track_display": subtitle_track_display,
             "manual_hardsub_state": manual_hardsub_state,
             "translation_status": lambda video: (
@@ -1722,7 +1772,54 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             show_metadata_candidates,
             title_candidates,
         ))
-        return templates.TemplateResponse(request, "series.html", context)
+        external_states = build_video_external_subtitle_states(title_candidates)
+        known_title_videos = {
+            video.id: video for video in title_candidates if video.id is not None
+        }
+        context.update({
+            "title_hierarchy_badge": (
+                build_hierarchy_review_collection_presentation(
+                    catalog_title.collection
+                ).badge
+                if catalog_title is not None
+                and catalog_title.collection is not None else None
+            ),
+            "title_metadata_badge": (
+                METADATA_BADGES[context["metadata_completion"].state]
+                if context.get("metadata_completion") is not None else None
+            ),
+            "title_media_badge": media_collection_badge(
+                build_media_check_evaluation(
+                    video,
+                    external_subtitle_state=external_states.get(video.id),
+                    known_videos=known_title_videos,
+                )
+                for video in title_candidates
+            ),
+            "hierarchy_edit_url": (
+                f"/hierarchy-review/{catalog_title.catalog_collection_id}"
+                f"/titles/{catalog_title.id}"
+                if catalog_title is not None
+                and catalog_title.catalog_collection_id is not None else None
+            ),
+            "metadata_edit_url": (
+                f"/metadata-review/{catalog_title.id}"
+                if catalog_title is not None else None
+            ),
+            "media_edit_url": (
+                f"/media-check/titles/{catalog_title.id}"
+                if catalog_title is not None else None
+            ),
+        })
+        return templates.TemplateResponse(
+            request,
+            (
+                "metadata_edit.html"
+                if request.url.path.startswith("/metadata-review/")
+                else "series.html"
+            ),
+            context,
+        )
 
     @app.get("/titles/{catalog_title_id}", response_class=HTMLResponse)
     def title_detail(
@@ -1892,6 +1989,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         simple_rows=None, message: str | None = None,
         assignment_split_proposal=None,
         variant_preview_state=None, structural_ab_preview_state=None,
+        title_scoped_id: int | None = None,
+        edit_submitted: dict[str, str] | None = None,
+        edit_error_scope: str | None = None,
     ):
         with sessions() as session:
             collection = session.scalar(select(CatalogCollection).options(
@@ -2075,7 +2175,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             available_collections = list(session.scalars(select(CatalogCollection).where(
                 CatalogCollection.id != collection.id
             ).order_by(CatalogCollection.local_title)).all())
-            return templates.TemplateResponse(request, "hierarchy_review_detail.html", {
+            title_numbering_visible = title_numbering
+            selected_title = None
+            selected_title_videos = videos
+            if title_scoped_id is not None:
+                selected_item = next(
+                    (item for item in title_numbering if item["title"].id == title_scoped_id),
+                    None,
+                )
+                if selected_item is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Část nebyla v této kolekci nalezena.",
+                    )
+                title_numbering_visible = [selected_item]
+                selected_title = selected_item["title"]
+                selected_title_videos = videos_by_title.get(title_scoped_id, [])
+            template_name = (
+                "hierarchy_edit.html"
+                if title_scoped_id is not None else "hierarchy_review_detail.html"
+            )
+            return templates.TemplateResponse(request, template_name, {
                 "collection": collection, "videos": videos,
                 "hierarchy_badge": build_hierarchy_review_collection_presentation(
                     collection
@@ -2098,6 +2218,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "external_search_candidates": external_search_candidates or [],
                 "metadata_status_labels": METADATA_STATUS_LABELS,
                 "title_numbering": title_numbering,
+                "title_numbering_visible": title_numbering_visible,
+                "selected_title": selected_title,
+                "selected_title_videos": selected_title_videos,
                 "numbering_unknown": numbering_unknown,
                 "nonstandard_videos": nonstandard_videos,
                 "unassigned_videos": unassigned_videos,
@@ -2122,7 +2245,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "assignment_split_proposal": assignment_split_proposal,
                 "variant_preview_state": variant_preview_state,
                 "structural_ab_preview_state": structural_ab_preview_state,
+                "edit_submitted": edit_submitted or {},
+                "edit_error_scope": edit_error_scope,
             })
+
+    def hierarchy_edit_error_response(
+        request: Request, collection_id: int, catalog_title_id: int,
+        form, error: str, *, scope: str, status_code: int = 400,
+    ):
+        submitted = {
+            key: str(value)
+            for key, value in form.multi_items()
+            if key not in {"return_to", "confirm_changes"}
+        }
+        response = hierarchy_review_context(
+            request, collection_id, error=error,
+            title_scoped_id=catalog_title_id,
+            edit_submitted=submitted,
+            edit_error_scope=scope,
+        )
+        response.status_code = status_code
+        return response
 
     @app.get("/hierarchy-review", response_class=HTMLResponse)
     def hierarchy_review_list(request: Request, message: str | None = None):
@@ -2247,14 +2390,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "message": message,
         })
 
-    @app.get("/media-check", response_class=HTMLResponse)
-    def media_check(
-        request: Request,
-        subtitle: str = "unresolved",
-        audio: str = "all",
-        q: str = "",
-        page: int = 1,
-        message: str | None = None,
+    def media_check_page_data(
+        request: Request, subtitle: str, audio: str, q: str, page: int,
     ):
         (
             videos, language_profiles, media_audio_tracks,
@@ -2269,19 +2406,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         external_subtitle_states = build_video_external_subtitle_states(
             videos, candidate_index=compatibility_candidate_index,
         )
+        results = build_media_check_results(
+            videos,
+            subtitle_filter=subtitle,
+            audio_filter=audio,
+            query=q,
+            page=page,
+            title_name_preference=get_preferred_title_language(request),
+            external_subtitle_states=external_subtitle_states,
+            detections=detections,
+            language_profiles=language_profiles,
+            audio_tracks=media_audio_tracks,
+            internal_subtitles=media_internal_subtitles,
+        )
+        return (
+            videos, detections, compatibility_candidate_index,
+            external_subtitle_states, results,
+        )
+
+    def media_check_context(
+        request: Request,
+        subtitle: str = "unresolved",
+        audio: str = "all",
+        q: str = "",
+        page: int = 1,
+        message: str | None = None,
+        edit_error: MediaEditValidationError | None = None,
+        submitted: dict[str, str] | None = None,
+        selected_video_ids: tuple[int, ...] = (),
+        status_code: int = 200,
+    ):
         try:
-            results = build_media_check_results(
-                videos,
-                subtitle_filter=subtitle,
-                audio_filter=audio,
-                query=q,
-                page=page,
-                title_name_preference=get_preferred_title_language(request),
-                external_subtitle_states=external_subtitle_states,
-                detections=detections,
-                language_profiles=language_profiles,
-                audio_tracks=media_audio_tracks,
-                internal_subtitles=media_internal_subtitles,
+            (
+                videos, detections, compatibility_candidate_index,
+                _external_subtitle_states, results,
+            ) = media_check_page_data(
+                request, subtitle, audio, q, page,
             )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -2320,7 +2480,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     for item in unresolved_subtitles
                 ),
             }
-        return templates.TemplateResponse(request, "media_check.html", {
+        response = templates.TemplateResponse(request, "media_check.html", {
             "results": results,
             "subtitle_filter_labels": SUBTITLE_FILTER_LABELS,
             "audio_filter_labels": AUDIO_FILTER_LABELS,
@@ -2332,10 +2492,152 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 results.query, results.page,
             ),
             "message": message,
+            "edit_error": edit_error,
+            "submitted": submitted or {},
+            "submitted_video_ids": selected_video_ids,
+            "bulk_scope": {
+                "subtitle": results.subtitle_filter,
+                "audio": results.audio_filter,
+                "q": results.query,
+                "page": results.page,
+            },
             "unresolved_subtitle_rows": unresolved_rows,
             "unresolved_subtitle_counts": unresolved_subtitle_counts,
             "compatibility_presentations": compatibility_presentations,
         })
+        response.status_code = status_code
+        return response
+
+    @app.get("/media-check", response_class=HTMLResponse)
+    def media_check(
+        request: Request,
+        subtitle: str = "unresolved",
+        audio: str = "all",
+        q: str = "",
+        page: int = 1,
+        message: str | None = None,
+    ):
+        return media_check_context(
+            request, subtitle, audio, q, page, message,
+        )
+
+    def media_title_context(
+        request: Request, catalog_title_id: int, *,
+        message: str | None = None,
+        error: MediaEditValidationError | None = None,
+        submitted: dict[str, str] | None = None,
+        selected_video_ids: tuple[int, ...] = (),
+        focus_video_id: int | None = None,
+        status_code: int = 200,
+    ):
+        with sessions() as session:
+            title = _load_catalog_title(session, catalog_title_id)
+        if title is None:
+            raise HTTPException(status_code=404, detail="Část nebyla nalezena.")
+        videos = _load_videos(sessions, catalog_title_id=catalog_title_id)
+        if focus_video_id is not None and focus_video_id not in {
+            video.id for video in videos
+        }:
+            raise HTTPException(
+                status_code=404,
+                detail="Požadované video do této části nepatří.",
+            )
+        detections = {
+            video: detect_episode_number(video.filename) for video in videos
+        }
+        candidate_index = build_compatibility_candidate_index(
+            videos, detections=detections,
+        )
+        states = build_video_external_subtitle_states(
+            videos, candidate_index=candidate_index,
+        )
+        audio_tracks = {
+            video.id: tuple(
+                MediaAudioTrack(
+                    id=track.id,
+                    stream_index=track.stream_index,
+                    codec=track.codec,
+                    language=track.language or "unknown",
+                    manual_language=track.manual_language,
+                )
+                for track in sorted(
+                    video.audio_tracks, key=lambda item: item.stream_index
+                )
+            )
+            for video in videos
+        }
+        internal_subtitles = {
+            video.id: tuple(
+                MediaInternalSubtitle(
+                    id=track.id,
+                    stream_index=track.stream_index,
+                    codec=track.codec,
+                    language=track.language or "unknown",
+                    normalized_language=track.normalized_language or "unknown",
+                    manual_language=track.manual_language,
+                    title=track.title,
+                )
+                for track in sorted(
+                    video.internal_subtitles,
+                    key=lambda item: item.stream_index,
+                )
+            )
+            for video in videos
+        }
+        results = build_media_check_results(
+            videos,
+            subtitle_filter="all",
+            audio_filter="all",
+            page_size=max(1, len(videos)),
+            title_name_preference=get_preferred_title_language(request),
+            external_subtitle_states=states,
+            detections=detections,
+            audio_tracks=audio_tracks,
+            internal_subtitles=internal_subtitles,
+        )
+        compatibility_presentations = build_compatibility_presentations(
+            videos,
+            presentation_subtitles=(
+                subtitle
+                for row in results.rows
+                for subtitle in (
+                    row.external_subtitle_state.compatible_subtitles
+                    + row.external_subtitle_state.incompatible_subtitles
+                    + row.external_subtitle_state.unknown_candidate_subtitles
+                )
+            ),
+            candidate_index=candidate_index,
+        )
+        response = templates.TemplateResponse(request, "media_edit.html", {
+            "catalog_title": title,
+            "results": results,
+            "subtitle_status_labels": SUBTITLE_STATUS_LABELS,
+            "audio_status_labels": AUDIO_STATUS_LABELS,
+            "compatibility_presentations": compatibility_presentations,
+            "return_to": f"/media-check/titles/{catalog_title_id}",
+            "message": message,
+            "edit_error": error,
+            "submitted": submitted or {},
+            "submitted_video_ids": selected_video_ids,
+            "focus_video_id": focus_video_id,
+            "manual_language_values": {
+                value for value, _label in MANUAL_LANGUAGE_CHOICES
+            },
+        })
+        response.status_code = status_code
+        return response
+
+    @app.get(
+        "/media-check/titles/{catalog_title_id}", response_class=HTMLResponse,
+    )
+    def media_title_edit(
+        request: Request, catalog_title_id: int, message: str | None = None,
+        focus_video: int | None = None,
+    ):
+        return media_title_context(
+            request, catalog_title_id, message=message,
+            focus_video_id=focus_video,
+        )
 
     @app.post("/media-check/external-subtitles/{subtitle_id}/assign")
     async def assign_unresolved_external_subtitle(request: Request, subtitle_id: int):
@@ -2530,11 +2832,262 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return local_redirect_response(return_to)
 
+    async def media_edit_request(
+        request: Request, video_id: int | None = None,
+        catalog_title_id: int | None = None,
+    ):
+        form = await request.form()
+        bulk = video_id is None
+        submitted = {
+            key: str(value)
+            for key, value in form.multi_items()
+            if key != "video_ids"
+        }
+        if video_id is not None:
+            submitted["error_video_id"] = str(video_id)
+
+        scope_subtitle = str(form.get("scope_subtitle") or "unresolved")
+        scope_audio = str(form.get("scope_audio") or "all")
+        scope_query = str(form.get("scope_q") or "")
+        try:
+            scope_page = int(str(form.get("scope_page") or "1"))
+        except ValueError:
+            scope_page = 1
+
+        def rejected_response(
+            error: MediaEditValidationError, *, status_code: int = 400,
+            selected_ids: tuple[int, ...] = (),
+        ):
+            if catalog_title_id is None:
+                return media_check_context(
+                    request,
+                    subtitle=scope_subtitle,
+                    audio=scope_audio,
+                    q=scope_query,
+                    page=scope_page,
+                    edit_error=error,
+                    submitted=submitted,
+                    selected_video_ids=selected_ids,
+                    status_code=status_code,
+                )
+            return media_title_context(
+                request, catalog_title_id,
+                error=error,
+                submitted=submitted,
+                selected_video_ids=selected_ids,
+                status_code=status_code,
+            )
+
+        allowed = (
+            ({
+                "video_ids", "bulk_audio", "bulk_internal_subtitle",
+                "hardsub", "availability", "return_to", "confirm_changes",
+            } | (
+                {
+                    "scope_subtitle", "scope_audio", "scope_q", "scope_page",
+                }
+                if catalog_title_id is None else set()
+            ))
+            if bulk else {
+                "hardsub", "availability", "return_to", "confirm_changes",
+            }
+        )
+        keys = [key for key, _ in form.multi_items()]
+        if any(
+            key not in allowed
+            and not (
+                not bulk
+                and (
+                    key.startswith("audio_")
+                    or key.startswith("internal_subtitle_")
+                )
+            )
+            for key in keys
+        ):
+            unsupported = tuple(sorted({
+                key for key in keys
+                if key not in allowed
+                and not (
+                    not bulk and (
+                        key.startswith("audio_")
+                        or key.startswith("internal_subtitle_")
+                    )
+                )
+            }))
+            return rejected_response(MediaEditValidationError(
+                "Změny médií nebyly přijaty.",
+                "Formulář obsahuje nepodporované pole.",
+                tuple(f"Pole {key}" for key in unsupported),
+                ("Obnovte stránku a odešlete pouze zobrazené hodnoty.",),
+            ))
+        duplicated = tuple(sorted(
+            key for key in set(keys) - {"video_ids"}
+            if keys.count(key) > 1
+        ))
+        if duplicated:
+            return rejected_response(MediaEditValidationError(
+                "Změny médií nebyly přijaty.",
+                "Stejné pole bylo odesláno vícekrát, takže nelze bezpečně "
+                "určit požadovanou hodnotu.",
+                tuple(f"Pole {key}" for key in duplicated),
+                ("Obnovte stránku a vyplňte formulář znovu.",),
+            ))
+        try:
+            selected_ids = (
+                tuple(int(value) for value in form.getlist("video_ids"))
+                if bulk else (video_id,)
+            )
+            audio_keys = [key for key in keys if key.startswith("audio_")]
+            internal_keys = [
+                key for key in keys if key.startswith("internal_subtitle_")
+            ]
+            audio_by_track = None if bulk or not audio_keys else {
+                int(key.removeprefix("audio_")): str(form[key])
+                for key in audio_keys
+            }
+            internal_by_track = None if bulk or not internal_keys else {
+                int(key.removeprefix("internal_subtitle_")): str(form[key])
+                for key in internal_keys
+            }
+        except (TypeError, ValueError) as exc:
+            return rejected_response(MediaEditValidationError(
+                "Změny médií nebyly přijaty.",
+                "Výběr videa nebo stopy obsahuje neplatný identifikátor.",
+                tuple(str(value) for value in form.getlist("video_ids")),
+                ("Obnovte stránku a vyberte položky znovu.",),
+            ))
+        return_to = safe_local_redirect_target(
+            form.get("return_to")
+            or (
+                f"/media-check/titles/{catalog_title_id}"
+                if catalog_title_id is not None else "/media-check"
+            )
+        )
+        if catalog_title_id is None:
+            try:
+                *_unused, scoped_results = media_check_page_data(
+                    request, scope_subtitle, scope_audio,
+                    scope_query, scope_page,
+                )
+            except ValueError as exc:
+                scope_subtitle = "unresolved"
+                scope_audio = "all"
+                scope_query = ""
+                scope_page = 1
+                return rejected_response(MediaEditValidationError(
+                    "Výběr videí byl odmítnut.",
+                    f"Zobrazený Media Check scope už není platný: {exc}",
+                    next_steps=(
+                        "Vraťte se na Media Check, znovu nastavte filtry a "
+                        "vyberte videa na aktuální stránce.",
+                    ),
+                ), selected_ids=selected_ids)
+            visible_ids = {
+                row.video.id for row in scoped_results.rows
+                if row.video.id is not None
+            }
+            outside_page = tuple(sorted(set(selected_ids) - visible_ids))
+            if scoped_results.page != scope_page or outside_page:
+                return rejected_response(MediaEditValidationError(
+                    "Výběr videí byl odmítnut.",
+                    "Některé odeslané video není na právě zobrazené stránce "
+                    "Media Checku.",
+                    tuple(f"Video ID {value}" for value in outside_page),
+                    (
+                        "Zaškrtněte pouze videa viditelná na aktuální stránce,",
+                        "nebo obnovte stránku a vytvořte nový výběr.",
+                    ),
+                ), selected_ids=selected_ids)
+        with sessions() as session:
+            try:
+                videos = load_media_videos(session, selected_ids)
+                if catalog_title_id is not None and any(
+                    video.catalog_title_id != catalog_title_id for video in videos
+                ):
+                    raise MediaEditValidationError(
+                        "Změny médií nebyly uloženy.",
+                        "Alespoň jedno vybrané video už nepatří do této části.",
+                        tuple(
+                            video.filename for video in videos
+                            if video.catalog_title_id != catalog_title_id
+                        ),
+                        ("Obnovte stránku a zkontrolujte aktuální membership.",),
+                    )
+                changes = apply_media_edits(
+                    videos, audio_by_track=audio_by_track,
+                    internal_subtitle_by_track=internal_by_track,
+                    bulk_audio=str(form.get("bulk_audio") or ""),
+                    bulk_internal_subtitle=str(
+                        form.get("bulk_internal_subtitle") or ""
+                    ),
+                    hardsub=str(form.get("hardsub") or ""),
+                    availability=str(form.get("availability") or ""),
+                )
+                if form.get("confirm_changes") == "yes":
+                    session.commit()
+                else:
+                    session.rollback()
+                    return templates.TemplateResponse(request, "edit_confirmation.html", {
+                        "heading": "Potvrdit změny Media Check",
+                        "description": (
+                            f"Vybráno {len(videos)} videí. Ruční override "
+                            "jazyků nemění scannerem zjištěnou evidenci."
+                        ),
+                        "changes": changes,
+                        "action": request.url.path,
+                        "fields": list(form.multi_items()),
+                        "return_to": return_to,
+                    })
+            except MediaEditValidationError as exc:
+                session.rollback()
+                return rejected_response(
+                    exc, selected_ids=selected_ids,
+                )
+            except IntegrityError as exc:
+                session.rollback()
+                error = MediaEditValidationError(
+                    "Změny médií nebyly uloženy.",
+                    "Data se od načtení stránky změnila a současný formulář "
+                    "už není bezpečný pro zápis.",
+                    next_steps=(
+                        "Obnovte stránku a zkontrolujte aktuální stopy před "
+                        "dalším uložením.",
+                    ),
+                )
+                return rejected_response(
+                    error, status_code=409, selected_ids=selected_ids,
+                )
+        return local_redirect_response(return_to)
+
+    @app.post("/media-check/videos/{video_id}/edit")
+    async def media_check_video_edit(request: Request, video_id: int):
+        return await media_edit_request(request, video_id)
+
+    @app.post("/media-check/bulk-edit")
+    async def media_check_bulk_edit(request: Request):
+        return await media_edit_request(request)
+
+    @app.post(
+        "/media-check/titles/{catalog_title_id}/videos/{video_id}/edit"
+    )
+    async def media_title_video_edit(
+        request: Request, catalog_title_id: int, video_id: int,
+    ):
+        return await media_edit_request(
+            request, video_id, catalog_title_id,
+        )
+
+    @app.post("/media-check/titles/{catalog_title_id}/bulk-edit")
+    async def media_title_bulk_edit(request: Request, catalog_title_id: int):
+        return await media_edit_request(
+            request, catalog_title_id=catalog_title_id,
+        )
+
     @app.post("/media-check/czsk-availability")
     async def update_media_check_czsk_availability(request: Request):
         form = await request.form()
         action = str(form.get("action") or "").strip().casefold()
-        if action not in {"unavailable", "clear"}:
+        if action not in {"unavailable", "seeking", "clear"}:
             raise HTTPException(status_code=400, detail="Neplatná Media Check akce.")
         try:
             selected_ids = tuple(dict.fromkeys(
@@ -2577,7 +3130,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                 for video in videos:
                     set_czsk_availability_manual(
-                        video, "unavailable" if action == "unavailable" else None,
+                        video, None if action == "clear" else action,
                     )
                 session.commit()
             except ValueError as exc:
@@ -2592,10 +3145,316 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         return hierarchy_review_context(request, collection_id, message=message)
 
+    @app.get(
+        "/hierarchy-review/{collection_id}/titles/{catalog_title_id}",
+        response_class=HTMLResponse,
+    )
+    def hierarchy_title_edit(
+        request: Request, collection_id: int, catalog_title_id: int,
+        message: str | None = None,
+    ):
+        return hierarchy_review_context(
+            request, collection_id, message=message,
+            title_scoped_id=catalog_title_id,
+        )
+
+    @app.post("/hierarchy-review/{collection_id}/titles/{catalog_title_id}/edit")
+    async def save_hierarchy_title_edit(
+        request: Request, collection_id: int, catalog_title_id: int,
+    ):
+        form = await request.form()
+        allowed = {
+            "part_type_manual", "season_number_manual", "season_label_manual",
+            "part_number_manual", "sort_order_manual", "hierarchy_verified",
+            "numbering_mode", "episode_start_offset", "return_to",
+            "confirm_changes",
+        }
+        keys = [key for key, _ in form.multi_items()]
+        if len(keys) != len(set(keys)) or any(key not in allowed for key in keys):
+            return hierarchy_edit_error_response(
+                request, collection_id, catalog_title_id, form,
+                (
+                    "Změny struktury nebyly přijaty, protože formulář obsahuje "
+                    "nepodporované nebo duplicitní pole. Obnovte stránku a "
+                    "zkuste úpravu znovu."
+                ),
+                scope="title",
+            )
+        required = {
+            "part_type_manual", "season_number_manual", "season_label_manual",
+            "part_number_manual", "sort_order_manual", "numbering_mode",
+            "episode_start_offset",
+        }
+        if not required.issubset(keys):
+            return hierarchy_edit_error_response(
+                request, collection_id, catalog_title_id, form,
+                (
+                    "Změny struktury nebyly přijaty, protože formulář není "
+                    "úplný. Obnovte stránku a zkontrolujte všechna pole."
+                ),
+                scope="title",
+            )
+        return_to = safe_local_redirect_target(
+            form.get("return_to")
+            or f"/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+        )
+        with sessions() as session:
+            title = session.get(CatalogTitle, catalog_title_id)
+            if title is None or title.catalog_collection_id != collection_id:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Změny nebyly uloženy. Část už nepatří do této "
+                        "kolekce. Obnovte Hierarchy Review."
+                    ),
+                )
+            try:
+                change_group = apply_title_hierarchy_form_edit(
+                    session, collection_id, catalog_title_id,
+                    part_type_manual=str(form["part_type_manual"]),
+                    season_number_manual=str(form["season_number_manual"]),
+                    season_label_manual=str(form["season_label_manual"]),
+                    part_number_manual=str(form["part_number_manual"]),
+                    sort_order_manual=str(form["sort_order_manual"]),
+                    hierarchy_verified=form.get("hierarchy_verified") == "true",
+                    numbering_mode=str(form["numbering_mode"]),
+                    episode_start_offset=str(form["episode_start_offset"]),
+                )
+                if form.get("confirm_changes") == "yes":
+                    session.commit()
+                else:
+                    session.rollback()
+                    return templates.TemplateResponse(
+                        request, "edit_confirmation.html", {
+                            "heading": "Potvrdit strukturu a číslování části",
+                            "description": (
+                                "Změny jsou omezené na hierarchy authority "
+                                "této části a uloží se v jedné transakci."
+                            ),
+                            "changes": change_group.changes,
+                            "action": request.url.path,
+                            "fields": list(form.multi_items()),
+                            "return_to": return_to,
+                        },
+                    )
+            except (MissingEditTarget, ValueError) as exc:
+                session.rollback()
+                return hierarchy_edit_error_response(
+                    request, collection_id, catalog_title_id, form,
+                    (
+                        f"Změny struktury nebyly uloženy: {exc} "
+                        "Opravte uvedenou hodnotu nebo obnovte stránku, pokud "
+                        "se část mezitím změnila."
+                    ),
+                    scope="title",
+                )
+            except IntegrityError as exc:
+                session.rollback()
+                return hierarchy_edit_error_response(
+                    request, collection_id, catalog_title_id, form,
+                    (
+                        "Změny struktury nebyly uloženy kvůli konfliktu "
+                        "aktuálního stavu. Obnovte stránku a zkontrolujte "
+                        "strukturu před dalším uložením."
+                    ),
+                    scope="title", status_code=409,
+                )
+        return local_redirect_response(return_to)
+
+    @app.post(
+        "/hierarchy-review/{collection_id}/titles/{catalog_title_id}/videos/{video_id}/edit"
+    )
+    async def save_hierarchy_video_edit(
+        request: Request, collection_id: int, catalog_title_id: int, video_id: int,
+    ):
+        form = await request.form()
+        allowed = {
+            "content_type", "manual_episode_number", "media_part_number",
+            "return_to", "confirm_changes",
+        }
+        keys = [key for key, _ in form.multi_items()]
+        required = {"content_type", "manual_episode_number", "media_part_number"}
+        if (
+            len(keys) != len(set(keys))
+            or any(key not in allowed for key in keys)
+            or not required.issubset(keys)
+        ):
+            return hierarchy_edit_error_response(
+                request, collection_id, catalog_title_id, form,
+                (
+                    "Hierarchy změny videa nebyly přijaty, protože formulář "
+                    "obsahuje neplatná pole. Obnovte stránku a zkuste to znovu."
+                ),
+                scope=f"video-{video_id}",
+            )
+        return_to = safe_local_redirect_target(
+            form.get("return_to")
+            or (
+                f"/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+                f"#hierarchy-video-{video_id}"
+            )
+        )
+        with sessions() as session:
+            try:
+                changes = apply_title_video_hierarchy_edit(
+                    session, collection_id, catalog_title_id, video_id,
+                    manual_episode_number=str(form["manual_episode_number"]),
+                    media_part_number=str(form["media_part_number"]),
+                    content_type=str(form["content_type"]),
+                )
+                video = session.get(Video, video_id)
+                if form.get("confirm_changes") == "yes":
+                    session.commit()
+                else:
+                    session.rollback()
+                    return templates.TemplateResponse(
+                        request, "edit_confirmation.html", {
+                            "heading": "Potvrdit hierarchy změny videa",
+                            "description": (
+                                f"Video: {video.filename}. Číslování, typ obsahu "
+                                "a Media Part se uloží v jedné transakci."
+                            ),
+                            "changes": changes,
+                            "action": request.url.path,
+                            "fields": list(form.multi_items()),
+                            "return_to": return_to,
+                        },
+                    )
+            except MissingEditTarget as exc:
+                session.rollback()
+                return hierarchy_edit_error_response(
+                    request, collection_id, catalog_title_id, form,
+                    (
+                        f"Hierarchy změny videa nebyly uloženy: {exc} "
+                        "Obnovte stránku a ověřte aktuální membership."
+                    ),
+                    scope=f"video-{video_id}", status_code=409,
+                )
+            except ValueError as exc:
+                session.rollback()
+                return hierarchy_edit_error_response(
+                    request, collection_id, catalog_title_id, form,
+                    (
+                        f"Hierarchy změny videa nebyly uloženy: {exc} "
+                        "Opravte označenou hodnotu a odešlete formulář znovu."
+                    ),
+                    scope=f"video-{video_id}",
+                )
+            except IntegrityError as exc:
+                session.rollback()
+                return hierarchy_edit_error_response(
+                    request, collection_id, catalog_title_id, form,
+                    (
+                        "Hierarchy změny videa nebyly uloženy kvůli databázovému "
+                        "konfliktu. Obnovte stránku a zkontrolujte aktuální stav."
+                    ),
+                    scope=f"video-{video_id}", status_code=409,
+                )
+        return local_redirect_response(return_to)
+
     def variant_workflow_error(request: Request, collection_id: int, error: object):
+        if "application/json" in request.headers.get("accept", ""):
+            return JSONResponse({"error": str(error)}, status_code=400)
         response = hierarchy_review_context(request, collection_id, error=str(error))
         response.status_code = 400
         return response
+
+    @app.post("/hierarchy-review/{collection_id}/save-all")
+    async def hierarchy_review_save_all(request: Request, collection_id: int):
+        form = await request.form()
+        keys = [key for key, _ in form.multi_items()]
+        allowed = {"payload_json", "return_to", "confirm_changes"}
+        return_to = safe_local_redirect_target(
+            form.get("return_to") or f"/hierarchy-review/{collection_id}"
+        )
+        fields = list(form.multi_items())
+        if (
+            len(keys) != len(set(keys))
+            or any(key not in allowed for key in keys)
+            or "payload_json" not in keys
+        ):
+            return templates.TemplateResponse(
+                request, "edit_confirmation.html", {
+                    "heading": "Změny nebyly uloženy",
+                    "description": "Žádná část dávky nebyla uložena.",
+                    "error": (
+                        "Hromadné uložení obsahuje nepodporovaná nebo "
+                        "duplicitní pole. Obnovte stránku a připravte změny znovu."
+                    ),
+                    "changes": (), "change_groups": (),
+                    "action": request.url.path, "fields": fields,
+                    "return_to": return_to,
+                }, status_code=400,
+            )
+        try:
+            payload = json.loads(str(form["payload_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return templates.TemplateResponse(
+                request, "edit_confirmation.html", {
+                    "heading": "Změny nebyly uloženy",
+                    "description": "Žádná část dávky nebyla uložena.",
+                    "error": (
+                        "Hromadné uložení nelze přečíst. Vraťte se na "
+                        "Hierarchy Edit, obnovte stránku a připravte změny znovu."
+                    ),
+                    "changes": (), "change_groups": (),
+                    "action": request.url.path, "fields": fields,
+                    "return_to": return_to,
+                }, status_code=400,
+            )
+        with sessions() as session:
+            if session.get(CatalogCollection, collection_id) is None:
+                raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena.")
+            try:
+                result = apply_hierarchy_page_edits(session, collection_id, payload)
+                if form.get("confirm_changes") == "yes":
+                    session.commit()
+                else:
+                    session.rollback()
+                    return templates.TemplateResponse(
+                        request, "edit_confirmation.html", {
+                            "heading": "Potvrdit všechny kompatibilní změny",
+                            "description": (
+                                f"{result.saved_sections} "
+                                f"{'neuložená změna' if result.saved_sections == 1 else 'neuložené změny' if result.saved_sections in {2, 3, 4} else 'neuložených změn'} "
+                                "se po potvrzení uloží v jedné transakci."
+                            ),
+                            "changes": (),
+                            "change_groups": result.change_groups,
+                            "action": request.url.path,
+                            "fields": fields,
+                            "return_to": return_to,
+                            "confirm_label": "Potvrdit a uložit všechny změny",
+                        },
+                    )
+            except ValueError as exc:
+                session.rollback()
+                return templates.TemplateResponse(
+                    request, "edit_confirmation.html", {
+                        "heading": "Změny nebyly uloženy",
+                        "description": "Žádná část dávky nebyla uložena.",
+                        "error": str(exc), "changes": (), "change_groups": (),
+                        "action": request.url.path, "fields": fields,
+                        "return_to": return_to,
+                    }, status_code=400,
+                )
+            except IntegrityError as exc:
+                session.rollback()
+                return templates.TemplateResponse(
+                    request, "edit_confirmation.html", {
+                        "heading": "Změny nebyly uloženy",
+                        "description": "Žádná část dávky nebyla uložena.",
+                        "error": (
+                            "Uložení narazilo na konflikt s aktuálním stavem "
+                            "hierarchie. Obnovte stránku, zkontrolujte nové "
+                            "hodnoty a připravte dávku znovu."
+                        ),
+                        "changes": (), "change_groups": (),
+                        "action": request.url.path, "fields": fields,
+                        "return_to": return_to,
+                    }, status_code=409,
+                )
+        return local_redirect_response(return_to)
 
     @app.post("/hierarchy-review/{collection_id}/variants/groups")
     async def hierarchy_review_variant_groups(request: Request, collection_id: int):
@@ -3104,6 +3963,133 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/metadata-review", response_class=HTMLResponse)
     def metadata_review(request: Request, status: str = "without"):
         return metadata_review_context(request, status)
+
+    @app.get("/metadata-review/{catalog_title_id}", response_class=HTMLResponse)
+    def metadata_title_edit(
+        request: Request, catalog_title_id: int, filter_name: str = "all",
+        q: str = "", sort: str | None = None, direction: str | None = None,
+        video_sort: str | None = None, video_direction: str | None = None,
+        message: str | None = None, metadata_error: str | None = None,
+        metadata_warning: str | None = None, show_rejected: bool = False,
+        pending_external_id: str | None = None,
+        require_conflict_confirmation: bool = False,
+        require_locked_confirmation: bool = False,
+        show_metadata_candidates: bool = False,
+        metadata_query: str | None = None,
+    ):
+        return series_detail(
+            request, filter_name, catalog_title_id, None, q, sort, direction,
+            video_sort, video_direction, message, metadata_error,
+            metadata_warning, show_rejected, pending_external_id,
+            require_conflict_confirmation, require_locked_confirmation,
+            None, None, None, show_metadata_candidates, metadata_query, None,
+        )
+
+    @app.post("/metadata-review/{catalog_title_id}/edit")
+    async def save_metadata_title_edit(request: Request, catalog_title_id: int):
+        form = await request.form()
+        submitted = {
+            key: str(value)
+            for key, value in form.multi_items()
+            if key not in {"return_to", "confirm_changes"}
+        }
+
+        def error_response(message: str, status_code: int = 400):
+            response = series_detail(
+                request, "all", catalog_title_id,
+                metadata_error=message,
+                edit_submitted=submitted,
+            )
+            response.status_code = status_code
+            return response
+
+        allowed = {
+            "manual_display_title", "requirement", "return_to",
+            "confirm_changes",
+        }
+        keys = [key for key, _ in form.multi_items()]
+        if (
+            len(keys) != len(set(keys))
+            or any(key not in allowed for key in keys)
+            or not {"manual_display_title", "requirement"}.issubset(keys)
+        ):
+            return error_response(
+                (
+                    "Metadata nastavení nebylo přijato, protože formulář "
+                    "obsahuje neplatná pole. Obnovte stránku a zkuste to znovu."
+                ),
+            )
+        return_to = safe_local_redirect_target(
+            form.get("return_to")
+            or f"/metadata-review/{catalog_title_id}#metadata"
+        )
+        with sessions() as session:
+            title = session.get(CatalogTitle, catalog_title_id)
+            if title is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Metadata nastavení nebylo uloženo, protože část už "
+                        "neexistuje. Vraťte se do Metadata Review."
+                    ),
+                )
+            display = str(form["manual_display_title"]).strip()
+            requirement = str(form["requirement"])
+            changes = []
+            try:
+                if display != (title.manual_display_title or ""):
+                    changes.append(
+                        "Zobrazovaný název: "
+                        f"{title.manual_display_title or 'automaticky'} → "
+                        f"{display or 'automaticky'}"
+                    )
+                    set_manual_display_title(session, title, display)
+                if requirement != (title.metadata_requirement_manual or ""):
+                    if requirement not in dict(METADATA_REQUIREMENT_CHOICES):
+                        raise ValueError(
+                            f"Požadavek „{requirement}“ není podporovaný."
+                        )
+                    changes.append("Požadavek na metadata: ruční nastavení se změní")
+                    set_metadata_requirement(title, requirement)
+                if not changes:
+                    raise ValueError(
+                        "Formulář neobsahuje žádnou změněnou metadata hodnotu."
+                    )
+                if form.get("confirm_changes") == "yes":
+                    session.commit()
+                else:
+                    session.rollback()
+                    return templates.TemplateResponse(
+                        request, "edit_confirmation.html", {
+                            "heading": "Potvrdit metadata nastavení části",
+                            "description": (
+                                "Zobrazovaný název a metadata requirement se "
+                                "uloží společně v jedné transakci."
+                            ),
+                            "changes": changes,
+                            "action": request.url.path,
+                            "fields": list(form.multi_items()),
+                            "return_to": return_to,
+                        },
+                    )
+            except ValueError as exc:
+                session.rollback()
+                return error_response(
+                    (
+                        f"Metadata nastavení nebylo uloženo: {exc} "
+                        "Opravte uvedenou hodnotu a formulář odešlete znovu."
+                    ),
+                )
+            except IntegrityError as exc:
+                session.rollback()
+                return error_response(
+                    (
+                        "Metadata nastavení nebylo uloženo, protože se část "
+                        "mezitím změnila. Obnovte stránku a zkontrolujte nový stav."
+                    ),
+                    status_code=409,
+                )
+        return local_redirect_response(return_to)
 
     @app.post("/metadata/batch-search", response_class=HTMLResponse)
     def batch_metadata_search(request: Request, limit: int = Form(10)):
@@ -3772,27 +4758,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return_to: str = Form("collection"),
     ):
         with sessions() as session:
-            title = session.get(CatalogTitle, catalog_title_id)
-            if title is None or title.catalog_collection_id != collection_id:
-                raise HTTPException(status_code=404, detail="Část kolekce nebyla nalezena")
             try:
-                number = int(season_number_manual) if season_number_manual.strip() else None
-                part_number = (
-                    int(part_number_manual) if part_number_manual.strip() else None
-                )
-                order = int(sort_order_manual) if sort_order_manual.strip() else None
-                set_manual_title_hierarchy(
-                    title, season_number=number, season_label=season_label_manual,
-                    part_type=part_type_manual, sort_order=order,
-                    hierarchy_verified=hierarchy_verified, part_number=part_number,
+                apply_title_hierarchy_edit(
+                    session, collection_id, catalog_title_id,
+                    season_number_manual=season_number_manual,
+                    season_label_manual=season_label_manual,
+                    part_number_manual=part_number_manual,
+                    part_type_manual=part_type_manual,
+                    sort_order_manual=sort_order_manual,
+                    hierarchy_verified=hierarchy_verified,
                 )
                 session.commit()
+            except MissingEditTarget as exc:
+                session.rollback()
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         if return_to == "hierarchy_review":
             return local_redirect_response(
                 f"/hierarchy-review/{collection_id}#title-{catalog_title_id}",
+            )
+        if return_to == "hierarchy_title":
+            return local_redirect_response(
+                f"/hierarchy-review/{collection_id}/titles/{catalog_title_id}?"
+                f"{urlencode({'message': 'Struktura části byla uložena.'})}"
+                f"#title-{catalog_title_id}",
             )
         params = {"filter_name": filter_name, "q": q, "sort": sort, "direction": direction}
         return local_redirect_response(
@@ -4273,20 +5264,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if title is None:
                 raise HTTPException(status_code=404, detail="Titul nebyl nalezen")
             try:
-                offset = int(episode_start_offset) if episode_start_offset.strip() else None
-                with strict_hierarchy_write_guard(
-                    session,
-                    [title.collection] if title.collection is not None else [],
-                ):
-                    set_title_numbering(
-                        title,
-                        "unknown" if numbering_mode == "auto" else numbering_mode,
-                        offset,
-                    )
-                    if title.collection is not None:
-                        refresh_collection_state(title.collection)
-                    else:
-                        recalculate_title_numbering(title, list(title.videos))
+                apply_title_numbering_edit(
+                    session, title, numbering_mode, episode_start_offset,
+                )
                 session.commit()
             except ValueError as exc:
                 session.rollback()
@@ -4307,21 +5287,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         detail_direction: str = Form(""), return_to: str = Form(""),
     ):
         with sessions() as session:
-            video = session.get(Video, video_id)
-            if video is None or video.catalog_title_id is None:
-                raise HTTPException(status_code=404, detail="Video nebylo nalezeno")
             try:
-                title = video.catalog_title
-                with strict_hierarchy_write_guard(
-                    session,
-                    [title.collection] if title.collection is not None else [],
-                ):
-                    set_video_episode_number_from_input(video, manual_episode_number)
-                    if title.collection is not None:
-                        refresh_collection_state(title.collection)
-                    else:
-                        recalculate_title_numbering(title, list(title.videos))
+                catalog_title_id = apply_episode_position_edit(
+                    session, video_id, manual_episode_number,
+                )
                 session.commit()
+            except MissingEditTarget as exc:
+                session.rollback()
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
             except ValueError as exc:
                 session.rollback()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4329,7 +5302,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return local_redirect_response(return_to)
         return local_redirect_response(
             metadata_return_url(
-                filter_name, video.catalog_title_id, q, sort, direction,
+                filter_name, catalog_title_id, q, sort, direction,
                 detail_sort, detail_direction,
             ).replace("#metadata", f"#video-{video_id}"),
         )

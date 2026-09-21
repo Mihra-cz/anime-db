@@ -43,11 +43,11 @@
   {% if kind == 'available' %}
     <span class="status-badge severity-success">{{ compatibility_status_label(external_subtitle_compatibility_status(subtitle, video)) }}</span>
     {% if external_subtitle_is_shared(subtitle) %}<small>Sdílený fyzický subtitle asset.</small>{% endif %}
-    <form class="inline-form" method="post" action="/videos/{{ video.id }}/external-subtitles/{{ subtitle.id }}/language">
+    <form class="inline-form external-subtitle-asset-editor" data-edit-form method="post" action="/videos/{{ video.id }}/external-subtitles/{{ subtitle.id }}/language">
       <select name="manual_language" aria-label="Ruční jazyk externích titulků {{ subtitle.relative_path }}"><option value="" {% if subtitle.manual_language is none %}selected{% endif %}>automaticky</option>{% for language, label in manual_language_choices %}<option value="{{ language }}" {% if subtitle.manual_language == language %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
       <input type="hidden" name="filter_name" value="all">
       <input type="hidden" name="return_to" value="{{ return_to }}#video-{{ video.id }}">
-      <button type="submit">Uložit titulky</button>
+      <button type="submit">Uložit jazyk titulku</button>
     </form>
   {% elif kind == 'incompatible' %}
     <span class="status-badge severity-warning">Ručně potvrzeno nekompatibilní</span>
@@ -57,6 +57,6 @@
     <small>Kompatibilita s tímto videem dosud nebyla posouzena.</small>
   {% endif %}
   {{ compatibility_control(subtitle, video, presentation, return_to) }}
-  {% if can_reopen_manual_subtitle_link(subtitle) %}<form class="inline-form" method="post" action="/media-check/external-subtitles/{{ subtitle.id }}/reopen-link"><input type="hidden" name="return_to" value="/media-check"><button class="button-secondary" type="submit">Vrátit přiřazení k řešení</button></form>{% endif %}
+  {% if can_reopen_manual_subtitle_link(subtitle) %}<form class="inline-form" method="post" action="/media-check/external-subtitles/{{ subtitle.id }}/reopen-link"><input type="hidden" name="return_to" value="{{ return_to }}"><button class="button-secondary" type="submit">Vrátit přiřazení k řešení</button></form>{% endif %}
 </article>
 {%- endmacro %}

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_external_subtitle_compatibility.html" import asset_card %}
+{% from "_media_bulk_editor.html" import bulk_editor, edit_error_summary with context %}
 {% block main_class %}content-shell content-wide{% endblock %}
 {% block title %}Kontrola médií · AnimeDB{% endblock %}
 {% block content %}
@@ -7,6 +8,7 @@
 <h1>Kontrola médií</h1>
 <p>Pracovní fronta audia, interních a externích titulků, hardsubu a ručních jazykových rozhodnutí. Faktický obsah videosouboru zůstává oddělený od rozhodnutí, že CZ/SK titulky nyní nejsou dostupné.</p>
 {% if message %}<div class="notice success">{{ message }}</div>{% endif %}
+{{ edit_error_summary(edit_error) }}
 
 <section class="panel unresolved-subtitle-list" aria-labelledby="unresolved-subtitle-heading">
   <h2 id="unresolved-subtitle-heading">Nepřiřazené externí titulky</h2>
@@ -53,57 +55,25 @@
 
 <div class="media-check-toolbar">
   <p>Nalezeno <strong>{{ results.total_filtered }}</strong> videí · stránka {{ results.page }}/{{ results.total_pages }}</p>
-  <form id="media-check-bulk-form" class="inline-form" method="post" action="/media-check/czsk-availability">
-    <input type="hidden" name="return_to" value="{{ return_to }}">
-    <span id="media-check-selected-count" aria-live="polite">Vybráno 0 videí</span>
-    <button type="submit" name="action" value="unavailable">Označit CZ/SK jako nedostupné</button>
-    <button class="button-secondary" type="submit" name="action" value="clear">Zrušit označení nedostupnosti</button>
-  </form>
 </div>
-<script>
-document.addEventListener('DOMContentLoaded', () => {
-  const form = document.getElementById('media-check-bulk-form');
-  const choices = Array.from(document.querySelectorAll('input[form="media-check-bulk-form"][name="video_ids"]:not(:disabled)'));
-  const count = document.getElementById('media-check-selected-count');
-  const selected = () => choices.filter(input => input.checked).length;
-  const update = () => { count.textContent = 'Vybráno ' + selected() + ' videí'; };
-  choices.forEach(input => input.addEventListener('change', update));
-  form.addEventListener('submit', event => {
-    const size = selected();
-    const action = event.submitter?.value === 'clear' ? 'Zrušit označení nedostupnosti' : 'Označit CZ/SK jako nedostupné';
-    if (!size || !window.confirm(action + ' u ' + size + ' vybraných videí?')) event.preventDefault();
-  });
-});
-</script>
+
+{{ bulk_editor('media-global-bulk', '/media-check/bulk-edit', return_to, submitted, submitted_video_ids, bulk_scope) }}
 
 <section class="panel media-check-list">
   <div class="table-wrap">
     <table class="responsive-cards episode-table media-check-table">
-      <thead><tr><th>Výběr</th><th>Anime / část</th><th>Video</th><th>Audio</th><th>Titulky</th><th>Hardsub</th><th>Kontroly</th></tr></thead>
+      <thead><tr><th>Výběr</th><th>Anime / část</th><th>Video</th><th>Audio</th><th>Titulky</th><th>Hardsub</th><th>Akce</th></tr></thead>
       <tbody>
       {% for row in results.rows %}{% set video = row.video %}{% set evaluation = row.evaluation %}{% set profile = evaluation.factual %}{% set hardsub_state = manual_hardsub_state(video) %}{% set external_state = row.external_subtitle_state %}
         <tr id="video-{{ video.id }}" class="media-row severity-{{ evaluation.subtitle_severity }}">
-          <td data-label="Výběr"><label class="media-select"><input form="media-check-bulk-form" type="checkbox" name="video_ids" value="{{ video.id }}" {% if not evaluation.subtitle_required %}disabled{% endif %}><span class="visually-hidden">Vybrat {{ video.filename }}</span></label></td>
+          <td data-label="Výběr"><label class="media-select"><input form="media-global-bulk" type="checkbox" name="video_ids" value="{{ video.id }}" data-media-select {% if video.id in submitted_video_ids %}checked{% endif %}><span class="visually-hidden">Vybrat {{ video.filename }}</span></label></td>
           <td data-label="Anime / část" class="card-primary"><strong>{{ row.collection_name }}</strong><small>{% if video.catalog_title_id %}<a href="/titles/{{ video.catalog_title_id }}">{{ row.title_name }}</a>{% else %}{{ row.title_name }}{% endif %} · {{ row.hierarchy_label }}</small></td>
           <td data-label="Video"><strong>{{ row.episode_label }}</strong><small class="technical-filename">{{ video.filename }}</small><small class="technical-path">{{ video.relative_path }}</small></td>
           <td data-label="Audio"><span class="status-badge severity-{{ evaluation.audio_severity }}">{{ audio_status_labels[profile.audio_status] }}</span><small>{% if profile.audio_languages %}{% for language in profile.audio_languages %}{{ language_display_label(language, include_name=true) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}žádná stopa{% endif %}</small></td>
           <td data-label="Titulky"><span class="status-badge severity-{{ evaluation.subtitle_severity }}">{{ subtitle_status_labels[evaluation.subtitle_status] }}</span><small>Fakticky: {% if profile.subtitle_status == 'preferred' %}CZ/SK{% elif evaluation.has_unknown_cs_sk_candidate %}existuje CZ/SK candidate čekající na posouzení kompatibility{% elif profile.subtitle_status == 'fallback_internal_en' %}Internal EN fallback{% elif not evaluation.subtitle_required %}bez evidovaných CZ/SK titulků{% else %}chybí vhodné titulky{% endif %}</small>{% if evaluation.manual_unavailable_recorded and not evaluation.manual_unavailable_effective %}<small>Uložený marker nedostupnosti není pro tento stav aktivní.</small>{% endif %}{% if not evaluation.completion_required %}<small>Potvrzená duplicitní kopie není samostatná completion jednotka.</small>{% endif %}</td>
           <td data-label="Hardsub"><span class="status-badge severity-{{ 'warning' if evaluation.hardsub_review_recommended else 'info' }}">{% if hardsub_state == 'yes' %}{% if video.manual_hardsub_cs %}CZ{% endif %}{% if video.manual_hardsub_cs and video.manual_hardsub_sk %} + {% endif %}{% if video.manual_hardsub_sk %}SK{% endif %} hardsub{% elif hardsub_state == 'no' %}Bez hardsubu · ověřeno{% else %}Hardsub neposouzen{% endif %}</span>{% if evaluation.hardsub_review_recommended %}<small>Vhodné ověřit, protože normální CZ/SK nebyly nalezeny.</small>{% endif %}</td>
-          <td data-label="Kontroly" class="card-wide">
-            <details class="media-controls"><summary>Stopy a ruční rozhodnutí</summary>
-              <div class="media-control-grid">
-                <section><h3>Audio stopy</h3>{% for track in row.audio_tracks|sort(attribute='stream_index') %}<article class="media-track"><p><strong>Stream {{ track.stream_index }}</strong> · {{ track.codec or '?' }}<small>detekováno {{ language_display_label(detected_audio_track_language(track), include_name=true) }} · ručně {{ language_display_label(track.manual_language, include_name=true) if track.manual_language is not none else '—' }} · efektivně {{ language_display_label(effective_audio_track_language(track), include_name=true) }}</small></p><form class="inline-form" method="post" action="/videos/{{ video.id }}/audio-tracks/{{ track.id }}/language"><select name="manual_language" aria-label="Ruční jazyk audio stopy {{ track.stream_index }}"><option value="" {% if track.manual_language is none %}selected{% endif %}>automaticky</option>{% for language, label in manual_language_choices %}<option value="{{ language }}" {% if track.manual_language == language %}selected{% endif %}>{{ label }}</option>{% endfor %}</select><input type="hidden" name="filter_name" value="all"><input type="hidden" name="return_to" value="{{ return_to }}#video-{{ video.id }}"><button type="submit">Uložit audio</button></form></article>{% else %}<p>Video nemá evidovanou audio stopu.</p>{% endfor %}</section>
-                <section><h3>Interní titulky</h3>{% for subtitle in row.internal_subtitles|sort(attribute='stream_index') %}<p class="media-track"><strong>Stream {{ subtitle.stream_index }}</strong> · {{ subtitle.codec or '?' }}<small>detekováno {{ language_display_label(effective_internal_subtitle_language(subtitle), include_name=true) }}{% if subtitle.title %} · {{ subtitle.title }}{% endif %}</small></p>{% else %}<p>Bez interních titulků.</p>{% endfor %}</section>
-                <section><h3>Externí titulky</h3>
-                  {% for subtitle in external_state.compatible_subtitles %}{{ asset_card(subtitle, video, compatibility_presentations.get(subtitle.id), return_to, 'available') }}{% else %}<p>Bez kompatibilních externích titulků.</p>{% endfor %}
-                  {% if external_state.unknown_candidate_subtitles %}<h4>K posouzení</h4>{% for subtitle in external_state.unknown_candidate_subtitles %}{{ asset_card(subtitle, video, compatibility_presentations.get(subtitle.id), return_to, 'unknown') }}{% endfor %}{% endif %}
-                  {% if external_state.incompatible_subtitles %}<h4>Nekompatibilní</h4>{% for subtitle in external_state.incompatible_subtitles %}{{ asset_card(subtitle, video, compatibility_presentations.get(subtitle.id), return_to, 'incompatible') }}{% endfor %}{% endif %}
-                </section>
-                <section class="{% if evaluation.hardsub_review_recommended %}soft-warning{% endif %}"><h3>Hardsub</h3><form class="inline-form" method="post" action="/videos/{{ video.id }}/hardsub"><select name="mode" aria-label="Ruční stav hardsubu"><option value="unknown" {% if hardsub_state == 'unknown' %}selected{% endif %}>neověřeno</option><option value="none" {% if hardsub_state == 'no' %}selected{% endif %}>žádný · ověřeno</option><option value="cs" {% if hardsub_state == 'yes' and video.manual_hardsub_cs and not video.manual_hardsub_sk %}selected{% endif %}>CZ</option><option value="sk" {% if hardsub_state == 'yes' and video.manual_hardsub_sk and not video.manual_hardsub_cs %}selected{% endif %}>SK</option><option value="both" {% if hardsub_state == 'yes' and video.manual_hardsub_cs and video.manual_hardsub_sk %}selected{% endif %}>CZ i SK</option></select><input type="hidden" name="filter_name" value="all"><input type="hidden" name="return_to" value="{{ return_to }}#video-{{ video.id }}"><button type="submit">Uložit hardsub</button></form></section>
-                <section><h3>Dostupnost CZ/SK</h3>{% if evaluation.manual_unavailable_recorded %}<form class="inline-form" method="post" action="/media-check/czsk-availability"><input type="hidden" name="video_ids" value="{{ video.id }}"><input type="hidden" name="return_to" value="{{ return_to }}#video-{{ video.id }}"><button class="button-secondary" type="submit" name="action" value="clear">Zrušit označení nedostupnosti</button></form>{% elif not evaluation.subtitle_required %}<p>Pro tento typ obsahu se CZ/SK titulky nevyžadují.</p>{% elif profile.has_cs_or_sk %}<p>Video skutečně obsahuje CZ/SK; ruční marker nedostupnosti není potřeba.</p>{% else %}<form class="inline-form" method="post" action="/media-check/czsk-availability"><input type="hidden" name="video_ids" value="{{ video.id }}"><input type="hidden" name="return_to" value="{{ return_to }}#video-{{ video.id }}"><button type="submit" name="action" value="unavailable">CZ/SK nyní nejsou dostupné</button></form>{% endif %}</section>
-              </div>
-            </details>
-          </td>
+          <td data-label="Akce" class="card-wide">
+            {% if video.catalog_title_id %}<a class="button-secondary" href="/media-check/titles/{{ video.catalog_title_id }}?focus_video={{ video.id }}#video-{{ video.id }}">Upravit video</a>{% else %}Zařaďte nejprve v Hierarchy Review{% endif %}</td>
         </tr>
       {% else %}<tr><td colspan="7">Zvoleným filtrům neodpovídá žádné video.</td></tr>{% endfor %}
       </tbody>
@@ -116,4 +86,5 @@ document.addEventListener('DOMContentLoaded', () => {
   <span>Stránka {{ results.page }} z {{ results.total_pages }}</span>
   {% if results.has_next %}<a class="button-secondary" href="{{ media_check_url(results.subtitle_filter, results.audio_filter, results.query, results.page + 1) }}">Další →</a>{% endif %}
 </nav>
+<script src="/static/media_bulk_editor.js"></script>
 {% endblock %}

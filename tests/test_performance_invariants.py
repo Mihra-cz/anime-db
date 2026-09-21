@@ -137,6 +137,49 @@ def test_stable_get_endpoints_are_semantically_read_only(
     assert _semantic_snapshot(engine) == before
 
 
+@pytest.mark.parametrize(
+    "route_path",
+    (
+        "/titles/{catalog_title_id}",
+        "/hierarchy-review/{collection_id}/titles/{catalog_title_id}",
+        "/metadata-review/{catalog_title_id}",
+        "/media-check/titles/{catalog_title_id}",
+    ),
+)
+def test_title_scoped_detail_gets_are_semantically_read_only(
+    performance_app, route_path,
+):
+    web_app, ids = performance_app
+    engine = web_app.state.sessions.kw["bind"]
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if getattr(route, "path", None) == route_path
+    )
+    path = route_path.format(
+        collection_id=ids["collection"], catalog_title_id=ids["title"],
+    )
+    args = (
+        (ids["collection"], ids["title"])
+        if "{collection_id}" in route_path else (ids["title"],)
+    )
+    before = _semantic_snapshot(engine)
+    writes = []
+
+    def record(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            writes.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        response = endpoint(_request(web_app, path), *args)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert response.status_code == 200
+    assert writes == []
+    assert _semantic_snapshot(engine) == before
+
+
 def test_overlord_content_editor_reuses_classification_and_preserves_raw_evidence(performance_app):
     import asyncio
     from test_metadata_web import post_form_request
@@ -167,36 +210,46 @@ def test_overlord_content_editor_reuses_classification_and_preserves_raw_evidenc
         session.commit()
 
     endpoints = {route.path: route.endpoint for route in web_app.routes if hasattr(route, "endpoint")}
-    path = f"/titles/{ids['title']}"
+    path = (
+        f"/hierarchy-review/{ids['collection']}/titles/{ids['title']}"
+    )
     def render():
         before = _semantic_snapshot(engine)
-        html = endpoints["/titles/{catalog_title_id}"](
-            _request(web_app, path), ids["title"],
+        html = endpoints[
+            "/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+        ](
+            _request(web_app, path), ids["collection"], ids["title"],
         ).body.decode()
         assert _semantic_snapshot(engine) == before
-        return html.split(f'id="video-{video_id}"', 1)[1].split("</tr>", 1)[0]
+        return html
 
-    def classify(value):
-        action = f"/hierarchy-review/{ids['collection']}/manage-videos"
-        response = asyncio.run(endpoints["/hierarchy-review/{collection_id}/manage-videos"](
+    def edit_video(value, manual_number=""):
+        action = f"{path}/videos/{video_id}/edit"
+        response = asyncio.run(endpoints[
+            "/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+            "/videos/{video_id}/edit"
+        ](
             post_form_request(web_app, action, [
-                ("operation", "classify"), ("video_ids", str(video_id)),
-                ("content_type", value), ("return_to", f"{path}#video-{video_id}"),
-            ]), ids["collection"],
+                ("content_type", value),
+                ("manual_episode_number", manual_number),
+                ("media_part_number", ""),
+                ("return_to", f"{path}#hierarchy-video-{video_id}"),
+                ("confirm_changes", "yes"),
+            ]), ids["collection"], ids["title"], video_id,
         ))
         assert response.status_code == 303
-        assert response.headers["location"] == f"{path}#video-{video_id}"
+        assert response.headers["location"] == f"{path}#hierarchy-video-{video_id}"
 
     html = render()
     assert "Typ obsahu" in html and "automaticky</option>" in html
     for value, _label in VIDEO_CONTENT_TYPE_CHOICES:
         assert f'<option value="{value}"' in html
     assert "<strong>Special 05</strong>" in html
-    classify("bonus")
+    edit_video("bonus")
     html = render()
-    assert "Raw typ: special" in html
+    assert "Raw/parser typ:</dt><dd>special" in html
     assert "<strong>Special 05</strong>" not in html
-    assert "<strong>Bonus</strong>" in html and "Bonus ?" in html
+    assert "Současná effective identita:</dt><dd><strong>Bonus</strong>" in html
     assert "Chybějící supplementary ordinal" in html
     with Session(engine) as session:
         item = session.get(Video, video_id)
@@ -204,14 +257,11 @@ def test_overlord_content_editor_reuses_classification_and_preserves_raw_evidenc
         assert item.file_type == "special"
         assert item.episode_number_manual_override is None
 
-    response = endpoints["/videos/{video_id}/episode-number"](
-        video_id, manual_episode_number="5", return_to=path,
-    )
-    assert response.status_code == 303
+    edit_video("bonus", "5")
     html = render()
     assert "<strong>Bonus 05</strong>" in html
     assert "Chybějící supplementary ordinal" not in html
-    classify("")
+    edit_video("", "5")
     html = render()
     assert "<strong>Special 05</strong>" in html
     assert "<strong>Bonus 05</strong>" not in html
@@ -295,11 +345,15 @@ def test_collection_wide_identity_review_is_bounded_and_read_only(performance_ap
         session.commit()
     expanded, html = measure()
     assert expanded == baseline
-    assert ("Chybějící supplementary ordinal" in html) is not structural
+    if route == "/titles/{catalog_title_id}":
+        assert ("Vyžaduje kontrolu" in html) is not structural
+        assert "Chybějící supplementary ordinal" not in html
+    else:
+        assert ("Chybějící supplementary ordinal" in html) is not structural
     assert "Kolize supplementary ordinalu" not in html
 
 
-def test_title_detail_count_comparison_is_semantically_read_only(performance_app):
+def test_metadata_edit_count_comparison_is_semantically_read_only(performance_app):
     web_app, ids = performance_app
     engine = web_app.state.sessions.kw["bind"]
     with Session(engine) as session:
@@ -314,7 +368,7 @@ def test_title_detail_count_comparison_is_semantically_read_only(performance_app
 
     endpoint = next(
         route.endpoint for route in web_app.routes
-        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+        if getattr(route, "path", None) == "/metadata-review/{catalog_title_id}"
     )
     before = _semantic_snapshot(engine)
     writes = []
@@ -326,7 +380,7 @@ def test_title_detail_count_comparison_is_semantically_read_only(performance_app
     event.listen(engine, "before_cursor_execute", record)
     try:
         response = endpoint(
-            _request(web_app, f"/titles/{ids['title']}"), ids["title"],
+            _request(web_app, f"/metadata-review/{ids['title']}"), ids["title"],
         )
     finally:
         event.remove(engine, "before_cursor_execute", record)
@@ -848,6 +902,7 @@ def test_supplementary_title_get_shows_manual_ordinal_without_writes(performance
         item.filename = 'Show NCOP03.mkv'
         item.file_type = 'ncop'
         item.episode_number_manual_override = 2
+        item_id = item.id
         title.videos.append(Video(
             catalog_collection=item.catalog_collection,
             relative_path='Anime/Performance Show/Season 1/Show - 02.mkv',
@@ -856,29 +911,38 @@ def test_supplementary_title_get_shows_manual_ordinal_without_writes(performance
             content_type_manual='episode',
         ))
         session.commit()
-    endpoint = next(route.endpoint for route in web_app.routes
-                    if getattr(route, 'path', None) == '/titles/{catalog_title_id}')
+    endpoints = {route.path: route.endpoint for route in web_app.routes
+                 if hasattr(route, 'endpoint')}
     before = _semantic_snapshot(engine)
     statements = []
     def record(conn, cursor, statement, parameters, context, many):
         statements.append(statement)
     event.listen(engine, 'before_cursor_execute', record)
     try:
-        response = endpoint(_request(web_app, f"/titles/{ids['title']}"), ids['title'])
+        title_response = endpoints['/titles/{catalog_title_id}'](
+            _request(web_app, f"/titles/{ids['title']}"), ids['title'],
+        )
+        hierarchy_response = endpoints[
+            '/hierarchy-review/{collection_id}/titles/{catalog_title_id}'
+        ](
+            _request(
+                web_app,
+                f"/hierarchy-review/{ids['collection']}/titles/{ids['title']}",
+            ),
+            ids['collection'], ids['title'],
+        )
     finally:
         event.remove(engine, 'before_cursor_execute', record)
-    assert response.status_code == 200
-    rendered = response.body.decode()
-    assert '<strong>NCOP 02</strong>' in rendered
-    assert 'class="inline-form supplementary-ordinal-form"' in rendered
-    assert '<span class="supplementary-ordinal-prefix">NCOP</span>' in rendered
-    assert 'Numerický ordinal <input type="number"' in rendered
-    assert 'name="manual_episode_number" value="2"' in rendered
-    assert 'Výsledná identita: <strong>NCOP 02</strong>' in rendered
-    assert 'Zadejte pouze kladné celé číslo.' in rendered
-    standard_row = rendered.split('id="video-2"', 1)[1].split('</tr>', 1)[0]
-    assert 'supplementary-ordinal-form' not in standard_row
-    assert 'placeholder="Číslo dle režimu"' in standard_row
-    assert 'aria-label="Ruční číslo epizody podle zvoleného režimu"' in standard_row
+    assert title_response.status_code == hierarchy_response.status_code == 200
+    title_html = title_response.body.decode()
+    hierarchy_html = hierarchy_response.body.decode()
+    assert '<strong>NCOP 02</strong>' in title_html
+    assert 'name="manual_episode_number"' not in title_html
+    editor = hierarchy_html.split(
+        f'id="hierarchy-video-{item_id}"', 1
+    )[1].split('</form>', 1)[0]
+    assert 'Současná effective identita:</dt><dd><strong>NCOP 02</strong>' in editor
+    assert 'Ordinal NCOP' in editor
+    assert 'name="manual_episode_number" value="2"' in editor
     assert not any(s.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')) for s in statements)
     assert _semantic_snapshot(engine) == before

@@ -184,7 +184,7 @@ def snapshot(engine):
     ("/", {}), ("/catalog/{filter_name}", {"filter_name": "all"}),
     ("/metadata-review", {"status": "without"}),
     ("/metadata-review", {"status": "all"}),
-    ("/titles/{catalog_title_id}", {"catalog_title_id": 3}),
+    ("/metadata-review/{catalog_title_id}", {"catalog_title_id": 3}),
 ])
 def test_get_is_read_only_and_query_count_bounded_by_titles(completion_app, path, kwargs):
     app, engine = completion_app
@@ -207,7 +207,7 @@ def test_get_is_read_only_and_query_count_bounded_by_titles(completion_app, path
     response, baseline = render()
     if path == "/metadata-review" and kwargs["status"] == "without":
         assert [row["title"].id for row in response.context["rows"]] == [2]
-    if path == "/titles/{catalog_title_id}":
+    if path == "/metadata-review/{catalog_title_id}":
         assert "Automaticky: metadata nejsou vyžadována" in response.body.decode()
         assert 'name="requirement"' in response.body.decode()
     with Session(engine) as session:

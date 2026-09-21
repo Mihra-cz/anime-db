@@ -2825,8 +2825,15 @@ def test_server_route_and_both_uis_enforce_dynamic_step_and_render_proposal(tmp_
         detail_direction="",
         return_to="",
     )
-    detail = endpoints["/titles/{catalog_title_id}"](
-        _request(web_app, f"/titles/{title_id}"), title_id,
+    detail = endpoints[
+        "/hierarchy-review/{collection_id}/titles/{catalog_title_id}"
+    ](
+        _request(
+            web_app,
+            f"/hierarchy-review/{collection_id}/titles/{title_id}",
+        ),
+        collection_id,
+        title_id,
     ).body.decode()
     assert 'step="0.1" inputmode="decimal"' in detail
     assert 'value="24.9"' in detail

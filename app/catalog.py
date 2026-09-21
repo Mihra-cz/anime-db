@@ -517,7 +517,16 @@ def set_external_subtitle_manual_language(
 
 
 def effective_internal_subtitle_language(track: InternalSubtitle) -> str:
+    if track.manual_language is not None:
+        return normalize_language(track.manual_language)
     return normalize_language(track.normalized_language, track.title)
+
+
+def set_internal_subtitle_manual_language(
+    track: InternalSubtitle, language: str | None,
+) -> None:
+    """Set human language authority without mutating scanner evidence."""
+    track.manual_language = _normalize_manual_language(language)
 
 
 def effective_external_subtitles_for_video(
@@ -1877,6 +1886,25 @@ def effective_video_content_display(video: Video) -> VideoContentDisplay:
         supplementary_type_label=ordinal.type_label if ordinal is not None else None,
         supplementary_ordinal=ordinal.number if ordinal is not None else None,
     )
+
+
+def catalog_video_identity(video: Video, title: CatalogTitle) -> str:
+    """Compact effective hierarchy identity without inventing an episode."""
+    content = effective_video_content_display(video)
+    if content.supplementary_label:
+        return content.supplementary_label
+    if content.noncanonical_position:
+        return str(content.noncanonical_position)
+    if content.value != "episode":
+        return content.label
+    if video.season_episode_number is not None:
+        if title.effective_season_number is not None:
+            return (
+                f"S{title.effective_season_number:02d}"
+                f"E{video.season_episode_number:02d}"
+            )
+        return f"E{video.season_episode_number:02d}"
+    return catalog_title_series_label(title)
 
 
 def derive_episode_number(filename: str) -> int | None:

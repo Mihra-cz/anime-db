@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% from "_manual_duplicate.html" import manual_duplicate_control %}
+{% macro variant_group_choice(key, groups, suggestion=none, allow_null=false, default_new=false) %}
+  <label>Výsledná varianta
+    <select name="group_choice_{{ key }}" required>
+      <option value="" {% if not default_new %}selected{% endif %} disabled>vyberte</option>
+      {% if allow_null %}<option value="null">Neurčeno / odebrat z varianty</option>{% endif %}
+      {% for group in groups %}<option value="{{ group.id }}">{{ group.manual_label }}{% if group.release_source %} · {{ group.release_source|upper }}{% endif %}{% if group.content_variant %} · {{ group.content_variant }}{% endif %}</option>{% endfor %}
+      <option value="new" {% if default_new %}selected{% endif %}>vytvořit novou group</option>
+    </select>
+  </label>
+  <span class="variant-new-group-fields">
+    <label>Label <input type="text" maxlength="200" name="group_label_{{ key }}" value="{{ suggestion.manual_label if suggestion else '' }}"></label>
+    <label>Zdroj <select name="group_source_{{ key }}"><option value="">neurčeno</option>{% for value, label in video_variant_release_source_choices %}<option value="{{ value }}" {% if suggestion and suggestion.release_source == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>Obsahová varianta <select name="group_content_{{ key }}"><option value="">neurčeno</option>{% for value, label in video_variant_content_variant_choices %}<option value="{{ value }}" {% if suggestion and suggestion.content_variant == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>Poznámka <input type="text" maxlength="1000" name="group_note_{{ key }}"></label>
+  </span>
+{% endmacro %}
+{% block main_class %}content-shell content-wide{% endblock %}
+{% block title %}Hierarchie · {{ catalog_title_display_title(selected_title, title_name_preference) }} · AnimeDB{% endblock %}
+{% block content %}
+<nav class="detail-backlinks" aria-label="Návrat">
+  <a href="/titles/{{ selected_title.id }}">← Zpět na detail části</a>
+  <a href="/hierarchy-review/{{ collection.id }}">← Hierarchy Review</a>
+</nav>
+<h1>Hierarchie · {{ catalog_title_display_title(selected_title, title_name_preference) }}</h1>
+<p>Editor strukturální autority části {{ catalog_title_series_label(selected_title) }}. Metadata a jazyky médií se upravují ve vlastních workflow.</p>
+{% if message %}<div class="notice success">{{ message }}</div>{% endif %}
+{% if error %}<div class="notice error" role="alert"><strong>Změny nebyly uloženy.</strong><br>{{ error }}</div>{% endif %}
+
+<div class="page-save-bar" id="hierarchy-save-bar" data-save-endpoint="/hierarchy-review/{{ collection.id }}/save-all">
+  <span id="hierarchy-dirty-count" aria-live="polite">0 neuložených změn</span>
+  <button type="button" id="hierarchy-save-all" disabled>Uložit všechny kompatibilní změny</button>
+  <small class="save-scope">Zahrnuje běžné editace struktury části, typu a číslování videa, části média, existujících variant groups a pozice Recapu. Návrhy, membership, split/merge, potvrzení variant či duplicit a odstranění zůstávají samostatné.</small>
+  <p class="save-feedback" id="hierarchy-save-feedback" role="status" aria-live="polite"></p>
+</div>
+
+<section class="panel" id="title-structure">
+  <h2>Struktura a číslování části</h2>
+  {% set title_failed = edit_error_scope == 'title' %}
+  {% set title_values = edit_submitted if title_failed else {} %}
+  {% set selected_part_type = title_values.get('part_type_manual', selected_title.part_type_manual or '') %}
+  {% set selected_numbering_mode = title_values.get('numbering_mode', 'auto' if selected_title.numbering_mode == 'unknown' else selected_title.numbering_mode) %}
+  <form class="hierarchy-title-editor structural-fields-form{% if title_failed %} has-field-error{% endif %}" data-edit-form data-save-kind="title_hierarchy" data-save-id="{{ selected_title.id }}"{% if title_failed %} data-dirty-on-load="true"{% endif %} method="post" action="/hierarchy-review/{{ collection.id }}/titles/{{ selected_title.id }}/edit">
+    {% if title_failed %}<small class="field-error">Opravte hodnoty v této sekci podle chybového souhrnu nahoře.</small>{% endif %}
+    <label>Typ části <select name="part_type_manual"><option value="">automaticky</option>{% for value, label in part_type_choices %}<option value="{{ value }}" {% if selected_part_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label data-season-number>Číslo sezóny <input type="number" min="1" name="season_number_manual" value="{{ title_values.get('season_number_manual', selected_title.season_number_manual if selected_title.season_number_manual is not none else '') }}"></label>
+    <label data-season-label>Označení sezóny <input type="text" maxlength="50" name="season_label_manual" value="{{ title_values.get('season_label_manual', selected_title.season_label_manual or '') }}"></label>
+    <label data-part-number>Číslo Part <input type="number" min="1" name="part_number_manual" value="{{ title_values.get('part_number_manual', selected_title.part_number_manual if selected_title.part_number_manual is not none else '') }}"></label>
+    <label>Ruční pořadí <input type="number" min="0" name="sort_order_manual" value="{{ title_values.get('sort_order_manual', selected_title.sort_order_manual if selected_title.sort_order_manual is not none else '') }}"></label>
+    <label><input type="checkbox" name="hierarchy_verified" value="true" {% if (title_failed and title_values.get('hierarchy_verified') == 'true') or (not title_failed and catalog_title_hierarchy_is_verified(selected_title)) %}checked{% endif %}> Zařazení ověřeno</label>
+    <label>Režim číslování <select name="numbering_mode"><option value="auto" {% if selected_numbering_mode == 'auto' %}selected{% endif %}>automaticky</option><option value="season_local" {% if selected_numbering_mode == 'season_local' %}selected{% endif %}>v rámci sezóny</option><option value="absolute" {% if selected_numbering_mode == 'absolute' %}selected{% endif %}>absolutní</option></select></label>
+    <label>Počet předchozích epizod <input type="number" min="0" name="episode_start_offset" value="{{ title_values.get('episode_start_offset', selected_title.episode_start_offset if selected_title.episode_start_offset is not none else '') }}"></label>
+    <input type="hidden" name="return_to" value="/hierarchy-review/{{ collection.id }}/titles/{{ selected_title.id }}#title-structure">
+    <button type="submit">Uložit</button>
+  </form>
+</section>
+
+<section class="panel hierarchy-video-edits" id="video-hierarchy">
+  <h2>Číslování, typ obsahu a Media Part</h2>
+  <p>Každé video má jeden hierarchy formulář. Média ani metadata se zde nemění.</p>
+  {% for video in selected_title_videos %}{% set content = effective_video_content_display(video) %}{% set numbering = effective_video_numbering(video, selected_title) %}{% set video_failed = edit_error_scope == 'video-' ~ video.id %}{% set video_values = edit_submitted if video_failed else {} %}{% set selected_content_type = video_values.get('content_type', video.content_type_manual or '') %}{% set current_number_label = hierarchy_number_field_label(content.value) %}
+  <form class="hierarchy-video-editor{% if video_failed %} has-field-error{% endif %}" data-edit-form data-save-kind="video_hierarchy" data-save-id="{{ video.id }}" data-catalog-title-id="{{ selected_title.id }}"{% if video_failed %} data-dirty-on-load="true"{% endif %} method="post" action="/hierarchy-review/{{ collection.id }}/titles/{{ selected_title.id }}/videos/{{ video.id }}/edit" id="hierarchy-video-{{ video.id }}">
+    <header class="hierarchy-video-heading"><div><strong>{{ video.filename }}</strong><small class="technical-path">{{ video.relative_path }}</small></div><span class="status-badge severity-info">{{ metadata_video_identity(video, selected_title) }}</span></header>
+    <section class="hierarchy-video-current" aria-label="Identita a současný stav">
+      <h3>Identita / současný stav</h3>
+      <dl class="hierarchy-identity-grid">
+        <div><dt>Současná effective identita:</dt><dd><strong>{{ metadata_video_identity(video, selected_title) }}</strong></dd></div>
+        {% if video.season_episode_number is not none %}<div><dt>Season + episode:</dt><dd>{% if selected_title.effective_season_number is not none %}S{{ '%02d'|format(selected_title.effective_season_number) }}{% endif %}E{{ '%02d'|format(video.season_episode_number) }}</dd></div>{% endif %}
+        <div><dt>Lokální číslo:</dt><dd>{{ video.local_episode_number if video.local_episode_number is not none else '—' }}</dd></div>
+        <div><dt>Absolutní číslo:</dt><dd>{{ video.absolute_episode_number if video.absolute_episode_number is not none else '—' }}</dd></div>
+        <div><dt>Externí číslo:</dt><dd>{{ video.external_episode_number if video.external_episode_number is not none else '—' }}</dd></div>
+        <div><dt>Zdroj číslování:</dt><dd>{{ video.episode_number_source or 'unknown' }}</dd></div>
+        <div><dt>Efektivní typ:</dt><dd>{{ content.label }}</dd></div>
+        <div><dt>Raw/parser typ:</dt><dd>{{ video.file_type }}</dd></div>
+        <div><dt>Media Part:</dt><dd>{{ media_part_label(video, selected_title_videos) or '—' }}{% set part_warning = media_part_ordinal_warning(video, selected_title_videos) %}{% if part_warning %}<small class="warning">{{ part_warning }}</small>{% endif %}</dd></div>
+        <div><dt>Varianta:</dt><dd>Současná varianta: {{ video_variant_display_for_video(video, include_unassigned=true) }}</dd></div>
+        <div><dt>Duplicita:</dt><dd>{% if video.duplicate_of_video_id %}Potvrzená secondary kopie videa #{{ video.duplicate_of_video_id }}{% elif video.id in duplicate_candidate_video_ids %}Nevyřešené podezření{% elif video.id in confirmed_duplicate_video_ids %}Potvrzený vztah{% else %}—{% endif %}</dd></div>
+      </dl>
+      {% if content.value != 'episode' %}<p class="hierarchy-supplementary-identity">Lokální supplementary identita: <strong>{% if content.supplementary_label %}{{ content.supplementary_label }}{% elif content.value == 'recap' and content.noncanonical_position %}{{ content.label }} {{ content.noncanonical_position }}{% else %}{{ content.label }}{% endif %}</strong> · ordinal: {{ content.supplementary_ordinal if content.supplementary_ordinal is not none else 'neurčen' }}</p>{% endif %}
+    </section>
+    {% if video_failed %}<small class="field-error">Toto video obsahuje odmítnutou hodnotu; opravte ji podle souhrnu nahoře.</small>{% endif %}
+    <section class="hierarchy-video-fields" aria-label="Editace"><h3>Editace</h3>
+    <label>Typ obsahu <select name="content_type"><option value="" data-number-label="{{ current_number_label }}">automaticky ({{ content.label }})</option>{% if selected_content_type and selected_content_type not in video_content_type_choices|map(attribute=0)|list %}<option value="{{ selected_content_type }}" selected data-number-label="Ruční ordinal">Neplatná odeslaná hodnota: {{ selected_content_type }}</option>{% endif %}{% for value, label in video_content_type_choices %}<option value="{{ value }}" data-number-label="{{ hierarchy_number_field_label(value) }}" {% if selected_content_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label><span data-number-field-label>{{ hierarchy_number_field_label(selected_content_type or content.value) }}</span> <input type="number" min="1" step="{{ '0.1' if (selected_content_type or content.value) == 'recap' else '1' }}" inputmode="{{ 'decimal' if (selected_content_type or content.value) == 'recap' else 'numeric' }}" name="manual_episode_number" value="{{ video_values.get('manual_episode_number', manual_episode_number_input_value(video)) }}"></label>
+    <label>Část média <input type="number" min="1" name="media_part_number" value="{{ video_values.get('media_part_number', video.media_part_number if video.media_part_number is not none else '') }}"></label>
+    <input type="hidden" name="return_to" value="/hierarchy-review/{{ collection.id }}/titles/{{ selected_title.id }}#hierarchy-video-{{ video.id }}">
+    <button type="submit">Uložit</button>
+    </section>
+    <section class="hierarchy-video-guidance" aria-label="Nápověda a upozornění"><h3>Nápověda / upozornění / návrhy</h3>
+      <p><small>Ruční hodnota přebíjí parser pouze na příslušné ose. A/B marker, varianta a Část média zůstávají samostatné osy. Supplementary ordinal neurčuje Media Part ani variantu.</small></p>
+      {% if numbering.manual_override %}<p class="notice soft-warning">Číslování používá ruční override.</p>{% endif %}
+      {% if video.id in assignment_recommendation_by_video %}{% set recommendation = assignment_recommendation_by_video[video.id] %}<p class="notice soft-warning"><strong>Existující návrh:</strong> {{ recommendation.type_label }}{% if recommendation.season_display %} · {{ recommendation.season_display }}{% endif %}. Návrh je pouze evidence; nic se bez potvrzení nezmění.</p>{% elif video.id in supplementary_suggestion_by_video %}{% set suggestion = supplementary_suggestion_by_video[video.id] %}<p class="notice soft-warning"><strong>Existující návrh:</strong> {{ suggestion.display_label }}{% if suggestion.context_label %} · kontext {{ suggestion.context_label }}{% endif %}. Návrh je pouze evidence; nic se bez potvrzení nezmění.</p>{% endif %}
+      {% for item in title_numbering_visible %}{% if item.title.id == selected_title.id %}{% for issue in item.diagnostic_issues if video in issue.videos %}<p class="{{ 'warning' if issue.blocking else 'notice soft-warning' }}">{{ issue.message }}</p>{% endfor %}{% for issue in item.supplementary_review_issues if video in issue.videos %}<p class="warning">{{ issue.type_label }} · {{ issue.issue_label }}: {{ issue.message }}</p>{% endfor %}{% endif %}{% endfor %}
+    </section>
+  </form>
+  {% else %}<p>Část neobsahuje žádná videa.</p>{% endfor %}
+</section>
+
+{% include "_hierarchy_title_cards.html" %}
+{% include "_hierarchy_manual_duplicates.html" %}
+
+<script src="/static/hierarchy_fields.js"></script>
+<script src="/static/local_edit_dirty.js"></script>
+<script src="/static/page_edit_save.js"></script>
+{% endblock %}

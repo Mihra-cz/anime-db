@@ -28,11 +28,31 @@
     if (save) save.disabled = !partType;
   }
 
+  function updateVideoNumberField(form) {
+    const typeSelect = form.querySelector('select[name="content_type"]');
+    const label = form.querySelector('[data-number-field-label]');
+    const input = form.querySelector('input[name="manual_episode_number"]');
+    if (!typeSelect || !label || !input) return;
+    const option = typeSelect.options[typeSelect.selectedIndex];
+    label.textContent = option.dataset.numberLabel || "Ruční ordinal";
+    const recap = typeSelect.value === "recap" || (
+      !typeSelect.value && label.textContent === "Ruční pozice Recapu"
+    );
+    input.step = recap ? "0.1" : "1";
+    input.inputMode = recap ? "decimal" : "numeric";
+  }
+
   document.querySelectorAll(".structural-fields-form, .manual-hierarchy-form").forEach(function (form) {
     updateStructuralForm(form);
     const typeSelect = form.querySelector('select[name="part_type_manual"], select[name="part_type"]');
     typeSelect.addEventListener("change", function () {
       updateStructuralForm(form);
+    });
+  });
+  document.querySelectorAll(".hierarchy-video-editor").forEach(function (form) {
+    updateVideoNumberField(form);
+    form.querySelector('select[name="content_type"]').addEventListener("change", function () {
+      updateVideoNumberField(form);
     });
   });
 })();

@@ -1,0 +1,19 @@
+{% set duplicate_scope_videos = selected_title_videos if selected_title else videos %}
+{% set manual_duplicate_suspected_count = duplicate_scope_videos|selectattr('duplicate_status_manual', 'equalto', 'suspected')|list|length %}
+<details class="panel manual-duplicate-panel" id="manual-duplicates">
+  <summary>Všechny duplicity a ruční podezření · {{ duplicate_scope_videos|length }} videí · ručně označeno: {{ manual_duplicate_suspected_count }}</summary>
+  <div class="manual-duplicate-content">
+    <p>Toto označení je nezávislá poznámka pro pozdější kontrolu. Automaticky nalezený problém vychází z logické identity; potvrzená duplicita vzniká pouze ručním výběrem primary a vazbou <code>duplicate_of_video_id</code>.</p>
+    <div class="manual-duplicate-list">
+      {% for video in duplicate_scope_videos %}<article>
+        <div><strong>{{ video.filename }}</strong><small>{{ video.relative_path }}</small></div>
+        {{ manual_duplicate_control(
+          video,
+          ('/hierarchy-review/' ~ collection.id ~ '/titles/' ~ selected_title.id ~ '#manual-duplicate-video-' ~ video.id) if selected_title else ('/hierarchy-review/' ~ collection.id ~ '#manual-duplicate-video-' ~ video.id),
+          confirmed_group=video.id in (confirmed_duplicate_video_ids|default([])),
+          automatic_candidate=video.id in (duplicate_candidate_video_ids|default([]))
+        ) }}
+      </article>{% endfor %}
+    </div>
+  </div>
+</details>

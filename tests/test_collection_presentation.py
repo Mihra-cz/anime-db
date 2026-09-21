@@ -336,7 +336,7 @@ def test_attached_film_classification_keeps_main_and_hierarchy_presentations(
     assert "<small>other</small>" not in film_item
     # Compatibility and reverse-duplicate associations are loaded in bounded
     # batches; the detached season-detail budget remains independent of rows.
-    assert detail_query_count <= 21
+    assert detail_query_count <= 22
 
     hierarchy = endpoints["/hierarchy-review/{collection_id}"](
         _request(web_app, f"/hierarchy-review/{collection_id}"), collection_id,
@@ -692,7 +692,8 @@ def test_hierarchy_review_lists_derived_supplementary_issues_without_status_chan
     assert f'href="/hierarchy-review/{ids["resolved"]}"' not in queue
     assert f'href="/hierarchy-review/{ids["resolved"]}"' in all_collections
     assert (
-        f'/hierarchy-review/{ids["automatic"]}'
+        f'/hierarchy-review/{ids["automatic"]}/titles/'
+        f'{ids["automatic_title"]}'
         f'#supplementary-ordinal-review-title-{ids["automatic_title"]}'
     ) in queue
     assert "Chybějící supplementary ordinal" in queue

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}{{ heading }} · AnimeDB{% endblock %}
+{% block content %}
+<section class="panel edit-confirmation">
+  <h1>{{ heading }}</h1>
+  {% if error %}<div class="notice error" role="alert"><strong>Změny nebyly uloženy.</strong><br>{{ error }}</div>{% endif %}
+  <p>{{ description }}</p>
+  <h2>Co se změní</h2>
+  {% if change_groups %}{% for group in change_groups %}<section class="edit-change-group"><h3>{{ group.heading }}</h3><ul>{% for change in group.changes %}<li>{{ change }}</li>{% endfor %}</ul></section>{% endfor %}{% else %}<ul>{% for change in changes %}<li>{{ change }}</li>{% endfor %}</ul>{% endif %}
+  {% if not error %}<p>Opravdu chcete uložit tyto změny?</p>{% endif %}
+  <form method="post" action="{{ action }}">
+    {% for name, value in fields if name != 'confirm_changes' %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    {% if not error %}<button type="submit" name="confirm_changes" value="yes">{{ confirm_label or 'Potvrdit a uložit' }}</button>{% endif %}
+    <a class="button-secondary" href="{{ return_to }}">Zpět bez uložení</a>
+  </form>
+</section>
+{% endblock %}

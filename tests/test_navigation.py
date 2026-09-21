@@ -55,6 +55,6 @@ def test_metadata_return_preserves_catalog_and_detail_state():
     assert metadata_return_url(
         "missing", 7, "show", "title", "desc", "episode", "asc"
     ) == (
-        "/titles/7?filter_name=missing&q=show&sort=title&direction=desc&"
+        "/metadata-review/7?filter_name=missing&q=show&sort=title&direction=desc&"
         "video_sort=episode&video_direction=asc#metadata"
     )

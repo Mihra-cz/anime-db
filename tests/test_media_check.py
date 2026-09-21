@@ -12,6 +12,7 @@ from app.catalog import is_media_completion_video, set_manual_hardsub
 from app.config import Settings
 from app.database import Base
 from app.main import create_app
+from app.media_edit_save import MediaEditValidationError, apply_media_edits
 from app.media_check import (
     build_media_check_evaluation,
     build_media_check_results,
@@ -174,6 +175,72 @@ def test_clear_manual_unavailable_returns_to_factual_workflow():
     assert build_media_check_evaluation(video).subtitle_status == (
         "needs_cs_sk_internal_en"
     )
+
+
+def test_seeking_is_manual_workflow_marker_but_factual_czsk_still_wins():
+    video = _video(1, internal=("en",))
+    set_czsk_availability_manual(video, "seeking")
+    evaluation = build_media_check_evaluation(video)
+    assert video.czsk_availability_manual == "seeking"
+    assert evaluation.manual_seeking_recorded is True
+    assert evaluation.subtitle_status == "needs_cs_sk_internal_en"
+
+    video.internal_subtitles.append(InternalSubtitle(
+        stream_index=11, codec="ass", language="cs", normalized_language="cs",
+    ))
+    evaluation = build_media_check_evaluation(video)
+    assert evaluation.subtitle_status == "available"
+    assert video.czsk_availability_manual == "seeking"
+
+
+def test_bulk_audio_and_internal_language_require_exactly_one_track_per_video():
+    first = _video(1, audio=("unknown",), internal=("unknown",))
+    second = _video(2, audio=("en",), internal=("en",))
+    first.audio_tracks[0].id, second.audio_tracks[0].id = 11, 12
+    first.internal_subtitles[0].id, second.internal_subtitles[0].id = 21, 22
+
+    changes = apply_media_edits(
+        [first, second], bulk_audio="ja", bulk_internal_subtitle="cs",
+    )
+
+    assert len(changes) == 4
+    assert [track.manual_language for video in (first, second) for track in video.audio_tracks] == ["ja", "ja"]
+    assert [track.manual_language for video in (first, second) for track in video.internal_subtitles] == ["cs", "cs"]
+
+
+@pytest.mark.parametrize(
+    ("axis", "audio", "internal", "problem_text"),
+    [
+        ("audio", (), ("en",), "0 audio stop"),
+        ("audio", ("ja", "en"), ("en",), "2 audio stopy"),
+        ("internal", ("ja",), (), "0 interní subtitle stop"),
+        ("internal", ("ja",), ("en", "unknown"), "2 interní subtitle stopy"),
+    ],
+)
+def test_ambiguous_bulk_track_language_rejects_entire_combined_batch(
+    axis, audio, internal, problem_text,
+):
+    safe = _video(1, audio=("unknown",), internal=("unknown",))
+    problem = _video(2, audio=audio, internal=internal)
+
+    with pytest.raises(MediaEditValidationError) as exc_info:
+        apply_media_edits(
+            [safe, problem],
+            bulk_audio="ja" if axis == "audio" else "",
+            bulk_internal_subtitle="cs" if axis == "internal" else "",
+            hardsub="none", availability="seeking",
+        )
+
+    error = exc_info.value
+    assert problem_text in error.problem_items[0]
+    assert "Žádná část" in error.rejected
+    assert error.requested_changes[-2:] == (
+        "Hardsub → žádný · ověřeno", "CZ/SK dostupnost → Sháním",
+    )
+    assert safe.manual_hardsub_verified_at is None
+    assert safe.czsk_availability_manual is None
+    assert all(track.manual_language is None for track in safe.audio_tracks)
+    assert all(track.manual_language is None for track in safe.internal_subtitles)
 
 
 @pytest.mark.parametrize(
@@ -913,6 +980,319 @@ def test_partial_translation_bulk_set_clear_is_atomic_and_hierarchy_isolated(tmp
         assert (collection.hierarchy_status, collection.hierarchy_note) == hierarchy_before
 
 
+def test_unified_video_edit_requires_preview_confirmation_and_commits_once(tmp_path):
+    web_app, ids, audio_track_id, _, _ = _media_app(tmp_path)
+    with web_app.state.sessions() as session:
+        video = session.get(Video, ids[9])
+        title_id = video.catalog_title_id
+        internal_track_id = video.internal_subtitles[0].id
+    path = f"/media-check/titles/{title_id}/videos/{ids[9]}/edit"
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if route.path == (
+            "/media-check/titles/{catalog_title_id}/videos/{video_id}/edit"
+        )
+    )
+    values = [
+        (f"audio_{audio_track_id}", "ja"),
+        (f"internal_subtitle_{internal_track_id}", "cs"),
+        ("hardsub", "none"), ("availability", "seeking"),
+        ("return_to", f"/media-check/titles/{title_id}#video-{ids[9]}"),
+    ]
+    preview = asyncio.run(endpoint(
+        _post_request(web_app, path, values), title_id, ids[9],
+    ))
+    assert preview.status_code == 200
+    assert "Opravdu chcete uložit" in preview.body.decode()
+    assert "Audio stream" in preview.body.decode()
+    assert "Hardsub:" in preview.body.decode()
+    assert "CZ/SK dostupnost:" in preview.body.decode()
+    with web_app.state.sessions() as session:
+        video = session.get(Video, ids[9])
+        assert video.czsk_availability_manual is None
+        assert video.manual_hardsub_verified_at is None
+        assert session.get(AudioTrack, audio_track_id).manual_language is None
+        assert video.internal_subtitles[0].normalized_language == "en"
+    saved = asyncio.run(endpoint(_post_request(
+        web_app, path, values + [("confirm_changes", "yes")],
+    ), title_id, ids[9]))
+    assert saved.status_code == 303
+    with web_app.state.sessions() as session:
+        video = session.get(Video, ids[9])
+        assert video.czsk_availability_manual == "seeking"
+        assert video.manual_hardsub_verified_at is not None
+        assert session.get(AudioTrack, audio_track_id).manual_language == "ja"
+        assert video.internal_subtitles[0].normalized_language == "en"
+        assert video.internal_subtitles[0].manual_language == "cs"
+
+
+def test_unified_video_validation_preserves_track_input_and_rolls_back(tmp_path):
+    web_app, ids, audio_track_id, _, _ = _media_app(tmp_path)
+    with web_app.state.sessions() as session:
+        video = session.get(Video, ids[9])
+        title_id = video.catalog_title_id
+        internal_track_id = video.internal_subtitles[0].id
+    path = f"/media-check/titles/{title_id}/videos/{ids[9]}/edit"
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if route.path == (
+            "/media-check/titles/{catalog_title_id}/videos/{video_id}/edit"
+        )
+    )
+    response = asyncio.run(endpoint(_post_request(web_app, path, [
+        (f"audio_{audio_track_id}", "ja"),
+        (f"internal_subtitle_{internal_track_id}", "xx"),
+        ("hardsub", "none"),
+        ("availability", "seeking"),
+    ]), title_id, ids[9]))
+
+    assert response.status_code == 400
+    rendered = response.body.decode()
+    assert "Jazyk interní subtitle stopy Stream" in rendered
+    assert "Hodnota „xx“ není podporovaný jazyk" in rendered
+    assert '<option value="xx" selected>' in rendered
+    assert 'data-dirty-on-load="true"' in rendered
+    with web_app.state.sessions() as session:
+        video = session.get(Video, ids[9])
+        assert session.get(AudioTrack, audio_track_id).manual_language is None
+        assert video.internal_subtitles[0].manual_language is None
+        assert video.manual_hardsub_verified_at is None
+        assert video.czsk_availability_manual is None
+
+
+def test_bulk_media_edit_rolls_back_all_videos_when_one_fails(tmp_path):
+    web_app, ids, _, _, _ = _media_app(tmp_path)
+    with web_app.state.sessions() as session:
+        title_id = session.get(Video, ids[9]).catalog_title_id
+        ambiguous = session.get(Video, ids[1])
+        ambiguous.audio_tracks.append(AudioTrack(
+            stream_index=99, codec="aac", language="en",
+        ))
+        session.commit()
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if route.path == "/media-check/titles/{catalog_title_id}/bulk-edit"
+    )
+    path = f"/media-check/titles/{title_id}/bulk-edit"
+    invalid = [
+        ("video_ids", str(ids[9])), ("video_ids", str(ids[1])),
+        ("bulk_audio", "en"), ("hardsub", ""),
+        ("availability", "unavailable"),
+        ("confirm_changes", "yes"),
+    ]
+    rejected = asyncio.run(endpoint(_post_request(web_app, path, invalid), title_id))
+    assert rejected.status_code == 400
+    rendered_error = rejected.body.decode()
+    assert "Žádná část hromadné změny nebyla uložena" in rendered_error
+    assert "právě jednu odpovídající stopu" in rendered_error
+    assert "E01.mkv" in rendered_error
+    assert "Odeberte problematická videa" in rendered_error
+    with web_app.state.sessions() as session:
+        assert session.get(Video, ids[9]).audio_tracks[0].manual_language is None
+        assert session.get(Video, ids[1]).audio_tracks[0].manual_language is None
+        assert session.get(Video, ids[9]).czsk_availability_manual is None
+
+    valid = [
+        ("video_ids", str(ids[9])), ("video_ids", str(ids[10])),
+        ("bulk_audio", "en"), ("hardsub", ""),
+        ("availability", ""),
+    ]
+    preview = asyncio.run(endpoint(_post_request(web_app, path, valid), title_id))
+    assert preview.status_code == 200
+    assert "Vybráno 2 videí" in preview.body.decode()
+    assert "Audio stream" in preview.body.decode()
+    with web_app.state.sessions() as session:
+        assert session.get(Video, ids[9]).audio_tracks[0].manual_language is None
+    saved = asyncio.run(endpoint(_post_request(
+        web_app, path, valid + [("confirm_changes", "yes")],
+    ), title_id))
+    assert saved.status_code == 303
+    with web_app.state.sessions() as session:
+        assert session.get(Video, ids[9]).audio_tracks[0].manual_language == "en"
+        assert session.get(Video, ids[10]).audio_tracks[0].manual_language == "en"
+        assert session.get(Video, ids[9]).czsk_availability_manual is None
+
+
+def _global_bulk_scope(*, query: str = "") -> list[tuple[str, str]]:
+    return [
+        ("scope_subtitle", "all"),
+        ("scope_audio", "all"),
+        ("scope_q", query),
+        ("scope_page", "1"),
+        ("return_to", "/media-check?subtitle=all&audio=all&page=1"),
+    ]
+
+
+def test_global_bulk_previews_and_atomically_saves_videos_across_titles(tmp_path):
+    web_app, ids, _, _, collection_id = _media_app(tmp_path)
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        second_title = CatalogTitle(
+            collection=collection,
+            local_title="Season 2", normalized_local_title="season 2",
+            relative_root_path="Anime/Partial Translation/Season 2",
+            part_type="season", season_number=2, season_label="S2",
+        )
+        session.add(second_title)
+        session.flush()
+        session.get(Video, ids[10]).catalog_title = second_title
+        session.commit()
+        second_title_id = second_title.id
+
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if route.path == "/media-check/bulk-edit"
+    )
+    values = [
+        ("video_ids", str(ids[9])), ("video_ids", str(ids[10])),
+        ("hardsub", "none"), ("availability", "seeking"),
+        ("bulk_audio", ""), ("bulk_internal_subtitle", ""),
+        *_global_bulk_scope(),
+    ]
+    preview = asyncio.run(endpoint(_post_request(
+        web_app, "/media-check/bulk-edit", values,
+    )))
+    assert preview.status_code == 200
+    rendered = preview.body.decode()
+    assert "Vybráno 2 videí" in rendered
+    assert "E09.mkv" in rendered and "E10.mkv" in rendered
+    with web_app.state.sessions() as session:
+        assert session.get(Video, ids[9]).manual_hardsub_verified_at is None
+        assert session.get(Video, ids[10]).czsk_availability_manual is None
+        assert session.get(Video, ids[9]).catalog_title_id != second_title_id
+
+    saved = asyncio.run(endpoint(_post_request(
+        web_app, "/media-check/bulk-edit",
+        values + [("confirm_changes", "yes")],
+    )))
+    assert saved.status_code == 303
+    with web_app.state.sessions() as session:
+        for video_id in (ids[9], ids[10]):
+            video = session.get(Video, video_id)
+            assert video.manual_hardsub_verified_at is not None
+            assert video.czsk_availability_manual == "seeking"
+
+
+def test_global_bulk_rejects_selection_outside_rendered_page_without_writes(tmp_path):
+    web_app, ids, _, _, _ = _media_app(tmp_path)
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if route.path == "/media-check/bulk-edit"
+    )
+    values = [
+        ("video_ids", str(ids[10])), ("hardsub", "none"),
+        ("bulk_audio", ""), ("bulk_internal_subtitle", ""),
+        ("availability", ""), *_global_bulk_scope(query="E09.mkv"),
+    ]
+
+    response = asyncio.run(endpoint(_post_request(
+        web_app, "/media-check/bulk-edit", values,
+    )))
+
+    assert response.status_code == 400
+    rendered = response.body.decode()
+    assert "Výběr videí byl odmítnut" in rendered
+    assert "právě zobrazené stránce" in rendered
+    assert f"Video ID {ids[10]}" in rendered
+    assert "Zaškrtněte pouze videa viditelná" in rendered
+    with web_app.state.sessions() as session:
+        assert session.get(Video, ids[10]).manual_hardsub_verified_at is None
+
+
+@pytest.mark.parametrize(
+    ("extra_values", "expected_reason"),
+    [
+        ([('hardsub', 'none')], "Vyberte alespoň jedno existující video"),
+        ([('video_ids', '9')], "žádnou změněnou hodnotu"),
+    ],
+    ids=("no-selection", "no-requested-change"),
+)
+def test_global_bulk_explains_empty_request_without_writes(
+    tmp_path, extra_values, expected_reason,
+):
+    web_app, ids, _, _, _ = _media_app(tmp_path)
+    values = [
+        ("bulk_audio", ""), ("bulk_internal_subtitle", ""),
+        *([] if any(key == "hardsub" for key, _ in extra_values) else [
+            ("hardsub", ""),
+        ]),
+        ("availability", ""),
+        *_global_bulk_scope(),
+    ]
+    if extra_values == [("video_ids", "9")]:
+        extra_values = [("video_ids", str(ids[9]))]
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if route.path == "/media-check/bulk-edit"
+    )
+
+    response = asyncio.run(endpoint(_post_request(
+        web_app, "/media-check/bulk-edit", extra_values + values,
+    )))
+
+    assert response.status_code == 400
+    rendered = response.body.decode()
+    assert "Změny" in rendered or "Výběr videí" in rendered
+    assert expected_reason in rendered
+    assert "Jak pokračovat" in rendered
+    with web_app.state.sessions() as session:
+        assert session.get(Video, ids[9]).manual_hardsub_verified_at is None
+
+
+def test_title_bulk_rejects_foreign_video_and_rolls_back_entire_request(tmp_path):
+    web_app, ids, _, _, collection_id = _media_app(tmp_path)
+    with web_app.state.sessions() as session:
+        collection = session.get(CatalogCollection, collection_id)
+        source_title_id = session.get(Video, ids[9]).catalog_title_id
+        foreign_title = CatalogTitle(
+            collection=collection,
+            local_title="Movie", normalized_local_title="movie",
+            relative_root_path="Anime/Partial Translation/Movie",
+            part_type="film",
+        )
+        session.add(foreign_title)
+        session.flush()
+        session.get(Video, ids[10]).catalog_title = foreign_title
+        session.commit()
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if route.path == "/media-check/titles/{catalog_title_id}/bulk-edit"
+    )
+    values = [
+        ("video_ids", str(ids[9])), ("video_ids", str(ids[10])),
+        ("hardsub", "none"), ("bulk_audio", ""),
+        ("bulk_internal_subtitle", ""), ("availability", ""),
+    ]
+
+    response = asyncio.run(endpoint(_post_request(
+        web_app, f"/media-check/titles/{source_title_id}/bulk-edit", values,
+    ), source_title_id))
+
+    assert response.status_code == 400
+    rendered = response.body.decode()
+    assert "nepatří do této části" in rendered
+    assert "E10.mkv" in rendered
+    assert "Obnovte stránku" in rendered
+    with web_app.state.sessions() as session:
+        assert session.get(Video, ids[9]).manual_hardsub_verified_at is None
+        assert session.get(Video, ids[10]).manual_hardsub_verified_at is None
+
+
+def test_unrequested_bulk_language_axis_does_not_apply_track_guard():
+    multi_audio = _video(1, audio=("ja", "en"), internal=())
+
+    changes = apply_media_edits(
+        [multi_audio], bulk_audio="", bulk_internal_subtitle="",
+        hardsub="none",
+    )
+
+    assert changes == [
+        "E01 · E01.mkv · Hardsub: neověřeno → žádný · ověřeno",
+    ]
+    assert all(track.manual_language is None for track in multi_audio.audio_tracks)
+
+
+
 def test_media_check_page_navigation_controls_and_existing_review_pages(tmp_path):
     web_app, ids, audio_track_id, external_subtitle_id, _ = _media_app(tmp_path)
     endpoints = {
@@ -938,19 +1318,48 @@ def test_media_check_page_navigation_controls_and_existing_review_pages(tmp_path
         200, 200, 200, 200,
     ]
     rendered = media.body.decode()
+    with web_app.state.sessions() as session:
+        title_id = session.get(Video, ids[9]).catalog_title_id
+    title_media = endpoints["/media-check/titles/{catalog_title_id}"](
+        _request(web_app, f"/media-check/titles/{title_id}"), title_id,
+        message=None,
+    )
+    title_rendered = title_media.body.decode()
     assert 'href="/media-check"' in homepage.body.decode()
     assert "Doplnit CZ/SK" in rendered
-    assert "CZ/SK nyní nejsou dostupné" in rendered
-    assert 'action="/media-check/czsk-availability"' in rendered
-    assert f'action="/videos/{ids[9]}/audio-tracks/{audio_track_id}/language"' in rendered
+    assert "CZ/SK nejsou dostupné" in rendered
+    assert rendered.count('data-media-bulk-form') == 1
+    assert rendered.count('action="/media-check/bulk-edit"') == 1
+    assert rendered.count('data-media-select') == 12
+    assert f'name="video_ids" value="{ids[9]}"' in rendered
+    assert f'href="/titles/{title_id}"' in rendered
+    assert (
+        f'href="/media-check/titles/{title_id}?focus_video={ids[9]}'
+        f'#video-{ids[9]}">Upravit video</a>'
+    ) in rendered
+    assert "Otevřít Media Edit" not in rendered
+    assert "Upravit média" not in rendered
+    assert title_rendered.count(
+        f'action="/media-check/titles/{title_id}/bulk-edit"'
+    ) == 1
+    assert title_rendered.count('data-media-bulk-form') == 1
+    assert (
+        f'action="/media-check/titles/{title_id}/videos/{ids[9]}/edit"'
+        in title_rendered
+    )
+    assert f'name="audio_{audio_track_id}"' in title_rendered
+    assert 'name="internal_subtitle_' in title_rendered
     assert (
         f'action="/videos/{ids[12]}/external-subtitles/{external_subtitle_id}/language"'
-        in rendered
+        in title_rendered
     )
-    assert f'action="/videos/{ids[10]}/hardsub"' in rendered
+    assert (
+        f'action="/media-check/titles/{title_id}/videos/{ids[10]}/edit"'
+        in title_rendered
+    )
     assert '/hardsub"' not in hierarchy.body.decode()
-    assert "JA – Japonština" in rendered
-    assert "? – Neznámý jazyk" in rendered
+    assert "JA – Japonština" in title_rendered
+    assert "? – Neznámý jazyk" in title_rendered
     assert "JP audio</span><small>JA – Japonština</small>" in rendered
     assert "Jazyk audia neurčen</span><small>? – Neznámý jazyk</small>" in rendered
     for value, label in (
@@ -962,7 +1371,7 @@ def test_media_check_page_navigation_controls_and_existing_review_pages(tmp_path
     ):
         assert re.search(
             rf'<option value="{value}"(?: selected)?\s*>{re.escape(label)}</option>',
-            rendered,
+            title_rendered,
         )
 
     return_to = "/media-check?subtitle=all&audio=all#video-test"
@@ -1032,14 +1441,23 @@ def test_opening_media_check_ui_is_neutral_and_rejects_unavailable_marker(tmp_pa
     assert "Titulky nejsou požadované" in translated_row
     assert "Fakticky: CZ/SK" in translated_row
     assert "JP audio" in translated_row
-    assert "Stream 10" in translated_row
+    assert "Stream 10" not in translated_row
     assert "Titulky nejsou požadované" in unknown_audio_row
     assert "Jazyk audia neurčen" in unknown_audio_row
     assert "severity-info" in unknown_audio_row
     assert "Vhodné ověřit" not in unknown_audio_row
-    assert 'type="checkbox"' in unknown_audio_row
-    assert "disabled" in unknown_audio_row
+    assert f'name="video_ids" value="{ids[9]}"' in unknown_audio_row
+    assert "Upravit video" in unknown_audio_row
     assert "CZ/SK nyní nejsou dostupné</button>" not in unknown_audio_row
+
+    with web_app.state.sessions() as session:
+        title_id = session.get(Video, ids[1]).catalog_title_id
+    title_rendered = endpoints["/media-check/titles/{catalog_title_id}"](
+        _request(web_app, f"/media-check/titles/{title_id}"), title_id,
+        message=None,
+    ).body.decode()
+    assert "Stream 10" in title_rendered
+    assert 'data-media-select' in title_rendered
 
     request = _post_request(web_app, "/media-check/czsk-availability", [
         ("video_ids", str(ids[9])),
@@ -1050,6 +1468,141 @@ def test_opening_media_check_ui_is_neutral_and_rejects_unavailable_marker(tmp_pa
     assert exc_info.value.status_code == 400
     with web_app.state.sessions() as session:
         assert session.get(Video, ids[9]).czsk_availability_manual is None
+
+
+def test_title_media_focus_opens_only_requested_video_without_selecting_it(tmp_path):
+    web_app, ids, _, _, _ = _media_app(tmp_path)
+    with web_app.state.sessions() as session:
+        title_id = session.get(Video, ids[9]).catalog_title_id
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if route.path == "/media-check/titles/{catalog_title_id}"
+    )
+
+    default = endpoint(
+        _request(web_app, f"/media-check/titles/{title_id}"),
+        title_id, message=None, focus_video=None,
+    ).body.decode()
+    assert '<details class="media-controls" open' not in default
+
+    focused = endpoint(
+        _request(
+            web_app,
+            f"/media-check/titles/{title_id}?focus_video={ids[9]}#video-{ids[9]}",
+        ),
+        title_id, message=None, focus_video=ids[9],
+    ).body.decode()
+    assert focused.count('<details class="media-controls" open') == 1
+    assert (
+        f'class="panel media-title-video is-focus-target" id="video-{ids[9]}"'
+        in focused
+    )
+    target = focused.split(f'id="video-{ids[9]}"', 1)[1].split(
+        '</article>', 1,
+    )[0]
+    target_checkbox = re.search(
+        rf'<input[^>]+name="video_ids" value="{ids[9]}"[^>]*>', target,
+    ).group(0)
+    assert "checked" not in target_checkbox
+
+
+def test_media_check_selection_is_not_persisted_into_a_new_get(tmp_path):
+    web_app, ids, _, _, _ = _media_app(tmp_path)
+    endpoints = {
+        route.path: route.endpoint for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    rejected = asyncio.run(endpoints["/media-check/bulk-edit"](_post_request(
+        web_app, "/media-check/bulk-edit", [
+            ("video_ids", str(ids[9])),
+            ("bulk_audio", ""), ("bulk_internal_subtitle", ""),
+            ("hardsub", ""), ("availability", ""),
+            *_global_bulk_scope(),
+        ],
+    )))
+    assert rejected.status_code == 400
+    rejected_checkbox = re.search(
+        rf'<input[^>]+name="video_ids" value="{ids[9]}"[^>]*>',
+        rejected.body.decode(),
+    ).group(0)
+    assert "checked" in rejected_checkbox
+
+    fresh = endpoints["/media-check"](
+        _request(web_app, "/media-check"),
+        subtitle="all", audio="all", q="", page=1, message=None,
+    ).body.decode()
+    fresh_checkboxes = re.findall(
+        r'<input[^>]+name="video_ids"[^>]*data-media-select[^>]*>', fresh,
+    )
+    assert len(fresh_checkboxes) == 12
+    assert all("checked" not in checkbox for checkbox in fresh_checkboxes)
+
+    filtered = endpoints["/media-check"](
+        _request(web_app, "/media-check?q=E09.mkv"),
+        subtitle="all", audio="all", q="E09.mkv", page=1, message=None,
+    ).body.decode()
+    filtered_checkboxes = re.findall(
+        r'<input[^>]+name="video_ids"[^>]*data-media-select[^>]*>', filtered,
+    )
+    assert len(filtered_checkboxes) == 1
+    assert "checked" not in filtered_checkboxes[0]
+
+
+def test_global_media_check_get_is_semantically_read_only(tmp_path):
+    web_app, _, _, _, _ = _media_app(tmp_path)
+    engine = web_app.state.sessions.kw["bind"]
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if route.path == "/media-check"
+    )
+    writes = []
+
+    def record(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            writes.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        response = endpoint(
+            _request(web_app, "/media-check"),
+            subtitle="all", audio="all", q="", page=1, message=None,
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert response.status_code == 200
+    assert writes == []
+
+
+def test_focused_title_media_get_is_semantically_read_only(tmp_path):
+    web_app, ids, _, _, _ = _media_app(tmp_path)
+    with web_app.state.sessions() as session:
+        title_id = session.get(Video, ids[9]).catalog_title_id
+    engine = web_app.state.sessions.kw["bind"]
+    endpoint = next(
+        route.endpoint for route in web_app.routes
+        if route.path == "/media-check/titles/{catalog_title_id}"
+    )
+    writes = []
+
+    def record(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            writes.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        response = endpoint(
+            _request(
+                web_app,
+                f"/media-check/titles/{title_id}?focus_video={ids[9]}",
+            ),
+            title_id, message=None, focus_video=ids[9],
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert response.status_code == 200
+    assert writes == []
 
 
 def test_unresolved_subtitle_media_check_manual_workflow_is_persistent_and_scoped(tmp_path):
@@ -1131,9 +1684,11 @@ def test_unresolved_subtitle_media_check_manual_workflow_is_persistent_and_scope
         linked_id = linked.id
         assert session.get(UnresolvedExternalSubtitle, unresolved_id) is None
 
-    linked_media = endpoints["/media-check"](
-        _request(web_app, "/media-check"), subtitle="all", audio="all",
-        q="", page=1, message=None,
+    with web_app.state.sessions() as session:
+        title_id = session.get(Video, ids[1]).catalog_title_id
+    linked_media = endpoints["/media-check/titles/{catalog_title_id}"](
+        _request(web_app, f"/media-check/titles/{title_id}"),
+        title_id, message=None,
     ).body.decode()
     assert "Ručně potvrzeno kompatibilní" in linked_media
 

@@ -94,7 +94,7 @@ def test_catalog_thumbnails_are_fixed_decorative_and_responsive():
     assert "artwork_type" not in collection
 
 
-def test_editable_video_table_uses_its_own_landscape_card_breakpoint():
+def test_read_only_video_table_uses_its_own_landscape_card_breakpoint():
     css = STYLE_PATH.read_text(encoding="utf-8")
     series = source("series.html")
 
@@ -104,8 +104,8 @@ def test_editable_video_table_uses_its_own_landscape_card_breakpoint():
     assert '.episode-table td[data-label="Audio"] .tag' in css
     assert '.episode-table .episode-number .inline-form > input[type="number"]' in css
     assert '.table-wrap:has(> .episode-table)' in css
-    assert 'class="responsive-cards episode-table"' in series
-    for label in ("Série", "Epizoda", "Délka", "Hardsub", "Typ", "Rozlišení", "Audio"):
+    assert 'class="responsive-cards episode-table readonly-title-table"' in series
+    for label in ("Video", "Identita", "Typ", "Media Part", "Parametry", "Audio", "Titulky / hardsub"):
         assert f'data-label="{label}"' in series
 
 
@@ -122,6 +122,19 @@ def test_media_check_reuses_landscape_cards_and_stacks_filters_on_mobile():
     assert "profile.audio_languages|map('upper')" not in media_check
     assert "select, textarea" in css
     assert "max-width: 100%;" in css
+    assert ".media-title-video, .media-row { scroll-margin-top: 18rem; }" in css
+    assert css.count(
+        ".media-title-video, .media-row { scroll-margin-top: 24rem; }"
+    ) == 1
+    assert (
+        '.media-check-table th:last-child,\n'
+        '.media-check-table td[data-label="Akce"] { min-width: 8.75rem; }'
+        in css
+    )
+    assert '.media-check-table td[data-label="Akce"] .button-secondary {' in css
+    assert "white-space: nowrap;" in css.split(
+        '.media-check-table td[data-label="Akce"] .button-secondary {', 1
+    )[1].split("}", 1)[0]
 
 
 def test_unassigned_video_workflow_uses_desktop_cards_without_horizontal_scroll():
@@ -139,6 +152,7 @@ def test_touch_accessible_paths_and_critical_hierarchy_controls_remain_present()
     series = source("series.html")
     root_videos = source("root_videos.html")
     hierarchy = source("hierarchy_review_detail.html")
+    hierarchy_edit = source("hierarchy_edit.html")
 
     for template_source in (series, root_videos):
         assert 'class="technical-details"' in template_source
@@ -147,9 +161,12 @@ def test_touch_accessible_paths_and_critical_hierarchy_controls_remain_present()
 
     assert 'id="active-review-issues"' in hierarchy
     assert 'id="manual-split"' in hierarchy
-    assert 'class="inline-form part-type-form manual-hierarchy-form"' in hierarchy
-    assert "effective_video_content_display" in hierarchy
-    assert "video_content_type_choices" in hierarchy
+    assert 'class="hierarchy-title-editor structural-fields-form' in hierarchy_edit
+    assert 'name="part_type_manual"' in hierarchy_edit
+    assert 'name="content_type"' in hierarchy_edit
+    assert 'name="media_part_number"' in hierarchy_edit
+    assert "effective_video_content_display" in hierarchy_edit
+    assert "video_content_type_choices" in hierarchy_edit
 
 
 def test_hierarchy_all_anime_index_uses_native_disclosure_and_wrapping_rows():

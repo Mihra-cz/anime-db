@@ -924,9 +924,9 @@ def test_manual_preview_confirm_clear_stale_and_cross_title_rejection(tmp_path):
         "/media-check/external-subtitles/{subtitle_id}/compatibility-confirm"
     ]
 
-    media = endpoints["/media-check"](
-        _request(web_app, "/media-check"),
-        subtitle="all", audio="all", q="", page=1, message=None,
+    media = endpoints["/media-check/titles/{catalog_title_id}"](
+        _request(web_app, f"/media-check/titles/{ids['title']}"),
+        ids["title"], message=None,
     )
     rendered = media.body.decode()
     assert "Kompatibilita s video variantami" in rendered
@@ -941,10 +941,10 @@ def test_manual_preview_confirm_clear_stale_and_cross_title_rejection(tmp_path):
     assert "Historická automatická vazba" not in rendered
     assert "Neurčeno / odstranit ruční rozhodnutí" not in rendered
     assert "Zobrazit náhled" in rendered
-    title_detail = endpoints["/titles/{catalog_title_id}"](
-        _request(web_app, f"/titles/{ids['title']}"), ids["title"]
+    title_detail = endpoints["/media-check/titles/{catalog_title_id}"](
+        _request(web_app, f"/media-check/titles/{ids['title']}"), ids["title"]
     ).body.decode()
-    assert "compatibility: Automaticky přiřazeno" in title_detail
+    assert "Uložit jazyk titulku" in title_detail
     assert (
         f'action="/videos/{ids["bd"]}/external-subtitles/{ids["subtitle"]}/language"'
         in title_detail
@@ -954,7 +954,7 @@ def test_manual_preview_confirm_clear_stale_and_cross_title_rejection(tmp_path):
         ("video_id", str(ids["tv"])),
         ("decision", CONFIRMED_COMPATIBLE),
         ("note", "compatible despite release"),
-        ("return_to", "/media-check"),
+        ("return_to", f"/media-check/titles/{ids['title']}"),
     ])
     preview_response = asyncio.run(preview_endpoint(
         preview_request, ids["subtitle"]
@@ -993,7 +993,7 @@ def test_manual_preview_confirm_clear_stale_and_cross_title_rejection(tmp_path):
         ("note", "compatible despite release"),
         ("expected_fingerprint", fingerprint),
         ("confirm_compatibility", "true"),
-        ("return_to", "/media-check"),
+        ("return_to", f"/media-check/titles/{ids['title']}"),
     ])
     response = asyncio.run(confirm_endpoint(confirm_request, ids["subtitle"]))
     assert response.status_code == 303
@@ -1007,15 +1007,15 @@ def test_manual_preview_confirm_clear_stale_and_cross_title_rejection(tmp_path):
         )
         assert row.verified_at is not None
 
-    media_after = endpoints["/media-check"](
-        _request(web_app, "/media-check"),
-        subtitle="available", audio="all", q="", page=1, message=None,
+    media_after = endpoints["/media-check/titles/{catalog_title_id}"](
+        _request(web_app, f"/media-check/titles/{ids['title']}"),
+        ids["title"], message=None,
     ).body.decode()
     assert "Ručně potvrzeno kompatibilní" in media_after
     assert "Sdílený fyzický subtitle asset" in media_after
     assert "Bez kompatibilních externích titulků" not in media_after
-    title_after = endpoints["/titles/{catalog_title_id}"](
-        _request(web_app, f"/titles/{ids['title']}"), ids["title"]
+    title_after = endpoints["/media-check/titles/{catalog_title_id}"](
+        _request(web_app, f"/media-check/titles/{ids['title']}"), ids["title"]
     ).body.decode()
     assert title_after.count("Nande - 01.ass") >= 2
     assert (

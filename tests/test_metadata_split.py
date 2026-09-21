@@ -795,8 +795,8 @@ def test_metadata_check_renders_safe_split_and_hierarchy_review_keeps_all_title_
         route.path: route.endpoint for route in web_app.routes
         if hasattr(route, "endpoint")
     }
-    detail = endpoints["/titles/{catalog_title_id}"](
-        web_request(web_app, f"/titles/{source_id}"), source_id,
+    detail = endpoints["/metadata-review/{catalog_title_id}"](
+        web_request(web_app, f"/metadata-review/{source_id}"), source_id,
     ).body.decode()
     metadata_review = endpoints["/metadata-review"](
         web_request(web_app, "/metadata-review"), status="split",
@@ -862,10 +862,10 @@ def test_metadata_detail_renders_complete_media_parts_as_neutral_information(
 
     endpoint = next(
         route.endpoint for route in web_app.routes
-        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+        if getattr(route, "path", None) == "/metadata-review/{catalog_title_id}"
     )
     rendered = endpoint(
-        web_request(web_app, f"/titles/{title_id}"), title_id,
+        web_request(web_app, f"/metadata-review/{title_id}"), title_id,
     ).body.decode()
     metadata_review = next(
         route.endpoint for route in web_app.routes
@@ -915,10 +915,10 @@ def test_metadata_detail_renders_fractional_recap_as_neutral_information(
 
     endpoint = next(
         route.endpoint for route in web_app.routes
-        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+        if getattr(route, "path", None) == "/metadata-review/{catalog_title_id}"
     )
     rendered = endpoint(
-        web_request(web_app, f"/titles/{title_id}"), title_id,
+        web_request(web_app, f"/metadata-review/{title_id}"), title_id,
     ).body.decode()
     metadata_review = next(
         route.endpoint for route in web_app.routes
@@ -977,10 +977,10 @@ def test_metadata_detail_keeps_provider_episode_zero_mismatch_unresolved(
 
     endpoint = next(
         route.endpoint for route in web_app.routes
-        if getattr(route, "path", None) == "/titles/{catalog_title_id}"
+        if getattr(route, "path", None) == "/metadata-review/{catalog_title_id}"
     )
     rendered = endpoint(
-        web_request(web_app, f"/titles/{season_id}"), season_id,
+        web_request(web_app, f"/metadata-review/{season_id}"), season_id,
     ).body.decode()
 
     assert "Lokálně: 12 logických položek (rozdíl 1)" in rendered
@@ -1017,7 +1017,8 @@ def test_hierarchy_review_uses_verified_bonus_local_title_without_restructuring(
 
     assert rendered.count('class="panel hierarchy-title-card') == 1
     assert (
-        f'<h3><a href="/titles/{title_id}">NC – High School DxD Born</a></h3>'
+        f'<h3><a href="/hierarchy-review/{collection_id}/titles/{title_id}">'
+        'NC – High School DxD Born</a></h3>'
         in rendered
     )
     assert f'id="title-{title_id}"' in rendered
