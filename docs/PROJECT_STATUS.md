@@ -237,6 +237,15 @@ rozpor nebo chybí primary) a `UNKNOWN` (identitu nelze bezpečně ověřit). Po
 konflikt, druhý review bez automatického odhadu. Nevzniká automatická náhrada
 primary ani mazání souborů.
 
+Pro nečíslovaná supplementary videa je samostatné explicitní potvrzení
+fyzických kopií téhož obsahu. Secondary ukládá
+`duplicate_confirmation_kind=unnumbered_supplementary_same_content` vedle
+`duplicate_of_video_id`; samotné `suspected` zůstává jen poznámkou. Resolver
+vazbu uzná pouze při současné shodě title, collection, typu a strukturálního
+kontextu, bez konfliktního ordinalu, varianty nebo Media Parts. Při pozdější
+změně evidence vazba zůstane uložená, ale přestane kolabovat logical count a
+vrátí se do Review. Běžné duplicity nad známou identitou se nemění.
+
 `VideoVariantGroup` je ruční skupina v rámci title, s volitelným release source
 a content variant. `NULL` assignment je neurčeno, ne implicitní výchozí varianta.
 Různé potvrzené skupiny mohou reprezentovat jednu epizodu; neoznačené či

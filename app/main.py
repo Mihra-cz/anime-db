@@ -109,6 +109,7 @@ from .hierarchy_review import (
     collection_grouping_suggestions, create_main_collection,
     create_anime_for_known_videos, create_title_for_known_videos,
     confirm_duplicate_groups, confirm_duplicate_videos,
+    confirm_unnumbered_supplementary_copies,
     confirm_existing_split_season_parts, create_title_from_videos,
     create_title_with_complementary_season_part,
     delete_empty_collection, delete_empty_collections, delete_empty_local_title,
@@ -123,6 +124,7 @@ from .hierarchy_review import (
     parse_simple_definitions,
     reevaluate_automatic_collection_hierarchy, refresh_collection_state,
     preview_assignments, separate_nonstandard_videos, simple_definition_rows,
+    preview_unnumbered_supplementary_copies,
     set_manual_duplicate_status,
     single_title_confirmation_suggestion, supplementary_assignment_recommendations,
     supplementary_video_suggestions,
@@ -4479,6 +4481,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#current-parts",
+        )
+
+    @app.post(
+        "/hierarchy-review/{collection_id}/duplicates/unnumbered/preview",
+        response_class=HTMLResponse,
+    )
+    async def hierarchy_review_unnumbered_copies_preview(
+        request: Request, collection_id: int,
+    ):
+        form = await request.form()
+        try:
+            video_ids = [int(value) for value in form.getlist("video_ids")]
+            primary_id = int(str(form.get("primary_video_id") or ""))
+            with sessions() as session:
+                preview = preview_unnumbered_supplementary_copies(
+                    session, collection_id, video_ids, primary_id,
+                )
+                title_id = preview.primary.catalog_title_id
+                return templates.TemplateResponse(
+                    request, "unnumbered_supplementary_duplicate_preview.html", {
+                        "collection_id": collection_id,
+                        "title_id": title_id,
+                        "preview": preview,
+                    },
+                )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/hierarchy-review/{collection_id}/duplicates/unnumbered/confirm")
+    async def hierarchy_review_unnumbered_copies_confirm(
+        request: Request, collection_id: int,
+    ):
+        form = await request.form()
+        if str(form.get("confirm_same_content") or "").casefold() not in {
+            "true", "on", "1",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="Fyzické kopie stejného obsahu je nutné explicitně potvrdit.",
+            )
+        try:
+            video_ids = [int(value) for value in form.getlist("video_ids")]
+            primary_id = int(str(form.get("primary_video_id") or ""))
+            with sessions() as session:
+                preview = confirm_unnumbered_supplementary_copies(
+                    session, collection_id, video_ids, primary_id,
+                    str(form.get("expected_fingerprint") or ""),
+                )
+                title_id = preview.primary.catalog_title_id
+                session.commit()
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = "Fyzické kopie stejného obsahu byly potvrzeny; ordinal zůstal neurčen."
+        return local_redirect_response(
+            f"/hierarchy-review/{collection_id}/titles/{title_id}"
+            f"?{urlencode({'message': message})}#supplementary-copies",
         )
 
     @app.post("/hierarchy-review/{collection_id}/duplicates/confirm-bulk")

@@ -46,7 +46,17 @@ logger = logging.getLogger(__name__)
 # Version 3 adds only ExternalSubtitle's rejection-memory column (R6 closure).
 # Version 4 adds only InternalSubtitle.manual_language; neither requires a
 # library reconstruction or inferred backfill.
-STARTUP_COMPATIBILITY_VERSION = 4
+# Version 5 adds only nullable Video duplicate confirmation authority. Existing
+# relations retain NULL; no historical relationship is inferred or backfilled.
+STARTUP_COMPATIBILITY_VERSION = 5
+
+
+def _migrate_unnumbered_duplicate_confirmation_kind(connection) -> None:
+    existing = {column["name"] for column in inspect(connection).get_columns("videos")}
+    if "duplicate_confirmation_kind" not in existing:
+        connection.execute(text(
+            "ALTER TABLE videos ADD COLUMN duplicate_confirmation_kind VARCHAR NULL"
+        ))
 
 
 AutomaticStructuralInput = tuple[str, int | None, int | None, str | None]
@@ -285,6 +295,7 @@ def migrate_schema(engine) -> None:
             ("content_type_manual", "VARCHAR NULL"),
             ("media_part_number", "INTEGER NULL"),
             ("duplicate_status_manual", "VARCHAR NULL"),
+            ("duplicate_confirmation_kind", "VARCHAR NULL"),
             ("duplicate_of_video_id", "INTEGER NULL REFERENCES videos(id) ON DELETE SET NULL"),
             ("duplicate_primary_missing", "BOOLEAN NOT NULL DEFAULT 0"),
         ],
@@ -839,6 +850,8 @@ def migrate_schema_at_startup(engine) -> bool:
             # Nullable human override only; existing factual language evidence
             # is preserved and every historical row starts with NULL authority.
             _migrate_internal_subtitle_manual_language(connection)
+        if current in (1, 2, 3, 4):
+            _migrate_unnumbered_duplicate_confirmation_kind(connection)
         connection.execute(text(
             f"PRAGMA user_version = {STARTUP_COMPATIBILITY_VERSION}"
         ))

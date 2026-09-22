@@ -673,6 +673,38 @@ def duplicate_relation_state(
         and secondary_group != primary_group
     ):
         return DuplicateRelationState.INVALID
+    if video.duplicate_confirmation_kind is not None:
+        from .unnumbered_supplementary_duplicate import (
+            UNNUMBERED_SUPPLEMENTARY_SAME_CONTENT,
+            validate_unnumbered_same_content_members,
+        )
+        if (
+            video.duplicate_confirmation_kind != UNNUMBERED_SUPPLEMENTARY_SAME_CONTENT
+            or primary.duplicate_confirmation_kind is not None
+        ):
+            return DuplicateRelationState.INVALID
+        if not allow_relationship_load and (
+            "catalog_title" not in video.__dict__
+            or "catalog_title" not in primary.__dict__
+        ):
+            return DuplicateRelationState.UNKNOWN
+        # Loaded relationships are needed only for this explicit, uncommon
+        # authority. Legacy relations keep their original identity resolver.
+        secondary_title, primary_title = video.catalog_title, primary.catalog_title
+        if secondary_title is None or primary_title is None:
+            return DuplicateRelationState.INVALID
+        if not allow_relationship_load and (
+            "collection" not in secondary_title.__dict__
+            or "collection" not in primary_title.__dict__
+        ):
+            return DuplicateRelationState.UNKNOWN
+        _ = secondary_title.collection
+        _ = primary_title.collection
+        try:
+            validate_unnumbered_same_content_members([primary, video])
+        except ValueError:
+            return DuplicateRelationState.INVALID
+        return DuplicateRelationState.VALID
     secondary_key = (
         current_identities.get(video)
         if current_identities is not None
@@ -983,6 +1015,7 @@ def set_duplicate_group_primary(videos: list[Video], primary: Video) -> None:
     for video in members:
         video.duplicate_of = None
         video.duplicate_primary_missing = False
+        video.duplicate_confirmation_kind = None
     for video in members:
         if video is not primary:
             video.duplicate_of = primary
@@ -992,6 +1025,7 @@ def clear_duplicate_group(videos: list[Video]) -> None:
     for video in _complete_duplicate_group(videos):
         video.duplicate_of = None
         video.duplicate_primary_missing = False
+        video.duplicate_confirmation_kind = None
 
 
 def _complete_duplicate_group(videos: list[Video]) -> set[Video]:

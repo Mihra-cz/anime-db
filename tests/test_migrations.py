@@ -102,6 +102,29 @@ def test_stable_application_startup_skips_compatibility_rebuild_and_writes(tmp_p
     assert _semantic_database_snapshot(engine) == before
 
 
+def test_v4_to_v5_adds_nullable_duplicate_confirmation_without_backfill(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'v4-duplicate-kind.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE videos DROP COLUMN duplicate_confirmation_kind"))
+        connection.execute(text(
+            "INSERT INTO videos (id, relative_path, root_folder, filename, size, mtime_ns, file_type) "
+            "VALUES (1, 'Show/Film.mkv', 'Show', 'Film.mkv', 123, 456, 'film')"
+        ))
+        connection.execute(text("PRAGMA user_version = 4"))
+    assert migrate_schema_at_startup(engine) is True
+    assert migrate_schema_at_startup(engine) is False
+    assert "duplicate_confirmation_kind" in {
+        column["name"] for column in inspect(engine).get_columns("videos")
+    }
+    with engine.connect() as connection:
+        assert connection.scalar(text("PRAGMA user_version")) == 5
+        assert tuple(connection.execute(text(
+            "SELECT id, relative_path, root_folder, filename, size, mtime_ns, "
+            "file_type, duplicate_confirmation_kind FROM videos WHERE id = 1"
+        )).one()) == (1, "Show/Film.mkv", "Show", "Film.mkv", 123, 456, "film", None)
+
+
 def test_startup_version_three_adds_internal_subtitle_manual_language_once(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'v3-internal-language.db'}")
     Base.metadata.create_all(engine)

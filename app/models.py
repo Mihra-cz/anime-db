@@ -50,6 +50,7 @@ class Video(Base):
     duplicate_status_manual: Mapped[str | None] = mapped_column(
         String, nullable=True, index=True
     )
+    duplicate_confirmation_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     duplicate_of_video_id: Mapped[int | None] = mapped_column(
         ForeignKey("videos.id", ondelete="SET NULL"), nullable=True, index=True
     )

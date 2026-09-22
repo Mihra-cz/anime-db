@@ -97,6 +97,38 @@
   {% else %}<p>Část neobsahuje žádná videa.</p>{% endfor %}
 </section>
 
+{% set missing_supplementary = namespace(found=false) %}
+{% for item in title_numbering_visible %}
+  {% for issue in item.supplementary_review_issues %}
+    {% if issue.code == 'missing_supplementary_ordinal' %}{% set missing_supplementary.found = true %}{% endif %}
+  {% endfor %}
+{% endfor %}
+{% if missing_supplementary.found %}
+<section class="panel" id="supplementary-copies">
+  <h2>Chybějící supplementary ordinal · fyzické kopie</h2>
+  <p>Pokud jde skutečně o stejný obsah, vyberte všechna příslušná videa a primární kopii. Podezření na duplicitu samo tento problém neřeší; ordinal se při potvrzení nedoplňuje.</p>
+  <form method="post" action="/hierarchy-review/{{ collection.id }}/duplicates/unnumbered/preview">
+    <fieldset><legend>Vybraná videa</legend>
+      {% for video in selected_title_videos %}{% set content = effective_video_content_display(video) %}
+      <div class="hierarchy-video-current">
+        <label><input type="checkbox" name="video_ids" value="{{ video.id }}"> {{ video.filename }}</label>
+        <span> · {{ content.label }} · ordinal: {{ content.supplementary_ordinal if content.supplementary_ordinal is not none else 'neurčen' }}</span>
+        <span> · Varianta: {{ video_variant_display_for_video(video, include_unassigned=true) }}</span>
+        <span> · Media Part: {{ media_part_label(video, selected_title_videos) or '—' }}</span>
+      </div>
+      {% endfor %}
+    </fieldset>
+    <label>Primary
+      <select name="primary_video_id" required>
+        <option value="" selected disabled>Vyberte primární video</option>
+        {% for video in selected_title_videos %}<option value="{{ video.id }}">{{ video.filename }}</option>{% endfor %}
+      </select>
+    </label>
+    <button type="submit">Potvrdit vybrané soubory jako fyzické kopie stejného obsahu · zobrazit preview</button>
+  </form>
+</section>
+{% endif %}
+
 {% include "_hierarchy_title_cards.html" %}
 {% include "_hierarchy_manual_duplicates.html" %}
 

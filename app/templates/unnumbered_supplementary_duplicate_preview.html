@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block main_class %}content-shell content-wide{% endblock %}
+{% block title %}Náhled fyzických kopií · AnimeDB{% endblock %}
+{% block content %}
+<nav class="detail-backlinks" aria-label="Návrat">
+  <a href="/hierarchy-review/{{ collection_id }}/titles/{{ title_id }}#supplementary-copies">← Zpět na Hierarchy Edit</a>
+</nav>
+<h1>Náhled potvrzení fyzických kopií</h1>
+<p>Potvrďte pouze v případě, že vybrané soubory skutečně obsahují stejný obsah. Nejde o potvrzení pouhého podezření.</p>
+<section class="panel">
+  <h2>Primary</h2>
+  <p>{{ preview.primary.filename }}</p>
+  <h2>Secondary</h2>
+  <ul>{% for video in preview.secondaries %}<li>{{ video.filename }}</li>{% endfor %}</ul>
+  <h2>Výsledek</h2>
+  <p>{{ 1 + preview.secondaries|length }} fyzická videa → 1 logická {{ preview.supplementary_type|capitalize }} identita</p>
+  <p>Supplementary ordinal zůstane neurčen.</p>
+  <form method="post" action="/hierarchy-review/{{ collection_id }}/duplicates/unnumbered/confirm">
+    <input type="hidden" name="primary_video_id" value="{{ preview.primary.id }}">
+    <input type="hidden" name="expected_fingerprint" value="{{ preview.fingerprint }}">
+    <input type="hidden" name="video_ids" value="{{ preview.primary.id }}">
+    {% for video in preview.secondaries %}<input type="hidden" name="video_ids" value="{{ video.id }}">{% endfor %}
+    <label><input type="checkbox" name="confirm_same_content" value="true" required> Tato videa jsou fyzické kopie stejného obsahu.</label>
+    <button type="submit">Potvrdit fyzické kopie</button>
+  </form>
+</section>
+{% endblock %}

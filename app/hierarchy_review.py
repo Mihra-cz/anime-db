@@ -97,6 +97,10 @@ from .video_variants import (
     reconcile_video_catalog_title,
     validate_video_catalog_title_assignment,
 )
+from .unnumbered_supplementary_duplicate import (
+    UNNUMBERED_SUPPLEMENTARY_SAME_CONTENT,
+    validate_unnumbered_same_content_members,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -2452,6 +2456,116 @@ def confirm_duplicate_videos(
         session.flush()
         refresh_collection_state(collection)
     return selected
+
+
+@dataclass(frozen=True)
+class UnnumberedSupplementaryCopiesPreview:
+    primary: Video
+    secondaries: tuple[Video, ...]
+    supplementary_type: str
+    fingerprint: str
+
+
+def preview_unnumbered_supplementary_copies(
+    session: Session, collection_id: int, video_ids: list[int], primary_video_id: int,
+) -> UnnumberedSupplementaryCopiesPreview:
+    """Read-only preview of one explicitly selected same-content group."""
+    collection = _load_collection_for_assignment(session, collection_id)
+    # The shared resolver operates on loaded relationships; batch-load the
+    # selected scope so both GET preview and POST validation stay bounded.
+    session.scalars(select(Video).options(
+        selectinload(Video.catalog_title).selectinload(CatalogTitle.collection).selectinload(CatalogCollection.titles),
+        selectinload(Video.catalog_collection),
+        selectinload(Video.duplicate_of),
+        selectinload(Video.duplicate_copies),
+        selectinload(Video.video_variant_group),
+    ).where(Video.catalog_collection_id == collection_id)).all()
+    if len(video_ids) != len(set(video_ids)):
+        raise ValueError("Výběr obsahuje stejné video vícekrát.")
+    selected = _selected_videos(collection, video_ids)
+    primary = next((video for video in selected if video.id == primary_video_id), None)
+    if primary is None:
+        raise ValueError("Primary musí být jedním z vybraných videí.")
+    kind = validate_unnumbered_same_content_members(selected)
+    selected_ids = {video.id for video in selected}
+    for video in selected:
+        if video.duplicate_primary_missing:
+            raise ValueError("Chybějící primary vyžaduje samostatnou kontrolu.")
+        if video.duplicate_of_video_id is None and video.duplicate_confirmation_kind is not None:
+            raise ValueError("Video má potvrzovací evidenci bez duplicate primary.")
+        if video.duplicate_of_video_id is not None and (
+            video.duplicate_of_video_id not in selected_ids
+            or video.duplicate_confirmation_kind != UNNUMBERED_SUPPLEMENTARY_SAME_CONTENT
+        ):
+            raise ValueError("Video už je secondary jiné nebo historické skupiny.")
+    if any(
+        copy.id not in selected_ids
+        for video in selected for copy in video.duplicate_copies
+    ):
+        raise ValueError("Je nutné vybrat celou existující skupinu kopií.")
+    existing_primaries = {
+        video.duplicate_of_video_id for video in selected
+        if video.duplicate_of_video_id is not None
+    }
+    if len(existing_primaries) > 1 or (
+        existing_primaries and next(iter(existing_primaries)) not in selected_ids
+    ):
+        raise ValueError("Vybraná videa netvoří jednu potvrzenou skupinu.")
+    # Include the whole structural input, so a stale preview cannot authorize
+    # a changed attachment even when the selected Video rows are untouched.
+    structural = [
+        (title.id, title.catalog_collection_id, title.part_type,
+         title.season_number, title.part_number, title.hierarchy_manual_override,
+         title.part_type_manual, title.season_number_manual,
+         title.part_number_manual, title.season_label_manual)
+        for title in sorted(collection.titles, key=lambda item: item.id)
+    ]
+    rows = [
+        (video.id, video.catalog_title_id, video.catalog_collection_id,
+         video.file_type, video.content_type_manual,
+         video.episode_number_manual_override,
+         video.recap_episode_number_manual_tenths,
+         video.video_variant_group_id, video.media_part_number,
+         video.duplicate_of_video_id, video.duplicate_confirmation_kind,
+         bool(video.duplicate_primary_missing), video.filename)
+        for video in sorted(selected, key=lambda item: item.id)
+    ]
+    payload = (collection_id, primary_video_id, kind, structural, rows)
+    fingerprint = hashlib.sha256(json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    return UnnumberedSupplementaryCopiesPreview(
+        primary=primary,
+        secondaries=tuple(video for video in selected if video is not primary),
+        supplementary_type=kind,
+        fingerprint=fingerprint,
+    )
+
+
+def confirm_unnumbered_supplementary_copies(
+    session: Session, collection_id: int, video_ids: list[int],
+    primary_video_id: int, fingerprint: str,
+) -> UnnumberedSupplementaryCopiesPreview:
+    """Recheck preview and atomically persist the narrow human authority."""
+    preview = preview_unnumbered_supplementary_copies(
+        session, collection_id, video_ids, primary_video_id,
+    )
+    if not fingerprint or fingerprint != preview.fingerprint:
+        raise ValueError("Preview už neodpovídá aktuálním datům; obnovte jej.")
+    collection = preview.primary.catalog_collection
+    with strict_hierarchy_write_guard(session, [collection]):
+        members = [preview.primary, *preview.secondaries]
+        for video in members:
+            video.duplicate_of = None
+            video.duplicate_confirmation_kind = None
+            video.duplicate_primary_missing = False
+        session.flush()
+        for video in preview.secondaries:
+            video.duplicate_of = preview.primary
+            video.duplicate_confirmation_kind = UNNUMBERED_SUPPLEMENTARY_SAME_CONTENT
+        session.flush()
+        refresh_collection_state(collection, recalculate=False)
+    return preview
 
 
 def confirm_duplicate_groups(
