@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import json
 import re
 from urllib.parse import urlencode
 
@@ -1603,6 +1604,138 @@ def test_focused_title_media_get_is_semantically_read_only(tmp_path):
 
     assert response.status_code == 200
     assert writes == []
+
+
+def test_unresolved_subtitle_all_ranked_candidates_are_rendered_and_actionable(tmp_path):
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'subtitle-candidates.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        videos = [Video(
+            relative_path=f"Anime/Variant {number:02}/Match.mkv",
+            root_folder="Anime", filename="Match.mkv", size=1, mtime_ns=1,
+        ) for number in range(1, 29)]
+        subtitle = UnresolvedExternalSubtitle(
+            relative_path="Anime/Unmatched.ass", filename="Unmatched.ass",
+            extension=".ass", language="cs", normalized_language="cs",
+        )
+        session.add_all([*videos, subtitle])
+        session.flush()
+        subtitle.rejected_video_ids_json = f"[{videos[27].id}]"
+        expected_ids = [video.id for video in videos[:27]]
+        rejected_id = videos[27].id
+        subtitle_id = subtitle.id
+        session.commit()
+
+    endpoints = {route.path: route.endpoint for route in web_app.routes
+                 if hasattr(route, "endpoint")}
+    with web_app.state.sessions() as session:
+        row = build_unresolved_subtitle_rows(
+            [session.get(UnresolvedExternalSubtitle, subtitle_id)],
+            list(session.scalars(select(Video).order_by(Video.id))),
+        )[0]
+        assert row.candidate_count == 27
+        assert [candidate.video.id for candidate in row.candidates] == expected_ids
+
+    rendered = endpoints["/media-check"](
+        _request(web_app, "/media-check"), subtitle="all", audio="all",
+        q="", page=1, message=None,
+    ).body.decode()
+    assert "Zobrazit kandidáty (27)" in rendered
+    rendered_ids = [int(value) for value in re.findall(
+        r'name="video_id" value="(\d+)"', rendered,
+    )]
+    assert rendered_ids == expected_ids
+    assert rendered.count(
+        f'action="/media-check/external-subtitles/{subtitle_id}/assign"'
+    ) == 27
+    for position in (1, 12, 13, 27):
+        video_id = expected_ids[position - 1]
+        assert f'/media-check/external-subtitles/{subtitle_id}/reject/{video_id}' in rendered
+    assert rejected_id not in rendered_ids
+
+    reject = asyncio.run(endpoints[
+        "/media-check/external-subtitles/{subtitle_id}/reject/{video_id}"
+    ](_post_request(web_app,
+        f"/media-check/external-subtitles/{subtitle_id}/reject/{expected_ids[26]}",
+        [("return_to", f"/media-check#external-subtitle-{subtitle_id}")],
+    ), subtitle_id, expected_ids[26]))
+    assert reject.status_code == 303
+    assert reject.headers["location"] == f"/media-check#external-subtitle-{subtitle_id}"
+    with web_app.state.sessions() as session:
+        row = session.get(UnresolvedExternalSubtitle, subtitle_id)
+        assert json.loads(row.rejected_video_ids_json) == [expected_ids[26], rejected_id]
+
+    assign = asyncio.run(endpoints[
+        "/media-check/external-subtitles/{subtitle_id}/assign"
+    ](_post_request(web_app,
+        f"/media-check/external-subtitles/{subtitle_id}/assign",
+        [("video_id", str(expected_ids[12]))],
+    ), subtitle_id))
+    assert assign.status_code == 303
+    with web_app.state.sessions() as session:
+        assert session.get(UnresolvedExternalSubtitle, subtitle_id) is None
+        linked = session.scalar(select(ExternalSubtitle).where(
+            ExternalSubtitle.relative_path == "Anime/Unmatched.ass"
+        ))
+        assert [(item.video_id, item.status) for item in linked.compatibilities] == [
+            (expected_ids[12], "confirmed_compatible")
+        ]
+
+
+@pytest.mark.parametrize("unresolved", [True, False])
+def test_unresolved_subtitle_panel_defaults_closed_with_counts_and_actions(
+    tmp_path, unresolved,
+):
+    web_app, _, _, _, _ = _media_app(tmp_path)
+    with web_app.state.sessions() as session:
+        review = UnresolvedExternalSubtitle(
+            relative_path="Anime/Partial Translation/Season 1/Review.ass",
+            filename="Review.ass", extension=".ass", language="cs",
+            normalized_language="cs",
+            status="unresolved" if unresolved else "confirmed_no_match",
+        )
+        no_match = UnresolvedExternalSubtitle(
+            relative_path="Anime/Partial Translation/Season 1/No Video.ass",
+            filename="No Video.ass", extension=".ass", language="cs",
+            normalized_language="cs", status="confirmed_no_match",
+        )
+        session.add_all([review, no_match])
+        session.commit()
+        review_id, no_match_id = review.id, no_match.id
+
+    endpoint = next(route.endpoint for route in web_app.routes
+                    if route.path == "/media-check")
+    rendered = endpoint(
+        _request(web_app, "/media-check"), subtitle="all", audio="all",
+        q="", page=1, message=None,
+    ).body.decode()
+    panel = re.search(
+        r'<details class="([^"]*unresolved-subtitle-list[^"]*)"([^>]*)>'
+        r'\s*<summary[^>]*>(.*?)</summary>', rendered, re.S,
+    )
+    assert panel is not None
+    assert "open" not in panel.group(2)
+    summary = re.sub(r"<[^>]+>", " ", panel.group(3))
+    assert "Nepřiřazené externí titulky" in summary
+    assert "celkem 2" in summary
+    assert f"čeká {1 if unresolved else 0}" in summary
+    assert f"bez videa {1 if unresolved else 2}" in summary
+    assert ("severity-warning" in panel.group(1)) is unresolved
+    assert ("severity-info" in panel.group(1)) is (not unresolved)
+    assert "Automatika zde nic nehádá" in rendered
+    assert f'action="/media-check/external-subtitles/{no_match_id}/decision"' in rendered
+    assert 'name="action" value="reopen"' in rendered
+    if unresolved:
+        assert f'id="external-subtitle-{review_id}"' in rendered
+        assert "Zobrazit kandidáty" in rendered
+        assert f'action="/media-check/external-subtitles/{review_id}/assign"' in rendered
+        assert f'/media-check/external-subtitles/{review_id}/reject/' in rendered
+        assert 'name="action" value="confirm_no_match"' in rendered
 
 
 def test_unresolved_subtitle_media_check_manual_workflow_is_persistent_and_scoped(tmp_path):

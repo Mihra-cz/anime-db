@@ -19,9 +19,6 @@ from .catalog import (
 from .external_subtitle_compatibility import confirm_compatible
 from .models import ExternalSubtitle, UnresolvedExternalSubtitle, Video
 
-MAX_SUBTITLE_CANDIDATES = 12
-
-
 @dataclass(frozen=True)
 class SubtitleCandidate:
     video: Video
@@ -249,7 +246,7 @@ def subtitle_candidates(
             candidate.video.id or 0,
         ),
     )
-    return scope, tuple(ranked[:MAX_SUBTITLE_CANDIDATES]), len(ranked)
+    return scope, tuple(ranked), len(ranked)
 
 
 def build_unresolved_subtitle_rows(

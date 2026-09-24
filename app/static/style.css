@@ -965,6 +965,10 @@ summary {
 .media-track:last-child { border-bottom: 0; }
 .media-track p { margin: 0 0 .5rem; }
 .unresolved-subtitle-list { margin-bottom: 1rem; }
+.unresolved-subtitle-list.severity-warning { border-left: .3rem solid #f59e0b; }
+.unresolved-subtitle-list.severity-info { border-left: .3rem solid #64748b; }
+.unresolved-subtitle-list > summary { font-weight: 700; }
+.external-subtitle-summary-counts { color: #aab4c5; font-weight: 400; }
 .unresolved-subtitle-card { padding: 1rem 0; border-top: 1px solid #364258; }
 .unresolved-subtitle-card > header,
 .subtitle-candidate,

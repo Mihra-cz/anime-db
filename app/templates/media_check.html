@@ -10,9 +10,9 @@
 {% if message %}<div class="notice success">{{ message }}</div>{% endif %}
 {{ edit_error_summary(edit_error) }}
 
-<section class="panel unresolved-subtitle-list" aria-labelledby="unresolved-subtitle-heading">
-  <h2 id="unresolved-subtitle-heading">Nepřiřazené externí titulky</h2>
-  <p>Celkem <strong>{{ unresolved_subtitle_counts.all }}</strong> · čeká na rozhodnutí <strong>{{ unresolved_subtitle_counts.unresolved }}</strong> · potvrzeno bez videa <strong>{{ unresolved_subtitle_counts.confirmed_no_match }}</strong>. Automatika zde nic nehádá. Kandidáti jsou omezeni fyzickým anime kontextem a slouží pouze jako návrhy pro ruční rozhodnutí.</p>
+<details class="panel unresolved-subtitle-list severity-{{ 'warning' if unresolved_subtitle_counts.unresolved else 'info' }}">
+  <summary><span class="external-subtitle-summary-title">Nepřiřazené externí titulky</span> <span class="external-subtitle-summary-counts">· celkem {{ unresolved_subtitle_counts.all }} · čeká {{ unresolved_subtitle_counts.unresolved }} · bez videa {{ unresolved_subtitle_counts.confirmed_no_match }}</span></summary>
+  <p>Automatika zde nic nehádá. Kandidáti jsou omezeni fyzickým anime kontextem a slouží pouze jako návrhy pro ruční rozhodnutí.</p>
   {% for row in unresolved_subtitle_rows %}{% set subtitle = row.subtitle %}
     <article id="external-subtitle-{{ subtitle.id }}" class="unresolved-subtitle-card">
       <header><div><strong>{{ subtitle.filename }}</strong><small class="technical-path">{{ subtitle.relative_path }}</small></div><span class="status-badge severity-{{ 'info' if subtitle.status == 'confirmed_no_match' else 'warning' }}">{{ 'Potvrzeno bez odpovídajícího videa' if subtitle.status == 'confirmed_no_match' else 'Čeká na rozhodnutí' }}</span></header>
@@ -31,7 +31,7 @@
       {% endif %}
     </article>
   {% else %}<p>Žádné nepřiřazené externí titulky.</p>{% endfor %}
-</section>
+</details>
 
 <section class="media-check-summary" aria-label="Souhrn kontroly médií">
   <a class="media-summary-card severity-warning{% if results.subtitle_filter == 'unresolved' %} active{% endif %}" href="{{ media_check_url('unresolved', results.audio_filter, results.query) }}"><span>Doplnit CZ/SK</span><strong>{{ results.subtitle_counts['unresolved'] }}</strong></a>
@@ -87,4 +87,20 @@
   {% if results.has_next %}<a class="button-secondary" href="{{ media_check_url(results.subtitle_filter, results.audio_filter, results.query, results.page + 1) }}">Další →</a>{% endif %}
 </nav>
 <script src="/static/media_bulk_editor.js"></script>
+<script>
+  (() => {
+    const revealExternalSubtitle = () => {
+      if (!/^#external-subtitle-\d+$/.test(window.location.hash)) return;
+      const target = document.getElementById(window.location.hash.slice(1));
+      if (!target) return;
+      const panel = target.closest('details.unresolved-subtitle-list');
+      if (panel) {
+        panel.open = true;
+        target.scrollIntoView({block: 'start'});
+      }
+    };
+    revealExternalSubtitle();
+    window.addEventListener('hashchange', revealExternalSubtitle);
+  })();
+</script>
 {% endblock %}
