@@ -125,6 +125,45 @@ Formální closure V5 **nespouští V6 automaticky**. Před zahájením V6 násl
 Toto je vstupní gate, nikoli další samostatná verze. Historické produkční
 inventury ani zelený dílčí badge nenahrazují nové posouzení připravenosti.
 
+## Plánovaný směr – Kontrola kompletnosti / Release tracking
+
+Samostatná uživatelská stránka a pracovní přehled jsou plánované, nikoli dnes
+implementované. Vstupem mají být pouze lokální `CatalogTitle` s bezpečně
+potvrzenou externí metadata vazbou a jejich `CatalogCollection`; metadata
+candidate není potvrzená autorita. Přehled má dlouhodobě ukazovat chybějící
+obsah a nově zjištěná pokračování anime, které už v knihovně máme.
+
+- Porovnání providerového rozsahu s knihovnou musí vycházet z existující
+  canonical/logical identity evidence pro standardní epizody, ne ze slepého
+  počtu fyzických `Video` rows. Potvrzená duplicate secondary a legitimní
+  varianty jedné identity počet nezvyšují; úplné Media Parts mohou tvořit
+  jednu logickou položku. Supplementary obsah sám nevyplňuje chybějící
+  standardní epizodu. Nejednoznačný scope nebo identita znamenají Review.
+- Stránka má ukázat konkrétní rozdíl, například „Anime / Season 2:
+  metadata 12 epizod, lokálně 11 logických epizod, chybí E07“. Faktické
+  „lokálně chybí“ zůstává oddělené od lidského pracovního rozhodnutí.
+- Pro chybějící nebo nově zjištěnou položku se plánují stavy **Mám**,
+  **Čeká na import**, **Sháním** a **Nebavilo / nebudu shánět**. Samostatné
+  „Nemám“ vedle „Sháním“ nevzniká: „nemám a chci získat“ znamená Sháním.
+  Přesnou persistenci a datový model určí až návrh implementační fáze.
+- Podle potvrzených externích metadat a bezpečných provider relations má
+  přehled odhalit i dosud nelokální další Season, Part, Film, OVA nebo jiné
+  relevantní pokračování. Provider relation je faktická evidence vztahu;
+  podobnost názvu nebo filename sama pokračování neprokazuje. Metadata
+  candidate není confirmed authority a nejistota patří do Review.
+  Současný AniList provider má `fetch_relations()` neimplementované, takže
+  release tracking dnes neumí; vyžaduje jeho budoucí bezpečnou implementaci.
+- Explicitní rozhodnutí **Nebavilo / nebudu shánět** pro anime/collection má
+  vyřadit i jeho budoucí zjištěná pokračování z aktivního backlogu „co mám
+  sehnat“, ale nesmí smazat ani změnit fakt, že existují. Stavy **Mám**,
+  **Čeká na import** a **Sháním** budoucí release tracking nevypínají.
+
+Pre-V6 completeness/precondition audit zůstává read-only kontrolou připravenosti
+současné produkční knihovny. Tento plánovaný uživatelský workflow je dlouhodobá
+evidence chybějícího a nového obsahu a důležitý podklad pro V6; V6 samotná je
+řízená fyzická reorganizace NAS. Release tracking žádný rename ani move
+neprovádí. Platí `člověk > automatika; nejistota → Review`.
+
 ## V6 – Řízená reorganizace knihovny na NAS
 
 Stav: Plánováno. Implementace nebyla zahájena.
@@ -231,7 +270,9 @@ scope a aktuální rozhodnutí o uzavírání, nikoli starou značku dokončení
 Původní V6 nadpis „Úplnost knihovny“ nepřebíráme jako poslední scope: pozdější
 Season/Part/Media Part a supplementary podklady počítají s fyzickými návrhy
 a aktuální rozhodnutí při docs review určuje V6 jako řízenou reorganizaci NAS.
-Úplnost je zachována jako vstupní/precondition téma, ne nově přečíslovaná verze.
+Pre-V6 audit úplnosti zůstává vstupní podmínkou; samostatný dlouhodobý
+workflow kontroly kompletnosti a release trackingu je výše zachován jako
+plánovaný směr, nikoli nově přečíslovaná verze.
 V7 zachovává konkrétně rozpracovaný importní kontrakt; V8–V10 zůstávají původními
 stručnými směry bez nového detailního odsouhlasení, proto mají orientační stav.
 
