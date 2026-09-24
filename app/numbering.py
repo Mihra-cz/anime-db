@@ -24,7 +24,10 @@ from .supplementary import (
     supplementary_ordinal,
 )
 
-NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
+PART_LOCAL_NUMBERING_MODE = "part_local"
+NUMBERING_MODES = {
+    "unknown", "season_local", "absolute", "mixed", PART_LOCAL_NUMBERING_MODE,
+}
 
 
 @dataclass(frozen=True)
@@ -1128,7 +1131,21 @@ def recalculate_title_numbering(
             )
             continue
         is_manual = video.episode_number_manual_override is not None
-        if title.numbering_mode == "absolute":
+        if title.numbering_mode == PART_LOCAL_NUMBERING_MODE:
+            # Confirmed title authority: the filename number is a source
+            # coordinate shifted by the source offset, while an explicit video
+            # number is already Part-local.  The source offset never doubles as
+            # the absolute axis; that base comes only from the collection pass.
+            season = (
+                effective if is_manual
+                else effective - (title.episode_start_offset or 0)
+            )
+            absolute = (
+                known_preceding_episodes + season
+                if known_preceding_episodes is not None and season > 0
+                else None
+            )
+        elif title.numbering_mode == "absolute":
             absolute = effective
             season = effective - offset if offset is not None and effective > offset else None
         elif title.numbering_mode == "season_local":
@@ -1145,19 +1162,37 @@ def recalculate_title_numbering(
         video.season_episode_number = season if season and season > 0 else None
         video.absolute_episode_number = absolute if absolute and absolute > 0 else None
         video.external_episode_number = video.season_episode_number if has_external else None
-        video.episode_number_source = (
-            "manual" if is_manual else "derived_from_part_offset" if offset is not None
-            else "sxxexx" if detection.season_hint is not None else "filename"
-        )
-        video.episode_number_confidence = 1.0 if is_manual else 0.9 if offset is not None else 0.95
+        if title.numbering_mode == PART_LOCAL_NUMBERING_MODE:
+            video.episode_number_source = "manual" if is_manual else "part_local"
+            video.episode_number_confidence = 1.0
+        else:
+            video.episode_number_source = (
+                "manual" if is_manual else "derived_from_part_offset" if offset is not None
+                else "sxxexx" if detection.season_hint is not None else "filename"
+            )
+            video.episode_number_confidence = (
+                1.0 if is_manual else 0.9 if offset is not None else 0.95
+            )
 
 
-def recalculate_collection_numbering(
-    collection: CatalogCollection, videos_by_title: dict[int, list[Video]]
-) -> None:
+def collection_numbering_bases(
+    collection: CatalogCollection,
+    *,
+    assume_part_local: CatalogTitle | None = None,
+) -> tuple[tuple[CatalogTitle, int | None], ...]:
+    """Return each title with the absolute base the numbering pass uses.
+
+    The base is the known official episode count of all preceding canonical
+    titles; supplementary titles neither contribute nor receive one.  A
+    part_local title has no inferred source offset, so a structurally first
+    part_local title may start from base 0, while an unknown preceding count
+    stays unknown instead of being guessed.  ``assume_part_local`` lets a
+    read-only preview ask for the base of a title before confirmation.
+    """
     preceding = 0
     preceding_known = True
     has_preceding_canonical_title = False
+    bases: list[tuple[CatalogTitle, int | None]] = []
     for title in sorted(
         collection.titles,
         key=_numbering_title_sort_key,
@@ -1174,9 +1209,19 @@ def recalculate_collection_numbering(
             )
             else None
         )
-        recalculate_title_numbering(
-            title, videos_by_title.get(title.id, []), known_preceding_episodes=known
-        )
+        if (
+            known is None
+            and not title_is_supplemental
+            and not has_preceding_canonical_title
+            and (
+                title.numbering_mode == PART_LOCAL_NUMBERING_MODE
+                or title is assume_part_local
+            )
+            and _numbering_season_number(title) in {None, 1}
+            and _numbering_part_number(title) in {None, 1}
+        ):
+            known = 0
+        bases.append((title, known))
         if title_is_supplemental:
             continue
         has_preceding_canonical_title = True
@@ -1185,6 +1230,16 @@ def recalculate_collection_numbering(
             preceding += official_count
         else:
             preceding_known = False
+    return tuple(bases)
+
+
+def recalculate_collection_numbering(
+    collection: CatalogCollection, videos_by_title: dict[int, list[Video]]
+) -> None:
+    for title, known in collection_numbering_bases(collection):
+        recalculate_title_numbering(
+            title, videos_by_title.get(title.id, []), known_preceding_episodes=known
+        )
 
 
 def _can_start_absolute_sequence(title: CatalogTitle) -> bool:
@@ -1256,6 +1311,16 @@ def set_title_numbering(
         raise ValueError("Neplatný režim číslování.")
     if offset is not None and offset < 0:
         raise ValueError("Offset nesmí být záporný.")
+    if mode == PART_LOCAL_NUMBERING_MODE:
+        if title.effective_part_number is None:
+            raise ValueError(
+                "Part-lokální číslování vyžaduje explicitní číslo Part."
+            )
+        if offset is None:
+            raise ValueError(
+                "Part-lokální číslování vyžaduje offset zdrojového číslování "
+                "(0, pokud zdrojová čísla začínají od 1)."
+            )
     title.numbering_mode = mode
     title.episode_start_offset = offset
     title.numbering_manual = mode != "unknown" or offset is not None

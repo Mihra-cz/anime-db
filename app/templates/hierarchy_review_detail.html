@@ -217,7 +217,7 @@
         <td data-label="Pořadí a číslování">
           <label>Ruční pořadí <input type="number" min="0" name="sort_order" value="{{ row.sort_order if row.sort_order is not none else '' }}" placeholder="automatické strukturální řazení"></label>
           <label>Offset číslování <input type="number" min="0" name="episode_start_offset" value="{{ row.episode_start_offset if row.episode_start_offset is not none else '' }}"></label>
-          <label>Režim číslování <select name="numbering_mode">{% for value, label in [('unknown','automaticky'),('season_local','v rámci sezóny'),('absolute','absolutní'),('mixed','smíšené')] %}<option value="{{ value }}" {% if (row.numbering_mode or 'unknown') == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+          <label>Režim číslování <select name="numbering_mode">{% for value, label in [('unknown','automaticky'),('season_local','v rámci sezóny'),('absolute','absolutní'),('mixed','smíšené'),('part_local','Part-lokální (E01..EN)')] %}<option value="{{ value }}" {% if (row.numbering_mode or 'unknown') == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
         </td>
         <td data-label="Pravidla přiřazení">
           <label>Rozsah epizod od <input type="number" min="1" name="episode_start" value="{{ row.episode_start if row.episode_start is not none else '' }}"></label>

@@ -75,6 +75,7 @@ from .models import (
     ManualSplitRuleVideo, Video, utc_now,
 )
 from .numbering import (
+    NUMBERING_MODES, PART_LOCAL_NUMBERING_MODE,
     clear_duplicate_group, collapses_into_duplicate_primary, effective_video_numbering,
     set_duplicate_group_primary,
     supplementary_context_map, validate_recap_number_for_content_type,
@@ -117,7 +118,7 @@ PERIOD_HINT_REVIEW_REASON = (
 )
 SUPPLEMENTAL_PART_TYPES = {"film", "ova", "special", "preview", "recap", "bonus", "other"}
 MANUAL_DUPLICATE_STATUSES = {"suspected"}
-ALLOWED_NUMBERING_MODES = {"unknown", "season_local", "absolute", "mixed"}
+ALLOWED_NUMBERING_MODES = NUMBERING_MODES
 SIMPLE_DEFINITION_FIELDS = (
     "title_id", "local_title", "manual_display_title", "season_number_manual",
     "season_label_manual", "part_number_manual", "part_type_manual", "episode_start",
@@ -2163,6 +2164,14 @@ def parse_manual_definitions(raw: str) -> list[ManualTitleDefinition]:
         mode = str(value.get("numbering_mode") or "unknown").strip().casefold()
         if mode not in ALLOWED_NUMBERING_MODES:
             raise ValueError(f"Část {position} má neplatný režim číslování.")
+        if mode == PART_LOCAL_NUMBERING_MODE and (
+            integer_fields["part_number_manual"] is None
+            or integer_fields["episode_start_offset"] is None
+        ):
+            raise ValueError(
+                f"Část {position}: Part-lokální číslování vyžaduje číslo Part "
+                "a offset zdrojového číslování."
+            )
         pattern = str(value.get("filename_pattern") or "").strip() or None
         if pattern:
             compile_manual_split_pattern(pattern)

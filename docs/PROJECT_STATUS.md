@@ -230,6 +230,17 @@ Standardní Episode musí mít logical episode number vždy, i jako singleton;
 chybějící číslo vyžaduje review. Toto pravidlo nemění strukturální čísla
 Season/Part/Cour.
 
+Explicitní Part (`SxxPyyEzz`) používá po ručním potvrzení
+`numbering_mode=part_local` vlastní standardní namespace E01..EN uvnitř svého
+`CatalogTitle`. V tomto režimu `episode_start_offset` znamená offset zdrojového
+(filename) číslování, nikoli absolutní osu; ruční číslo videa je přímo
+Part-lokální. Samotné přiřazení či potvrzení Part struktury čísla nemění;
+Part-lokální číslování je samostatný náhled a potvrzení nad jednoznačnou souvislou
+řadou současných logical identities. Mezera, kolize, nekompatibilní ruční číslo
+nebo Recap vyžadující převod jsou Review. Absolutní číslo zůstává odvozenou
+informační projekcí z bezpečně známých počtů předchozích canonical titulů, jinak
+prázdné; není canonical identitou ani podkladem názvu souboru.
+
 `duplicate_of_video_id` je zachovaná ruční evidence potvrzené duplicity, nikoli
 sama důkaz její současné effective platnosti. Shared resolver rozlišuje `VALID`
 (obě současné identity jsou známé a shodné), `INVALID` (současná data prokazují

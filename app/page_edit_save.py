@@ -20,6 +20,7 @@ from .hierarchy_types import VIDEO_CONTENT_TYPE_CHOICES
 from .media_parts import MEDIA_PART_NUMBER_ERROR, set_media_part_number
 from .models import CatalogTitle, Video, VideoVariantGroup
 from .numbering import (
+    PART_LOCAL_NUMBERING_MODE,
     manual_episode_number_input_value, recalculate_title_numbering,
     set_title_numbering, set_video_episode_number_from_input,
 )
@@ -125,7 +126,11 @@ def apply_title_hierarchy_form_edit(
     labels = (
         "Typ části", "Číslo sezóny", "Označení sezóny", "Číslo Part",
         "Ruční pořadí", "Zařazení ověřeno", "Režim číslování",
-        "Počet předchozích epizod",
+        (
+            "Offset zdrojového číslování"
+            if requested[6] == PART_LOCAL_NUMBERING_MODE
+            else "Počet předchozích epizod"
+        ),
     )
     changes = tuple(
         f"{label}: {_human_value(before)} → {_human_value(after)}"

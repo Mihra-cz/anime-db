@@ -182,6 +182,9 @@ from .metadata.completion import (
 from .metadata.link_lifecycle import (
     active_primary_external_link, external_title_link_is_active,
 )
+from .part_local_numbering import (
+    apply_part_local_numbering, evaluate_part_local_numbering,
+)
 from .page_edit_save import (
     MissingEditTarget, apply_episode_position_edit, apply_hierarchy_page_edits,
     apply_title_hierarchy_edit, apply_title_hierarchy_form_edit,
@@ -2131,6 +2134,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "variant_lane_proposal": repeated_variant_lane_proposal(title),
                     "structural_ab_proposals": structural_ab_pair_proposals(title),
                     "bulk_renumber_proposal": deterministic_bulk_renumber_proposal(
+                        title,
+                        issues=title_card_issues,
+                    ),
+                    "part_local_evaluation": evaluate_part_local_numbering(
                         title,
                         issues=title_card_issues,
                     ),
@@ -4719,6 +4726,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         message = "Vybraná videa byla očíslována v potvrzeném pořadí."
         return local_redirect_response(
             f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}#assignment",
+        )
+
+    @app.post("/hierarchy-review/{collection_id}/part-local-confirm")
+    async def hierarchy_review_part_local_confirm(
+        request: Request,
+        collection_id: int,
+    ):
+        form = await request.form()
+        if str(form.get("confirm_part_local") or "").casefold() not in {
+            "true", "on", "1",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="Part-lokální číslování je nutné explicitně potvrdit.",
+            )
+        try:
+            catalog_title_id = int(str(form.get("catalog_title_id") or ""))
+            with sessions() as session:
+                title = session.get(CatalogTitle, catalog_title_id)
+                if title is None or title.catalog_collection_id != collection_id:
+                    raise ValueError("Část už nepatří do této kolekce.")
+                proposal = apply_part_local_numbering(
+                    session,
+                    catalog_title_id,
+                    expected_fingerprint=str(
+                        form.get("expected_fingerprint") or ""
+                    ),
+                )
+                session.commit()
+        except (TypeError, ValueError, IntegrityError) as exc:
+            return hierarchy_review_context(
+                request,
+                collection_id,
+                error=(
+                    str(exc)
+                    if not isinstance(exc, IntegrityError)
+                    else (
+                        "Part-lokální číslování narazilo na databázovou kolizi; "
+                        "nic nebylo uloženo. Načtěte nový náhled."
+                    )
+                ),
+            )
+        message = (
+            f"Část má potvrzené Part-lokální číslování E01..E"
+            f"{proposal.logical_episode_count:02d} (offset zdrojového číslování "
+            f"{proposal.source_offset}); soubory ani NAS se nezměnily."
+        )
+        return local_redirect_response(
+            f"/hierarchy-review/{collection_id}?{urlencode({'message': message})}"
+            f"#title-{catalog_title_id}",
         )
 
     @app.post("/hierarchy-review/{collection_id}/bulk-renumber-confirm")
