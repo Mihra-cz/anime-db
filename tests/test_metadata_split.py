@@ -680,6 +680,50 @@ def test_explicit_metadata_split_moves_metadata_and_preserves_hierarchy_and_cont
             assert video.content_type_manual is None
 
 
+@pytest.mark.parametrize("stored_lifecycle", ["active", None])
+def test_metadata_split_moves_the_active_link_row_and_keeps_history_on_source(
+    tmp_path, stored_lifecycle,
+):
+    # ``None`` is the pre-lifecycle primary representation; the moved row must
+    # leave the split as explicit active authority, never as a copy.
+    engine = create_engine(f"sqlite:///{tmp_path / 'split-lifecycle.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection, source, _videos = supplementary_title([
+            f"Special {number:02}.mkv" for number in range(1, 7)
+        ])
+        attach_confirmed_metadata(source, 3)
+        source.external_links[0].lifecycle_state = stored_lifecycle
+        source.external_links.append(ExternalTitleLink(
+            provider="anilist", external_id="67890", match_method="manual_search",
+            is_primary=False, is_manual=True, verified_at=utc_now(),
+            lifecycle_state="superseded",
+        ))
+        session.add(collection)
+        session.commit()
+        source_id = source.id
+        active_link_id = source.external_links[0].id
+        link_count = session.query(ExternalTitleLink).count()
+
+        result = apply_metadata_split(session, source_id, confirmed=True)
+        new_id = result.new_title.id
+        session.commit()
+
+    with Session(engine) as session:
+        source = session.get(CatalogTitle, source_id)
+        new_title = session.get(CatalogTitle, new_id)
+        assert session.query(ExternalTitleLink).count() == link_count
+        assert [
+            (link.id, link.external_id, link.lifecycle_state, link.is_primary)
+            for link in new_title.external_links
+        ] == [(active_link_id, "12345", "active", True)]
+        assert [
+            (link.external_id, link.lifecycle_state, link.is_primary)
+            for link in source.external_links
+        ] == [("67890", "superseded", False)]
+        assert evaluate_metadata_split(source) is None
+
+
 def test_metadata_split_does_not_override_existing_range_selector_authority():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

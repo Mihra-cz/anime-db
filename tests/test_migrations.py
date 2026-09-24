@@ -118,7 +118,9 @@ def test_v4_to_v5_adds_nullable_duplicate_confirmation_without_backfill(tmp_path
         column["name"] for column in inspect(engine).get_columns("videos")
     }
     with engine.connect() as connection:
-        assert connection.scalar(text("PRAGMA user_version")) == 5
+        assert connection.scalar(text("PRAGMA user_version")) == (
+            STARTUP_COMPATIBILITY_VERSION
+        )
         assert tuple(connection.execute(text(
             "SELECT id, relative_path, root_folder, filename, size, mtime_ns, "
             "file_type, duplicate_confirmation_kind FROM videos WHERE id = 1"

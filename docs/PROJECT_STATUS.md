@@ -74,7 +74,9 @@ Přejmenování, přesuny, import či fyzický cleanup médií nejsou současné
 - Persistence: SQLAlchemy nad SQLite, foreign keys zapnuté pro každé spojení.
   Idempotentní compatibility migrace mají verzovaný startup přes `user_version`;
   stabilní restart neprovádí novou rekonstrukci celé knihovny. Aktuální
-  compatibility verze je 3; upgrade 1→2 i 2→3 je aditivní, bez rekonstrukce.
+  compatibility verze je 6 (schema verze, nikoli roadmap V6); upgrady 1→2 až
+  5→6 jsou aditivní, bez rekonstrukce. Upgrade 5→6 přidává lifecycle
+  `ExternalTitleLink` s pouze mechanickým backfillem.
 - Scanner: rekurzivní evidence MKV/MP4/M4V/AVI, technická data přes `ffprobe`,
   párování a jazyková evidence externích titulků. Velikost a `mtime` určují,
   zda je nutné opakovat probe. Manuální autority se zachovávají.
@@ -336,9 +338,23 @@ Score je pomocná confidence s pevným maximem, nikoli pravděpodobnost ani
 automatická autorita. Neznámá evidence se odlišuje od shody a konfliktu.
 Batch search kandidáty hledá, nepotvrzuje je.
 
-Potvrzení metadata completion vyžaduje `linked_manual` a primární ruční
-`ExternalTitleLink` s `verified_at`; samotný status, candidate nebo uložený
-metadata payload nestačí. Service spravuje link, normalizovaný `TitleMetadata`,
+Potvrzení metadata completion vyžaduje `linked_manual` a aktivní primární
+ruční `ExternalTitleLink` s `verified_at`; samotný status, candidate nebo uložený
+metadata payload nestačí.
+
+`ExternalTitleLink.lifecycle_state` popisuje současný vztah potvrzené vazby
+k title: `active` (jediná metadata authority, vždy `is_primary`), `superseded`
+(nahrazena explicitním potvrzením jiné vazby), `unlinked` (explicitně odpojena
+bez náhrady) a `legacy_historical` (non-primary vazba z doby před lifecycle;
+její historická příčina se neodhaduje). `is_manual` a `verified_at` zůstávají
+faktickou evidencí dřívějšího potvrzení. Historické vazby se nemažou a nedodávají
+completion, refresh, provider count, konflikt ani primary presentation; opětovná
+volba téže identity reaktivuje stejný row. Metadata split přesouvá aktivní row
+beze změny lifecycle. Odmítnutí kandidáta zůstává samostatnou osou
+`MetadataCandidate.rejected_at`. Authority určuje sdílený resolver
+v `app/metadata/link_lifecycle.py`.
+
+Service spravuje link, normalizovaný `TitleMetadata`,
 obnovení, odpojení a lock. Lock brání běžnému refreshi/přepsání bez příslušného
 explicitního potvrzení. Metadata se nepoužívají k tichému přepsání ruční hierarchy.
 Změna existence potvrzeného metadata payloadu nebo jeho `episode_count` je

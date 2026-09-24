@@ -32,6 +32,7 @@ from app.numbering import (
 from app.title_naming import safe_catalog_title_local_title
 
 from .candidates import EpisodeCountComparison, compare_episode_count
+from .link_lifecycle import activate_external_title_link, active_primary_external_link
 
 
 class MetadataSplitStatus(StrEnum):
@@ -121,7 +122,7 @@ def _confirmed_metadata(
     title: CatalogTitle,
 ) -> tuple[TitleMetadata, ExternalTitleLink] | None:
     metadata = title.metadata_record
-    primary = next((link for link in title.external_links if link.is_primary), None)
+    primary = active_primary_external_link(title.external_links)
     if (
         metadata is None
         or primary is None
@@ -493,7 +494,10 @@ def _move_confirmed_metadata(
     metadata = evaluation.metadata
     primary = evaluation.primary_link
     metadata.catalog_title_id = target.id
+    # The same authority row moves; it stays active and no historical copy
+    # is left behind on the source title.
     primary.catalog_title_id = target.id
+    activate_external_title_link(primary)
 
     for candidate in source.metadata_candidates:
         if (

@@ -48,7 +48,10 @@ logger = logging.getLogger(__name__)
 # library reconstruction or inferred backfill.
 # Version 5 adds only nullable Video duplicate confirmation authority. Existing
 # relations retain NULL; no historical relationship is inferred or backfilled.
-STARTUP_COMPATIBILITY_VERSION = 5
+# Version 6 adds ExternalTitleLink.lifecycle_state with a mechanical backfill
+# only (primary -> active, non-primary -> legacy_historical); it is a schema
+# compatibility step, not the start of roadmap V6.
+STARTUP_COMPATIBILITY_VERSION = 6
 
 
 def _migrate_unnumbered_duplicate_confirmation_kind(connection) -> None:
@@ -56,6 +59,33 @@ def _migrate_unnumbered_duplicate_confirmation_kind(connection) -> None:
     if "duplicate_confirmation_kind" not in existing:
         connection.execute(text(
             "ALTER TABLE videos ADD COLUMN duplicate_confirmation_kind VARCHAR NULL"
+        ))
+
+
+def _migrate_external_title_link_lifecycle(connection) -> None:
+    """Add the link lifecycle and backfill only what is_primary already proves.
+
+    A pre-lifecycle non-primary row may have been replaced or unlinked; that
+    event cannot be reconstructed, so it becomes ``legacy_historical`` and
+    never ``superseded``/``unlinked``.  Rows that already carry a state are
+    left untouched, and a database without NULL rows receives no UPDATE.
+    """
+    existing = {
+        column["name"]
+        for column in inspect(connection).get_columns("external_title_links")
+    }
+    if "lifecycle_state" not in existing:
+        connection.execute(text(
+            "ALTER TABLE external_title_links ADD COLUMN lifecycle_state VARCHAR NULL"
+        ))
+    needs_backfill = connection.scalar(text(
+        "SELECT 1 FROM external_title_links WHERE lifecycle_state IS NULL LIMIT 1"
+    ))
+    if needs_backfill:
+        connection.execute(text(
+            "UPDATE external_title_links SET lifecycle_state = CASE "
+            "WHEN is_primary = 1 THEN 'active' ELSE 'legacy_historical' END "
+            "WHERE lifecycle_state IS NULL"
         ))
 
 
@@ -354,6 +384,7 @@ def migrate_schema(engine) -> None:
                     logger.info("Migrace databáze: přidávám %s.%s", table, name)
                     connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
         _migrate_metadata_requirement(connection)
+        _migrate_external_title_link_lifecycle(connection)
         connection.execute(text(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_external_title_primary "
             "ON external_title_links(catalog_title_id) WHERE is_primary = 1"
@@ -852,6 +883,8 @@ def migrate_schema_at_startup(engine) -> bool:
             _migrate_internal_subtitle_manual_language(connection)
         if current in (1, 2, 3, 4):
             _migrate_unnumbered_duplicate_confirmation_kind(connection)
+        if current in (1, 2, 3, 4, 5):
+            _migrate_external_title_link_lifecycle(connection)
         connection.execute(text(
             f"PRAGMA user_version = {STARTUP_COMPATIBILITY_VERSION}"
         ))

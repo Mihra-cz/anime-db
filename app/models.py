@@ -307,6 +307,9 @@ class ExternalTitleLink(Base):
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     is_manual: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Current relation of this confirmed link to its title; values and the
+    # authority resolver live in app.metadata.link_lifecycle.
+    lifecycle_state: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     __table_args__ = (

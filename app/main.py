@@ -179,6 +179,9 @@ from .metadata.completion import (
     METADATA_REQUIREMENT_CHOICES, has_confirmed_metadata,
     resolve_metadata_completion, set_metadata_requirement,
 )
+from .metadata.link_lifecycle import (
+    active_primary_external_link, external_title_link_is_active,
+)
 from .page_edit_save import (
     MissingEditTarget, apply_episode_position_edit, apply_hierarchy_page_edits,
     apply_title_hierarchy_edit, apply_title_hierarchy_form_edit,
@@ -884,8 +887,8 @@ def _metadata_template_values(
     candidate_workflow_open = show_candidates or bool(
         title and stored_candidates and not has_confirmed_metadata(title)
     )
-    primary_external_link = next(
-        (link for link in (title.external_links if title else []) if link.is_primary), None
+    primary_external_link = (
+        active_primary_external_link(title.external_links) if title else None
     )
     return {
         "title_metadata": metadata,
@@ -895,7 +898,9 @@ def _metadata_template_values(
         "metadata_requirement_choices": METADATA_REQUIREMENT_CHOICES,
         "external_links": sorted(
             title.external_links if title else [],
-            key=lambda link: (not link.is_primary, link.provider, link.external_id),
+            key=lambda link: (
+                not external_title_link_is_active(link), link.provider, link.external_id,
+            ),
         ),
         "metadata_genres": decoded(metadata.genres_json if metadata else None),
         "metadata_tags": decoded(metadata.tags_json if metadata else None),
@@ -2046,11 +2051,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if (state := effective_video_numbering(video)).is_standard
                 and state.numbering_input is not None
             ]
-            external_candidates = [
-                {"title": title, "metadata": title.metadata_record, "links": title.external_links}
-                for title in collection.titles
-                if title.metadata_record or title.external_links
-            ]
+            # Historical links stay stored evidence; the panel lists only the
+            # current metadata authority of each title.
+            external_candidates = []
+            for candidate_title in collection.titles:
+                candidate_link = active_primary_external_link(
+                    candidate_title.external_links
+                )
+                if candidate_title.metadata_record or candidate_link:
+                    external_candidates.append({
+                        "title": candidate_title,
+                        "metadata": candidate_title.metadata_record,
+                        "links": (candidate_link,) if candidate_link else (),
+                    })
             videos_by_title: dict[int | None, list[Video]] = {}
             for video in videos:
                 videos_by_title.setdefault(video.catalog_title_id, []).append(video)
@@ -2092,7 +2105,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ),
                     "metadata_linked": bool(
                         title.metadata_record
-                        and any(link.is_primary for link in title.external_links)
+                        and active_primary_external_link(title.external_links)
                     ),
                     "can_delete": bool(
                         not title.videos

@@ -6,6 +6,8 @@ from typing import Iterable
 
 from app.models import CatalogTitle, Video
 
+from .link_lifecycle import confirmed_primary_external_link
+
 
 SAFE_TECHNICAL_TYPES = frozenset({"op", "ed", "ncop", "nced", "menu", "cm"})
 METADATA_REQUIREMENT_CHOICES = (
@@ -25,9 +27,9 @@ def metadata_video_type(video: Video) -> str:
 
 
 def has_confirmed_metadata(title: CatalogTitle) -> bool:
-    return title.metadata_status == "linked_manual" and any(
-        link.is_primary and link.is_manual and link.verified_at is not None
-        for link in title.external_links
+    return (
+        title.metadata_status == "linked_manual"
+        and confirmed_primary_external_link(title) is not None
     )
 
 

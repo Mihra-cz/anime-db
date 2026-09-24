@@ -17,6 +17,7 @@ from .catalog import (
     normalize_title,
 )
 from .hierarchy_authority import manual_hierarchy_snapshot_uses_legacy_projection
+from .metadata.link_lifecycle import confirmed_primary_external_link
 from .models import CatalogCollection, CatalogTitle, Video, utc_now
 from .supplementary import (
     ORDINAL_TYPES, incomplete_representation_segments, representation_conflict,
@@ -1742,10 +1743,7 @@ def _confirmed_expected_episode_count(title: CatalogTitle) -> int | None:
         or title.metadata_status != "linked_manual"
     ):
         return None
-    confirmed_primary = any(
-        link.is_primary and link.is_manual and link.verified_at is not None
-        for link in title.external_links
-    )
+    confirmed_primary = confirmed_primary_external_link(title) is not None
     return metadata.episode_count if confirmed_primary else None
 
 

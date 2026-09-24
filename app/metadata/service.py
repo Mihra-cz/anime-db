@@ -14,6 +14,10 @@ from app.models import CatalogTitle, ExternalTitleLink, MetadataCandidate, Title
 from app.numbering import recalculate_title_numbering
 from app.hierarchy import parse_explicit_part
 
+from .link_lifecycle import (
+    activate_external_title_link, active_primary_external_link_clause,
+    supersede_external_title_link, unlink_external_title_link,
+)
 from .providers.base import MetadataProvider, ProviderTitleMetadata
 
 
@@ -209,7 +213,7 @@ def confirm_anilist_candidate(
         raise ValueError("AniList vrátil neočekávanou identitu titulu.")
     current_primary = session.scalar(select(ExternalTitleLink).where(
         ExternalTitleLink.catalog_title_id == title.id,
-        ExternalTitleLink.is_primary.is_(True),
+        active_primary_external_link_clause(),
     ))
     if title.metadata_locked and current_primary and not confirm_locked:
         raise MetadataLockedError(
@@ -219,7 +223,7 @@ def confirm_anilist_candidate(
     conflicting = session.scalar(select(ExternalTitleLink).where(
         ExternalTitleLink.provider == "anilist",
         ExternalTitleLink.external_id == data.external_id,
-        ExternalTitleLink.is_primary.is_(True),
+        active_primary_external_link_clause(),
         ExternalTitleLink.catalog_title_id != title.id,
     ))
     if conflicting and not confirm_conflict:
@@ -229,16 +233,21 @@ def confirm_anilist_candidate(
         )
     numbering_before = _numbering_evidence(session, title)
     timestamp = now or datetime.now(timezone.utc)
-    for link in session.scalars(select(ExternalTitleLink).where(
-        ExternalTitleLink.catalog_title_id == title.id,
-        ExternalTitleLink.is_primary.is_(True),
-    )):
-        link.is_primary = False
+    # Reuse the title's existing row for this identity (historical or not) so
+    # re-selecting it reactivates the same evidence instead of duplicating it.
     link = session.scalar(select(ExternalTitleLink).where(
         ExternalTitleLink.catalog_title_id == title.id,
         ExternalTitleLink.provider == "anilist",
         ExternalTitleLink.external_id == data.external_id,
     ))
+    for previous in session.scalars(select(ExternalTitleLink).where(
+        ExternalTitleLink.catalog_title_id == title.id,
+        ExternalTitleLink.is_primary.is_(True),
+    )):
+        if previous is not link:
+            supersede_external_title_link(previous)
+    # The partial unique primary index must be free before the new primary.
+    session.flush()
     if link is None:
         link = ExternalTitleLink(
             catalog_title_id=title.id, provider="anilist", external_id=data.external_id,
@@ -248,7 +257,7 @@ def confirm_anilist_candidate(
     link.external_url = data.site_url
     link.match_score = candidate.match_score if candidate else None
     link.match_method = "manual_search"
-    link.is_primary = True
+    activate_external_title_link(link)
     link.is_manual = True
     link.verified_at = timestamp
     title.preferred_metadata_provider = "anilist"
@@ -275,7 +284,7 @@ def refresh_title_metadata(
         raise MetadataLockedError("Metadata jsou zamknutá. Před aktualizací je odemkněte.")
     link = session.scalar(select(ExternalTitleLink).where(
         ExternalTitleLink.catalog_title_id == title.id,
-        ExternalTitleLink.is_primary.is_(True),
+        active_primary_external_link_clause(),
     ))
     if link is None or link.provider != "anilist":
         raise ValueError("Titul nemá primární AniList vazbu.")
@@ -292,10 +301,13 @@ def refresh_title_metadata(
 
 def unlink_title_metadata(session: Session, title: CatalogTitle) -> None:
     numbering_before = _numbering_evidence(session, title)
+    # Only the current authority becomes unlinked; older superseded, unlinked
+    # and legacy rows keep their own lifecycle as preserved evidence.
     for link in session.scalars(select(ExternalTitleLink).where(
         ExternalTitleLink.catalog_title_id == title.id,
+        active_primary_external_link_clause(),
     )):
-        link.is_primary = False
+        unlink_external_title_link(link)
     if metadata := session.get(TitleMetadata, title.id):
         title.metadata_record = None
         session.delete(metadata)
