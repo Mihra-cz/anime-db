@@ -135,7 +135,9 @@ from .hierarchy_review_presentation import (
     build_hierarchy_review_collection_presentation,
 )
 from .status_presentation import METADATA_BADGES, media_collection_badge
-from .hierarchy_types import PART_TYPE_CHOICES, VIDEO_CONTENT_TYPE_CHOICES
+from .hierarchy_types import (
+    PART_TYPE_CHOICES, PART_TYPE_LABELS, VIDEO_CONTENT_TYPE_CHOICES,
+)
 from .metadata.providers.anilist import AniListProvider
 from .metadata.providers.base import MetadataProviderError
 from .metadata.artwork import (
@@ -324,6 +326,7 @@ templates.env.globals.update(
     effective_video_numbering=effective_video_numbering,
     hierarchy_number_field_label=hierarchy_number_field_label,
     part_type_choices=PART_TYPE_CHOICES,
+    part_type_labels=PART_TYPE_LABELS,
     video_content_type_choices=VIDEO_CONTENT_TYPE_CHOICES,
     media_part_label=media_part_label,
     media_part_ordinal_warning=media_part_ordinal_warning,

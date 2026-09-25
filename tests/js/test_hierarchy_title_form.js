@@ -105,6 +105,8 @@ const VISIBLE = {
   '': [],
   season: CONDITIONAL,
   part: ['season_number_manual', 'part_number_manual'],
+  // Legacy persisted value rendered only for a title that already stores it.
+  cour: CONDITIONAL,
   ...Object.fromEntries(
     ['film', 'ova', 'special', 'preview', 'recap', 'bonus', 'other'].map(type => [
       type, ['season_number_manual', 'season_label_manual'],

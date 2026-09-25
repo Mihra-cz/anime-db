@@ -16,7 +16,8 @@ PART_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
 )
 # ``cour`` remains accepted for persisted legacy rows and old technical JSON,
 # but it is not offered as a new user-facing hierarchy choice.
-PART_TYPES = frozenset({*(value for value, _ in PART_TYPE_CHOICES), "cour"})
+LEGACY_PART_TYPES = frozenset({"cour"})
+PART_TYPES = frozenset({*(value for value, _ in PART_TYPE_CHOICES), *LEGACY_PART_TYPES})
 PART_TYPE_LABELS = {**dict(PART_TYPE_CHOICES), "cour": "Cour"}
 SUPPLEMENTARY_PART_TYPES = PART_TYPES - {"season", "part", "cour"}
 MAIN_CONTENT_PART_TYPES = frozenset({"season", "part", "cour", "title"})

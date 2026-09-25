@@ -20,6 +20,9 @@ from app.main import create_app
 from app.metadata.candidates import local_episode_count_evidence
 from app.metadata.completion import resolve_metadata_completion
 from app.metadata.service import unlink_title_metadata
+from app.metadata.split import (
+    MetadataSplitStatus, apply_metadata_split, evaluate_metadata_split,
+)
 from app.models import (
     CatalogCollection, CatalogTitle, ExternalTitleLink, TitleMetadata, Video,
     VideoVariantGroup, utc_now,
@@ -754,3 +757,300 @@ def test_a_star_titles_keep_canonical_numbers_after_preceding_metadata_changes(e
     assert unlinked["season"] == list(range(1, count + 1))
     assert unlinked["absolute"] == [None] * count
     assert (unlinked["mode"], unlinked["offset"]) == (PART_LOCAL_NUMBERING_MODE, offset)
+
+
+# --- absolute sequence start on the Part axis -------------------------------------
+
+def build_structure(session, specs, *, name="Show"):
+    """Like ``build`` with an explicit structural type and numbering authority.
+
+    specs: (key, part_type, season, part, sources, metadata_count, mode, offset)
+    in structural order.
+    """
+    collection = CatalogCollection(
+        local_title=name, normalized_local_title=name.casefold(),
+        relative_root_path=f"Anime/{name}",
+    )
+    titles = {}
+    for index, (key, part_type, season, part, sources, count, mode, offset) in enumerate(
+        specs, 1,
+    ):
+        title = CatalogTitle(
+            collection=collection, local_title=f"{name} {key}",
+            normalized_local_title=f"{name} {key}".casefold(),
+            relative_root_path=f"Anime/{name}/{key}", part_type=part_type,
+            season_number=season, hierarchy_manual_override=True,
+            part_type_manual=part_type, season_number_manual=season,
+            part_number_manual=part,
+            season_label_manual=f"S{season}" if part_type != "part" else None,
+            hierarchy_verified_at=utc_now(),
+        )
+        for number in sources:
+            add_video(title, f"{name} - {number:02}.mkv")
+        if count is not None:
+            attach_metadata(title, count, f"{name}-{index}")
+        if mode is not None:
+            set_title_numbering(title, mode, offset)
+        titles[key] = title
+    session.add(collection)
+    session.flush()
+    finalize_hierarchy_write([collection])
+    session.commit()
+    return collection, titles
+
+
+NONE_3 = [None, None, None]
+ABSOLUTE_START_CASES = {
+    # Safe starts and known axes keep working.
+    "season_1_without_part": (
+        [("s1", "season", 1, None, range(1, 4), None, None, None)], {"s1": [1, 2, 3]},
+    ),
+    "isolated_s1p1": (
+        [("p1", "season", 1, 1, range(1, 4), None, None, None)], {"p1": [1, 2, 3]},
+    ),
+    "known_season_count_then_s2": (
+        [
+            ("s1", "season", 1, None, range(1, 4), 3, None, None),
+            ("s2", "season", 2, None, range(1, 4), None, None, None),
+        ],
+        {"s1": [1, 2, 3], "s2": [4, 5, 6]},
+    ),
+    "known_p1_count_then_season_typed_p2_local": (
+        [
+            ("p1", "season", 1, 1, range(1, 4), 3, None, None),
+            ("p2", "season", 1, 2, range(1, 4), None, None, None),
+        ],
+        {"p1": [1, 2, 3], "p2": [4, 5, 6]},
+    ),
+    "known_p1_count_then_season_typed_p2_continuing": (
+        [
+            ("p1", "season", 1, 1, range(1, 4), 3, None, None),
+            ("p2", "season", 1, 2, range(4, 7), None, None, None),
+        ],
+        {"p1": [1, 2, 3], "p2": [4, 5, 6]},
+    ),
+    "explicit_offset_on_season_typed_p2": (
+        [("p2", "season", 1, 2, range(1, 4), None, "season_local", 3)],
+        {"p2": [4, 5, 6]},
+    ),
+    # A Part > 1 without a known preceding count is never a safe absolute E1.
+    "isolated_season_typed_s1p2": (
+        [("p2", "season", 1, 2, range(1, 4), None, None, None)], {"p2": NONE_3},
+    ),
+    "unknown_p1_then_season_typed_p2_local": (
+        [
+            ("p1", "season", 1, 1, range(1, 4), None, None, None),
+            ("p2", "season", 1, 2, range(1, 4), None, None, None),
+        ],
+        {"p1": [1, 2, 3], "p2": NONE_3},
+    ),
+    "unknown_p1_then_season_typed_p2_continuing": (
+        [
+            ("p1", "season", 1, 1, range(1, 4), None, None, None),
+            ("p2", "season", 1, 2, range(4, 7), None, None, None),
+        ],
+        {"p1": [1, 2, 3], "p2": NONE_3},
+    ),
+    "season_local_s1p2_without_offset": (
+        [("p2", "season", 1, 2, range(1, 4), None, "season_local", None)],
+        {"p2": NONE_3},
+    ),
+    "isolated_s2p1": (
+        [("s2p1", "season", 2, 1, range(1, 4), None, None, None)], {"s2p1": NONE_3},
+    ),
+    "legacy_cour_p2": (
+        [
+            ("c1", "cour", 1, 1, range(1, 4), None, None, None),
+            ("c2", "cour", 1, 2, range(1, 4), None, None, None),
+        ],
+        {"c1": [1, 2, 3], "c2": NONE_3},
+    ),
+    "explicit_part_p2": (
+        [
+            ("p1", "part", 1, 1, range(1, 4), None, None, None),
+            ("p2", "part", 1, 2, range(1, 4), None, None, None),
+        ],
+        {"p1": [1, 2, 3], "p2": NONE_3},
+    ),
+    "part_local_keeps_its_own_base": (
+        [
+            ("p1", "season", 1, 1, range(1, 4), None, PART_LOCAL_NUMBERING_MODE, 0),
+            ("p2", "season", 1, 2, range(4, 7), None, PART_LOCAL_NUMBERING_MODE, 3),
+        ],
+        {"p1": [1, 2, 3], "p2": NONE_3},
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(ABSOLUTE_START_CASES))
+def test_absolute_sequence_starts_only_where_it_is_safe(engine, session, case):
+    specs, expected = ABSOLUTE_START_CASES[case]
+    _, titles = build_structure(session, specs)
+    assert {
+        key: fresh(engine, titles[key].id)["absolute"] for key in expected
+    } == expected
+
+
+def test_season_typed_part_two_keeps_its_canonical_numbers(engine, session):
+    _, titles = build_structure(session, [
+        ("p1", "season", 1, 1, range(1, 4), None, None, None),
+        ("p2", "season", 1, 2, range(1, 4), None, None, None),
+    ])
+    state = fresh(engine, titles["p2"].id)
+    assert state["season"] == [1, 2, 3]
+    assert state["absolute"] == NONE_3
+    assert (state["mode"], state["offset"], state["manual"]) == ("unknown", None, False)
+
+
+# --- metadata split over Part-local authority -------------------------------------
+
+def set_metadata_count(engine, title_id, count):
+    with make_session_factory(engine)() as other:
+        title = other.get(CatalogTitle, title_id)
+        title.metadata_record.episode_count = count
+        finalize_hierarchy_write([title.collection])
+        other.commit()
+
+
+def split_state(engine, collection_id):
+    """Every authority and projection a metadata split could touch."""
+    with Session(engine) as other:
+        collection = other.get(CatalogCollection, collection_id)
+        return {
+            "titles": sorted(
+                (
+                    title.id, title.numbering_mode, title.episode_start_offset,
+                    title.numbering_manual, title.hierarchy_manual_override,
+                    title.part_type_manual, title.season_number_manual,
+                    title.part_number_manual, title.season_label_manual,
+                    title.hierarchy_verified_at, title.metadata_status,
+                    title.metadata_record.episode_count if title.metadata_record else None,
+                    tuple(sorted(
+                        (link.id, link.catalog_title_id, link.lifecycle_state,
+                         link.is_primary)
+                        for link in title.external_links
+                    )),
+                )
+                for title in collection.titles
+            ),
+            "videos": sorted(
+                (
+                    video.id, video.catalog_title_id, video.local_episode_number,
+                    video.season_episode_number, video.absolute_episode_number,
+                    video.external_episode_number, video.episode_number_source,
+                    video.episode_number_manual_override,
+                )
+                for video in collection.videos
+            ),
+        }
+
+
+def split_evaluation(engine, title_id):
+    with Session(engine) as other:
+        evaluation = evaluate_metadata_split(other.get(CatalogTitle, title_id))
+        return (
+            evaluation.status,
+            sorted(video.season_episode_number for video in evaluation.matching_videos),
+            sorted(video.season_episode_number for video in evaluation.remaining_videos),
+        )
+
+
+def refused_split(engine, title_id, match):
+    """Apply exactly like the split route: a ValueError rolls everything back."""
+    with make_session_factory(engine)() as other:
+        with pytest.raises(ValueError, match=match):
+            apply_metadata_split(other, title_id, confirmed=True)
+        other.rollback()
+
+
+def test_offset_part_local_split_is_ambiguous_not_a_source_number_subset(engine, session):
+    collection, titles = build(session, [
+        ("p1", 1, 1, range(1, 13), 12), ("p2", 1, 2, range(13, 25), 12),
+    ])
+    confirm(session, titles["p1"].id)
+    confirm(session, titles["p2"].id)
+    set_metadata_count(engine, titles["p2"].id, 6)
+    state = fresh(engine, titles["p2"].id)
+    assert (state["mode"], state["offset"]) == (PART_LOCAL_NUMBERING_MODE, 12)
+    assert state["season"] == list(range(1, 13))
+    before = split_state(engine, collection.id)
+
+    # Parser/source E13..E24 is not the Part-local E01..E12 identity; the split
+    # refuses to guess instead of cutting a subset from source numbers.
+    assert split_evaluation(engine, titles["p2"].id) == (
+        MetadataSplitStatus.AMBIGUOUS, [], [],
+    )
+    refused_split(engine, titles["p2"].id, "1..N")
+    assert split_state(engine, collection.id) == before
+
+
+def test_offset_zero_part_local_split_preview_is_refused_atomically_on_apply(
+    engine, session,
+):
+    collection, titles = build(session, [
+        ("p1", 1, 1, range(1, 13), 12), ("p2", 1, 2, range(13, 25), 12),
+    ])
+    confirm(session, titles["p1"].id)
+    confirm(session, titles["p2"].id)
+    set_metadata_count(engine, titles["p1"].id, 6)
+    before = split_state(engine, collection.id)
+
+    assert split_evaluation(engine, titles["p1"].id) == (
+        MetadataSplitStatus.RECOMMENDED, list(range(1, 7)), list(range(7, 13)),
+    )
+    # The subset would need a second Season 1 Part 1, so apply is refused.
+    refused_split(engine, titles["p1"].id, "Part 1 je použito vícekrát")
+
+    assert split_state(engine, collection.id) == before
+    state = fresh(engine, titles["p1"].id)
+    assert (state["mode"], state["offset"]) == (PART_LOCAL_NUMBERING_MODE, 0)
+    assert state["season"] == list(range(1, 13))
+    with Session(engine) as other:
+        assert len(other.get(CatalogCollection, collection.id).titles) == 2
+
+
+@pytest.mark.parametrize("sources,status,matching", [
+    (range(1, 13), MetadataSplitStatus.RECOMMENDED, list(range(1, 7))),
+    (range(13, 25), MetadataSplitStatus.AMBIGUOUS, []),
+])
+def test_split_evaluation_ignores_absolute_shift_after_preceding_count_change(
+    engine, session, sources, status, matching,
+):
+    _, titles = build(session, [
+        ("p1", 1, 1, range(1, 13), 12), ("p2", 1, 2, sources, 6),
+    ])
+    confirm(session, titles["p1"].id)
+    confirm(session, titles["p2"].id)
+    first = split_evaluation(engine, titles["p2"].id)
+    assert first[:2] == (status, matching)
+    absolute_before = fresh(engine, titles["p2"].id)["absolute"]
+
+    set_metadata_count(engine, titles["p1"].id, 10)
+    state = fresh(engine, titles["p2"].id)
+    assert state["season"] == list(range(1, 13))
+    assert state["absolute"] == list(range(11, 23)) != absolute_before
+    assert split_evaluation(engine, titles["p2"].id) == first
+
+
+@pytest.mark.parametrize("sources,status,matching,refusal", [
+    (range(1, 13), MetadataSplitStatus.RECOMMENDED, list(range(1, 7)),
+     "Part 2 je použito vícekrát"),
+    (range(13, 25), MetadataSplitStatus.AMBIGUOUS, [], "1..N"),
+])
+def test_split_without_known_absolute_axis_uses_part_local_evidence(
+    engine, session, sources, status, matching, refusal,
+):
+    collection, titles = build(session, [
+        ("p1", 1, 1, range(1, 13), None), ("p2", 1, 2, sources, 6),
+    ])
+    confirm(session, titles["p1"].id)
+    confirm(session, titles["p2"].id)
+    state = fresh(engine, titles["p2"].id)
+    assert state["season"] == list(range(1, 13))
+    assert state["absolute"] == [None] * 12
+    before = split_state(engine, collection.id)
+
+    # NULL absolute is not a missing local identity, and still no automatic split.
+    assert split_evaluation(engine, titles["p2"].id)[:2] == (status, matching)
+    refused_split(engine, titles["p2"].id, refusal)
+    assert split_state(engine, collection.id) == before

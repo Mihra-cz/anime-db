@@ -9,6 +9,7 @@ import asyncio
 from html.parser import HTMLParser
 import json
 from pathlib import Path
+import re
 from urllib.parse import urlencode
 
 import pytest
@@ -16,6 +17,9 @@ from starlette.requests import Request
 
 from app.config import Settings
 from app.database import Base
+from app.hierarchy_authority import (
+    ManualHierarchyAuthorityState, manual_hierarchy_authority_state,
+)
 from app.hierarchy_evaluation import finalize_hierarchy_write
 from app.hierarchy_types import PART_TYPE_CHOICES
 from app.main import create_app
@@ -39,6 +43,9 @@ BROWSER_VISIBLE = {
     "": set(),
     "season": set(CONDITIONAL),
     "part": {"season_number_manual", "part_number_manual"},
+    # Legacy persisted value: never offered as a new choice, but rendered when
+    # stored, and it keeps its whole snapshot including the Part axis.
+    "cour": set(CONDITIONAL),
     **{
         value: {"season_number_manual", "season_label_manual"}
         for value, _ in PART_TYPE_CHOICES if value not in {"season", "part"}
@@ -696,3 +703,288 @@ def test_no_javascript_numbering_only_submit_still_works(tmp_path, manual):
     assert _post_title(app, collection_id, s2, submitted, confirm=True).status_code == 303
     assert _structure(app, s2) == before
     assert _numbering(app, s2)["offset"] == 3
+
+
+# --- legacy cour -----------------------------------------------------------------------------
+
+LEGACY_COUR_KINDS = ("complete", "incomplete", "automatic")
+
+
+def _legacy_cour(app, kind: str):
+    """Season 1 Part 1 plus a legacy Cour 2 of Season 1 in the given authority state."""
+    cour_manual = {
+        "complete": _manual("cour", 1, part=2),
+        # A historical snapshot: verified once, but no active override.
+        "incomplete": {
+            "hierarchy_manual_override": False, "part_type_manual": "cour",
+            "season_number_manual": 1, "part_number_manual": 2,
+            "season_label_manual": "S1", "hierarchy_verified_at": utc_now(),
+        },
+        "automatic": None,
+    }[kind]
+    collection_id, (season, cour) = _seed(app, "Show", (
+        ("Season 1", 1, range(1, 4), _manual("season", 1, part=1)),
+        ("Cour 2", 1, range(4, 7), cour_manual),
+    ), filename=lambda n: f"Show - {n:02}.mkv")
+    if kind == "automatic":
+        with app.state.sessions() as session:
+            title = session.get(CatalogTitle, cour)
+            title.part_type, title.part_number = "cour", 2
+            session.flush()
+            finalize_hierarchy_write([title.collection])
+            session.commit()
+    return collection_id, season, cour
+
+
+def _cour_state(app, title_id):
+    state = _structure(app, title_id)
+    with app.state.sessions() as session:
+        title = session.get(CatalogTitle, title_id)
+        state["authority"] = manual_hierarchy_authority_state(title)
+        state["automatic"] = (title.part_type, title.season_number, title.part_number)
+    return state
+
+
+def _part_type_options(app, collection_id, title_id):
+    rendered = _text(_call(
+        app, TITLE_ROUTE, "GET", f"/hierarchy-review/{collection_id}/titles/{title_id}",
+        [], collection_id, title_id,
+    ))
+    form = rendered.split('class="hierarchy-title-editor', 1)[1].split("</form>", 1)[0]
+    select = re.search(
+        r'<select name="part_type_manual">(.*?)</select>', form, re.DOTALL,
+    ).group(1)
+    return [
+        (value, bool(selected), label.strip())
+        for value, selected, label in re.findall(
+            r'<option value="([^"]*)"\s*(selected)?\s*>(.*?)</option>', select,
+        )
+    ]
+
+
+def _submit(app, collection_id, title_id, submitted, via_save_all, *, confirm):
+    if via_save_all:
+        return _post_save_all(
+            app, collection_id, [_save_all_section(title_id, submitted)], confirm=confirm,
+        )
+    return _post_title(app, collection_id, title_id, submitted, confirm=confirm)
+
+
+@pytest.mark.parametrize("kind", ["complete", "incomplete"])
+def test_persisted_legacy_cour_is_rendered_as_the_selected_value(tmp_path, kind):
+    app = _app(tmp_path)
+    collection_id, season, cour = _legacy_cour(app, kind)
+
+    options = _part_type_options(app, collection_id, cour)
+    assert [value for value, selected, _ in options if selected] == ["cour"]
+    label = next(label for value, _, label in options if value == "cour")
+    assert "Cour" in label and "legacy" in label
+    fields = dict(_rendered_form(app, collection_id, cour))
+    assert (
+        fields["season_number_manual"], fields["season_label_manual"],
+        fields["part_number_manual"],
+    ) == ("1", "S1", "2")
+
+    # Rendering a stored legacy value does not offer it as a new choice.
+    assert "cour" not in {value for value, _ in PART_TYPE_CHOICES}
+    assert "cour" not in {value for value, _, _ in _part_type_options(app, collection_id, season)}
+
+
+def test_automatic_cour_renders_as_automatic_without_a_legacy_choice(tmp_path):
+    app = _app(tmp_path)
+    collection_id, _, cour = _legacy_cour(app, "automatic")
+    assert _cour_state(app, cour)["effective"] == ("cour", 1, 2)
+
+    # "automaticky" is the first option; the browser falls back to it.
+    assert dict(_rendered_form(app, collection_id, cour))["part_type_manual"] == ""
+    assert "cour" not in {value for value, _, _ in _part_type_options(app, collection_id, cour)}
+
+
+@pytest.mark.parametrize("via_save_all", [False, True])
+@pytest.mark.parametrize("kind", ["complete", "incomplete"])
+def test_numbering_only_edit_keeps_the_legacy_cour_snapshot(tmp_path, kind, via_save_all):
+    app = _app(tmp_path)
+    collection_id, _, cour = _legacy_cour(app, kind)
+    before = _cour_state(app, cour)
+    assert before["part_type_manual"] == "cour"
+    assert before["authority"] == {
+        "complete": ManualHierarchyAuthorityState.COMPLETE,
+        "incomplete": ManualHierarchyAuthorityState.INCOMPLETE,
+    }[kind]
+    submitted = _browser_submit(app, collection_id, cour, episode_start_offset="3")
+    assert dict(submitted)["part_type_manual"] == "cour"
+    assert set(CONDITIONAL) <= dict(submitted).keys()
+
+    preview = _submit(app, collection_id, cour, submitted, via_save_all, confirm=False)
+    assert preview.status_code == 200, _text(preview)
+    _assert_only_numbering_changes(_text(preview))
+    saved = _submit(app, collection_id, cour, submitted, via_save_all, confirm=True)
+    assert saved.status_code == 303, _text(saved)
+
+    # Fresh sessions: the historical snapshot is neither cleared nor promoted.
+    assert _cour_state(app, cour) == before
+    assert _numbering(app, cour)["offset"] == 3
+
+
+@pytest.mark.parametrize("via_save_all", [False, True])
+def test_numbering_only_edit_of_automatic_cour_creates_no_manual_authority(
+    tmp_path, via_save_all,
+):
+    app = _app(tmp_path)
+    collection_id, _, cour = _legacy_cour(app, "automatic")
+    before = _cour_state(app, cour)
+    assert before["authority"] == ManualHierarchyAuthorityState.NONE
+    submitted = _browser_submit(app, collection_id, cour, episode_start_offset="3")
+    assert dict(submitted)["part_type_manual"] == ""
+
+    preview = _submit(app, collection_id, cour, submitted, via_save_all, confirm=False)
+    assert preview.status_code == 200, _text(preview)
+    _assert_only_numbering_changes(_text(preview))
+    saved = _submit(app, collection_id, cour, submitted, via_save_all, confirm=True)
+    assert saved.status_code == 303, _text(saved)
+
+    after = _cour_state(app, cour)
+    assert after == before
+    assert after["effective"] == ("cour", 1, 2)
+    assert _numbering(app, cour)["offset"] == 3
+
+
+@pytest.mark.parametrize("via_save_all", [False, True])
+@pytest.mark.parametrize("kind", LEGACY_COUR_KINDS)
+def test_unchanged_legacy_cour_form_changes_nothing(tmp_path, kind, via_save_all):
+    app = _app(tmp_path)
+    collection_id, _, cour = _legacy_cour(app, kind)
+    before = _cour_state(app, cour)
+    numbering_before = _numbering(app, cour)
+    submitted = _browser_submit(app, collection_id, cour)
+
+    response = _submit(app, collection_id, cour, submitted, via_save_all, confirm=True)
+    assert response.status_code == 400
+    assert "neobsahuje žádnou změněnou hierarchy hodnotu" in _text(response)
+    assert _cour_state(app, cour) == before
+    assert _numbering(app, cour) == numbering_before
+
+
+@pytest.mark.parametrize("via_save_all", [False, True])
+@pytest.mark.parametrize("kind", ["complete", "incomplete"])
+def test_explicit_cour_to_part_is_a_confirmed_structure_change(tmp_path, kind, via_save_all):
+    app = _app(tmp_path)
+    collection_id, _, cour = _legacy_cour(app, kind)
+    submitted = _browser_submit(
+        app, collection_id, cour, part_type_manual="part", hierarchy_verified=True,
+    )
+    assert "season_label_manual" not in dict(submitted)
+
+    preview = _submit(app, collection_id, cour, submitted, via_save_all, confirm=False)
+    assert preview.status_code == 200, _text(preview)
+    assert "Typ části: cour → part" in _text(preview)
+    assert _cour_state(app, cour)["part_type_manual"] == "cour"
+    saved = _submit(app, collection_id, cour, submitted, via_save_all, confirm=True)
+    assert saved.status_code == 303, _text(saved)
+
+    after = _cour_state(app, cour)
+    assert (after["part_type_manual"], after["season_number_manual"]) == ("part", 1)
+    assert after["part_number_manual"] == 2
+    assert after["effective"] == ("part", 1, 2)
+    assert after["authority"] == ManualHierarchyAuthorityState.COMPLETE
+
+
+@pytest.mark.parametrize("via_save_all", [False, True])
+def test_explicit_cour_to_season_follows_split_season_rules(tmp_path, via_save_all):
+    app = _app(tmp_path)
+    collection_id, _, cour = _legacy_cour(app, "complete")
+    before = _cour_state(app, cour)
+
+    # Season 1 already has an explicit Part 1, so the converted title needs its
+    # own unique Part number; leaving it empty is rejected without any write.
+    missing_part = _browser_submit(
+        app, collection_id, cour, part_type_manual="season", part_number_manual="",
+    )
+    response = _submit(app, collection_id, cour, missing_part, via_save_all, confirm=True)
+    assert response.status_code == 400
+    assert "Season 1 už v této kolekci existuje" in _text(response)
+    assert _cour_state(app, cour) == before
+
+    submitted = _browser_submit(app, collection_id, cour, part_type_manual="season")
+    preview = _submit(app, collection_id, cour, submitted, via_save_all, confirm=False)
+    assert preview.status_code == 200, _text(preview)
+    assert "Typ části: cour → season" in _text(preview)
+    saved = _submit(app, collection_id, cour, submitted, via_save_all, confirm=True)
+    assert saved.status_code == 303, _text(saved)
+
+    after = _cour_state(app, cour)
+    assert after["part_type_manual"] == "season"
+    assert after["effective"] == ("season", 1, 2)
+    assert after["season_label_manual"] == "S1"
+    assert after["authority"] == ManualHierarchyAuthorityState.COMPLETE
+
+
+def test_explicit_cour_to_automatic_needs_preview_and_confirmation(tmp_path):
+    app = _app(tmp_path)
+    collection_id, _, cour = _legacy_cour(app, "complete")
+    before = _cour_state(app, cour)
+    submitted = _browser_submit(
+        app, collection_id, cour, part_type_manual="", hierarchy_verified=False,
+    )
+
+    preview = _post_title(app, collection_id, cour, submitted)
+    rendered = _text(preview)
+    assert preview.status_code == 200, rendered
+    assert "Typ části: cour → neurčeno" in rendered
+    assert "Číslo Part: 2 → neurčeno" in rendered
+    assert "Zařazení ověřeno: ano → ne" in rendered
+    assert _cour_state(app, cour) == before
+
+    assert _post_title(app, collection_id, cour, submitted, confirm=True).status_code == 303
+    after = _cour_state(app, cour)
+    assert (after["part_type_manual"], after["part_number_manual"]) == (None, None)
+    assert after["hierarchy_manual_override"] is False
+    assert after["authority"] == ManualHierarchyAuthorityState.NONE
+
+
+@pytest.mark.parametrize("via_save_all", [False, True])
+@pytest.mark.parametrize("target", ["season", "automatic_cour"])
+def test_cour_cannot_be_newly_chosen_through_the_form(tmp_path, target, via_save_all):
+    app = _app(tmp_path)
+    collection_id, season, automatic = _legacy_cour(app, "automatic")
+    title_id = season if target == "season" else automatic
+    before = _cour_state(app, title_id)
+    submitted = _browser_submit(
+        app, collection_id, title_id, part_type_manual="cour",
+        season_number_manual="1", season_label_manual="S1",
+        part_number_manual="1" if target == "season" else "2",
+        hierarchy_verified=True,
+    )
+
+    response = _submit(app, collection_id, title_id, submitted, via_save_all, confirm=True)
+    assert response.status_code == 400
+    assert "legacy" in _text(response)
+    assert _cour_state(app, title_id) == before
+
+
+@pytest.mark.parametrize("via_save_all", [False, True])
+@pytest.mark.parametrize(("kind", "changes"), [
+    ("complete", {"season_number_manual": "2", "season_label_manual": "S2"}),
+    ("complete", {"part_number_manual": "3"}),
+    # Ticking "verified" must not promote a historical snapshot to authority.
+    ("incomplete", {"hierarchy_verified": True}),
+], ids=["complete-season", "complete-part", "incomplete-verified"])
+def test_retained_legacy_cour_structure_cannot_be_edited(
+    tmp_path, kind, changes, via_save_all,
+):
+    app = _app(tmp_path)
+    collection_id, _, cour = _legacy_cour(app, kind)
+    before = _cour_state(app, cour)
+    numbering_before = _numbering(app, cour)
+    submitted = _browser_submit(app, collection_id, cour, **changes)
+    assert dict(submitted)["part_type_manual"] == "cour"
+
+    for confirm in (False, True):
+        response = _submit(app, collection_id, cour, submitted, via_save_all, confirm=confirm)
+        assert response.status_code == 400
+        assert "lze jej zachovat beze změny" in _text(response)
+    after = _cour_state(app, cour)
+    assert after == before
+    assert after["authority"] == before["authority"]
+    assert after["effective"] == before["effective"]
+    assert _numbering(app, cour) == numbering_before

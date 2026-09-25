@@ -1243,17 +1243,17 @@ def recalculate_collection_numbering(
 
 
 def _can_start_absolute_sequence(title: CatalogTitle) -> bool:
-    """Whether one isolated structural identity can safely begin at absolute E1."""
+    """Whether one isolated structural identity can safely begin at absolute E1.
+
+    The Part axis is independent of the structural type label: a split Season
+    stored as ``season`` + Part 2 is no more a safe start than a ``part`` or
+    legacy ``cour`` Part 2.
+    """
     season_number = _numbering_season_number(title)
     part_number = _numbering_part_number(title)
-    part_type = _numbering_part_type(title)
-    if season_number is not None:
-        return season_number == 1 and (
-            part_type not in {"part", "cour"} or part_number in {None, 1}
-        )
-    if part_type in {"part", "cour"} and part_number is not None:
-        return part_number == 1
-    return True
+    if part_number is not None and part_number != 1:
+        return False
+    return season_number in {None, 1}
 
 
 def _numbering_title_sort_key(title: CatalogTitle):

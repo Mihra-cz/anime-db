@@ -14,7 +14,9 @@
     const partType = typeSelect.value;
     const isSeason = partType === "season";
     const isPart = partType === "part";
-    const hasPartAxis = isSeason || isPart;
+    // Legacy ``cour`` is only rendered for a title that already stores it; it
+    // keeps its Part number exactly like title_hierarchy_conditional_fields().
+    const hasPartAxis = isSeason || isPart || partType === "cour";
     const isConcrete = Boolean(partType);
 
     setFieldState(form, "[data-season-number]", isConcrete);

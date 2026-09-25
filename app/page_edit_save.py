@@ -17,7 +17,9 @@ from .hierarchy_review import (
     classify_videos_in_place, refresh_collection_state,
     set_manual_title_hierarchy,
 )
-from .hierarchy_types import VIDEO_CONTENT_TYPE_CHOICES
+from .hierarchy_types import (
+    LEGACY_PART_TYPES, PART_TYPE_LABELS, VIDEO_CONTENT_TYPE_CHOICES,
+)
 from .media_parts import MEDIA_PART_NUMBER_ERROR, set_media_part_number
 from .models import CatalogTitle, Video, VideoVariantGroup
 from .numbering import (
@@ -186,6 +188,17 @@ def apply_title_hierarchy_form_edit(
         value is not None and value != before
         for value, before in zip(submitted[:6], current[:6], strict=True)
     )
+    # The form renders a legacy type only so an already stored snapshot survives
+    # an unrelated edit; it can be kept unchanged or converted, never newly
+    # chosen, edited or promoted from a historical snapshot.
+    requested_type = requested[0].casefold()
+    if requested_type in LEGACY_PART_TYPES and (
+        requested_type != current[0] or structure_changed
+    ):
+        raise ValueError(
+            f"Typ části {PART_TYPE_LABELS[requested_type]} je pouze legacy hodnota; "
+            "lze jej zachovat beze změny nebo převést na Sezónu či Part."
+        )
     changes = tuple(
         f"{label}: {_human_value(before)} → {_human_value(after)}"
         for index, (label, before, after) in enumerate(
