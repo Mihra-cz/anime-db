@@ -186,10 +186,12 @@ from .part_local_numbering import (
     apply_part_local_numbering, evaluate_part_local_numbering,
 )
 from .page_edit_save import (
+    TITLE_HIERARCHY_CONDITIONAL_FIELDS,
     MissingEditTarget, apply_episode_position_edit, apply_hierarchy_page_edits,
     apply_title_hierarchy_edit, apply_title_hierarchy_form_edit,
     apply_title_numbering_edit,
     apply_title_video_hierarchy_edit, hierarchy_number_field_label,
+    missing_title_hierarchy_fields,
 )
 from .video_variants import (
     VIDEO_VARIANT_CONTENT_VARIANT_CHOICES,
@@ -3202,12 +3204,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 scope="title",
             )
-        required = {
-            "part_type_manual", "season_number_manual", "season_label_manual",
-            "part_number_manual", "sort_order_manual", "numbering_mode",
-            "episode_start_offset",
-        }
-        if not required.issubset(keys):
+        if missing_title_hierarchy_fields(form.get("part_type_manual"), keys):
             return hierarchy_edit_error_response(
                 request, collection_id, catalog_title_id, form,
                 (
@@ -3234,9 +3231,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 change_group = apply_title_hierarchy_form_edit(
                     session, collection_id, catalog_title_id,
                     part_type_manual=str(form["part_type_manual"]),
-                    season_number_manual=str(form["season_number_manual"]),
-                    season_label_manual=str(form["season_label_manual"]),
-                    part_number_manual=str(form["part_number_manual"]),
+                    **{
+                        field: str(form[field]) if field in form else None
+                        for field in TITLE_HIERARCHY_CONDITIONAL_FIELDS
+                    },
                     sort_order_manual=str(form["sort_order_manual"]),
                     hierarchy_verified=form.get("hierarchy_verified") == "true",
                     numbering_mode=str(form["numbering_mode"]),

@@ -6,6 +6,11 @@
   const button = document.getElementById('hierarchy-save-all');
   const count = document.getElementById('hierarchy-dirty-count');
   const feedback = document.getElementById('hierarchy-save-feedback');
+  const TITLE_HIERARCHY_FIELDS = [
+    'part_type_manual', 'season_number_manual', 'season_label_manual',
+    'part_number_manual', 'sort_order_manual', 'numbering_mode',
+    'episode_start_offset',
+  ];
 
   function plural(value) {
     return value === 1 ? 'neuložená změna' :
@@ -40,16 +45,15 @@
     if (kind === 'recap_position') return {kind, id, values: {
       manual_episode_number: value(data, 'manual_episode_number'),
     }};
-    if (kind === 'title_hierarchy') return {kind, id, values: {
-      part_type_manual: value(data, 'part_type_manual'),
-      season_number_manual: value(data, 'season_number_manual'),
-      season_label_manual: value(data, 'season_label_manual'),
-      part_number_manual: value(data, 'part_number_manual'),
-      sort_order_manual: value(data, 'sort_order_manual'),
-      hierarchy_verified: data.has('hierarchy_verified'),
-      numbering_mode: value(data, 'numbering_mode'),
-      episode_start_offset: value(data, 'episode_start_offset'),
-    }};
+    if (kind === 'title_hierarchy') {
+      // Same fields as the local submit: an input disabled because the part
+      // type does not use it is omitted, never sent as an empty value.
+      const values = {hierarchy_verified: data.has('hierarchy_verified')};
+      TITLE_HIERARCHY_FIELDS.forEach(name => {
+        if (data.has(name)) values[name] = value(data, name);
+      });
+      return {kind, id, values};
+    }
     if (kind === 'video_hierarchy') return {kind, id, values: {
       catalog_title_id: Number(form.dataset.catalogTitleId),
       content_type: value(data, 'content_type'),

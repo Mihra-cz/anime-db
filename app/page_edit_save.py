@@ -1,6 +1,7 @@
 """Explicit, transactional save scope for ordinary hierarchy detail edits."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
@@ -41,6 +42,44 @@ class EditChangeGroup:
 class HierarchyPageEditResult:
     saved_sections: int
     change_groups: tuple[EditChangeGroup, ...]
+
+
+TITLE_HIERARCHY_CONDITIONAL_FIELDS = (
+    "season_number_manual", "season_label_manual", "part_number_manual",
+)
+_TITLE_HIERARCHY_REQUIRED_FIELDS = frozenset({
+    "part_type_manual", "sort_order_manual", "numbering_mode",
+    "episode_start_offset",
+})
+
+
+def title_hierarchy_conditional_fields(part_type_manual: str) -> frozenset[str]:
+    """Structural inputs the title hierarchy form uses for one part type.
+
+    ``hierarchy_fields.js`` hides and disables the other conditional inputs, so
+    the browser omits them from both the local submit and Save All.  An omitted
+    input therefore means "not used by this part type", never a damaged request.
+    """
+    part_type = part_type_manual.strip().casefold()
+    if not part_type:
+        return frozenset()
+    fields = {"season_number_manual"}
+    if part_type != "part":
+        fields.add("season_label_manual")
+    if part_type in {"season", "part", "cour"}:
+        fields.add("part_number_manual")
+    return frozenset(fields)
+
+
+def missing_title_hierarchy_fields(
+    part_type_manual: object, submitted: Iterable[str],
+) -> frozenset[str]:
+    """Return the relevant title form inputs a submission lacks."""
+    part_type = part_type_manual if isinstance(part_type_manual, str) else ""
+    return (
+        _TITLE_HIERARCHY_REQUIRED_FIELDS
+        | title_hierarchy_conditional_fields(part_type)
+    ) - set(submitted)
 
 
 def apply_title_numbering_edit(
@@ -98,21 +137,32 @@ def _human_value(value: object) -> str:
 
 def apply_title_hierarchy_form_edit(
     session: Session, collection_id: int, title_id: int, *,
-    part_type_manual: str, season_number_manual: str,
-    season_label_manual: str, part_number_manual: str,
+    part_type_manual: str, season_number_manual: str | None,
+    season_label_manual: str | None, part_number_manual: str | None,
     sort_order_manual: str, hierarchy_verified: bool,
     numbering_mode: str, episode_start_offset: str,
 ) -> EditChangeGroup:
-    """Stage the full ordinary title hierarchy form and describe its impact."""
+    """Stage the ordinary title hierarchy form and describe its impact.
+
+    ``None`` is a conditional input the form omitted because the submitted part
+    type does not use it.  It is not an edit by itself, so a numbering-only save
+    never rewrites the structure; when the structure is rewritten, it is empty.
+    """
     title = session.get(CatalogTitle, title_id)
     if title is None or title.catalog_collection_id != collection_id:
         raise MissingEditTarget("Část už nepatří do této kolekce.")
-    requested = (
-        part_type_manual.strip(), season_number_manual.strip(),
-        season_label_manual.strip(), part_number_manual.strip(),
+    submitted = (
+        part_type_manual.strip(),
+        *(
+            None if value is None else value.strip()
+            for value in (
+                season_number_manual, season_label_manual, part_number_manual,
+            )
+        ),
         sort_order_manual.strip(), hierarchy_verified, numbering_mode.strip(),
         episode_start_offset.strip(),
     )
+    requested = tuple("" if value is None else value for value in submitted)
     current = (
         title.part_type_manual or "",
         str(title.season_number_manual or ""),
@@ -132,16 +182,22 @@ def apply_title_hierarchy_form_edit(
             else "Počet předchozích epizod"
         ),
     )
+    structure_changed = any(
+        value is not None and value != before
+        for value, before in zip(submitted[:6], current[:6], strict=True)
+    )
     changes = tuple(
         f"{label}: {_human_value(before)} → {_human_value(after)}"
-        for label, before, after in zip(labels, current, requested, strict=True)
-        if before != after
+        for index, (label, before, after) in enumerate(
+            zip(labels, current, requested, strict=True)
+        )
+        if before != after and (structure_changed or index >= 6)
     )
     if not changes:
         raise ValueError(
             "Formulář neobsahuje žádnou změněnou hierarchy hodnotu."
         )
-    if requested[:6] != current[:6]:
+    if structure_changed:
         apply_title_hierarchy_edit(
             session, collection_id, title_id,
             season_number_manual=requested[1], season_label_manual=requested[2],
@@ -297,7 +353,21 @@ def _validated_sections(payload: object) -> list[tuple[str, int, dict]]:
         kind, target_id, values = section["kind"], section["id"], section["values"]
         if type(kind) is not str or kind not in _FIELDS or type(target_id) is not int or target_id < 1:
             raise ValueError("Nepodporovaná editační sekce.")
-        if not isinstance(values, dict) or set(values) != _FIELDS[kind]:
+        if not isinstance(values, dict):
+            raise ValueError("Neplatná pole editační sekce.")
+        if kind == "title_hierarchy":
+            # The same contract as the local title form: only conditional
+            # inputs unused by the submitted part type may be omitted.
+            valid_keys = (
+                set(values) <= _FIELDS[kind]
+                and "hierarchy_verified" in values
+                and not missing_title_hierarchy_fields(
+                    values.get("part_type_manual"), values,
+                )
+            )
+        else:
+            valid_keys = set(values) == _FIELDS[kind]
+        if not valid_keys:
             raise ValueError("Neplatná pole editační sekce.")
         if (kind, target_id) in seen:
             raise ValueError("Stejná sekce je v dávce vícekrát.")
@@ -312,7 +382,7 @@ def _validated_sections(payload: object) -> list[tuple[str, int, dict]]:
         elif kind == "title_hierarchy":
             if type(values["hierarchy_verified"]) is not bool:
                 raise ValueError("Neplatný stav ověření části.")
-            _validate_string_values(values, _FIELDS[kind] - {"hierarchy_verified"})
+            _validate_string_values(values, set(values) - {"hierarchy_verified"})
         else:
             _validate_string_values(values, _FIELDS[kind] - {"catalog_title_id"})
         validated.append((kind, target_id, values))
@@ -375,7 +445,8 @@ def apply_hierarchy_page_edits(
                 )))
             elif kind == "title_hierarchy":
                 groups.append(apply_title_hierarchy_form_edit(
-                    session, collection_id, target_id, **values,
+                    session, collection_id, target_id,
+                    **{field: values.get(field) for field in _FIELDS[kind]},
                 ))
             else:
                 video = session.get(Video, target_id)
