@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.hierarchy_types import MAIN_CONTENT_PART_TYPES
 from app.models import Artwork, CatalogTitle
 from app.title_order import catalog_title_sort_key
+from .link_lifecycle import confirmed_primary_external_link
 from .providers.base import metadata_http_timeout
 
 
@@ -42,12 +43,28 @@ def resolve_local_path(root: Path, local_path: str) -> Path:
 
 
 def primary_cover_artwork(title: CatalogTitle | None) -> Artwork | None:
-    """Return the existing title-level presentation authority for local covers."""
-    return next((
-        artwork
-        for artwork in (title.artwork if title is not None else ())
-        if artwork.is_primary and artwork.artwork_type == "cover"
-    ), None)
+    """Return the title-level presentation cover.
+
+    Artwork rows stay identity-keyed evidence.  When the title has a confirmed
+    metadata authority, only a cover of that provider identity may present it,
+    so a stale primary cover of a historical link never shows.  Without
+    confirmed metadata the stored primary flag remains the fallback.
+    """
+    if title is None:
+        return None
+    covers = [artwork for artwork in title.artwork if artwork.artwork_type == "cover"]
+    link = confirmed_primary_external_link(title)
+    if link is not None:
+        identity = (link.provider.strip().casefold(), str(link.external_id))
+        covers = [
+            artwork for artwork in covers
+            if (artwork.provider, artwork.external_id) == identity
+        ]
+        return next(
+            (artwork for artwork in covers if artwork.is_primary),
+            covers[0] if covers else None,
+        )
+    return next((artwork for artwork in covers if artwork.is_primary), None)
 
 
 def local_artwork_thumbnail_url(artwork: Artwork | None, root: Path) -> str | None:
@@ -90,12 +107,9 @@ def collection_artwork_thumbnail_url(
         ),
     )
     for title in ordered:
-        for artwork in title.artwork:
-            if not artwork.is_primary or artwork.artwork_type != "cover":
-                continue
-            url = local_artwork_thumbnail_url(artwork, root)
-            if url is not None:
-                return url
+        url = local_artwork_thumbnail_url(primary_cover_artwork(title), root)
+        if url is not None:
+            return url
     return None
 
 
@@ -111,6 +125,21 @@ def _validate_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
         raise ArtworkCacheError("URL obalu musí být bezpečná HTTP nebo HTTPS adresa.")
+
+
+def _make_single_primary_cover(session: Session, artwork: Artwork) -> None:
+    """Keep one primary cover per title; other identities stay stored evidence."""
+    others = session.scalars(select(Artwork).where(
+        Artwork.catalog_title_id == artwork.catalog_title_id,
+        Artwork.artwork_type == "cover",
+        Artwork.id != artwork.id,
+        Artwork.is_primary.is_(True),
+    )).all()
+    for other in others:
+        other.is_primary = False
+    if not artwork.is_primary:
+        artwork.is_primary = True
+    session.flush()
 
 
 def cache_cover(
@@ -132,6 +161,7 @@ def cache_cover(
         original = resolve_local_path(root, existing.local_path)
         thumbnail = resolve_local_path(root, existing.thumbnail_path) if existing.thumbnail_path else None
         if original.is_file() and thumbnail and thumbnail.is_file():
+            _make_single_primary_cover(session, existing)
             return existing
 
     destination = resolve_local_path(root, identity.as_posix())
@@ -203,10 +233,10 @@ def cache_cover(
         artwork.width = width
         artwork.height = height
         artwork.file_size = size
-        artwork.is_primary = True
         artwork.fetched_at = timestamp
         artwork.updated_at = timestamp
         session.flush()
+        _make_single_primary_cover(session, artwork)
         return artwork
     except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.HTTPError) as exc:
         raise ArtworkCacheError("Obal se nepodařilo stáhnout.") from exc

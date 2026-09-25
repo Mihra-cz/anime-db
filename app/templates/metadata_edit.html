@@ -19,7 +19,7 @@
   <button type="submit">Uložit</button>
 </form>
 {% if metadata_query is not defined %}{% set metadata_query = metadata_default_query %}{% endif %}
-<p>Stav: <strong>{{ metadata_status_labels.get(catalog_title.metadata_status, 'Chyba') if catalog_title else 'Bez metadat' }}</strong>{% if catalog_title and catalog_title.metadata_locked %} · 🔒 Zamknuto{% endif %}</p>
+<p>Stav: <strong>{{ metadata_completion.label if metadata_completion else 'Bez metadat' }}</strong>{% if catalog_title and catalog_title.metadata_status in metadata_workflow_warning_statuses %} · <span class="warning">{{ metadata_status_labels.get(catalog_title.metadata_status, catalog_title.metadata_status) }}</span>{% endif %}{% if catalog_title and catalog_title.metadata_locked %} · 🔒 Zamknuto{% endif %}</p>
 {% if catalog_title %}<p>Lokální původní titul: <strong>{{ catalog_title.local_title }}</strong></p>{% endif %}
 {% if metadata_message %}<div class="notice success">{{ metadata_message }}</div>{% endif %}{% if metadata_warning %}<div class="notice warning-box">{{ metadata_warning }}</div>{% endif %}
 {% if local_cover_url %}<img class="metadata-cover" src="{{ local_cover_url }}" alt="Lokálně uložený obal" loading="lazy">{% endif %}

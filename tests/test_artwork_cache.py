@@ -17,7 +17,9 @@ from app.metadata.artwork import (
     local_artwork_thumbnail_url,
     primary_cover_artwork,
 )
-from app.models import Artwork, CatalogCollection, CatalogTitle
+from datetime import datetime, timezone
+
+from app.models import Artwork, CatalogCollection, CatalogTitle, ExternalTitleLink
 
 
 def image_bytes(fmt):
@@ -209,3 +211,104 @@ def test_artwork_download_uses_explicit_split_timeout(tmp_path):
     assert recording.request_timeout.read == 15
     assert recording.request_timeout.connect == 5
     recording.close(); session.close(); engine.dispose()
+
+
+# --- presentation cover follows the current metadata authority ------------------
+
+def confirmed_link(external_id, *, lifecycle="active"):
+    active = lifecycle == "active"
+    return ExternalTitleLink(
+        provider="anilist", external_id=str(external_id), match_method="manual_search",
+        is_primary=active, is_manual=True, verified_at=datetime.now(timezone.utc),
+        lifecycle_state=lifecycle,
+    )
+
+
+def reconfirmed_title(artwork):
+    """A title re-linked from a historical identity (117612) to a new one (139648)."""
+    return CatalogTitle(
+        id=248, local_title="Part 2", normalized_local_title="part 2",
+        relative_root_path="Anime/Show/Part 2", part_type="season",
+        external_links=[
+            confirmed_link(117612, lifecycle="legacy_historical"), confirmed_link(139648),
+        ],
+        artwork=artwork,
+    )
+
+
+def test_confirmed_identity_cover_wins_over_a_stale_historical_primary(tmp_path):
+    root = tmp_path / "artwork"
+    for external_id in (117612, 139648):
+        thumbnail = root / "anilist" / str(external_id) / "cover-thumb.webp"
+        thumbnail.parent.mkdir(parents=True)
+        thumbnail.write_bytes(str(external_id).encode())
+    historical = stored_artwork(117612, "anilist/117612/cover-thumb.webp")
+    current = stored_artwork(139648, "anilist/139648/cover-thumb.webp")
+    title = reconfirmed_title([historical, current])
+
+    assert primary_cover_artwork(title) is current
+    assert collection_artwork_thumbnail_url(
+        [title], root,
+    ) == "/artwork/anilist/139648/cover-thumb.webp"
+    # The historical row stays preserved evidence; nothing is rewritten on read.
+    assert historical.is_primary is True and current.is_primary is True
+    assert [link.lifecycle_state for link in title.external_links] == [
+        "legacy_historical", "active",
+    ]
+
+
+def test_confirmed_identity_never_falls_back_to_a_historical_cover():
+    title = reconfirmed_title([stored_artwork(117612, "anilist/117612/cover-thumb.webp")])
+    assert primary_cover_artwork(title) is None
+
+
+def test_title_without_confirmed_metadata_keeps_the_primary_fallback():
+    primary = stored_artwork(7, "anilist/7/cover-thumb.webp")
+    title = CatalogTitle(
+        local_title="Show", normalized_local_title="show", relative_root_path="Anime/Show",
+        artwork=[stored_artwork(6, "anilist/6/cover-thumb.webp", primary=False), primary],
+    )
+    assert primary_cover_artwork(title) is primary
+    title.artwork = [stored_artwork(6, "anilist/6/cover-thumb.webp", primary=False)]
+    assert primary_cover_artwork(title) is None
+
+
+def test_caching_a_cover_keeps_a_single_primary_and_preserves_old_rows(tmp_path):
+    engine, session, title, root = setup(tmp_path)
+    title.external_links.extend([
+        confirmed_link(1, lifecycle="legacy_historical"), confirmed_link(2),
+    ])
+    session.flush()
+    links_before = [
+        (link.external_id, link.lifecycle_state, link.is_primary)
+        for link in title.external_links
+    ]
+    first = cache_cover(session, catalog_title_id=title.id, provider="anilist", external_id="1",
+                        remote_url="https://img/1", root=root, client=client(image_bytes("JPEG"), "image/jpeg"))
+    second = cache_cover(session, catalog_title_id=title.id, provider="anilist", external_id="2",
+                         remote_url="https://img/2", root=root, client=client(image_bytes("JPEG"), "image/jpeg"))
+    session.commit()
+
+    with Session(engine) as fresh:
+        rows = fresh.scalars(select(Artwork).order_by(Artwork.id)).all()
+        assert [(row.external_id, row.is_primary) for row in rows] == [("1", False), ("2", True)]
+        assert (root / rows[0].local_path).is_file()
+        stored = fresh.get(CatalogTitle, title.id)
+        assert primary_cover_artwork(stored).id == second.id
+        assert [
+            (link.external_id, link.lifecycle_state, link.is_primary)
+            for link in stored.external_links
+        ] == links_before
+
+    # Re-caching an already stored identity (unchanged URL and files) makes it
+    # the single primary again instead of returning a demoted row untouched.
+    again = cache_cover(session, catalog_title_id=title.id, provider="anilist", external_id="1",
+                        remote_url="https://img/1", root=root, client=client(b"unused", "text/html"))
+    session.commit()
+    assert again.id == first.id
+    with Session(engine) as fresh:
+        assert [
+            (row.external_id, row.is_primary)
+            for row in fresh.scalars(select(Artwork).order_by(Artwork.id))
+        ] == [("1", True), ("2", False)]
+    session.close(); engine.dispose()

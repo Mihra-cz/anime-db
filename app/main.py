@@ -348,6 +348,11 @@ METADATA_STATUS_LABELS = {
     "conflict": "Konflikt", "migration_review_required": "Vyžaduje kontrolu migrace",
     "unavailable": "Bez externího záznamu", "error": "Chyba",
 }
+# Stored workflow states that are a real warning on their own; they accompany the
+# derived completion state instead of replacing it.
+templates.env.globals["metadata_workflow_warning_statuses"] = (
+    "conflict", "error", "migration_review_required",
+)
 
 
 def _homepage_collection_rows(
@@ -403,6 +408,7 @@ def _load_collection_titles_with_artwork(
         return {}, {}
     statement = select(CatalogCollection).options(
         joinedload(CatalogCollection.titles).joinedload(CatalogTitle.artwork),
+        joinedload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
         joinedload(CatalogCollection.titles).joinedload(
             CatalogTitle.videos
         ).joinedload(Video.duplicate_of),
@@ -1872,6 +1878,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
                 selectinload(CatalogCollection.titles).joinedload(CatalogTitle.artwork),
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
             ).where(CatalogCollection.id == collection_id))
         if collection is None:
             raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
@@ -1927,6 +1934,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             parts_by_title_id[title.id] = {
                 "title": title, "stats": stats, "metadata": title.metadata_record,
                 "videos": title_videos_list,
+                # Derived user-facing state; metadata_status stays workflow evidence.
+                "metadata_completion": resolve_metadata_completion(
+                    title, title_videos_list,
+                ),
             }
             if (
                 matched
@@ -1995,7 +2006,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "sort": sort or "", "direction": direction or "",
             "title_state_query": urlencode(state),
             "back_url": catalog_state_url(filter_name, q, sort or "", direction or ""),
-            "metadata_status_labels": METADATA_STATUS_LABELS,
         })
 
     def hierarchy_review_context(
@@ -3962,10 +3972,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 include = {
                     "without": completion.relevant and not completion.resolved,
                     "all": True,
-                    "pending": title.metadata_status == "candidates_available",
+                    # Stored workflow status is evidence; a resolved completion
+                    # (confirmed or not_required) leaves nothing to confirm.
+                    "pending": (
+                        title.metadata_status == "candidates_available"
+                        and not completion.resolved
+                    ),
                     "manual": title.metadata_status == "linked_manual",
                     "conflict": title.metadata_status == "conflict",
-                    "missing-artwork": title.metadata_status == "linked_manual" and not any(item.is_primary for item in title.artwork),
+                    "missing-artwork": title.metadata_status == "linked_manual" and primary_cover_artwork(title) is None,
                     "low-score": any((candidate.match_score or 0) < LOW_SCORE_THRESHOLD for candidate in active),
                     "split": split_evaluation is not None,
                 }[status]

@@ -184,6 +184,8 @@ def snapshot(engine):
     ("/", {}), ("/catalog/{filter_name}", {"filter_name": "all"}),
     ("/metadata-review", {"status": "without"}),
     ("/metadata-review", {"status": "all"}),
+    ("/metadata-review", {"status": "pending"}),
+    ("/metadata-review", {"status": "missing-artwork"}),
     ("/metadata-review/{catalog_title_id}", {"catalog_title_id": 3}),
 ])
 def test_get_is_read_only_and_query_count_bounded_by_titles(completion_app, path, kwargs):
@@ -345,3 +347,226 @@ def test_rebuild_preserves_requirement_and_rejects_stale_plan(completion_app):
     with Session(engine) as session:
         assert session.get(CatalogTitle, 2).metadata_requirement_manual == "not_required"
         assert session.get(CatalogTitle, 99).metadata_requirement_manual == "not_required"
+
+
+# --- metadata review work queues follow the completion contract -----------------
+
+def queue_title(number, *, types=("episode",), requirement=None, confirmed=False,
+                status="candidates_available"):
+    title = make_title(number, types=types, confirmed=confirmed)
+    title.metadata_status = status
+    title.metadata_requirement_manual = requirement
+    title.metadata_candidates.append(MetadataCandidate(
+        provider="anilist", external_id=f"c{number}", candidate_title=f"Candidate {number}",
+        match_score=0.9,
+    ))
+    return title
+
+
+def queue_ids(app, status):
+    response = endpoint(app, "/metadata-review")(request(app, "/metadata-review"), status=status)
+    assert response.status_code == 200
+    return sorted(row["title"].id for row in response.context["rows"])
+
+
+@pytest.fixture
+def queue_app(tmp_path):
+    app = create_app(Settings(
+        database_url=f"sqlite:///{tmp_path / 'queue.db'}", anime_path=tmp_path,
+        metadata_download_artwork=False, metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    engine = app.state.sessions.kw["bind"]
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all([
+            queue_title(1, requirement="not_required"),          # manual not_required
+            queue_title(2),                                      # required and missing
+            queue_title(3, confirmed=True, status="linked_manual"),
+            # A link without the linked_manual status is not confirmed completion.
+            queue_title(4, confirmed=True),
+            queue_title(5, types=("ncop", "nced")),              # automatic not_required
+        ])
+        session.commit()
+    yield app, engine
+    engine.dispose()
+
+
+def test_pending_queue_contains_only_titles_that_still_need_metadata(queue_app):
+    app, engine = queue_app
+    before = snapshot(engine)
+    # The pending queue is exactly the unresolved part of the stored workflow.
+    assert queue_ids(app, "pending") == [2, 4]
+    assert queue_ids(app, "without") == [2, 4]
+    assert queue_ids(app, "all") == [1, 2, 3, 4, 5]
+    # Candidates stay stored evidence; the read changes nothing.
+    assert snapshot(engine) == before
+    with Session(engine) as session:
+        assert all(len(title.metadata_candidates) == 1
+                   for title in session.scalars(select(CatalogTitle)))
+
+
+def test_clearing_manual_not_required_brings_stored_candidates_back(queue_app):
+    app, engine = queue_app
+    update = endpoint(app, "/titles/{catalog_title_id}/metadata/requirement")
+    assert update(1, requirement="", return_url="/metadata-review").status_code == 303
+    assert queue_ids(app, "pending") == [1, 2, 4]
+    assert update(1, requirement="not_required", return_url="/metadata-review").status_code == 303
+    assert queue_ids(app, "pending") == [2, 4]
+    with Session(engine) as session:
+        assert [candidate.external_id for candidate in session.get(CatalogTitle, 1).metadata_candidates] == ["c1"]
+
+
+def test_missing_artwork_queue_uses_the_current_identity_cover(queue_app):
+    from app.models import Artwork
+
+    app, engine = queue_app
+    with Session(engine) as session:
+        title = session.get(CatalogTitle, 3)
+        title.artwork.append(Artwork(
+            provider="anilist", external_id="historical", artwork_type="cover",
+            remote_url="https://img/historical", local_path="anilist/historical/cover.jpg",
+            mime_type="image/jpeg", file_size=1, is_primary=True,
+        ))
+        session.commit()
+    # A primary cover of another identity does not satisfy the current authority.
+    assert 3 in queue_ids(app, "missing-artwork")
+    with Session(engine) as session:
+        title = session.get(CatalogTitle, 3)
+        title.artwork.append(Artwork(
+            provider="anilist", external_id="3", artwork_type="cover",
+            remote_url="https://img/3", local_path="anilist/3/cover.jpg",
+            mime_type="image/jpeg", file_size=1, is_primary=True,
+        ))
+        session.commit()
+    assert 3 not in queue_ids(app, "missing-artwork")
+
+
+# --- collection page shows the derived completion state -------------------------
+
+def collection_metadata_cells(app, collection_id):
+    path = "/collections/{collection_id}"
+    response = endpoint(app, path)(request(app, path), collection_id=collection_id)
+    assert response.status_code == 200
+    import re
+    return re.findall(r'<td data-label="Metadata">(.*?)</td>', response.body.decode())
+
+
+@pytest.mark.parametrize("collection_id,expected", [
+    (1, "Metadata nejsou vyžadována"),   # manual not_required, candidates_available
+    (2, "Metadata chybí"),
+    (3, "Metadata potvrzena"),
+    (5, "Metadata nejsou vyžadována"),   # automatic technical-only
+])
+def test_collection_page_metadata_column_uses_completion(queue_app, collection_id, expected):
+    app, engine = queue_app
+    before = snapshot(engine)
+    statements = []
+
+    def record(_conn, _cursor, statement, *_args):
+        statements.append(statement)
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        cells = collection_metadata_cells(app, collection_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert cells == [expected]
+    assert "Čeká na potvrzení" not in cells
+    assert not any(item.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE"))
+                   for item in statements)
+    assert snapshot(engine) == before
+    with Session(engine) as session:
+        title = session.get(CatalogTitle, collection_id)
+        assert title.metadata_status == ("linked_manual" if collection_id == 3 else "candidates_available")
+        assert len(title.metadata_candidates) == 1
+
+
+def test_collection_page_metadata_query_count_is_bounded(queue_app):
+    app, engine = queue_app
+
+    def count():
+        statements = []
+
+        def record(_conn, _cursor, statement, *_args):
+            statements.append(statement)
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            collection_metadata_cells(app, 3)
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        return len(statements)
+
+    baseline = count()
+    with Session(engine) as session:
+        collection = session.get(CatalogCollection, 3)
+        for number in range(10, 30):
+            extra = make_title(number, confirmed=number % 2 == 0)
+            extra.id = None
+            extra.collection = collection
+            for video in extra.videos:
+                video.catalog_collection = collection
+            session.add(extra)
+        session.commit()
+    assert len(collection_metadata_cells(app, 3)) == 21
+    assert count() == baseline
+
+
+# --- metadata detail page states the derived completion ---------------------------
+
+def metadata_detail(app, engine, title_id):
+    import re
+    path = "/metadata-review/{catalog_title_id}"
+    before = snapshot(engine)
+    statements = []
+
+    def record(_conn, _cursor, statement, *_args):
+        statements.append(statement)
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        response = endpoint(app, path)(request(app, path), catalog_title_id=title_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert response.status_code == 200
+    assert not any(item.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE"))
+                   for item in statements)
+    assert snapshot(engine) == before
+    body = response.body.decode()
+    state = re.search(r"<p>Stav: <strong>(.*?)</strong>", body).group(1)
+    return state, body
+
+
+@pytest.mark.parametrize("title_id,expected", [
+    (1, "Metadata nejsou vyžadována"),   # candidates_available + manual not_required
+    (2, "Metadata chybí"),
+    (3, "Metadata potvrzena"),
+    (5, "Metadata nejsou vyžadována"),   # automatic technical-only
+])
+def test_metadata_detail_state_uses_completion(queue_app, title_id, expected):
+    app, engine = queue_app
+    state, body = metadata_detail(app, engine, title_id)
+    assert state == expected
+    if title_id == 1:
+        assert "Ručně: metadata nejsou vyžadována" in body
+    if title_id != 2:
+        assert "Čeká na potvrzení" not in body
+    with Session(engine) as session:
+        title = session.get(CatalogTitle, title_id)
+        assert title.metadata_status == (
+            "linked_manual" if title_id == 3 else "candidates_available"
+        )
+        assert [candidate.external_id for candidate in title.metadata_candidates] == [f"c{title_id}"]
+
+
+@pytest.mark.parametrize("workflow_status,label", [
+    ("conflict", "Konflikt"), ("error", "Chyba"),
+    ("migration_review_required", "Vyžaduje kontrolu migrace"),
+])
+def test_metadata_detail_keeps_a_real_workflow_warning_beside_completion(
+    queue_app, workflow_status, label,
+):
+    app, engine = queue_app
+    with Session(engine) as session:
+        session.get(CatalogTitle, 2).metadata_status = workflow_status
+        session.commit()
+    state, body = metadata_detail(app, engine, 2)
+    assert state == "Metadata chybí"
+    assert f'<span class="warning">{label}</span>' in body
