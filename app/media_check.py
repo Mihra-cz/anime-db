@@ -25,7 +25,7 @@ from .external_subtitle_compatibility import (
     build_video_external_subtitle_states,
 )
 from .hierarchy_types import VIDEO_CONTENT_TYPE_LABELS
-from .models import Video
+from .models import ExternalSubtitle, Video
 from .numbering import (
     EffectiveVideoNumbering,
     effective_video_numbering,
@@ -180,6 +180,22 @@ def set_czsk_availability_manual(video: Video, value: str | None) -> None:
     }:
         raise ValueError("Neplatné ruční rozhodnutí o dostupnosti CZ/SK titulků.")
     video.czsk_availability_manual = normalized
+
+
+def retire_unavailable_for_confirmed_subtitle(
+    video: Video, subtitle: ExternalSubtitle,
+) -> None:
+    """Drop "unavailable" once a human confirms a CZ/SK subtitle as compatible.
+
+    That decision is factual CZ/SK availability for this Video, so the older
+    workflow marker must not linger.  An unassessed candidate never ends the
+    marker, and "seeking" remains the user's own decision.
+    """
+    if (
+        video.czsk_availability_manual == CZSK_AVAILABILITY_UNAVAILABLE
+        and effective_external_subtitle_language(subtitle) in {"cs", "sk"}
+    ):
+        set_czsk_availability_manual(video, None)
 
 
 OPENING_ENDING_CONTENT_TYPES = frozenset({"op", "ed", "ncop", "nced"})

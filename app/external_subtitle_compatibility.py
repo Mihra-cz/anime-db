@@ -484,7 +484,7 @@ def confirm_compatible(
     note: str | None = None,
     verified_at: datetime | None = None,
 ) -> ExternalSubtitleCompatibility:
-    return _confirm(
+    row = _confirm(
         session,
         subtitle,
         video,
@@ -492,6 +492,11 @@ def confirm_compatible(
         note=note,
         verified_at=verified_at,
     )
+    # Local import avoids the media_check -> compatibility import cycle.
+    from .media_check import retire_unavailable_for_confirmed_subtitle
+
+    retire_unavailable_for_confirmed_subtitle(video, subtitle)
+    return row
 
 
 def confirm_incompatible(
