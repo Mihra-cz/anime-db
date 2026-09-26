@@ -10,11 +10,14 @@ import re
 import sqlite3
 
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session, joinedload, raiseload
+from sqlalchemy.orm import Session, joinedload, raiseload, selectinload
 
 from app.catalog import detect_episode_number
-from app.models import Video
-from app.supplementary import supplementary_inventory, supplementary_ordinal, variant_group_id
+from app.models import CatalogCollection, CatalogTitle, Video
+from app.supplementary import (
+    ORDINAL_TYPES, supplementary_inventory, supplementary_ordinal,
+    supplementary_review_issues, typed_structural_contexts, variant_group_id,
+)
 
 
 def audit(database: Path) -> dict:
@@ -26,10 +29,12 @@ def audit(database: Path) -> dict:
     ))
     with Session(engine, autoflush=False) as session:
         videos = list(session.scalars(select(Video).options(
-            joinedload(Video.catalog_title), joinedload(Video.video_variant_group), raiseload('*'),
+            joinedload(Video.catalog_title).joinedload(CatalogTitle.collection)
+            .selectinload(CatalogCollection.titles),
+            joinedload(Video.video_variant_group), selectinload(Video.duplicate_of),
+            raiseload('*'),
         ).order_by(Video.id)))
-        grouped = defaultdict(list)
-        rows = []
+        typed, rows = [], []
         for video in videos:
             detection = detect_episode_number(video.filename)
             state = supplementary_ordinal(video, detection=detection)
@@ -53,15 +58,23 @@ def audit(database: Path) -> dict:
                        catalog_title=video.catalog_title.local_title if video.catalog_title else None,
                        duplicate_of=video.duplicate_of_video_id)
             rows.append(row)
-            grouped[(video.catalog_title_id, subtype)].append((video, row, bucket))
+            typed.append((video, row, bucket))
+        # Same scope as Hierarchy Review: typed identities of supplementary
+        # titles attached to one main part share a collection-wide namespace.
+        typed_videos = [video for video, _, _ in typed]
+        contexts = typed_structural_contexts(typed_videos)
+        grouped = defaultdict(list)
+        for video, row, bucket in typed:
+            grouped[(contexts[video], row['effective_type'])].append((video, row, bucket))
         totals = {kind: dict(physical=0, raw_parser_ordinal=0, manual_numbering=0,
                             effective_ordinal=0, unknown=0, collisions=0,
                             media_part_groups=0, variant_groups=0)
-                  for kind in ('op', 'ed', 'ncop', 'nced', 'ova', 'special', 'preview', 'pv', 'cm')}
-        candidates, collisions = [], []
+                  for kind in sorted(ORDINAL_TYPES | {'pv'})}
         variant_ids = defaultdict(set)
-        for (title_id, subtype), members in grouped.items():
-            inventory = supplementary_inventory([v for v, _, _ in members])
+        for members in grouped.values():
+            inventory = supplementary_inventory(
+                [v for v, _, _ in members], collection_scope=True, contexts=contexts,
+            )
             bucket = members[0][2]
             for video, row, source_bucket in members:
                 total = totals[source_bucket]
@@ -75,20 +88,32 @@ def audit(database: Path) -> dict:
             for partition in inventory.partitions:
                 if partition.requires_review:
                     totals[bucket]['collisions'] += 1
-                    collisions.append(dict(title_id=title_id, type=subtype, ordinal=partition.identity.ordinal,
-                                           video_ids=[v.id for v in partition.videos]))
                 totals[bucket]['media_part_groups'] += len({variant_group_id(v) for v in partition.videos if v.media_part_number is not None})
             if any(v.media_part_number is not None for v in inventory.unknown_videos):
                 totals[bucket]['media_part_groups'] += 1
-            unknown_rows = [r for _, r, _ in members if r['effective_ordinal'] is None]
-            if len(members) > 1 and unknown_rows:
-                candidates.append(dict(title_id=title_id, title=members[0][1]['catalog_title'],
-                                       type=subtype, physical=len(members), unknown=unknown_rows))
         for kind, ids in variant_ids.items():
             totals[kind]['variant_groups'] = len(ids)
+        # Candidates and collisions are the shared review read model, which
+        # counts logical identities (confirmed copies, lanes, Media Parts),
+        # never physical rows.
+        rows_by_id = {row['id']: row for row in rows}
+        candidates, collisions, broken = [], [], []
+        for issue in supplementary_review_issues(typed_videos, collection_scope=True):
+            context = contexts[issue.videos[0]]
+            item = dict(context=context.label, type=issue.supplementary_type,
+                        title_ids=sorted({v.catalog_title_id for v in issue.videos}))
+            if issue.code == 'missing_supplementary_ordinal':
+                candidates.append(dict(item, physical=len(grouped[(context, issue.supplementary_type)]),
+                                       unknown=[rows_by_id[v.id] for v in issue.videos]))
+            elif issue.code == 'supplementary_ordinal_collision':
+                collisions.append(dict(item, ordinal=issue.known_ordinals[0],
+                                       video_ids=[v.id for v in issue.videos]))
+            else:
+                broken.append(dict(item, video_ids=[v.id for v in issue.videos]))
         result = dict(database=before, total_videos=len(videos), totals=totals,
                       unknown_total=sum(t['unknown'] for t in totals.values()),
                       collision_candidates=candidates, ordinal_collisions=collisions,
+                      broken_identities=broken,
                       nande=[r for r in rows if 'nande koko' in r['path'].casefold()],
                       rows=rows)
     engine.dispose()
