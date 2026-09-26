@@ -6,7 +6,7 @@ import re
 
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt"}
 SUBTITLE_LANGUAGE_SUFFIXES = frozenset({
-    "cs", "cze", "ces", "sk", "slk", "slo", "en", "eng",
+    "cs", "cz", "cze", "ces", "sk", "slk", "slo", "en", "eng",
     "de", "deu", "ger", "fr", "fra", "fre", "es", "spa",
     "it", "ita", "ja", "jpn", "ko", "kor", "zh", "zho", "chi",
     "pl", "pol", "ru", "rus", "uk", "ukr", "pt", "por", "hu", "hun",

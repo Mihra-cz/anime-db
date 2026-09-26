@@ -1985,8 +1985,9 @@ def _rescan(web_app, library) -> int:
 
 
 @pytest.mark.parametrize(
-    "subtitle_name", ["Series - 01.ass", "Series - 01.cs.ass"],
-    ids=["exact-stem", "language-suffix"],
+    "subtitle_name",
+    ["Series - 01.ass", "Series - 01.cs.ass", "Series - 01.cz.ass"],
+    ids=["exact-stem", "language-suffix", "cz-suffix"],
 )
 def test_subtitle_found_by_a_later_scan_is_available_without_human_work(
     tmp_path, monkeypatch, subtitle_name,
@@ -2016,9 +2017,10 @@ def test_subtitle_found_by_a_later_scan_is_available_without_human_work(
     assert ">Mám<" in article
 
 
+@pytest.mark.parametrize("suffix", ["cs", "cz"])
 @pytest.mark.parametrize("czsk", ["seeking", "unavailable"])
 def test_rescans_never_clear_manual_workflow_but_human_confirmation_does(
-    tmp_path, monkeypatch, czsk,
+    tmp_path, monkeypatch, czsk, suffix,
 ):
     web_app, endpoints, library, video_path, video_id = _scanned_media_app(
         tmp_path, monkeypatch,
@@ -2029,7 +2031,7 @@ def test_rescans_never_clear_manual_workflow_but_human_confirmation_does(
         )
         session.commit()
 
-    (video_path.parent / "Series - 01.cs.ass").write_text(
+    (video_path.parent / f"Series - 01.{suffix}.ass").write_text(
         "Jsem tady, protože všechno dobře dopadlo.", encoding="utf-8",
     )
     subtitle_id = _rescan(web_app, library)
@@ -2069,3 +2071,47 @@ def test_rescans_never_clear_manual_workflow_but_human_confirmation_does(
     assert (final["row_id"], final["status"], final["czsk"]) == (
         discovered["row_id"], CONFIRMED_COMPATIBLE, None,
     )
+
+
+@pytest.mark.parametrize(
+    ("content", "detected", "status"),
+    [
+        ("Jsem tady, protože všechno dobře dopadlo.", "cs", "available"),
+        ("Hello there, everything turned out fine.", "unknown",
+         "needs_cs_sk_no_fallback"),
+    ],
+    ids=["czech-content", "unrecognised-content"],
+)
+def test_cz_suffix_matches_safely_without_deciding_the_language(
+    tmp_path, monkeypatch, content, detected, status,
+):
+    web_app, endpoints, library, video_path, video_id = _scanned_media_app(
+        tmp_path, monkeypatch,
+    )
+    (video_path.parent / "Series - 01.cz.ass").write_text(content, encoding="utf-8")
+    subtitle_id = _rescan(web_app, library)
+
+    def stored():
+        with web_app.state.sessions() as session:
+            subtitle = session.get(ExternalSubtitle, subtitle_id)
+            rows = session.scalars(select(ExternalSubtitleCompatibility)).all()
+            return (
+                session.scalar(select(func.count()).select_from(ExternalSubtitle)),
+                [(row.id, row.video_id, row.status, row.match_method) for row in rows],
+                (subtitle.language, subtitle.normalized_language,
+                 subtitle.manual_language),
+            )
+
+    assets, rows, language = stored()
+    assert assets == 1
+    assert [(video, status, method) for _, video, status, method in rows] == [
+        (video_id, AUTOMATIC_MATCH, MATCH_METHOD_FILENAME),
+    ]
+    assert language == (detected, detected, None)
+    state = _persisted_state(web_app, video_id, subtitle_id)
+    assert state["candidates"] == ()
+    assert state["evaluation"].subtitle_status == status
+    assert state["evaluation"].has_automatic_cs_sk_match is (detected == "cs")
+
+    _rescan(web_app, library)
+    assert stored() == (assets, rows, language)
