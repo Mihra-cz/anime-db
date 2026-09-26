@@ -157,7 +157,7 @@ from .media_parts import (
     media_part_sequence_warning, media_part_summary_label, set_media_part_number,
 )
 from .media_check import (
-    AUDIO_FILTER_LABELS, AUDIO_STATUS_LABELS,
+    AUDIO_FILTER_LABELS, AUDIO_STATUS_LABELS, MANUAL_RECONCILIATION_NOTICES,
     MediaAudioTrack, MediaInternalSubtitle,
     SUBTITLE_FILTER_LABELS, SUBTITLE_STATUS_LABELS,
     build_media_check_evaluation, build_media_check_results,
@@ -340,6 +340,7 @@ templates.env.globals.update(
     compatibility_status_label=compatibility_status_label,
     compatibility_match_method_label=compatibility_match_method_label,
     external_subtitle_compatibility_status=external_subtitle_compatibility_status,
+    manual_reconciliation_notices=MANUAL_RECONCILIATION_NOTICES,
     manual_episode_number_input_value=manual_episode_number_input_value,
 )
 METADATA_STATUS_LABELS = {

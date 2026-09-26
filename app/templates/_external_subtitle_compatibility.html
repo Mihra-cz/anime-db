@@ -37,6 +37,24 @@
 {% endif %}
 {%- endmacro %}
 
+{% macro manual_reconciliation_notice(row, return_to) -%}
+{% set notice = manual_reconciliation_notices.get(row.evaluation.manual_reconciliation) %}
+{% if notice %}
+<div class="media-reconciliation severity-{{ notice.severity }}{% if notice.prominent %} is-prominent{% endif %}">
+  <p>{{ notice.message }}</p>
+  {% for subtitle in row.reconciliation_subtitles %}
+  <form class="inline-form" method="post" action="/media-check/external-subtitles/{{ subtitle.id }}/compatibility-preview">
+    <input type="hidden" name="video_id" value="{{ row.video.id }}">
+    <input type="hidden" name="decision" value="confirmed_compatible">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    <button type="submit">Potvrdit kompatibilitu</button>
+    <small class="technical-path">{{ subtitle.relative_path }}</small>
+  </form>
+  {% endfor %}
+</div>
+{% endif %}
+{%- endmacro %}
+
 {% macro asset_card(subtitle, video, presentation, return_to, kind) -%}
 <article class="media-track">
   <p><strong>{{ subtitle.relative_path }}</strong><small>{{ subtitle.codec|upper }} · detekováno {{ language_display_label(detected_external_subtitle_language(subtitle), include_name=true) }} · ručně {{ language_display_label(subtitle.manual_language, include_name=true) if subtitle.manual_language is not none else '—' }} · efektivně {{ language_display_label(effective_external_subtitle_language(subtitle), include_name=true) }}</small></p>

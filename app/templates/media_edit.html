@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_external_subtitle_compatibility.html" import asset_card %}
+{% from "_external_subtitle_compatibility.html" import asset_card, manual_reconciliation_notice %}
 {% from "_media_bulk_editor.html" import bulk_editor, edit_error_summary with context %}
 {% macro selected_value(name, current, video_id=none) %}{% if submitted and (video_id is none or submitted.get('error_video_id') == video_id|string) and name in submitted %}{{ submitted[name] }}{% else %}{{ current }}{% endif %}{% endmacro %}
 {% block main_class %}content-shell content-wide{% endblock %}
@@ -21,6 +21,7 @@
       <div><h2>{{ row.episode_label }} · {{ video.filename }}</h2><small class="technical-path">{{ video.relative_path }}</small></div>
       <div class="media-video-statuses"><span class="status-badge severity-{{ evaluation.audio_severity }}">{{ audio_status_labels[profile.audio_status] }}</span><span class="status-badge severity-{{ evaluation.subtitle_severity }}">{{ subtitle_status_labels[evaluation.subtitle_status] }}</span></div>
     </header>
+    {{ manual_reconciliation_notice(row, '/media-check/titles/' ~ catalog_title.id ~ '?focus_video=' ~ video.id ~ '#video-' ~ video.id) }}
     <details class="media-controls" {% if focus_video_id == video.id or submitted.get('error_video_id') == video.id|string %}open{% endif %}><summary>Upravit video</summary>
       <form class="media-video-editor{% if submitted.get('error_video_id') == video.id|string %} has-field-error{% endif %}" data-edit-form{% if submitted.get('error_video_id') == video.id|string %} data-dirty-on-load="true"{% endif %} method="post" action="/media-check/titles/{{ catalog_title.id }}/videos/{{ video.id }}/edit">
         <input type="hidden" name="return_to" value="/media-check/titles/{{ catalog_title.id }}?focus_video={{ video.id }}#video-{{ video.id }}">

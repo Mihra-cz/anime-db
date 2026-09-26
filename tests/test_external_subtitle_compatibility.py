@@ -1454,18 +1454,55 @@ def test_preview_service_is_stale_protected_and_atomic(tmp_path):
         )) == 1
 
 
+
 PREVIEW_PATH = "/media-check/external-subtitles/{subtitle_id}/compatibility-preview"
 CONFIRM_PATH = "/media-check/external-subtitles/{subtitle_id}/compatibility-confirm"
+SEEKING_MATCH_NOTICE = (
+    "CZ/SK titulky byly nalezeny na NASu. Potvrď kompatibilitu a ukonči stav "
+    "„Sháním“."
+)
+SEEKING_CANDIDATE_NOTICE = (
+    "Byl nalezen možný CZ/SK kandidát. Zkontroluj kompatibilitu."
+)
+UNAVAILABLE_MATCH_NOTICE = (
+    "Na NASu byl nalezen CZ/SK titulek navzdory rozhodnutí „Neexistují“. "
+    "Ověř kompatibilitu."
+)
+UNAVAILABLE_CANDIDATE_NOTICE = (
+    "Existuje možný CZ/SK kandidát navzdory ručnímu rozhodnutí „Neexistují“."
+)
+RECONCILIATION_NOTICES = (
+    SEEKING_MATCH_NOTICE,
+    SEEKING_CANDIDATE_NOTICE,
+    UNAVAILABLE_MATCH_NOTICE,
+    UNAVAILABLE_CANDIDATE_NOTICE,
+)
+# Evaluation of the TV video, whose only factual subtitle is internal EN, while
+# an unassessed CZ/SK candidate exists, per stored manual workflow marker.
+CANDIDATE_STATE = {
+    "unavailable": (
+        "known_unavailable_internal_en", False, "unavailable_candidate",
+    ),
+    "seeking": (
+        "needs_cs_sk_compatibility_unknown", True, "seeking_candidate",
+    ),
+}
+# The same TV video once no CZ/SK candidate remains.
+NO_CANDIDATE_STATUS = {
+    "unavailable": "known_unavailable_internal_en",
+    "seeking": "needs_cs_sk_internal_en",
+}
 
 
-def _unavailable_candidate_app(
+def _manual_candidate_app(
     tmp_path, *, language="cs", manual_language=None, czsk="unavailable",
 ):
-    """TV video closed as "Neexistují" while a BD subtitle is its candidate.
+    """TV video with a manual CZ/SK marker and a sibling variant's subtitle.
 
     The TV video mirrors the production Director's Cut shape: internal EN
     fallback, manually verified "no hardsub", manual audio authority and an
-    unassessed CZ/SK candidate that belongs to a sibling variant.
+    unassessed CZ/SK candidate that belongs to the BD variant, where the
+    scanner matched it automatically.
     """
     web_app, endpoints, ids = _compatibility_app(tmp_path)
     with web_app.state.sessions() as session:
@@ -1489,61 +1526,70 @@ def _unavailable_candidate_app(
     return web_app, endpoints, ids
 
 
-def _decide_compatibility(web_app, endpoints, ids, decision: str):
+def _decide_compatibility(
+    web_app, endpoints, video_id: int, subtitle_id: int, decision: str,
+):
     preview = asyncio.run(endpoints[PREVIEW_PATH](_post_request(web_app, "", [
-        ("video_id", str(ids["tv"])),
+        ("video_id", str(video_id)),
         ("decision", decision),
-    ]), ids["subtitle"]))
+    ]), subtitle_id))
     assert preview.status_code == 200
-    return asyncio.run(endpoints[CONFIRM_PATH](_post_request(web_app, "", [
-        ("video_id", str(ids["tv"])),
+    body = preview.body.decode()
+    response = asyncio.run(endpoints[CONFIRM_PATH](_post_request(web_app, "", [
+        ("video_id", str(video_id)),
         ("decision", decision),
-        ("expected_fingerprint", _preview_fingerprint(preview.body.decode())),
+        ("expected_fingerprint", _preview_fingerprint(body)),
         ("confirm_compatibility", "true"),
-    ]), ids["subtitle"]))
+    ]), subtitle_id))
+    return body, response
 
 
-def _persisted_tv_state(web_app, ids) -> dict:
+def _persisted_state(web_app, video_id: int, subtitle_id: int) -> dict:
     """Read the stored authority and its Media Check result in a fresh session."""
     with web_app.state.sessions() as session:
         videos = list(session.scalars(select(Video).order_by(Video.id)))
         known = {video.id: video for video in videos}
         states = build_video_external_subtitle_states(videos)
-        tv = known[ids["tv"]]
-        compatibility = session.scalar(select(ExternalSubtitleCompatibility).where(
-            ExternalSubtitleCompatibility.video_id == ids["tv"],
-            ExternalSubtitleCompatibility.external_subtitle_id == ids["subtitle"],
-        ))
+        video = known[video_id]
+        rows = session.scalars(select(ExternalSubtitleCompatibility).where(
+            ExternalSubtitleCompatibility.video_id == video_id,
+            ExternalSubtitleCompatibility.external_subtitle_id == subtitle_id,
+        )).all()
+        assert len(rows) <= 1
         return {
-            "status": compatibility.status if compatibility else None,
-            "czsk": tv.czsk_availability_manual,
-            "unrelated_czsk": known[ids["unrelated"]].czsk_availability_manual,
-            "bd_czsk": known[ids["bd"]].czsk_availability_manual,
+            "row_id": rows[0].id if rows else None,
+            "status": rows[0].status if rows else None,
+            "czsk": video.czsk_availability_manual,
+            "others_czsk": {
+                other.id: other.czsk_availability_manual
+                for other in videos if other.id != video_id
+            },
             "evaluation": build_media_check_evaluation(
-                tv, external_subtitle_state=states[tv.id], known_videos=known,
+                video, external_subtitle_state=states[video.id], known_videos=known,
             ),
             "candidates": tuple(
-                subtitle.id for subtitle in states[tv.id].unknown_candidate_subtitles
+                subtitle.id
+                for subtitle in states[video.id].unknown_candidate_subtitles
             ),
             "authority": (
-                tv.catalog_title_id,
-                tv.catalog_collection_id,
-                tv.video_variant_group_id,
-                tv.season_episode_number,
-                tv.episode_number_manual_override,
-                tv.content_type_manual,
-                tv.duplicate_of_video_id,
-                tv.duplicate_status_manual,
-                tv.manual_hardsub_cs,
-                tv.manual_hardsub_sk,
-                tv.manual_hardsub_verified_at,
+                video.catalog_title_id,
+                video.catalog_collection_id,
+                video.video_variant_group_id,
+                video.season_episode_number,
+                video.episode_number_manual_override,
+                video.content_type_manual,
+                video.duplicate_of_video_id,
+                video.duplicate_status_manual,
+                video.manual_hardsub_cs,
+                video.manual_hardsub_sk,
+                video.manual_hardsub_verified_at,
                 tuple(
                     (track.stream_index, track.language, track.manual_language)
-                    for track in tv.audio_tracks
+                    for track in video.audio_tracks
                 ),
                 tuple(
                     (track.stream_index, track.language, track.manual_language)
-                    for track in tv.internal_subtitles
+                    for track in video.internal_subtitles
                 ),
             ),
         }
@@ -1557,45 +1603,8 @@ def _media_check_filter_ids(web_app, endpoints, subtitle_filter: str) -> set[int
     return {int(value) for value in re.findall(r'<tr id="video-(\d+)"', body)}
 
 
-@pytest.mark.parametrize(
-    ("language", "manual_language"),
-    [("cs", None), ("sk", None), ("unknown", "sk")],
-    ids=["cz", "sk", "manual-sk-over-unknown"],
-)
-def test_confirmed_czsk_candidate_retires_manual_unavailable(
-    tmp_path, language, manual_language,
-):
-    web_app, endpoints, ids = _unavailable_candidate_app(
-        tmp_path, language=language, manual_language=manual_language,
-    )
-    before = _persisted_tv_state(web_app, ids)
-    assert before["status"] is None
-    assert before["czsk"] == "unavailable"
-    assert before["evaluation"].subtitle_status == "known_unavailable_internal_en"
-    assert before["evaluation"].manual_unavailable_effective is True
-    assert before["evaluation"].subtitle_is_open is False
-    assert before["candidates"] == (ids["subtitle"],)
-    assert ids["tv"] in _media_check_filter_ids(web_app, endpoints, "unavailable")
-
-    response = _decide_compatibility(web_app, endpoints, ids, CONFIRMED_COMPATIBLE)
-    assert response.status_code == 303
-
-    after = _persisted_tv_state(web_app, ids)
-    assert after["status"] == CONFIRMED_COMPATIBLE
-    assert after["czsk"] is None
-    assert after["evaluation"].subtitle_status == "available"
-    assert after["evaluation"].manual_unavailable_recorded is False
-    assert after["candidates"] == ()
-    assert after["authority"] == before["authority"]
-    assert after["unrelated_czsk"] == "unavailable"
-    assert after["bd_czsk"] == before["bd_czsk"]
-    assert ids["tv"] in _media_check_filter_ids(web_app, endpoints, "available")
-    assert ids["tv"] not in _media_check_filter_ids(web_app, endpoints, "unavailable")
-    assert ids["tv"] not in _media_check_filter_ids(web_app, endpoints, "unresolved")
-
-
-def test_incompatible_or_unknown_candidate_keeps_manual_unavailable(tmp_path):
-    web_app, endpoints, ids = _unavailable_candidate_app(tmp_path)
+def _rendered_video(web_app, endpoints, video_id: int) -> tuple[str, str]:
+    """Render the Media Check row and Media Edit article without any write."""
     engine = web_app.state.sessions.kw["bind"]
     writes = []
 
@@ -1603,101 +1612,260 @@ def test_incompatible_or_unknown_candidate_keeps_manual_unavailable(tmp_path):
         if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
             writes.append(statement)
 
+    with web_app.state.sessions() as session:
+        title_id = session.get(Video, video_id).catalog_title_id
     event.listen(engine, "before_cursor_execute", record)
     try:
-        unavailable_ids = _media_check_filter_ids(web_app, endpoints, "unavailable")
-        unresolved_ids = _media_check_filter_ids(web_app, endpoints, "unresolved")
         listing = endpoints["/media-check"](
             _request(web_app, "/media-check"),
-            subtitle="unavailable", audio="all", q="", page=1, message=None,
+            subtitle="all", audio="all", q="", page=1, message=None,
         ).body.decode()
         detail = endpoints["/media-check/titles/{catalog_title_id}"](
-            _request(web_app, f"/media-check/titles/{ids['title']}"), ids["title"],
+            _request(web_app, f"/media-check/titles/{title_id}"), title_id,
         ).body.decode()
     finally:
         event.remove(engine, "before_cursor_execute", record)
     assert writes == []
-    assert ids["tv"] in unavailable_ids
-    assert ids["tv"] not in unresolved_ids
-    tv_row = re.search(
-        rf'<tr id="video-{ids["tv"]}".*?</tr>', listing, re.S,
-    ).group(0)
-    assert "CZ/SK nyní nejsou dostupné · Internal EN" in tv_row
-    assert "existuje CZ/SK candidate čekající na posouzení kompatibility" in tv_row
-    assert "<h4>K posouzení</h4>" in detail
+    row = re.search(rf'<tr id="video-{video_id}".*?</tr>', listing, re.S).group(0)
+    article = detail.split(f'id="video-{video_id}"', 1)[1].split(
+        '<article class="panel media-title-video', 1,
+    )[0]
+    return row, article
 
-    unknown = _persisted_tv_state(web_app, ids)
-    assert unknown["czsk"] == "unavailable"
+
+def _offers_compatibility_confirmation(
+    html: str, video_id: int, subtitle_id: int,
+) -> bool:
+    return any(
+        f'name="video_id" value="{video_id}"' in form
+        and 'name="decision" value="confirmed_compatible"' in form
+        and "Potvrdit kompatibilitu" in form
+        for form in re.findall(
+            rf'<form[^>]*action="/media-check/external-subtitles/{subtitle_id}/'
+            rf'compatibility-preview"[^>]*>(.*?)</form>',
+            html, re.S,
+        )
+    )
+
+
+def _notices_in(html: str) -> tuple[str, ...]:
+    return tuple(notice for notice in RECONCILIATION_NOTICES if notice in html)
+
+
+@pytest.mark.parametrize("czsk", ["unavailable", "seeking"])
+@pytest.mark.parametrize(
+    ("language", "manual_language"),
+    [("cs", None), ("sk", None), ("unknown", "sk")],
+    ids=["cz", "sk", "manual-sk-over-unknown"],
+)
+def test_confirmed_czsk_candidate_retires_manual_workflow(
+    tmp_path, language, manual_language, czsk,
+):
+    web_app, endpoints, ids = _manual_candidate_app(
+        tmp_path, language=language, manual_language=manual_language, czsk=czsk,
+    )
+    before = _persisted_state(web_app, ids["tv"], ids["subtitle"])
+    status, is_open, reconciliation = CANDIDATE_STATE[czsk]
+    assert before["status"] is None
+    assert before["czsk"] == czsk
+    assert before["evaluation"].subtitle_status == status
+    assert before["evaluation"].subtitle_is_open is is_open
+    assert before["evaluation"].manual_reconciliation == reconciliation
+    assert before["candidates"] == (ids["subtitle"],)
+
+    preview, response = _decide_compatibility(
+        web_app, endpoints, ids["tv"], ids["subtitle"], CONFIRMED_COMPATIBLE,
+    )
+    marker_label = "Sháním" if czsk == "seeking" else "Neexistují"
+    assert f"Potvrzením se ukončí ruční stav „{marker_label}“" in preview
+    assert response.status_code == 303
+
+    after = _persisted_state(web_app, ids["tv"], ids["subtitle"])
+    assert after["status"] == CONFIRMED_COMPATIBLE
+    assert after["czsk"] is None
+    assert after["evaluation"].subtitle_status == "available"
+    assert after["evaluation"].manual_reconciliation is None
+    assert after["candidates"] == ()
+    assert after["authority"] == before["authority"]
+    assert after["others_czsk"] == before["others_czsk"]
+    assert ids["tv"] in _media_check_filter_ids(web_app, endpoints, "available")
+    assert ids["tv"] not in _media_check_filter_ids(web_app, endpoints, "unavailable")
+    assert ids["tv"] not in _media_check_filter_ids(web_app, endpoints, "unresolved")
+    row, article = _rendered_video(web_app, endpoints, ids["tv"])
+    assert _notices_in(row) == _notices_in(article) == ()
+
+
+@pytest.mark.parametrize("czsk", ["unavailable", "seeking"])
+def test_candidate_decisions_short_of_compatible_keep_manual_workflow(
+    tmp_path, czsk,
+):
+    web_app, endpoints, ids = _manual_candidate_app(tmp_path, czsk=czsk)
+    row, article = _rendered_video(web_app, endpoints, ids["tv"])
+    notice = (
+        SEEKING_CANDIDATE_NOTICE if czsk == "seeking"
+        else UNAVAILABLE_CANDIDATE_NOTICE
+    )
+    assert _notices_in(row) == _notices_in(article) == (notice,)
+    assert "existuje CZ/SK candidate čekající na posouzení kompatibility" in row
+    assert "<h4>K posouzení</h4>" in article
+    # Only the user who is actively seeking is offered a direct confirmation;
+    # "Neexistují" may keep an unassessed candidate for as long as it likes.
+    assert _offers_compatibility_confirmation(
+        row, ids["tv"], ids["subtitle"],
+    ) is (czsk == "seeking")
+    status, is_open, _ = CANDIDATE_STATE[czsk]
+    unresolved_ids = _media_check_filter_ids(web_app, endpoints, "unresolved")
+    unavailable_ids = _media_check_filter_ids(web_app, endpoints, "unavailable")
+    assert (ids["tv"] in unresolved_ids) is is_open
+    assert (ids["tv"] in unavailable_ids) is (czsk == "unavailable")
+
+    unknown = _persisted_state(web_app, ids["tv"], ids["subtitle"])
+    assert unknown["czsk"] == czsk
+    assert unknown["evaluation"].subtitle_status == status
     assert unknown["evaluation"].has_unknown_cs_sk_candidate is True
-    assert unknown["evaluation"].subtitle_status == "known_unavailable_internal_en"
-    assert unknown["evaluation"].subtitle_is_open is False
+    assert unknown["evaluation"].has_automatic_cs_sk_match is False
 
-    response = _decide_compatibility(
-        web_app, endpoints, ids, CONFIRMED_INCOMPATIBLE,
+    _, response = _decide_compatibility(
+        web_app, endpoints, ids["tv"], ids["subtitle"], CONFIRMED_INCOMPATIBLE,
     )
     assert response.status_code == 303
-    incompatible = _persisted_tv_state(web_app, ids)
+    incompatible = _persisted_state(web_app, ids["tv"], ids["subtitle"])
     assert incompatible["status"] == CONFIRMED_INCOMPATIBLE
-    assert incompatible["czsk"] == "unavailable"
-    assert incompatible["evaluation"].subtitle_status == (
-        "known_unavailable_internal_en"
-    )
+    assert incompatible["czsk"] == czsk
+    assert incompatible["evaluation"].subtitle_status == NO_CANDIDATE_STATUS[czsk]
+    assert incompatible["evaluation"].manual_reconciliation is None
     assert incompatible["authority"] == unknown["authority"]
 
-    response = _decide_compatibility(web_app, endpoints, ids, "unknown")
+    _, response = _decide_compatibility(
+        web_app, endpoints, ids["tv"], ids["subtitle"], "unknown",
+    )
     assert response.status_code == 303
-    reset = _persisted_tv_state(web_app, ids)
+    reset = _persisted_state(web_app, ids["tv"], ids["subtitle"])
     assert reset["status"] is None
-    assert reset["czsk"] == "unavailable"
+    assert reset["czsk"] == czsk
     assert reset["candidates"] == (ids["subtitle"],)
-    assert reset["evaluation"].subtitle_status == "known_unavailable_internal_en"
-    assert ids["tv"] not in _media_check_filter_ids(web_app, endpoints, "unresolved")
+    assert reset["evaluation"].subtitle_status == status
+    assert (
+        ids["tv"] in _media_check_filter_ids(web_app, endpoints, "unresolved")
+    ) is is_open
 
 
+@pytest.mark.parametrize("czsk", ["unavailable", "seeking"])
 @pytest.mark.parametrize(
     ("language", "manual_language"),
     [("en", None), ("cs", "en"), ("unknown", None)],
     ids=["en", "manual-en-over-cz", "unknown-language"],
 )
-def test_confirmed_non_czsk_subtitle_keeps_manual_unavailable(
-    tmp_path, language, manual_language,
+def test_confirmed_non_czsk_subtitle_keeps_manual_workflow(
+    tmp_path, language, manual_language, czsk,
 ):
-    web_app, endpoints, ids = _unavailable_candidate_app(
-        tmp_path, language=language, manual_language=manual_language,
+    web_app, endpoints, ids = _manual_candidate_app(
+        tmp_path, language=language, manual_language=manual_language, czsk=czsk,
     )
-    before = _persisted_tv_state(web_app, ids)
+    before = _persisted_state(web_app, ids["tv"], ids["subtitle"])
 
-    response = _decide_compatibility(web_app, endpoints, ids, CONFIRMED_COMPATIBLE)
+    preview, response = _decide_compatibility(
+        web_app, endpoints, ids["tv"], ids["subtitle"], CONFIRMED_COMPATIBLE,
+    )
+    assert "Potvrzením se ukončí ruční stav" not in preview
     assert response.status_code == 303
 
-    after = _persisted_tv_state(web_app, ids)
-    assert after["status"] == CONFIRMED_COMPATIBLE
-    assert after["czsk"] == "unavailable"
-    assert after["evaluation"].subtitle_status == "known_unavailable_internal_en"
-    assert after["authority"] == before["authority"]
-
-
-@pytest.mark.parametrize("czsk", [None, "seeking"])
-def test_confirmed_czsk_candidate_leaves_other_workflow_values(tmp_path, czsk):
-    web_app, endpoints, ids = _unavailable_candidate_app(tmp_path, czsk=czsk)
-    before = _persisted_tv_state(web_app, ids)
-
-    response = _decide_compatibility(web_app, endpoints, ids, CONFIRMED_COMPATIBLE)
-    assert response.status_code == 303
-
-    after = _persisted_tv_state(web_app, ids)
+    after = _persisted_state(web_app, ids["tv"], ids["subtitle"])
     assert after["status"] == CONFIRMED_COMPATIBLE
     assert after["czsk"] == czsk
+    assert after["evaluation"].subtitle_status == NO_CANDIDATE_STATUS[czsk]
+    assert after["authority"] == before["authority"]
+
+
+def test_confirmed_czsk_candidate_without_manual_workflow_stays_unset(tmp_path):
+    web_app, endpoints, ids = _manual_candidate_app(tmp_path, czsk=None)
+    before = _persisted_state(web_app, ids["tv"], ids["subtitle"])
+    assert before["evaluation"].subtitle_status == (
+        "needs_cs_sk_compatibility_unknown"
+    )
+    assert before["evaluation"].manual_reconciliation is None
+    assert ids["tv"] in _media_check_filter_ids(web_app, endpoints, "unresolved")
+    assert ids["tv"] not in _media_check_filter_ids(web_app, endpoints, "available")
+    row, article = _rendered_video(web_app, endpoints, ids["tv"])
+    assert _notices_in(row) == _notices_in(article) == ()
+
+    _, response = _decide_compatibility(
+        web_app, endpoints, ids["tv"], ids["subtitle"], CONFIRMED_COMPATIBLE,
+    )
+    assert response.status_code == 303
+
+    after = _persisted_state(web_app, ids["tv"], ids["subtitle"])
+    assert after["status"] == CONFIRMED_COMPATIBLE
+    assert after["czsk"] is None
     assert after["evaluation"].subtitle_status == "available"
     assert after["authority"] == before["authority"]
-    assert after["unrelated_czsk"] == "unavailable"
+    assert after["others_czsk"] == before["others_czsk"]
 
 
-def test_failed_compatible_confirmation_changes_neither_authority(
-    tmp_path, monkeypatch,
+@pytest.mark.parametrize("czsk", [None, "seeking", "unavailable"])
+def test_automatic_match_is_availability_and_explains_manual_workflow(
+    tmp_path, czsk,
 ):
-    web_app, endpoints, ids = _unavailable_candidate_app(tmp_path)
-    before = _persisted_tv_state(web_app, ids)
+    web_app, endpoints, ids = _compatibility_app(tmp_path)
+    with web_app.state.sessions() as session:
+        session.get(Video, ids["bd"]).czsk_availability_manual = czsk
+        session.commit()
+    before = _persisted_state(web_app, ids["bd"], ids["subtitle"])
+    assert before["status"] == AUTOMATIC_MATCH
+    assert before["evaluation"].subtitle_status == "available"
+    assert before["evaluation"].subtitle_is_open is False
+    assert before["evaluation"].has_automatic_cs_sk_match is True
+    assert before["evaluation"].manual_reconciliation == {
+        None: None, "seeking": "seeking_match", "unavailable": "unavailable_match",
+    }[czsk]
+    assert ids["bd"] in _media_check_filter_ids(web_app, endpoints, "available")
+    assert ids["bd"] not in _media_check_filter_ids(web_app, endpoints, "unresolved")
+    assert ids["bd"] not in _media_check_filter_ids(
+        web_app, endpoints, "unavailable",
+    )
+
+    row, article = _rendered_video(web_app, endpoints, ids["bd"])
+    expected = {
+        None: (),
+        "seeking": (SEEKING_MATCH_NOTICE,),
+        "unavailable": (UNAVAILABLE_MATCH_NOTICE,),
+    }[czsk]
+    assert _notices_in(row) == _notices_in(article) == expected
+    assert ">Mám<" in article
+    for html in (row, article):
+        assert _offers_compatibility_confirmation(
+            html, ids["bd"], ids["subtitle"],
+        ) is (czsk is not None)
+    assert "Uložený marker nedostupnosti není pro tento stav aktivní." not in row
+    assert _persisted_state(web_app, ids["bd"], ids["subtitle"])["czsk"] == czsk
+    if czsk is None:
+        return
+
+    preview, response = _decide_compatibility(
+        web_app, endpoints, ids["bd"], ids["subtitle"], CONFIRMED_COMPATIBLE,
+    )
+    marker_label = "Sháním" if czsk == "seeking" else "Neexistují"
+    assert f"Potvrzením se ukončí ruční stav „{marker_label}“" in preview
+    assert response.status_code == 303
+    after = _persisted_state(web_app, ids["bd"], ids["subtitle"])
+    assert after["row_id"] == before["row_id"]
+    assert after["status"] == CONFIRMED_COMPATIBLE
+    assert after["czsk"] is None
+    assert after["evaluation"].subtitle_status == "available"
+    assert after["evaluation"].manual_reconciliation is None
+    assert after["authority"] == before["authority"]
+    assert after["others_czsk"] == before["others_czsk"]
+    row, article = _rendered_video(web_app, endpoints, ids["bd"])
+    assert _notices_in(row) == _notices_in(article) == ()
+    assert not _offers_compatibility_confirmation(row, ids["bd"], ids["subtitle"])
+
+
+@pytest.mark.parametrize("czsk", ["unavailable", "seeking"])
+def test_failed_compatible_confirmation_changes_neither_authority(
+    tmp_path, monkeypatch, czsk,
+):
+    web_app, endpoints, ids = _manual_candidate_app(tmp_path, czsk=czsk)
+    before = _persisted_state(web_app, ids["tv"], ids["subtitle"])
 
     stale_preview = asyncio.run(endpoints[PREVIEW_PATH](_post_request(
         web_app, "", [
@@ -1715,8 +1883,8 @@ def test_failed_compatible_confirmation_changes_neither_authority(
         ("confirm_compatibility", "true"),
     ]), ids["subtitle"]))
     assert stale.status_code == 400
-    after_stale = _persisted_tv_state(web_app, ids)
-    assert (after_stale["status"], after_stale["czsk"]) == (None, "unavailable")
+    after_stale = _persisted_state(web_app, ids["tv"], ids["subtitle"])
+    assert (after_stale["status"], after_stale["czsk"]) == (None, czsk)
 
     def fail_after_compatibility_was_staged(_video, _value):
         raise ValueError("simulated lifecycle failure")
@@ -1726,30 +1894,33 @@ def test_failed_compatible_confirmation_changes_neither_authority(
         "set_czsk_availability_manual",
         fail_after_compatibility_was_staged,
     )
-    failed = _decide_compatibility(web_app, endpoints, ids, CONFIRMED_COMPATIBLE)
+    _, failed = _decide_compatibility(
+        web_app, endpoints, ids["tv"], ids["subtitle"], CONFIRMED_COMPATIBLE,
+    )
     assert failed.status_code == 400
     assert "simulated lifecycle failure" in failed.body.decode()
-    after_failure = _persisted_tv_state(web_app, ids)
+    after_failure = _persisted_state(web_app, ids["tv"], ids["subtitle"])
     assert after_failure["status"] is None
-    assert after_failure["czsk"] == "unavailable"
+    assert after_failure["czsk"] == czsk
     assert after_failure["evaluation"].subtitle_status == before[
         "evaluation"
     ].subtitle_status
 
 
+@pytest.mark.parametrize("czsk", ["unavailable", "seeking"])
 @pytest.mark.parametrize(
-    ("language", "expected_czsk"),
-    [("cs", None), ("sk", None), ("en", "unavailable")],
+    ("language", "retired"),
+    [("cs", True), ("sk", True), ("en", False)],
 )
-def test_manual_unresolved_link_uses_the_same_unavailable_lifecycle(
-    tmp_path, language, expected_czsk,
+def test_manual_unresolved_link_uses_the_same_manual_workflow_lifecycle(
+    tmp_path, language, retired, czsk,
 ):
     engine = make_engine(f"sqlite:///{tmp_path / 'manual-link.db'}")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         collection, title, _, _ = _catalog(session)
         video = _video(title, collection, filename="Nande - 02.mkv", episode=2)
-        video.czsk_availability_manual = "unavailable"
+        video.czsk_availability_manual = czsk
         unresolved = UnresolvedExternalSubtitle(
             relative_path=f"Anime/Nande/Nande - 02.{language}.ass",
             filename=f"Nande - 02.{language}.ass",
@@ -1769,4 +1940,132 @@ def test_manual_unresolved_link_uses_the_same_unavailable_lifecycle(
         assert [(row.video_id, row.status) for row in rows] == [
             (video_id, CONFIRMED_COMPATIBLE)
         ]
-        assert video.czsk_availability_manual == expected_czsk
+        assert video.czsk_availability_manual == (None if retired else czsk)
+
+
+def _scanned_media_app(tmp_path, monkeypatch):
+    """Web app over a temporary library that has been scanned once."""
+    library = tmp_path / "library"
+    video_path = library / "Series" / "Series - 01.mkv"
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"video")
+    monkeypatch.setattr(
+        "app.scanner.service.probe_video", lambda *_args, **_kw: PROBE_RESULT,
+    )
+    web_app = create_app(Settings(
+        anime_path=library,
+        database_url=f"sqlite:///{tmp_path / 'scanned.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        scan_library(session, library)
+    with web_app.state.sessions() as session:
+        video = session.scalar(select(Video))
+        assert session.scalar(select(func.count()).select_from(ExternalSubtitle)) == 0
+        assert video.czsk_availability_manual is None
+        video_id = video.id
+    endpoints = {
+        route.path: route.endpoint
+        for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    return web_app, endpoints, library, video_path, video_id
+
+
+def _rescan(web_app, library) -> int:
+    with web_app.state.sessions() as session:
+        scan_library(session, library)
+    with web_app.state.sessions() as session:
+        assert session.scalar(select(func.count()).select_from(
+            UnresolvedExternalSubtitle
+        )) == 0
+        return session.scalar(select(ExternalSubtitle.id))
+
+
+@pytest.mark.parametrize(
+    "subtitle_name", ["Series - 01.ass", "Series - 01.cs.ass"],
+    ids=["exact-stem", "language-suffix"],
+)
+def test_subtitle_found_by_a_later_scan_is_available_without_human_work(
+    tmp_path, monkeypatch, subtitle_name,
+):
+    web_app, endpoints, library, video_path, video_id = _scanned_media_app(
+        tmp_path, monkeypatch,
+    )
+    assert video_id in _media_check_filter_ids(web_app, endpoints, "unresolved")
+
+    (video_path.parent / subtitle_name).write_text(
+        "Jsem tady, protože všechno dobře dopadlo.", encoding="utf-8",
+    )
+    subtitle_id = _rescan(web_app, library)
+
+    state = _persisted_state(web_app, video_id, subtitle_id)
+    assert state["status"] == AUTOMATIC_MATCH
+    assert state["candidates"] == ()
+    assert state["czsk"] is None
+    assert state["evaluation"].subtitle_status == "available"
+    assert state["evaluation"].has_automatic_cs_sk_match is True
+    assert state["evaluation"].manual_reconciliation is None
+    assert video_id in _media_check_filter_ids(web_app, endpoints, "available")
+    assert video_id not in _media_check_filter_ids(web_app, endpoints, "unresolved")
+    row, article = _rendered_video(web_app, endpoints, video_id)
+    assert _notices_in(row) == _notices_in(article) == ()
+    assert not _offers_compatibility_confirmation(row, video_id, subtitle_id)
+    assert ">Mám<" in article
+
+
+@pytest.mark.parametrize("czsk", ["seeking", "unavailable"])
+def test_rescans_never_clear_manual_workflow_but_human_confirmation_does(
+    tmp_path, monkeypatch, czsk,
+):
+    web_app, endpoints, library, video_path, video_id = _scanned_media_app(
+        tmp_path, monkeypatch,
+    )
+    with web_app.state.sessions() as session:
+        media_check_module.set_czsk_availability_manual(
+            session.get(Video, video_id), czsk,
+        )
+        session.commit()
+
+    (video_path.parent / "Series - 01.cs.ass").write_text(
+        "Jsem tady, protože všechno dobře dopadlo.", encoding="utf-8",
+    )
+    subtitle_id = _rescan(web_app, library)
+    discovered = _persisted_state(web_app, video_id, subtitle_id)
+    assert discovered["status"] == AUTOMATIC_MATCH
+    assert discovered["czsk"] == czsk
+    assert discovered["evaluation"].subtitle_status == "available"
+    assert discovered["evaluation"].subtitle_is_open is False
+    assert discovered["evaluation"].manual_reconciliation == f"{czsk}_match"
+    assert video_id not in _media_check_filter_ids(web_app, endpoints, "unresolved")
+    row, article = _rendered_video(web_app, endpoints, video_id)
+    notice = SEEKING_MATCH_NOTICE if czsk == "seeking" else UNAVAILABLE_MATCH_NOTICE
+    assert _notices_in(row) == _notices_in(article) == (notice,)
+    assert _offers_compatibility_confirmation(row, video_id, subtitle_id)
+    assert _offers_compatibility_confirmation(article, video_id, subtitle_id)
+
+    assert _rescan(web_app, library) == subtitle_id
+    rescanned = _persisted_state(web_app, video_id, subtitle_id)
+    assert (rescanned["row_id"], rescanned["status"], rescanned["czsk"]) == (
+        discovered["row_id"], AUTOMATIC_MATCH, czsk,
+    )
+
+    _, response = _decide_compatibility(
+        web_app, endpoints, video_id, subtitle_id, CONFIRMED_COMPATIBLE,
+    )
+    assert response.status_code == 303
+    confirmed = _persisted_state(web_app, video_id, subtitle_id)
+    assert confirmed["row_id"] == discovered["row_id"]
+    assert confirmed["status"] == CONFIRMED_COMPATIBLE
+    assert confirmed["czsk"] is None
+    assert confirmed["evaluation"].subtitle_status == "available"
+    assert confirmed["evaluation"].manual_reconciliation is None
+    assert confirmed["authority"] == discovered["authority"]
+
+    _rescan(web_app, library)
+    final = _persisted_state(web_app, video_id, subtitle_id)
+    assert (final["row_id"], final["status"], final["czsk"]) == (
+        discovered["row_id"], CONFIRMED_COMPATIBLE, None,
+    )

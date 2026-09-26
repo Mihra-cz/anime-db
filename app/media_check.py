@@ -36,6 +36,7 @@ from .numbering import (
 
 CZSK_AVAILABILITY_UNAVAILABLE = "unavailable"
 CZSK_AVAILABILITY_SEEKING = "seeking"
+CZSK_SUBTITLE_LANGUAGES = frozenset({"cs", "sk"})
 MEDIA_CHECK_PAGE_SIZE = 50
 
 MediaCheckSubtitleStatus = Literal[
@@ -91,6 +92,62 @@ AUDIO_STATUS_SEVERITY: Mapping[AudioStatus, MediaCheckSeverity] = {
     "no_audio": "error",
 }
 
+# A stored manual CZ/SK marker read against the evidence that exists now:
+# "<marker>_match" is a scanner automatic_match, "<marker>_available" other
+# factual CZ/SK and "<marker>_candidate" only an unassessed candidate.
+ManualReconciliation = Literal[
+    "seeking_match",
+    "seeking_available",
+    "seeking_candidate",
+    "unavailable_match",
+    "unavailable_available",
+    "unavailable_candidate",
+]
+
+
+@dataclass(frozen=True)
+class ManualReconciliationNotice:
+    severity: MediaCheckSeverity
+    prominent: bool
+    message: str
+
+
+# Seeking is the user's open wish, so found evidence warrants attention;
+# "Neexistují" is a closed decision and evidence against it is only INFO.
+MANUAL_RECONCILIATION_NOTICES: Mapping[
+    ManualReconciliation, ManualReconciliationNotice
+] = {
+    "seeking_match": ManualReconciliationNotice(
+        "warning", True,
+        "CZ/SK titulky byly nalezeny na NASu. Potvrď kompatibilitu a ukonči "
+        "stav „Sháním“.",
+    ),
+    "seeking_available": ManualReconciliationNotice(
+        "warning", True,
+        "CZ/SK titulky jsou fakticky dostupné, ale zůstává uložený stav "
+        "„Sháním“. Pokud už titulky nesháníš, nastav Neurčeno.",
+    ),
+    "seeking_candidate": ManualReconciliationNotice(
+        "warning", True,
+        "Byl nalezen možný CZ/SK kandidát. Zkontroluj kompatibilitu.",
+    ),
+    "unavailable_match": ManualReconciliationNotice(
+        "info", True,
+        "Na NASu byl nalezen CZ/SK titulek navzdory rozhodnutí „Neexistují“. "
+        "Ověř kompatibilitu.",
+    ),
+    "unavailable_available": ManualReconciliationNotice(
+        "info", True,
+        "CZ/SK titulky jsou fakticky dostupné navzdory rozhodnutí "
+        "„Neexistují“.",
+    ),
+    "unavailable_candidate": ManualReconciliationNotice(
+        "info", False,
+        "Existuje možný CZ/SK kandidát navzdory ručnímu rozhodnutí "
+        "„Neexistují“.",
+    ),
+}
+
 
 @dataclass(frozen=True)
 class MediaCheckEvaluation:
@@ -107,6 +164,8 @@ class MediaCheckEvaluation:
     has_unknown_cs_sk_candidate: bool
     audio_severity: MediaCheckSeverity
     audio_requires_review: bool
+    has_automatic_cs_sk_match: bool = False
+    manual_reconciliation: ManualReconciliation | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +204,8 @@ class MediaCheckRow:
     external_subtitle_state: VideoExternalSubtitleState
     audio_tracks: tuple[MediaAudioTrack, ...]
     internal_subtitles: tuple[MediaInternalSubtitle, ...]
+    # CZ/SK assets whose explicit confirmation would settle the manual marker.
+    reconciliation_subtitles: tuple[ExternalSubtitle, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -182,20 +243,60 @@ def set_czsk_availability_manual(video: Video, value: str | None) -> None:
     video.czsk_availability_manual = normalized
 
 
-def retire_unavailable_for_confirmed_subtitle(
+def confirmed_subtitle_retires_manual_availability(
+    video: Video, subtitle: ExternalSubtitle,
+) -> str | None:
+    """Return the manual CZ/SK marker a compatible confirmation would end.
+
+    A human-confirmed CZ/SK subtitle settles both "seeking" and "unavailable".
+    Nothing short of that decision does: scanner matches, unassessed
+    candidates, incompatible decisions and other languages leave them intact.
+    """
+    marker = video.czsk_availability_manual
+    if (
+        marker in {CZSK_AVAILABILITY_SEEKING, CZSK_AVAILABILITY_UNAVAILABLE}
+        and effective_external_subtitle_language(subtitle)
+        in CZSK_SUBTITLE_LANGUAGES
+    ):
+        return marker
+    return None
+
+
+def retire_manual_availability_for_confirmed_subtitle(
     video: Video, subtitle: ExternalSubtitle,
 ) -> None:
-    """Drop "unavailable" once a human confirms a CZ/SK subtitle as compatible.
-
-    That decision is factual CZ/SK availability for this Video, so the older
-    workflow marker must not linger.  An unassessed candidate never ends the
-    marker, and "seeking" remains the user's own decision.
-    """
-    if (
-        video.czsk_availability_manual == CZSK_AVAILABILITY_UNAVAILABLE
-        and effective_external_subtitle_language(subtitle) in {"cs", "sk"}
-    ):
+    """Clear the manual marker once a human confirms a CZ/SK subtitle."""
+    if confirmed_subtitle_retires_manual_availability(video, subtitle):
         set_czsk_availability_manual(video, None)
+
+
+def _czsk_subtitles(
+    subtitles: tuple[ExternalSubtitle, ...],
+) -> tuple[ExternalSubtitle, ...]:
+    return tuple(
+        subtitle for subtitle in subtitles
+        if effective_external_subtitle_language(subtitle) in CZSK_SUBTITLE_LANGUAGES
+    )
+
+
+def _manual_reconciliation(
+    video: Video,
+    factual: VideoLanguageProfile,
+    *,
+    has_automatic_match: bool,
+    has_unknown_candidate: bool,
+) -> ManualReconciliation | None:
+    """Explain a stored manual marker against current evidence, never write it."""
+    marker = video.czsk_availability_manual
+    if marker not in {CZSK_AVAILABILITY_SEEKING, CZSK_AVAILABILITY_UNAVAILABLE}:
+        return None
+    if has_automatic_match:
+        return f"{marker}_match"
+    if factual.subtitle_status == "preferred":
+        return f"{marker}_available"
+    if has_unknown_candidate:
+        return f"{marker}_candidate"
+    return None
 
 
 OPENING_ENDING_CONTENT_TYPES = frozenset({"op", "ed", "ncop", "nced"})
@@ -238,10 +339,11 @@ def build_media_check_evaluation(
     )
     has_unknown_cs_sk_candidate = bool(
         external_subtitle_state
-        and any(
-            effective_external_subtitle_language(subtitle) in {"cs", "sk"}
-            for subtitle in external_subtitle_state.unknown_candidate_subtitles
-        )
+        and _czsk_subtitles(external_subtitle_state.unknown_candidate_subtitles)
+    )
+    has_automatic_cs_sk_match = bool(
+        external_subtitle_state
+        and _czsk_subtitles(external_subtitle_state.automatic_subtitles)
     )
     if not subtitle_required:
         subtitle_status: MediaCheckSubtitleStatus = "not_required"
@@ -306,7 +408,29 @@ def build_media_check_evaluation(
                 not subtitle_required and factual.audio_status == "unknown"
             )
         ),
+        has_automatic_cs_sk_match=has_automatic_cs_sk_match,
+        manual_reconciliation=_manual_reconciliation(
+            video,
+            factual,
+            has_automatic_match=has_automatic_cs_sk_match,
+            has_unknown_candidate=has_unknown_cs_sk_candidate,
+        ),
     )
+
+
+def _reconciliation_subtitles(
+    evaluation: MediaCheckEvaluation, state: VideoExternalSubtitleState,
+) -> tuple[ExternalSubtitle, ...]:
+    """CZ/SK assets offered for direct confirmation beside a pending marker.
+
+    Found scanner matches are offered for both markers; an unassessed
+    candidate only while the user is actively seeking.
+    """
+    if evaluation.manual_reconciliation in {"seeking_match", "unavailable_match"}:
+        return _czsk_subtitles(state.automatic_subtitles)
+    if evaluation.manual_reconciliation == "seeking_candidate":
+        return _czsk_subtitles(state.unknown_candidate_subtitles)
+    return ()
 
 
 def _subtitle_matches(evaluation: MediaCheckEvaluation, filter_name: str) -> bool:
@@ -382,14 +506,15 @@ def _build_row(
         use_current_title=False,
         detection=detection,
     )
+    evaluation = build_media_check_evaluation(
+        video,
+        external_subtitle_state=external_subtitle_state,
+        language_profile=language_profile,
+        known_videos=known_videos,
+    )
     return MediaCheckRow(
         video=video,
-        evaluation=build_media_check_evaluation(
-            video,
-            external_subtitle_state=external_subtitle_state,
-            language_profile=language_profile,
-            known_videos=known_videos,
-        ),
+        evaluation=evaluation,
         collection_name=collection_name,
         title_name=title_name,
         hierarchy_label=catalog_title_series_label(title) if title is not None else "—",
@@ -402,6 +527,9 @@ def _build_row(
         external_subtitle_state=external_subtitle_state,
         audio_tracks=audio_tracks,
         internal_subtitles=internal_subtitles,
+        reconciliation_subtitles=_reconciliation_subtitles(
+            evaluation, external_subtitle_state,
+        ),
     )
 
 

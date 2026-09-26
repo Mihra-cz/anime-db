@@ -428,15 +428,19 @@ audio stopy. Chybějící JP samo není chyba. CZ/SK dostupnost může doložit 
 stream, kompatibilní externí asset nebo ručně ověřený CZ/SK hardsub.
 Pouze interní EN slouží jako fallback; externí EN je technická evidence.
 
-Media Check nad fakty vede požadavek a nullable ruční „CZ/SK nedostupné“.
-Pozitivní CZ/SK evidence má před tímto markerem faktickou přednost. Marker
-smaže jen ruční potvrzení CZ/SK externího titulku jako kompatibilního pro
-dané video, ve stejné transakci; neposouzený kandidát, nekompatibilita ani jiný
-jazyk jej nemění a kandidát se u uzavřeného videa pouze zobrazí. Pouze
-secondary s aktuálně `VALID` duplicate relation nevytváří další povinnou
-completion jednotku; `INVALID` a `UNKNOWN` evidence
-zůstává samostatnou completion položkou a jiné fyzické reprezentace se rovněž
-posuzují samostatně.
+Media Check nad fakty vede požadavek a nullable ruční workflow externích CZ/SK
+titulků `seeking` (Sháním) a `unavailable` (Neexistují). Bezpečný scanner
+`automatic_match` je faktická dostupnost bez další lidské práce; neposouzený
+kandidát je jen možnost k posouzení. Pozitivní CZ/SK evidence má před markerem
+faktickou přednost a `unavailable` s pouhým kandidátem zůstává uzavřené.
+Scanner, kandidát, nekompatibilita, návrat na neurčeno ani jiný jazyk marker
+nemažou; oba ukončí jen ruční potvrzení CZ/SK titulku jako kompatibilního pro
+dané video, ve stejné transakci. Rozpor markeru s nalezenou evidencí je
+odvozené upozornění bez uloženého stavu: u `seeking` výrazné s přímým
+„Potvrdit kompatibilitu“, u `unavailable` pouze INFO. Pouze secondary
+s aktuálně `VALID` duplicate relation nevytváří další povinnou completion
+jednotku; `INVALID` a `UNKNOWN` evidence zůstává samostatnou completion
+položkou a jiné fyzické reprezentace se rovněž posuzují samostatně.
 
 Úzká OP/ED/NCOP/NCED policy nevyžaduje titulky a unknown audio je zde neutrální;
 skutečná absence audia (`no_audio`) zůstává problémem. Video manual klasifikace je první autorita,

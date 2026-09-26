@@ -107,6 +107,8 @@ class CompatibilityDecisionPreview:
     resulting_status: str | None
     note: str | None
     fingerprint: str
+    # Manual CZ/SK workflow marker this confirmation ends on the target Video.
+    retired_manual_availability: str | None = None
 
     @property
     def current_label(self) -> str:
@@ -138,6 +140,9 @@ class VideoExternalSubtitleState:
     compatible_subtitles: tuple[ExternalSubtitle, ...]
     incompatible_subtitles: tuple[ExternalSubtitle, ...]
     unknown_candidate_subtitles: tuple[ExternalSubtitle, ...]
+    # Compatible assets whose pair is still scanner evidence, not a human
+    # decision; a subset of ``compatible_subtitles``.
+    automatic_subtitles: tuple[ExternalSubtitle, ...] = ()
 
 
 def compatibility_status_label(status: str | None) -> str:
@@ -493,9 +498,9 @@ def confirm_compatible(
         verified_at=verified_at,
     )
     # Local import avoids the media_check -> compatibility import cycle.
-    from .media_check import retire_unavailable_for_confirmed_subtitle
+    from .media_check import retire_manual_availability_for_confirmed_subtitle
 
-    retire_unavailable_for_confirmed_subtitle(video, subtitle)
+    retire_manual_availability_for_confirmed_subtitle(video, subtitle)
     return row
 
 
@@ -686,6 +691,7 @@ def build_video_external_subtitle_states(
     compatible: dict[int, dict[int, ExternalSubtitle]] = defaultdict(dict)
     incompatible: dict[int, dict[int, ExternalSubtitle]] = defaultdict(dict)
     unknown: dict[int, dict[int, ExternalSubtitle]] = defaultdict(dict)
+    automatic: dict[int, dict[int, ExternalSubtitle]] = defaultdict(dict)
 
     for video_id, video in index.videos_by_id.items():
         for row in video.external_subtitle_compatibilities:
@@ -694,6 +700,8 @@ def build_video_external_subtitle_states(
                 continue
             if row.status in POSITIVE_COMPATIBILITY_STATUSES:
                 compatible[video_id][subtitle.id] = subtitle
+                if row.status == AUTOMATIC_MATCH:
+                    automatic[video_id][subtitle.id] = subtitle
             elif row.status == CONFIRMED_INCOMPATIBLE:
                 incompatible[video_id][subtitle.id] = subtitle
 
@@ -726,6 +734,7 @@ def build_video_external_subtitle_states(
             compatible_subtitles=ordered(compatible[video_id]),
             incompatible_subtitles=ordered(incompatible[video_id]),
             unknown_candidate_subtitles=ordered(unknown[video_id]),
+            automatic_subtitles=ordered(automatic[video_id]),
         )
         for video_id in index.videos_by_id
     }
@@ -844,6 +853,7 @@ def _decision_fingerprint(
                 video.duplicate_of_video_id,
                 video.duplicate_primary_missing,
                 video.relative_path,
+                video.czsk_availability_manual,
             )
             for video in known
         ),
@@ -872,6 +882,13 @@ def preview_compatibility_decision(
     result_status = _decision_result_status(
         subtitle, candidate, normalized_decision, known
     )
+    # Local import avoids the media_check -> compatibility import cycle.
+    from .media_check import confirmed_subtitle_retires_manual_availability
+
+    retired = (
+        confirmed_subtitle_retires_manual_availability(candidate.video, subtitle)
+        if normalized_decision == CONFIRMED_COMPATIBLE else None
+    )
     return CompatibilityDecisionPreview(
         subtitle=subtitle,
         target=candidate,
@@ -886,6 +903,7 @@ def preview_compatibility_decision(
             decision=normalized_decision,
             note=normalized_note,
         ),
+        retired_manual_availability=retired,
     )
 
 

@@ -889,6 +889,11 @@ summary {
 .media-check-table .media-row.severity-warning { box-shadow: inset .25rem 0 #f59e0b; }
 .media-check-table .media-row.severity-info { box-shadow: inset .25rem 0 #64748b; }
 .media-check-table .media-row.severity-success { box-shadow: inset .25rem 0 #10b981; }
+.media-reconciliation { margin: .5rem 0; color: #95a2b8; font-size: .85rem; }
+.media-reconciliation p { margin: 0 0 .4rem; color: inherit; }
+.media-reconciliation.is-prominent { padding: .6rem .75rem; border: 1px solid #3b82f6; border-radius: 8px; background: #172554; color: #bfdbfe; font-size: .9rem; }
+.media-reconciliation.is-prominent.severity-warning { border-color: #92400e; border-left: 4px solid #f59e0b; background: #211b12; color: #fcd34d; }
+.media-reconciliation form { margin-top: .35rem; }
 .media-check-table th:last-child,
 .media-check-table td[data-label="Akce"] { min-width: 8.75rem; }
 .media-check-table td[data-label="Akce"] .button-secondary {

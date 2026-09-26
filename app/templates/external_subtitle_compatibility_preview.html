@@ -17,6 +17,7 @@
     <dt>Výsledný stav</dt><dd><strong>{{ preview.resulting_label }}</strong></dd>
     <dt>Poznámka k ručnímu rozhodnutí</dt><dd>{{ preview.note or '—' }}</dd>
   </dl>
+  {% if preview.retired_manual_availability %}<p class="notice soft-warning">Potvrzením se ukončí ruční stav „{{ 'Sháním' if preview.retired_manual_availability == 'seeking' else 'Neexistují' }}“ u tohoto videa.</p>{% endif %}
   {% if preview.decision == 'unknown' %}<p class="notice soft-warning">Bez ručního rozhodnutí zůstane platné automatické přiřazení podle názvu, pokud pro tento pár stále existuje. Jinak bude výsledný stav neurčený.</p>{% endif %}
   <form method="post" action="/media-check/external-subtitles/{{ preview.subtitle.id }}/compatibility-confirm">
     <input type="hidden" name="video_id" value="{{ preview.target.video.id }}">
