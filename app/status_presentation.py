@@ -36,11 +36,19 @@ MEDIA_BADGES = {
 
 
 def media_collection_badge(evaluations: Iterable[object]) -> StatusBadge:
-    """Summarize canonical Media Check evaluations, excluding duplicate copies."""
+    """Summarize canonical Media Check evaluations, excluding duplicate copies.
+
+    Manual-workflow reconciliation counts beside the factual severities, so a
+    factually complete title still reports the work a pending "seeking" needs.
+    """
     severities = [
         severity
         for evaluation in evaluations if evaluation.completion_required
-        for severity in (evaluation.subtitle_severity, evaluation.audio_severity)
+        for severity in (
+            evaluation.subtitle_severity,
+            evaluation.audio_severity,
+            evaluation.reconciliation_severity,
+        )
     ]
     for severity in ("error", "warning", "info", "success"):
         if severity in severities:

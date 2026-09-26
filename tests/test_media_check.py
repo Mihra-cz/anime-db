@@ -24,6 +24,7 @@ from app.models import (
     ExternalSubtitleCompatibility, InternalSubtitle,
     TitleMetadata, UnresolvedExternalSubtitle, Video,
 )
+from app.status_presentation import media_collection_badge
 from app.numbering import (
     DuplicateRelationState,
     collapses_into_duplicate_primary,
@@ -459,6 +460,7 @@ def test_opening_ending_is_excluded_from_subtitle_and_unknown_audio_queues():
     )
 
     assert all_results.subtitle_counts == {
+        "attention": 1,
         "all": 3,
         "unresolved": 1,
         "unresolved-internal-en": 0,
@@ -499,6 +501,7 @@ def test_media_check_summary_filters_search_and_pagination_share_evaluator():
     )
 
     assert all_results.subtitle_counts == {
+        "attention": 3,
         "all": 6,
         "unresolved": 3,
         "unresolved-internal-en": 1,
@@ -660,6 +663,7 @@ def test_confirmed_duplicate_copy_keeps_facts_without_new_completion_unit():
         [primary, copy], subtitle_filter="all", page_size=10,
     )
     assert results.subtitle_counts == {
+        "attention": 0,
         "all": 2,
         "unresolved": 0,
         "unresolved-internal-en": 0,
@@ -1859,3 +1863,87 @@ def test_unresolved_subtitle_media_check_manual_workflow_is_persistent_and_scope
     ](reopen_request, reopened_id))
     with web_app.state.sessions() as session:
         assert session.get(UnresolvedExternalSubtitle, reopened_id).status == "unresolved"
+
+
+
+def _reconciliation_scenario(marker: str | None, evidence: str):
+    """One target video (id 1) with the requested manual marker and evidence."""
+    collection, title = _collection()
+    placed = {"title": title, "collection": collection}
+    extra = []
+    if evidence == "match":
+        target = _video(1, internal=("en",), external=("cs",), **placed)
+    elif evidence == "available":
+        target = _video(1, internal=("cs",), **placed)
+    elif evidence == "candidate":
+        target = _video(1, internal=("en",), **placed)
+        sibling = _video(2, external=("cs",), **placed)
+        sibling.season_episode_number = 1
+        extra.append(sibling)
+    elif evidence == "opening":
+        target = _video(1, file_type="op", **placed)
+    elif evidence == "duplicate":
+        primary = _video(2, external=("sk",), **placed)
+        target = _video(1, external=("cs",), **placed)
+        target.season_episode_number = 2
+        target.duplicate_of = primary
+        target.duplicate_of_video_id = primary.id
+        extra.append(primary)
+    else:
+        target = _video(1, **placed)
+    set_czsk_availability_manual(target, marker)
+    videos = [target, *extra]
+    for video in videos:
+        # Compatibility projections index persisted pairs by their keys.
+        for index, row in enumerate(video.external_subtitle_compatibilities, 1):
+            row.external_subtitle.id = 100 * video.id + index
+            row.external_subtitle_id = row.external_subtitle.id
+            row.video_id = video.id
+    return target, videos
+
+
+@pytest.mark.parametrize(
+    ("marker", "evidence", "reconciliation", "attention", "badge"),
+    [
+        ("seeking", "match", "seeking_match", True, "Média: kontrola"),
+        ("seeking", "available", "seeking_available", True, "Média: kontrola"),
+        ("seeking", "candidate", "seeking_candidate", True, "Média: kontrola"),
+        ("unavailable", "match", "unavailable_match", False, "Média: informace"),
+        ("unavailable", "available", "unavailable_available", False,
+         "Média: informace"),
+        ("unavailable", "candidate", "unavailable_candidate", False,
+         "Média: informace"),
+        (None, "match", None, False, "Média OK"),
+        (None, "none", None, True, "Média: problém"),
+        ("seeking", "opening", None, False, "Média: informace"),
+        ("seeking", "duplicate", "seeking_match", False, "Média OK"),
+    ],
+)
+def test_subtitle_attention_queue_and_badge_follow_manual_reconciliation(
+    marker, evidence, reconciliation, attention, badge,
+):
+    target, videos = _reconciliation_scenario(marker, evidence)
+    results = build_media_check_results(videos, subtitle_filter="all", page_size=10)
+    evaluation = next(row for row in results.rows if row.video is target).evaluation
+
+    assert evaluation.manual_reconciliation == reconciliation
+    assert evaluation.subtitle_attention_required is attention
+    assert results.subtitle_counts["attention"] == int(attention)
+    queue = build_media_check_results(
+        videos, subtitle_filter="attention", page_size=10,
+    )
+    assert [row.video.id for row in queue.rows] == ([target.id] if attention else [])
+    assert queue.total_filtered == results.subtitle_counts["attention"]
+    assert media_collection_badge(row.evaluation for row in results.rows).label == badge
+    if evidence == "match":
+        # Workflow attention never rewrites the factual completion axis.
+        assert evaluation.subtitle_status == "available"
+        assert evaluation.subtitle_is_open is False
+        unresolved = build_media_check_results(
+            videos, subtitle_filter="unresolved", page_size=10,
+        )
+        available = build_media_check_results(
+            videos, subtitle_filter="available", page_size=10,
+        )
+        assert target not in {row.video for row in unresolved.rows}
+        assert target in {row.video for row in available.rows}

@@ -157,7 +157,8 @@ from .media_parts import (
     media_part_sequence_warning, media_part_summary_label, set_media_part_number,
 )
 from .media_check import (
-    AUDIO_FILTER_LABELS, AUDIO_STATUS_LABELS, MANUAL_RECONCILIATION_NOTICES,
+    AUDIO_FILTER_LABELS, AUDIO_STATUS_LABELS, DEFAULT_SUBTITLE_FILTER,
+    MANUAL_RECONCILIATION_NOTICES,
     MediaAudioTrack, MediaInternalSubtitle,
     SUBTITLE_FILTER_LABELS, SUBTITLE_STATUS_LABELS,
     build_media_check_evaluation, build_media_check_results,
@@ -977,7 +978,7 @@ def catalog_state_url(
 
 
 def media_check_state_url(
-    subtitle_filter: str = "unresolved",
+    subtitle_filter: str = DEFAULT_SUBTITLE_FILTER,
     audio_filter: str = "all",
     query: str = "",
     page: int = 1,
@@ -2464,7 +2465,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def media_check_context(
         request: Request,
-        subtitle: str = "unresolved",
+        subtitle: str = DEFAULT_SUBTITLE_FILTER,
         audio: str = "all",
         q: str = "",
         page: int = 1,
@@ -2549,7 +2550,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/media-check", response_class=HTMLResponse)
     def media_check(
         request: Request,
-        subtitle: str = "unresolved",
+        subtitle: str = DEFAULT_SUBTITLE_FILTER,
         audio: str = "all",
         q: str = "",
         page: int = 1,
@@ -2884,7 +2885,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if video_id is not None:
             submitted["error_video_id"] = str(video_id)
 
-        scope_subtitle = str(form.get("scope_subtitle") or "unresolved")
+        scope_subtitle = str(form.get("scope_subtitle") or DEFAULT_SUBTITLE_FILTER)
         scope_audio = str(form.get("scope_audio") or "all")
         scope_query = str(form.get("scope_q") or "")
         try:
@@ -3008,7 +3009,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     scope_query, scope_page,
                 )
             except ValueError as exc:
-                scope_subtitle = "unresolved"
+                scope_subtitle = DEFAULT_SUBTITLE_FILTER
                 scope_audio = "all"
                 scope_query = ""
                 scope_page = 1

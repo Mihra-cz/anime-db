@@ -34,6 +34,7 @@
 </details>
 
 <section class="media-check-summary" aria-label="Souhrn kontroly médií">
+  <a class="media-summary-card severity-warning{% if results.subtitle_filter == 'attention' %} active{% endif %}" href="{{ media_check_url('attention', results.audio_filter, results.query) }}"><span>Titulky k vyřízení</span><strong>{{ results.subtitle_counts['attention'] }}</strong></a>
   <a class="media-summary-card severity-warning{% if results.subtitle_filter == 'unresolved' %} active{% endif %}" href="{{ media_check_url('unresolved', results.audio_filter, results.query) }}"><span>Doplnit CZ/SK</span><strong>{{ results.subtitle_counts['unresolved'] }}</strong></a>
   <a class="media-summary-card severity-warning{% if results.subtitle_filter == 'unresolved-internal-en' %} active{% endif %}" href="{{ media_check_url('unresolved-internal-en', results.audio_filter, results.query) }}"><span>Internal EN k dispozici</span><strong>{{ results.subtitle_counts['unresolved-internal-en'] }}</strong></a>
   <a class="media-summary-card severity-error{% if results.subtitle_filter == 'unresolved-no-fallback' %} active{% endif %}" href="{{ media_check_url('unresolved-no-fallback', results.audio_filter, results.query) }}"><span>Bez vhodných titulků</span><strong>{{ results.subtitle_counts['unresolved-no-fallback'] }}</strong></a>

@@ -38,6 +38,7 @@ CZSK_AVAILABILITY_UNAVAILABLE = "unavailable"
 CZSK_AVAILABILITY_SEEKING = "seeking"
 CZSK_SUBTITLE_LANGUAGES = frozenset({"cs", "sk"})
 MEDIA_CHECK_PAGE_SIZE = 50
+DEFAULT_SUBTITLE_FILTER = "attention"
 
 MediaCheckSubtitleStatus = Literal[
     "available",
@@ -51,6 +52,7 @@ MediaCheckSubtitleStatus = Literal[
 MediaCheckSeverity = Literal["success", "warning", "error", "info"]
 
 SUBTITLE_FILTER_LABELS: Mapping[str, str] = {
+    "attention": "Titulky k vyřízení",
     "all": "Vše",
     "unresolved": "Doplnit CZ/SK",
     "unresolved-internal-en": "Doplnit CZ/SK – Internal EN",
@@ -166,6 +168,23 @@ class MediaCheckEvaluation:
     audio_requires_review: bool
     has_automatic_cs_sk_match: bool = False
     manual_reconciliation: ManualReconciliation | None = None
+
+    @property
+    def reconciliation_severity(self) -> MediaCheckSeverity | None:
+        notice = MANUAL_RECONCILIATION_NOTICES.get(self.manual_reconciliation)
+        return notice.severity if notice is not None else None
+
+    @property
+    def subtitle_attention_required(self) -> bool:
+        """Subtitle work queue: a factual gap or a manual workflow awaiting the user.
+
+        Factual completion stays untouched; only warning-level reconciliation
+        (an explicit "seeking") asks for action, while "unavailable" evidence is
+        INFO about a closed decision.  A VALID duplicate copy is never work.
+        """
+        return self.completion_required and (
+            self.subtitle_is_open or self.reconciliation_severity == "warning"
+        )
 
 
 @dataclass(frozen=True)
@@ -438,6 +457,7 @@ def _subtitle_matches(evaluation: MediaCheckEvaluation, filter_name: str) -> boo
     if filter_name != "all" and not evaluation.completion_required:
         return False
     return {
+        "attention": evaluation.subtitle_attention_required,
         "all": True,
         "unresolved": evaluation.subtitle_is_open,
         "unresolved-internal-en": status == "needs_cs_sk_internal_en",
@@ -589,7 +609,7 @@ def _audio_counts(rows: list[MediaCheckRow]) -> dict[str, int]:
 def build_media_check_results(
     videos: list[Video],
     *,
-    subtitle_filter: str = "unresolved",
+    subtitle_filter: str = DEFAULT_SUBTITLE_FILTER,
     audio_filter: str = "all",
     query: str | None = None,
     page: int = 1,

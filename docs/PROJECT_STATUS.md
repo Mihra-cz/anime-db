@@ -437,10 +437,13 @@ Scanner, kandidát, nekompatibilita, návrat na neurčeno ani jiný jazyk marker
 nemažou; oba ukončí jen ruční potvrzení CZ/SK titulku jako kompatibilního pro
 dané video, ve stejné transakci. Rozpor markeru s nalezenou evidencí je
 odvozené upozornění bez uloženého stavu: u `seeking` výrazné s přímým
-„Potvrdit kompatibilitu“, u `unavailable` pouze INFO. Pouze secondary
-s aktuálně `VALID` duplicate relation nevytváří další povinnou completion
-jednotku; `INVALID` a `UNKNOWN` evidence zůstává samostatnou completion
-položkou a jiné fyzické reprezentace se rovněž posuzují samostatně.
+„Potvrdit kompatibilitu“, u `unavailable` pouze INFO. Výchozí pracovní fronta
+„Titulky k vyřízení“ spojuje faktickou mezeru se Sháním reconciliation
+a stejné pravidlo řídí souhrnné Media badge; faktický filtr „Doplnit CZ/SK“
+se nemění. Pouze secondary s aktuálně `VALID` duplicate relation nevytváří
+další povinnou completion jednotku; `INVALID` a `UNKNOWN` evidence zůstává
+samostatnou completion položkou a jiné fyzické reprezentace se rovněž
+posuzují samostatně.
 
 Úzká OP/ED/NCOP/NCED policy nevyžaduje titulky a unknown audio je zde neutrální;
 skutečná absence audia (`no_audio`) zůstává problémem. Video manual klasifikace je první autorita,

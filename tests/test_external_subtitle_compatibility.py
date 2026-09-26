@@ -2115,3 +2115,112 @@ def test_cz_suffix_matches_safely_without_deciding_the_language(
 
     _rescan(web_app, library)
     assert stored() == (assets, rows, language)
+
+
+def _single_title_media_app(tmp_path, czsk):
+    """One collection whose only video has JP audio and a scanner CZ match."""
+    web_app = create_app(Settings(
+        anime_path=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'single-title.db'}",
+        metadata_download_artwork=False,
+        metadata_artwork_directory=tmp_path / "artwork",
+    ))
+    with web_app.state.sessions() as session:
+        Base.metadata.create_all(session.get_bind())
+        collection, title, _, _ = _catalog(session, label="Mugen")
+        video = _video(title, collection, filename="Mugen - 01.mkv")
+        video.audio_tracks.append(AudioTrack(
+            stream_index=1, codec="aac", language="jpn",
+        ))
+        subtitle = ExternalSubtitle(
+            relative_path="Anime/Mugen/Mugen - 01.ass",
+            codec="ass",
+            language="cs",
+            normalized_language="cs",
+            match_method="automatic",
+        )
+        session.add_all([video, subtitle])
+        session.flush()
+        synchronize_automatic_match(session, subtitle, video)
+        video.czsk_availability_manual = czsk
+        session.commit()
+        ids = {"video": video.id, "title": title.id}
+    endpoints = {
+        route.path: route.endpoint
+        for route in web_app.routes
+        if hasattr(route, "endpoint")
+    }
+    return web_app, endpoints, ids
+
+
+@pytest.mark.parametrize(
+    ("czsk", "badge", "queued"),
+    [
+        (None, "Média OK", False),
+        ("seeking", "Média: kontrola", True),
+        ("unavailable", "Média: informace", False),
+    ],
+)
+def test_default_queue_and_summary_badges_surface_seeking_reconciliation(
+    tmp_path, czsk, badge, queued,
+):
+    web_app, endpoints, ids = _single_title_media_app(tmp_path, czsk)
+    engine = web_app.state.sessions.kw["bind"]
+    writes = []
+
+    def record(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            writes.append(statement)
+
+    def media_check(**query):
+        return endpoints["/media-check"](
+            _request(web_app, "/media-check"), **query,
+        ).body.decode()
+
+    def listed(body):
+        return f'<tr id="video-{ids["video"]}"' in body
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        default = media_check()
+        searched = media_check(q="Mugen")
+        explicit = {
+            name: media_check(subtitle=name)
+            for name in ("unresolved", "all", "available", "attention")
+        }
+        homepage = endpoints["/"](_request(web_app, "/"), q="").body.decode()
+        title_detail = endpoints["/titles/{catalog_title_id}"](
+            _request(web_app, f"/titles/{ids['title']}"), ids["title"],
+        ).body.decode()
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert writes == []
+
+    assert '<option value="attention" selected>Titulky k vyřízení</option>' in default
+    assert listed(default) is queued
+    assert listed(searched) is queued
+    card = re.search(
+        r'<a class="media-summary-card severity-warning( active)?" href="([^"]*)">'
+        r'<span>Titulky k vyřízení</span><strong>(\d+)</strong>',
+        default,
+    )
+    assert card is not None
+    assert card.group(1) == " active"
+    assert "subtitle=attention" in card.group(2)
+    assert int(card.group(3)) == int(queued)
+    assert listed(explicit["attention"]) is queued
+    assert not listed(explicit["unresolved"])
+    assert listed(explicit["all"])
+    assert listed(explicit["available"])
+
+    homepage_badge = re.search(
+        r'href="/media-check\?q=Mugen">([^<]+)</a>', homepage,
+    )
+    assert homepage_badge is not None
+    assert homepage_badge.group(1) == badge
+    assert (
+        f'<span>Média</span><span aria-hidden="true">·</span><strong>{badge}</strong>'
+        in title_detail
+    )
+    with web_app.state.sessions() as session:
+        assert session.get(Video, ids["video"]).czsk_availability_manual == czsk

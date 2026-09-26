@@ -49,12 +49,13 @@ def test_badges_keep_verified_review_conflict_and_information_distinct():
 
 def test_media_badge_uses_canonical_evaluation_severity_and_duplicate_scope():
     evaluations = [
-        SimpleNamespace(completion_required=True, subtitle_severity="success", audio_severity="success"),
-        SimpleNamespace(completion_required=False, subtitle_severity="error", audio_severity="error"),
+        SimpleNamespace(completion_required=True, subtitle_severity="success", audio_severity="success", reconciliation_severity=None),
+        SimpleNamespace(completion_required=False, subtitle_severity="error", audio_severity="error", reconciliation_severity="warning"),
     ]
     assert media_collection_badge(evaluations).label == "Média OK"
     evaluations.append(SimpleNamespace(
         completion_required=True, subtitle_severity="warning", audio_severity="success",
+        reconciliation_severity=None,
     ))
     assert media_collection_badge(evaluations).severity == "warning"
 
