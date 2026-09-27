@@ -308,3 +308,17 @@ verzí označují tehdejší rozsah, nikoli automaticky dnešní closure stav.
 - Finální nezávislý V5 closure audit skončil s verdiktem PASS.
 - Stabilní manual-first authority/lifecycle baseline nad hierarchy, duplicitami,
   variantami a groupingem; žádný known V5 closure blocker nezůstává otevřený.
+
+## Pre-V6 gate a zahájení V6
+
+### 2026-09-27 — Pre-V6 gate closed
+
+`05984ff` — Respect confirmed supplementary placement (auditovaný baseline)
+
+- Fresh read-only hierarchy, metadata, Media Check a supplementary audity nad
+  produkční DB skončily PASS; persistentní BLOCKER, REVIEW i CLEANUP = 0.
+- Logická authority je připravena jako podklad V6; V6 byla formálně zahájena
+  návrhem canonical naming kontraktu ([V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md)).
+- Fyzická disposition potvrzených duplicit a completeness audit jsou vědomě
+  přesunuty do odpovídajících fází V6; completeness je její závěrečnou částí
+  před V7.

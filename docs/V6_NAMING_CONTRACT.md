@@ -1,0 +1,199 @@
+# AnimeDB – V6 naming kontrakt
+
+Tento dokument je aktuálním source of truth pro **již schválená** pravidla
+fyzických názvů a struktury knihovny ve V6. Obsahuje pouze odsouhlasená
+rozhodnutí; co ještě schválené není, je výslovně vedeno v části
+[Otevřené V6 design otázky](#otevřené-v6-design-otázky). Návrhy a doporučení
+z přípravných V6 analýz se sem nepřebírají automaticky.
+
+Stav a pořadí V6 určuje [ROADMAP](ROADMAP.md#v6--řízená-reorganizace-knihovny-na-nas),
+současnou implementaci a doménovou semantics [PROJECT_STATUS](PROJECT_STATUS.md),
+pravidla práce [AGENTS](../AGENTS.md). Kontrakt popisuje cílový stav; dnešní
+aplikace žádný rename ani move neprovádí.
+
+## Authority princip
+
+Canonical fyzická cesta a název souboru jsou **deterministickou projekcí
+authoritative stavu databáze**. Nejsou novým zdrojem identity a planner jimi
+nesmí opravovat hierarchii, odhadovat Season či Part, doplňovat supplementary
+ordinal, slučovat varianty, vybírat primary duplicity, párovat titulky podle
+podobnosti ani vytvářet metadata authority.
+
+Precedence:
+
+1. human/manual authority;
+2. confirmed metadata a bezpečná derived authority;
+3. jinak Review — nikoli odhad z názvu.
+
+Zdrojový název souboru nebo adresáře není autoritou tam, kde DB už obsahuje
+potvrzené rozhodnutí. Chybějící nebo nejednoznačná autorita znamená Review
+nebo odklad, nikdy „chytrý“ filename guess.
+
+Fyzické názvy jsou nezávislé na UI display preferenci. Změna preferovaného
+jazyka zobrazení (Romaji/English/Native) fyzickou knihovnu nepřejmenovává.
+
+## Naming ≠ hierarchy
+
+Tvrdý invariant: **naming choice je fyzická presentation, hierarchy je doménová
+autorita; jsou to oddělené osy.**
+
+- Textový prefix neurčuje strukturální identitu; tu určuje výhradně token
+  `Sxx` / `SxxPyy` / `Exx` odvozený z hierarchy a numbering autority.
+- Výběr názvu Partu jako textového prefixu nevytváří Part authority.
+  Season-level obsah (`Season = 2`, `Part = None`) smí nést prefix převzatý
+  z názvu Partu, ale tím se nikdy nestane `Part = 1`.
+- Naming Review ani uložení naming choice nemění hierarchy, numbering,
+  content type, ordinal, varianty, duplicity ani metadata vazby.
+
+## Collection root
+
+**Default:** Romaji z potvrzené AniList vazby anchoru collection.
+
+Automaticky se jako fyzická autorita **nepoužívají**:
+
+- AniList `userPreferred`;
+- `manual_display_title`, `TitleMetadata.display_title` ani jiná starší
+  naming/display pole;
+- současný lokální root nebo zdrojová složka.
+
+Naming Review nabízí člověku tyto kandidáty:
+
+- Romaji;
+- English — lidský kandidát, nikoli automatický fallback;
+- AniList synonyms — lidský kandidát, nikoli automatický „short title“;
+- current semantic root (současný root bez historických period markerů);
+- custom text.
+
+### Current root
+
+Současný root je pouze kandidát. Koncové lokální period markery, například
+`(J23)`, `(L12-L20)`, `(P19-L20)` a jiné historické period hints, lze pro
+review analyticky oddělit; do canonical rootu se defaultně nepřenášejí.
+Původní zdrojová cesta zůstává zachovaná v budoucím manifestu/historii operací.
+Shoda current názvu s AniList synonymem je pouze fakt shody; název, který mezi
+AniList tituly není, má neznámý původ.
+
+## Naming Review triggery
+
+Root i title prefix jdou do Naming Review, pokud platí alespoň jedno:
+
+| | Trigger |
+| --- | --- |
+| A | sanitized Romaji má více než 70 Unicode znaků |
+| B | current semantic název je výrazně kratší: alespoň o 10 znaků, nebo má nejvýše 70 % délky Romaji |
+| C | autorita názvu je nejednoznačná |
+| D | planner najde explicitní naming konflikt či kolizi |
+
+Hranice 70 znaků je hranice čitelnosti, nikoli limit filesystému.
+
+## Adresářová struktura
+
+- Sezóny: `Season 01`, `Season 02`, … (dvoumístné zero padding).
+- Part složky defaultně nevznikají; více Partů jedné Season může ležet v jedné
+  Season složce.
+
+## Prefix standardního videa
+
+Prefix názvu souboru standardního videa vychází z konkrétního `CatalogTitle`
+(Season/Part/release), nikoli automaticky z collection rootu.
+
+**Default:** pokud má title potvrzená AniList metadata, použije se celé
+confirmed Romaji tohoto title.
+
+Gramatika:
+
+```text
+bez Partu:            <TitlePrefix> - S01E01.ext
+s potvrzeným Partem:  <TitlePrefix> - S01P02E01.ext
+```
+
+Příklady:
+
+- Peter Grill S1: `Peter Grill to Kenja no Jikan - S01E01.mkv`
+- Peter Grill S2: `Peter Grill to Kenja no Jikan - Super Extra - S02E01.mkv`
+
+Pro title prefix platí stejné review triggery i kandidáti (Romaji, English,
+AniList synonyms, current, custom) jako pro root. Volba rootu a volba title
+prefixu jsou **nezávislé**.
+
+Textový Season/Part marker v Romaji (`Part 2`, `2nd Season` apod.) se
+automaticky neodstraňuje. Například `Re-Zero … 2nd Season Part 2 - S02P02E01`
+je přípustné: text je popisný, `S02P02` je strukturální identita. Případnou
+redundanci řeší Naming Review.
+
+## Supplementary obsah
+
+### S vlastními confirmed metadaty
+
+Má-li supplementary `CatalogTitle` vlastní potvrzenou AniList vazbu, default
+prefix je **celé confirmed Romaji tohoto title**. Automaticky se nerozděluje na
+series title a podtitul, nemaže se text OVA/Special/Part a nevytváří se short
+title. Redundance se řeší Naming Review, ne parserovou heuristikou.
+
+Příklad Oresuki:
+
+- root: `Ore wo Suki nano wa Omae dake ka yo`
+- OVA prefix: `Ore wo Suki nano wa Omae dake ka yo - Oretachi no Game Set`
+
+### Bez vlastních metadat
+
+| Situace | Prefix |
+| --- | --- |
+| A. jednoznačný authoritative Season parent | schválený fyzický název této Season/Part naming unit |
+| B. root-level obsah bez Season parentu | schválený fyzický root |
+| C. Season-only autorita, ale Season je rozdělena na více Partů | Human Naming Review |
+
+Technický label `CatalogTitle` se jako prefix automaticky nepoužívá.
+
+### Season-only obsah napříč Party
+
+Season-only kontext (`Season = N`, `Part = None`) je legitimní autorita
+(např. SAO Reflection jako Preview S4, Slime NCOP/NCED S2). Naming Review
+nabídne názvy relevantních Partů — a pokud už člověk pro Part schválil kratší
+či alternativní fyzický název, nabídne **tento schválený název**, nikoli znovu
+raw Romaji. Příklad: P1 schváleno `Tensura S2`, P2 `Tensura S2 Part 2`;
+season-level bonus dostane na výběr `Tensura S2`, `Tensura S2 Part 2` a custom.
+Zvolený text Part authority nevytváří (viz [Naming ≠ hierarchy](#naming--hierarchy)).
+
+### Identita a tokeny
+
+- Supplementary ordinal se v názvu použije jen tam, kde existuje v DB autoritě.
+  Singleton bez ordinalu nedostane vymyšlené `01`; season-only obsah nedostane
+  vymyšlený Part.
+- **Media Part** má token `MP01`, `MP02`, … za logickou identitou, např.
+  `… - S01P02E03-MP01.mkv` nebo `… S01 - OVA 01-MP01.mkv`. Media Part není hierarchy Part, nová episode
+  identita ani supplementary ordinal.
+- **Recap** používá chronologickou fractional pozici s plnou přesností a
+  nevydává se za standardní Episode, např. `S02 - Recap 12.5`,
+  `S03 - Recap 24.25`.
+
+## Persistence naming choices
+
+Jednou člověkem potvrzená fyzická naming choice musí být persistentní a
+znovupoužitelná: schválený root používají root-level supplementary bez
+metadat, schválený Season/Part prefix se nabízí season-level supplementary
+obsahu a změna UI display preference fyzický název nemění. Datový model této
+persistence tento kontrakt nenavrhuje; patří do V6.2.
+
+## Zaznamenaná lidská rozhodnutí
+
+| Případ | Rozhodnutí |
+| --- | --- |
+| Oresuki, video #2115 | OVA singleton, ordinal None |
+| SAO Reflection, video #2622 | Preview (nikoli Recap), S4, Part None, ordinal None; `00` ve filename není canonical identita |
+| Slime, videa #2805/#2806 | NCOP/NCED, Season S2, Part None — season-level bonus bez P1/P2 |
+| Peter Grill S2 | `Super Extra` je název Season/release, nikoli supplementary marker |
+
+## Otevřené V6 design otázky
+
+Následující body nejsou součástí schváleného kontraktu:
+
+- syntax tokenu pro video varianty (representation lanes);
+- fyzická disposition potvrzených duplicate secondary kopií;
+- fyzická strategie M:N externích titulků;
+- implementace canonical parseru/formatteru, včetně sanitizace názvů;
+- numbering migrace pro canonical filename grammar;
+- schema persistence naming choices;
+- transakce aktualizace cest ve filesystemu a DB;
+- execution manifest;
+- finální rollback/recovery protokol.

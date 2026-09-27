@@ -25,7 +25,7 @@ Průběžné test counts, session logy a jednotlivé commity sem nepatří.
 | V3 | Hotovo | Překlady a ruční validace |
 | V4 | Hotovo | Použitelné webové rozhraní |
 | V5 | Hotovo | Stabilní hierarchie, metadata a číslování včetně navazující stabilizace |
-| V6 | Plánováno | Řízená reorganizace knihovny na NAS podle ověřených dat |
+| V6 | Probíhá | Řízená reorganizace knihovny na NAS podle ověřených dat |
 | V7 | Plánováno | Bezpečný import a deduplikace |
 | V8 | Orientační / k revizi | Automatické sledování NASu |
 | V9 | Orientační / k revizi | Jellyfin / Shoko integrace |
@@ -101,12 +101,12 @@ Finální nezávislý V5 closure audit skončil s verdiktem **PASS** (checkpoint
 duplicitami, variantami a groupingem byla dokončena a žádný známý V5 closure
 blocker nezůstává otevřený.
 
-Closure V5 neznamená, že je produkční DB ručně kompletně uklizená, ani že
-V6 byla zahájena — obojí zůstává samostatným krokem podle gate níže.
+Closure V5 sama neznamenala ruční úklid produkční DB ani zahájení V6;
+obojí proběhlo až samostatně přes vstupní gate níže.
 
-### Vstupní gate V6 po uzavření V5
+### Vstupní gate V6 (Pre-V6) — uzavřeno, PASS
 
-Formální closure V5 **nespouští V6 automaticky**. Před zahájením V6 následuje:
+Formální closure V5 nespouštěla V6 automaticky. Pre-V6 gate tvořily kroky:
 
 1. UX/UI polish existujících V5 workflow — beze změny domain semantics a
    bez nových authority heuristik; platí `člověk > automatika; nejistota →
@@ -119,11 +119,17 @@ Formální closure V5 **nespouští V6 automaticky**. Před zahájením V6 násl
 5. Fresh read-only metadata audit.
 6. Fresh read-only Media Check audit.
 7. Fresh read-only supplementary audit.
-8. V6 completeness/precondition audit.
-9. Teprve potom zahájení V6.
+8. Zahájení V6.
 
-Toto je vstupní gate, nikoli další samostatná verze. Historické produkční
-inventury ani zelený dílčí badge nenahrazují nové posouzení připravenosti.
+Toto byl vstupní gate, nikoli další samostatná verze. Všechny kroky jsou
+dokončené: finální Pre-V6 closure audit (2026-09-27, baseline `05984ff`)
+skončil s BLOCKER 0, REVIEW 0 a CLEANUP 0 a V6 byla formálně zahájena.
+Closure checkpoint a vědomě otevřené položky popisuje
+[PROJECT_STATUS](PROJECT_STATUS.md#pre-v6-closure-checkpoint).
+
+Kontrola úplnosti knihovny (completeness) **není** vstupní podmínkou V6.
+Podle rozhodnutí z 2026-09-27 je závěrečnou částí V6 — po logickém
+a fyzickém úklidu NAS a před V7 importem.
 
 ## Plánovaný směr – Kontrola kompletnosti / Release tracking
 
@@ -158,15 +164,34 @@ obsah a nově zjištěná pokračování anime, které už v knihovně máme.
   sehnat“, ale nesmí smazat ani změnit fakt, že existují. Stavy **Mám**,
   **Čeká na import** a **Sháním** budoucí release tracking nevypínají.
 
-Pre-V6 completeness/precondition audit zůstává read-only kontrolou připravenosti
-současné produkční knihovny. Tento plánovaný uživatelský workflow je dlouhodobá
-evidence chybějícího a nového obsahu a důležitý podklad pro V6; V6 samotná je
-řízená fyzická reorganizace NAS. Release tracking žádný rename ani move
+Finální completeness audit je závěrečnou částí V6 po úklidu NAS a před V7.
+Tento plánovaný uživatelský workflow je dlouhodobá evidence chybějícího
+a nového obsahu a podklad pro tento audit; V6 samotná je řízená fyzická
+reorganizace NAS. Release tracking žádný rename ani move
 neprovádí. Platí `člověk > automatika; nejistota → Review`.
 
 ## V6 – Řízená reorganizace knihovny na NAS
 
-Stav: Plánováno. Implementace nebyla zahájena.
+Stav: **Probíhá** (od uzavření Pre-V6 gate 2026-09-27).
+
+Aktuální fáze: návrh canonical naming a struktury a příprava bezpečné
+reorganizace (planner/execution foundation). Fyzický rename ani move na NAS
+zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
+v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
+
+### Postup V6
+
+Orientační pořadí; podrobné členění fází se stanoví až při jejich schválení.
+
+1. Canonical naming a struktura (naming kontrakt, Naming Review).
+2. Planner a preview konkrétních operací.
+3. Bezpečný execution základ (transakce cest, manifest, rollback/recovery).
+4. Fyzický a logický úklid NAS, včetně disposition potvrzených duplicit.
+5. Ověření výsledného stavu.
+6. Finální completeness audit.
+7. Closure V6.
+
+V7 import začíná až po closure V6.
 
 ### Cíl a hranice
 
@@ -181,18 +206,17 @@ Stav: Plánováno. Implementace nebyla zahájena.
   Chybějící či nejednoznačnou autoritu musí vrátit k review, ne vymyslet.
 - V6 nesmí opravovat neuklizená V5 data ani znovu nezávisle hádat jejich hierarchii.
 
-### Doložený směr cílových názvů
+### Cílové názvy
 
-Bez hierarchy Partu se počítá s `S01E01`, při skutečném Partu s `S01P01E01`
-nebo `S01P02E01`. Fyzický segment má oddělený token `MPxx`; příklad
-`S01P02E03-MP01` není nová epizoda ani další hierarchy Part.
-Part složky na NAS nejsou povinné: několik Parts může ležet v jedné Season složce.
-To jsou podklady budoucího návrhu, nikoli hotový úplný filename formatter;
-konkrétní názvy a rozlišení všech reprezentací musí projít preview a kontrolou kolizí.
+Schválená pravidla rootu, Season složek, prefixů, tokenů `SxxEyy` /
+`SxxPyyEzz`, Media Part `MPxx`, Recap pozic a supplementary obsahu jsou
+v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md); tamtéž je seznam dosud
+otevřených design otázek. Kontrakt není hotový filename formatter: konkrétní
+názvy všech reprezentací musí projít preview a kontrolou kolizí.
 
-### Úplnost jako podklad, nikoli odhad z počtu souborů
+### Úplnost jako závěrečná část V6, nikoli odhad z počtu souborů
 
-Dřívější směr kontroly úplnosti zůstává relevantní pro připravenost knihovny:
+Kontrola úplnosti proběhne jako finální audit V6 po úklidu NAS a před V7:
 porovnání konkrétního CatalogTitle s potvrzeným externím rozsahem, chybějící
 a nerozpoznané epizody, nevysvětlené duplicity, různé reprezentace, titulky bez
 videa a konflikty lokální/providerové struktury. Bezpečný základ je logická
@@ -204,14 +228,17 @@ secondary nesmějí být mechanicky považovány za další chybějící/duplici
 Absence supplementary obsahu není chybou úplnosti hlavní standardní série.
 „Bez CZ/SK“ znamená chybějící překlad, nikoli chybějící epizodu.
 
+Známé podklady pro tento audit jsou vedené v
+[PROJECT_STATUS](PROJECT_STATUS.md#pre-v6-closure-checkpoint) (např. externí
+titulky bez video targetu a tituly s vyšším providerovým počtem epizod).
 Původní náměty na procenta úplnosti a CZ/SK překladu zůstávají orientačním
-reporting směrem k revizi při vymezení V6. Nejsou novou podmínkou closure V5
-ani tvrzením, že současné metadata completion již řeší úplnost knihovny.
+reporting směrem k revizi. Současné metadata completion úplnost knihovny neřeší.
 
 ## V7 – Bezpečný import a deduplikace
 
-Stav: Plánováno. Navazuje na ověřenou hierarchii a řízenou cílovou strukturu,
-nikoli na nové hádání identity při kopírování. Import není implementován.
+Stav: Plánováno. Začíná až po closure V6 včetně finálního completeness auditu.
+Navazuje na ověřenou hierarchii a řízenou cílovou strukturu, nikoli na nové
+hádání identity při kopírování. Import není implementován.
 
 - Cíl: bezpečně zpracovat neuspořádané zdroje z PC, archivy, zálohy, obnovy HDD,
   opakované downloady, různé encody/repacky/remuxy, poškozená videa a samostatné titulky.
@@ -270,9 +297,10 @@ scope a aktuální rozhodnutí o uzavírání, nikoli starou značku dokončení
 Původní V6 nadpis „Úplnost knihovny“ nepřebíráme jako poslední scope: pozdější
 Season/Part/Media Part a supplementary podklady počítají s fyzickými návrhy
 a aktuální rozhodnutí při docs review určuje V6 jako řízenou reorganizaci NAS.
-Pre-V6 audit úplnosti zůstává vstupní podmínkou; samostatný dlouhodobý
-workflow kontroly kompletnosti a release trackingu je výše zachován jako
-plánovaný směr, nikoli nově přečíslovaná verze.
+Audit úplnosti je podle rozhodnutí z 2026-09-27 závěrečnou částí V6, nikoli
+vstupní podmínkou; samostatný dlouhodobý workflow kontroly kompletnosti
+a release trackingu je výše zachován jako plánovaný směr, nikoli nově
+přečíslovaná verze.
 V7 zachovává konkrétně rozpracovaný importní kontrakt; V8–V10 zůstávají původními
 stručnými směry bez nového detailního odsouhlasení, proto mají orientační stav.
 

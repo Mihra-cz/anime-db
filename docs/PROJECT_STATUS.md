@@ -2,8 +2,9 @@
 
 Tento dokument popisuje účel AnimeDB, současnou implementaci a hranice jejího použití.
 Verzovaný plán a progress patří do [ROADMAP.md](ROADMAP.md), technické milníky
-do [HISTORY.md](HISTORY.md), vstupní a provozní rozcestník do [README.md](../README.md)
-a pravidla práce do [AGENTS.md](../AGENTS.md). Při rozporu mají přednost aktuální
+do [HISTORY.md](HISTORY.md), vstupní a provozní rozcestník do [README.md](../README.md),
+pravidla práce do [AGENTS.md](../AGENTS.md) a schválená V6 naming pravidla do
+[V6_NAMING_CONTRACT.md](V6_NAMING_CONTRACT.md). Při rozporu mají přednost aktuální
 kód, model a testy; datované audity nejsou živou inventurou produkce.
 Tento dokument není roadmapa, changelog ani pracovní deník.
 
@@ -51,10 +52,48 @@ nejsou součástí aplikačního kontraktu a nejsou zde vydávány za ověřené
 
 ## Aktuální rozsah a baseline
 
-Auditovaný baseline implementace: `659fb89` — Sjednocení katalogové prezentace
-s tri-state duplicitami.
-Aktuální fáze: **V5 – Hotovo** (Pre-V6 gate / polish a cleanup).
+Auditovaný baseline implementace: `05984ff` — Respect confirmed supplementary
+placement.
+Aktuální fáze: **V6 – Probíhá: návrh canonical naming a bezpečné reorganizace**.
+V1–V5 jsou hotové a Pre-V6 gate je uzavřený (PASS). Fyzická reorganizace NAS
+zatím nezačala a aplikace rename/move neprovádí.
 Podrobný vývojový plán a zbývající kroky jsou výhradně v [ROADMAP.md](ROADMAP.md).
+
+Současné zaměření V6:
+
+- canonical naming kontrakt — schválená pravidla jsou
+  v [V6_NAMING_CONTRACT.md](V6_NAMING_CONTRACT.md);
+- návrh Naming Review (lidská volba fyzických názvů rootu a prefixů);
+- příprava bezpečného planneru a execution základu.
+
+### Pre-V6 closure checkpoint
+
+Finální fresh read-only closure audit nad produkční DB (2026-09-27, kód
+`05984ff`) skončil s **BLOCKER 0, REVIEW 0, CLEANUP 0**. PASS: hierarchy,
+numbering, metadata, Media Check, duplicity, varianty, Media Parts,
+supplementary, integrita DB a shoda uložených a odvozených hodnot. Jediný
+mechanický rozdíl (zastaralý provenance label číslování u 13 videí po rozšíření
+parseru) byl srovnán sdílenou finalizací. Produkční DB po closure: size
+7077888 B, SHA-256 `5010425a3b02dfb13022ee0b7b064bec26a1eb7ebfe0c5635d9c70530da5936d`,
+`user_version` 6. Checkpoint je snapshot, nikoli živá inventura.
+
+Closure neznamená nulový backlog. Vědomě otevřené zůstává:
+
+- **V6:** fyzická disposition 52 potvrzených (VALID) duplicate secondary kopií;
+  Naming Review (dlouhé Romaji, root Bananya/Monogatari, volba Season/Part
+  prefixů, názvy season-level supplementary obsahu); canonical parser/formatter;
+  persistence naming choices; numbering migrace pro canonical filename grammar;
+  transakce cest ve filesystemu a DB; move manifest, preview a rollback;
+  fyzická strategie externích titulků.
+- **Konec V6 – completeness:** 16 CZ externích titulků `confirmed_no_match`
+  bez video targetu; 11 titulů, kde provider uvádí více epizod než lokální
+  knihovna; chybějící standardní epizody a další completeness / Release
+  Tracking evidence.
+- **INFO / quality backlog:** doporučení k ověření hardsubu, kandidáti metadat
+  s nízkým skóre, čínský dabing, Re:Zero Director's Cut s kandidáty pod ručním
+  `unavailable`, `soft_long_flat_series` a latentní nálezy O2–O5.
+
+Nic z toho není neuzavřeným Pre-V6 gate.
 
 ### Authority contract
 
@@ -551,7 +590,8 @@ a jeho vymazání vrací detected hodnotu.
   Testy a experimenty patří do dočasných databází. NAS se automaticky nemění.
 - Potvrzená logická změna ani duplicita nepovoluje fyzický zásah do médií.
   Současný kód rename planner neobsahuje; požadavky na budoucí fyzické operace
-  jsou v [ROADMAP](ROADMAP.md).
+  jsou v [ROADMAP](ROADMAP.md), schválená naming pravidla
+  v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 
 Kontrolní opory: [performance invariants](../tests/test_performance_invariants.py),
 [hierarchy pipeline parity](../tests/test_hierarchy_pipeline_parity.py),
@@ -572,8 +612,9 @@ Kontrolní opory: [performance invariants](../tests/test_performance_invariants.
 - Supplementary singleton bez čísla, neurčené varianty a nejednoznačný season
   parent mohou být legitimně zachované neznámé údaje; aplikace je nedoplňuje
   heuristikou kvůli zelenému badge nebo přípravě filename.
-- Neexistuje fyzický rename/import planner ani kompletní V6 completeness gate.
-  Dnešní read-only identity inventory je dílčí předpoklad, ne povolení k přesunu.
+- Neexistuje fyzický rename/import planner. V6 completeness audit je plánovaný
+  jako závěrečná část V6 po úklidu NAS. Read-only identity inventory je dílčí
+  předpoklad, ne povolení k přesunu.
 
 Produkční backlog zde není odhadován z historických počtů. Datované podklady:
 [classification audit](CONTENT_CLASSIFICATION_AUDIT_2026-09-02.md),

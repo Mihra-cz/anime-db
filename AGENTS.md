@@ -18,7 +18,9 @@ provozní návod, nikoli druhý popis aplikace, roadmapa ani changelog.
   - [docs/ROADMAP.md](docs/ROADMAP.md) je autorita pro V1–VX, aktuální fázi,
     progress a closure/gate podmínky;
   - [docs/HISTORY.md](docs/HISTORY.md) je stručná technická historie
-    významných milníků.
+    významných milníků;
+  - [docs/V6_NAMING_CONTRACT.md](docs/V6_NAMING_CONTRACT.md) je source of
+    truth pro schválená V6 pravidla fyzických názvů a struktury.
 - PROJECT_STATUS není changelog ani roadmapa, ROADMAP není commit log a HISTORY
   není current-state autorita.
 - Před změnou zkontroluj `git status`, aktuální větev a stav vůči upstreamu;
@@ -36,8 +38,9 @@ provozní návod, nikoli druhý popis aplikace, roadmapa ani changelog.
 - Nemíchej bez technické nutnosti business logiku, databázové změny, čisté
   presentation/CSS úpravy a dokumentační refaktor. Presentation změna nesmí
   měnit uložená business data.
-- Nezačínej V6 ani jinou budoucí etapu během V5 polish/closure úkolu. Rozsah
-  verzí určuje ROADMAP a explicitní zadání uživatele.
+- Nezačínej budoucí etapu ani fázi mimo explicitní zadání. Rozsah verzí a
+  aktuální fázi určuje ROADMAP a explicitní zadání uživatele; návrhová práce
+  ve V6 sama neopravňuje k fyzickým operacím nad NAS ani k V7 importu.
 - Preferuj nejmenší změnu, která používá stávající shared resolver a zachová
   chování mimo scope. Nevytvářej paralelní source of truth ani novou závislost
   bez prokazatelné potřeby.
@@ -220,10 +223,16 @@ nepředstírej úspěch full suite a neřiď se historickým počtem testů.
   ne samozřejmou syntaxi; obecný docs/comment cleanup drž odděleně od funkční
   změny.
 
-## 10. Bezpečnost budoucí V6
+## 10. Bezpečnost V6
 
-- V6 začne až po formálním closure V5, ručním cleanupu produkčních dat a všech
-  precondition auditech uvedených v ROADMAP. V6 není současná funkcionalita.
+- V6 probíhá podle ROADMAP; fyzická reorganizace zatím není implementovaná
+  funkcionalita. Schválená naming pravidla jsou pouze v V6_NAMING_CONTRACT;
+  neschválené návrhy za kontrakt nevydávej.
+- Canonical fyzická cesta a název souboru jsou deterministickou projekcí
+  authoritative DB stavu, nikdy novým zdrojem identity. Chybějící nebo
+  nejednoznačná autorita znamená Review, ne odhad z názvu.
+- Naming choice je fyzická presentation: nesmí měnit hierarchy, numbering ani
+  jinou doménovou autoritu. Textový prefix nevytváří Season ani Part.
 - Fyzická reorganizace vždy začíná pouze plánem/preview. Rename, move nebo delete
   se smí provést až po explicitním potvrzení uživatele.
 - Cílové cesty musí být jednoznačné a bez kolizí; videa a jejich externí titulky
