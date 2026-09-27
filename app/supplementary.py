@@ -79,18 +79,12 @@ def supplementary_ordinal(
         ):
             return None
         return SupplementaryOrdinal(subtype, override if override > 0 else None, "manual")
-    number = None
-    marker = {
-        "ova": "ova|oad", "special": "specials?", "preview": "previews?|pv",
-    }.get(subtype, subtype)
-    if detection.supplementary_type == subtype:
-        number = detection.supplementary_number
-    elif (
-        detection.is_standard
-        and re.search(rf"(?<![a-z0-9])(?:{marker})(?![a-z0-9])", video.filename, re.I)
-    ):
-        # The marker must be in the filename, never just in its parent folder.
-        number = detection.number
+    # Only parser grammar binds a number to its marker; a generic number that
+    # merely appears beside a marker elsewhere in the filename is no evidence.
+    number = (
+        detection.supplementary_number
+        if detection.supplementary_type == subtype else None
+    )
     if (
         video.media_part_number is not None
         and re.search(r"\b(?:OVA|OAD)\s+P\d+", video.filename, re.I)

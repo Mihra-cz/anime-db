@@ -827,7 +827,7 @@ def test_standard_episode_and_ova_sequence_do_not_form_duplicate_group():
     ("Title CM - 05.mkv", "cm", 5),
     ("Title Menu - 06.mkv", "menu", 6),
 ))
-def test_safe_classifier_supplementary_type_outranks_generic_episode_number(
+def test_explicit_supplementary_grammar_outranks_generic_episode_number(
     filename, expected_type, expected_number,
 ):
     title = CatalogTitle(
@@ -841,7 +841,10 @@ def test_safe_classifier_supplementary_type_outranks_generic_episode_number(
         file_type=classify_video(relative_path),
     )
 
-    assert detect_episode_number(filename).kind == "standard"
+    detection = detect_episode_number(filename)
+    assert (
+        detection.kind, detection.supplementary_type, detection.supplementary_number,
+    ) == ("supplementary", expected_type, expected_number)
     recalculate_title_numbering(title, [video])
     state = effective_video_numbering(video, title)
 
@@ -1095,12 +1098,15 @@ def test_manual_episode_override_outranks_classifier_supplementary_fallback():
         id=1, local_title="Season 1", normalized_local_title="season 1",
         relative_root_path="Anime/Show/Season 1", part_type="season", season_number=1,
     )
+    relative_path = "Anime/Show/Season 1/OVA/Title - 01.mkv"
     video = Video(
-        id=1, relative_path="Anime/Show/Season 1/Title OVA - 01.mkv",
-        root_folder="Anime", filename="Title OVA - 01.mkv", size=1, mtime_ns=1,
-        catalog_title=title, file_type="ova", episode_number_manual_override=7,
+        id=1, relative_path=relative_path,
+        root_folder="Anime", filename="Title - 01.mkv", size=1, mtime_ns=1,
+        catalog_title=title, file_type=classify_video(relative_path),
+        episode_number_manual_override=7,
     )
 
+    assert video.file_type == "ova"
     recalculate_title_numbering(title, [video])
 
     state = effective_video_numbering(video, title)
@@ -1108,6 +1114,34 @@ def test_manual_episode_override_outranks_classifier_supplementary_fallback():
     assert state.manual_override
     assert video.season_episode_number == 7
     assert video.episode_number_source == "manual"
+
+
+def test_hyphenated_supplementary_grammar_matches_existing_explicit_form():
+    states = []
+    for filename in ("Title OVA - 01.mkv", "Title OVA 01.mkv"):
+        title = CatalogTitle(
+            id=1, local_title="Season 1", normalized_local_title="season 1",
+            relative_root_path="Anime/Show/Season 1", part_type="season",
+            season_number=1,
+        )
+        relative_path = f"{title.relative_root_path}/{filename}"
+        video = Video(
+            id=1, relative_path=relative_path, root_folder="Anime",
+            filename=filename, size=1, mtime_ns=1, catalog_title=title,
+            file_type=classify_video(relative_path),
+            episode_number_manual_override=7,
+        )
+        recalculate_title_numbering(title, [video])
+        state = effective_video_numbering(video, title)
+        states.append((
+            video.file_type, state.classification, state.supplementary_type,
+            state.supplementary_number, video.season_episode_number,
+            video.episode_number_source,
+        ))
+
+    assert states[0] == states[1] == (
+        "ova", "supplementary", "ova", 7, 7, "manual",
+    )
 
 
 @pytest.mark.parametrize(("filename", "kind", "version_hint", "marker"), (

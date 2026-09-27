@@ -1,12 +1,17 @@
 import pytest
 from sqlalchemy import create_engine, event, select
-from sqlalchemy.orm import Session, raiseload
+from sqlalchemy.orm import Session, raiseload, selectinload
 
-from app.catalog import classify_video, detect_episode_number, effective_video_content_display
+from app.catalog import (
+    classify_video, detect_episode_number, effective_video_content_display,
+    effective_video_content_type,
+)
 from app.database import Base
-from app.models import CatalogTitle, Video
+from app.models import CatalogCollection, CatalogTitle, Video
 from app.numbering import effective_video_numbering, video_numbering_identity, unresolved_duplicate_groups
 from app.supplementary import (
+    SupplementaryOrdinal,
+    collection_supplementary_review,
     supplementary_inventory,
     supplementary_ordinal,
     supplementary_review_issues,
@@ -359,3 +364,89 @@ def test_tv_ordinal_and_manual_media_parts_remain_separate():
     assert supplementary_inventory(items).logical_count == 1
     assert [supplementary_ordinal(v).number for v in items] == [1, 1]
     assert [v.media_part_number for v in items] == [1, 2]
+
+
+@pytest.mark.parametrize('filename,subtype,number', [
+    ('OVA03.mkv', 'ova', 3), ('OVA 03.mkv', 'ova', 3), ('OVA - 03.mkv', 'ova', 3),
+    ('OAD 02.mkv', 'ova', 2), ('OVA Episode 02 Name.mkv', 'ova', 2),
+    ('Special 03.mkv', 'special', 3), ('Special - 03.mkv', 'special', 3),
+    ('Show OVA - 01v2.mkv', 'ova', 1), ('Show PV - 04.mkv', 'preview', 4),
+])
+def test_explicit_grammar_owns_supplementary_ordinal(filename, subtype, number):
+    detection = detect_episode_number(filename)
+    assert (detection.kind, detection.supplementary_type, detection.supplementary_number) == (
+        'supplementary', subtype, number,
+    )
+    item = video(graph('bonus'), filename)
+    # Raw classifier evidence is irrelevant: the parser grammar owns the number.
+    item.file_type = 'episode'
+    assert supplementary_ordinal(item) == SupplementaryOrdinal(subtype, number, 'parser')
+
+
+@pytest.mark.parametrize('filename', [
+    'Show OVA 13 - 15.mkv', 'Show OVA S01E03.mkv',
+    'Show Special Edition - 03.mkv', 'Show OVA Episode 02.5.mkv',
+    'Show Extra - 01.mkv',
+])
+def test_generic_number_beside_marker_is_not_supplementary_ordinal(filename):
+    assert detect_episode_number(filename).supplementary_number is None
+    state = supplementary_ordinal(video(graph('ova'), filename))
+    assert (state.number, state.source) == (None, 'unknown')
+
+
+def _persisted_single_ova(tmp_path, filename, override):
+    engine = create_engine(f'sqlite:///{tmp_path / "single-ova.db"}')
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title='Show', normalized_local_title='show', relative_root_path='Show',
+        )
+        season = CatalogTitle(
+            collection=collection, local_title='Season 1', normalized_local_title='season 1',
+            relative_root_path='Show/Season 1', part_type='season', season_number=1,
+        )
+        ova = CatalogTitle(
+            collection=collection, local_title='OVA', normalized_local_title='ova',
+            relative_root_path='Show/OVA', part_type='ova', season_number=1,
+        )
+        relative_path = f'Show/OVA/{filename}'
+        session.add_all([season, ova, Video(
+            catalog_title=ova, catalog_collection=collection, filename=filename,
+            relative_path=relative_path, root_folder='Show', size=1, mtime_ns=1,
+            file_type=classify_video(relative_path),
+            episode_number_manual_override=override,
+        )])
+        session.commit()
+    return engine
+
+
+@pytest.mark.parametrize('override,expected', [
+    (None, SupplementaryOrdinal('ova', None, 'unknown')),
+    (1, SupplementaryOrdinal('ova', 1, 'manual')),
+    (2, SupplementaryOrdinal('ova', 2, 'manual')),
+])
+def test_generic_trailing_number_after_ova_marker_is_not_an_ordinal(tmp_path, override, expected):
+    filename = 'Ore wo Suki nano wa Omae dake ka yo - OVA 13 - 15.mkv'
+    engine = _persisted_single_ova(tmp_path, filename, override)
+    with Session(engine) as session:
+        item = session.scalars(select(Video).options(
+            selectinload(Video.catalog_title).selectinload(CatalogTitle.collection)
+            .selectinload(CatalogCollection.titles),
+        )).one()
+        titles = list(item.catalog_title.collection.titles)
+        detection = detect_episode_number(item.filename)
+        assert (detection.kind, detection.number, detection.supplementary_number) == (
+            'standard', 15, None,
+        )
+        assert effective_video_content_type(item) == 'ova'
+        assert supplementary_ordinal(item) == expected
+        assert effective_video_content_display(item).display_label == expected.display_label
+        inventory = supplementary_inventory(
+            [item], collection_scope=True, titles_by_id={t.id: t for t in titles},
+        )
+        assert inventory.logical_identity_count == 1
+        assert supplementary_review_issues(
+            [item], collection_scope=True, titles_by_id={t.id: t for t in titles},
+        ) == ()
+        assert collection_supplementary_review([item], titles) == {}
+        assert not session.dirty and not session.new

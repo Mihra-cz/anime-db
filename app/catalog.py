@@ -1534,6 +1534,20 @@ OPENING_ENDING_LETTER_SEQUENCE = re.compile(
     r"(?:^|[^a-z0-9])(?P<type>NCOP|NCED|OP|ED)\s*"
     r"(?P<number>\d{2})(?P<marker>[AB])$", re.IGNORECASE,
 )
+# The marker directly owns the number in ``OVA - 03`` and ``OVA Episode 03``.
+# NCOP/NCED keep their unnumbered marker precedence; Extra stays outside,
+# because the classifier treats it as Other rather than as a typed marker.
+HYPHENATED_SUPPLEMENTARY_SEQUENCE = re.compile(
+    r"(?:^|[^a-z0-9])(?P<type>OVA|OAD|SPECIALS?|OP|ED|PREVIEWS?|PV|RECAPS?|"
+    r"BONUS(?:ES)?|CM|MENU)\s+-\s+0*(?P<number>\d{1,3})(?:v\d+)?$",
+    re.IGNORECASE,
+)
+EPISODE_SUPPLEMENTARY_SEQUENCE = re.compile(
+    r"(?:^|[^a-z0-9])(?P<type>OVA|OAD|SPECIALS?|OP|ED|PREVIEWS?|PV|RECAPS?|"
+    r"BONUS(?:ES)?|CM|MENU)\s+EPISODE\s*0*(?P<number>\d{1,3})(?:v\d+)?"
+    r"(?=$|[^a-z0-9.])",
+    re.IGNORECASE,
+)
 BRACKETED_UNNUMBERED_SUPPLEMENTARY_MARKER = re.compile(
     r"\[\s*(?P<type>NCOP|NCED|OP|ED|CM|PV|MENU)\s*\]",
     re.IGNORECASE,
@@ -1684,6 +1698,7 @@ def _exact_supplementary_detection(stem: str) -> EpisodeNumberDetection | None:
     for pattern in (
         OPENING_ENDING_TV_SEQUENCE, PARENTHESIZED_PV_SEQUENCE,
         LEGACY_BD_SPECIAL_SEQUENCE, OPENING_ENDING_LETTER_SEQUENCE,
+        HYPHENATED_SUPPLEMENTARY_SEQUENCE, EPISODE_SUPPLEMENTARY_SEQUENCE,
     ):
         if match := pattern.search(stem):
             raw_type = match.group("type").casefold()
