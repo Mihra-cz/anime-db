@@ -209,7 +209,7 @@ def test_unverified_supplementary_context_can_keep_real_hierarchy_review():
     assert suggestions[0].supplementary_type == "op"
 
 
-def test_verified_but_mismatched_supplementary_type_keeps_hierarchy_conflict_action():
+def test_manual_title_without_explicit_video_selector_keeps_supplementary_suggestion():
     _, _, videos = supplementary_title(
         ["OVA 01.mkv"], part_type="bonus", verified=True,
     )
@@ -219,6 +219,86 @@ def test_verified_but_mismatched_supplementary_type_keeps_hierarchy_conflict_act
     assert len(suggestions) == 1
     assert suggestions[0].supplementary_type == "ova"
     assert suggestions[0].proposed_part_type == "ova"
+
+
+@pytest.mark.parametrize("part_type", ["special", "bonus"])
+def test_explicit_human_placement_in_manual_title_hides_supplementary_suggestion(part_type):
+    _, title, videos = supplementary_title(
+        ["OVA 01.mkv"], part_type=part_type, verified=True,
+    )
+    title.manual_split_rule_videos.append(ManualSplitRuleVideo(video=videos[0]))
+
+    assert supplementary_video_suggestions(videos) == ()
+    assert supplementary_video_suggestions(
+        videos, include_video_ids={video.id for video in videos},
+    ) == ()
+    assert videos[0].content_type_manual is None
+    assert title.effective_part_type == part_type
+
+
+def test_explicit_selector_without_complete_manual_title_keeps_suggestion():
+    _, title, videos = supplementary_title(
+        ["High School DxD OP 01.mkv"], part_type="bonus", verified=False,
+    )
+    title.manual_split_rule_videos.append(ManualSplitRuleVideo(video=videos[0]))
+
+    suggestions = supplementary_video_suggestions(videos)
+
+    assert [suggestion.video for suggestion in suggestions] == [videos[0]]
+
+
+def test_explicit_selector_into_another_title_is_not_placement_authority():
+    collection, title, videos = supplementary_title(
+        ["OVA 01.mkv"], part_type="special", verified=True,
+    )
+    other = CatalogTitle(
+        collection=collection, local_title="OVA – S3",
+        normalized_local_title="ova s3",
+        relative_root_path="Anime/High School DxD/ova", part_type="ova",
+        season_number=3, hierarchy_manual_override=True, part_type_manual="ova",
+        season_number_manual=3, season_label_manual="S3",
+        hierarchy_verified_at=utc_now(),
+    )
+    other.manual_split_rule_videos.append(ManualSplitRuleVideo(video=videos[0]))
+
+    suggestions = supplementary_video_suggestions(videos)
+
+    assert [suggestion.video for suggestion in suggestions] == [videos[0]]
+    assert title.effective_part_type == "special"
+
+
+def test_manual_content_type_still_hides_supplementary_suggestion():
+    _, _, videos = supplementary_title(
+        ["OVA 01.mkv"], part_type="bonus", verified=False,
+    )
+    videos[0].content_type_manual = "ova"
+
+    assert supplementary_video_suggestions(videos) == ()
+
+
+def test_persisted_human_placement_hides_suggestion_without_writes(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'placement.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, title, videos = supplementary_title(
+            ["Show OVA - 01.mkv", "Show OVA - 02.mkv"],
+            part_type="special", verified=True,
+        )
+        session.add_all(videos)
+        session.flush()
+        title.manual_split_rule_videos.append(ManualSplitRuleVideo(video=videos[0]))
+        session.commit()
+
+    with Session(engine) as session:
+        collection = session.scalar(select(CatalogCollection))
+        videos = sorted(collection.videos, key=lambda video: video.filename)
+
+        suggestions = supplementary_video_suggestions(videos)
+
+        assert [suggestion.video.filename for suggestion in suggestions] == [
+            "Show OVA - 02.mkv",
+        ]
+        assert not session.dirty and not session.new and not session.deleted
 
 
 def test_metadata_split_requires_confirmed_metadata_and_skips_full_coverage():

@@ -5,6 +5,7 @@ from enum import StrEnum
 import re
 
 from .catalog import derive_episode_number
+from .hierarchy_authority import manual_hierarchy_snapshot_is_complete
 from .models import CatalogCollection, CatalogTitle, ManualSplitRuleVideo, Video
 from .video_variants import (
     assign_video_catalog_title,
@@ -413,6 +414,23 @@ def has_persisted_manual_split_selector(title: CatalogTitle) -> bool:
     return bool(
         title.manual_split_rule_videos
         or has_persisted_manual_split_rule(title)
+    )
+
+
+def has_confirmed_manual_placement(video: Video, title: CatalogTitle) -> bool:
+    """Whether a user placed this video into a manually defined title.
+
+    Title verification alone is not enough: a video may join a verified
+    structure automatically.  Only the explicit selector of this video into
+    this title, combined with complete manual title authority, is a human
+    placement decision.
+    """
+    if not manual_hierarchy_snapshot_is_complete(title):
+        return False
+    return any(
+        link.__dict__.get("video") is video
+        or (video.id is not None and link.video_id == video.id)
+        for link in title.manual_split_rule_videos
     )
 
 

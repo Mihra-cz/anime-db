@@ -202,6 +202,15 @@ Derived supplementary review doplňuje uložený hierarchy stav o chybějící
 ordinaly v opakovaných typech, kolize a porušené duplicate identity. Čtení
 nepřepisuje `hierarchy_status`, manual snapshot ani verified timestamp.
 
+Neblokující návrh **Pravděpodobně doplňkový obsah** je nápověda pro automatické
+nebo nepotvrzené zařazení explicitně označeného supplementary videa. Potlačí jej
+ruční typ obsahu videa, title s kompletním manual snapshotem shodného typu, nebo
+lidské umístění: title s kompletním manual snapshotem spolu s explicitním
+selectorem (`ManualSplitRuleVideo`) právě tohoto videa do něj. Při rozdílném typu
+samotné verified title či collection nestačí, protože video mohlo do ověřené
+struktury přibýt automaticky. Subtype videa a typ title/kontejneru jsou oddělené
+osy a nemusí se shodovat (např. OVA ve Specials, PV v Bonus).
+
 Dolní sbalený index **Všechna anime** obsahuje reálné collections s evidovanými
 videi, nikoli prázdné placeholdery či technický root `.`. Je navigací nezávislou
 na horní frontě: vyřešené anime zůstává dostupné přímým odkazem do review detailu.

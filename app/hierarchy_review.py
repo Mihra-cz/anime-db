@@ -66,6 +66,7 @@ from .manual_split import (
     definition_from_title,
     evaluate_persisted_manual_split,
     evaluate_manual_split_assignment,
+    has_confirmed_manual_placement,
     has_persisted_manual_split_selector,
     replace_explicit_video_selector_authority,
     synchronize_manual_split_authority,
@@ -568,6 +569,10 @@ def supplementary_video_suggestion(
         # this supplementary video.  Filename tokens alone must not reopen an
         # individual split recommendation; independent hierarchy diagnostics
         # and duplicate controls remain rendered through their own workflows.
+        return None
+    if current is not None and has_confirmed_manual_placement(video, current):
+        # Content subtype and container type are separate axes; a user who
+        # placed this video into a manually defined title has decided it.
         return None
     context_already_present = bool(
         current and context_label
