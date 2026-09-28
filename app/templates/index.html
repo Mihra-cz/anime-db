@@ -26,9 +26,10 @@
 <th><a class="sort-link" href="{{ sort_url('title') }}">Anime{% if sort == 'title' %} {{ '▲' if direction == 'asc' else '▼' }}{% endif %}</a></th>
 <th>Hierarchie</th><th>Média</th>
 <th><a class="sort-link" href="{{ sort_url('metadata') }}">Metadata{% if sort == 'metadata' %} {{ '▲' if direction == 'asc' else '▼' }}{% endif %}</a></th>
+<th>Pojmenování</th>
 </tr></thead><tbody>
-{% for row in collections %}{% set group = row.group %}{{ workbench_row(group, row.href, row.thumbnail_url, 'Přímý detail hlavní části' if row.opens_title else 'Přehled ' ~ row.title_count ~ ' částí', (hierarchy_statuses|default({})).get(group.catalog_collection_id), (media_statuses|default({})).get(group.catalog_collection_id), metadata_badges['resolved' if group.metadata_ok else 'missing'] if metadata_badges is defined else none) }}
-{% else %}<tr><td colspan="4">Katalog zatím neobsahuje žádnou logickou collection s videem.</td></tr>{% endfor %}
+{% for row in collections %}{% set group = row.group %}{{ workbench_row(group, row.href, row.thumbnail_url, 'Přímý detail hlavní části' if row.opens_title else 'Přehled ' ~ row.title_count ~ ' částí', (hierarchy_statuses|default({})).get(group.catalog_collection_id), (media_statuses|default({})).get(group.catalog_collection_id), metadata_badges['resolved' if group.metadata_ok else 'missing'] if metadata_badges is defined else none, (naming_badges|default({})).get(group.catalog_collection_id), true) }}
+{% else %}<tr><td colspan="5">Katalog zatím neobsahuje žádnou logickou collection s videem.</td></tr>{% endfor %}
 </tbody></table></div>
 <details class="catalog-sort-options"><summary>Další možnosti řazení</summary><nav aria-label="Řazení katalogu">{% for key, label in [('total','Videa'),('episodes','Epizody'),('variants','Varianty'),('bonus','Bonusy'),('cs','CZ'),('sk','SK'),('missing','Bez CZ/SK'),('unknown','Neznámé titulky'),('translated','S překladem')] %}<a href="{{ sort_url(key) }}">{{ label }}</a>{% endfor %}</nav></details>
 </section>

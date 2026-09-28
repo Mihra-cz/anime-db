@@ -16,6 +16,7 @@
   {% if hierarchy_edit_url and title_hierarchy_badge %}<a class="status-badge authority-status-pill severity-{{ title_hierarchy_badge.severity }}" href="{{ hierarchy_edit_url }}"><span>Hierarchie</span><span aria-hidden="true">·</span><strong>{{ title_hierarchy_badge.label }}</strong></a>{% endif %}
   {% if metadata_edit_url and title_metadata_badge %}<a class="status-badge authority-status-pill severity-{{ title_metadata_badge.severity }}" href="{{ metadata_edit_url }}"><span>Metadata</span><span aria-hidden="true">·</span><strong>{{ title_metadata_badge.label }}</strong></a>{% endif %}
   {% if media_edit_url and title_media_badge %}<a class="status-badge authority-status-pill severity-{{ title_media_badge.severity }}" href="{{ media_edit_url }}"><span>Média</span><span aria-hidden="true">·</span><strong>{{ title_media_badge.label }}</strong></a>{% endif %}
+  {% if title_naming_badge %}<a class="status-badge authority-status-pill severity-{{ title_naming_badge.severity }}" href="{{ title_naming_badge.href }}"><span>Pojmenování</span><span aria-hidden="true">·</span><strong>{{ title_naming_badge.label }}</strong></a>{% endif %}
 </nav>
 
 {% set confirmed_metadata = title_metadata if metadata_completion and metadata_completion.state == 'confirmed' else none %}

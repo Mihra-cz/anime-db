@@ -174,10 +174,24 @@ filename byte limit zahrnuje suffix i extension. Film/Bonus/CM/Menu, variant
 tokeny, duplicate disposition a finální supplementary folder taxonomy jsou
 dosud otevřené a nevytváří se z nich odhadovaná grammar.
 
-Physical Naming / Pojmenování je samostatná aplikační doména s budoucí vlastní
-centrální Naming Review sekcí. Foundation nemá Naming Review UI, target
-planner ani filesystem operace. Běžné UI display resolvery physical choices
-nepoužívají; celé A/B/C/D review workflow zatím není implementované.
+Physical Naming / Pojmenování má samostatnou centrální sekci `/naming-review`
+a shared [derived review model](../app/naming_review.py) pro frontu a
+homepage/collection/title badges. Výchozí K vyřízení obsahuje A/B/C review,
+basis mismatch a technicky neplatný effective název; bezpečné defaults,
+platná potvrzení a inherited děti nevytvářejí práci. Kandidáty mají raw text,
+portable preview, provenance, délky a diagnostics; current není automatická
+autorita a nejednoznačný current prefix se nehádá z filename.
+
+Save/reconfirm/reset používají naming service, serverové kandidáty a stale-form
+fingerprint; GET a custom preview jsou read-only. Synonym keys nezávisí na
+pořadí seznamu. Season-only supplementary nabídne snapshot textu relevantních
+Partů bez změny Part authority. Limit 255 UTF-8 bytes zahrnuje i známé filename
+suffixy a inherited prefix dependencies; dosud otevřená grammar se neodhaduje.
+Běžné UI display resolvery physical choices nepoužívají. Target planner,
+kolize, warning >240 UTF-16 units absolutní klientské cesty a filesystem
+operace zůstávají další prací; UI nyní žádnou base path nehádá. Nasazení na
+produkční DB je samostatný řízený krok: teprve první startup této verze
+provede aditivní upgrade schema 6→7 bez backfillu naming choices.
 
 ### Fyzická evidence a logická struktura
 

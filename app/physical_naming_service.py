@@ -62,6 +62,11 @@ def load_physical_naming_context(
         and (choice.catalog_collection_id in loaded_collection_ids
              or choice.catalog_title_id in loaded_title_ids)
     )
+    return physical_naming_context_from_models(collections, titles, choices)
+
+
+def physical_naming_context_from_models(collections, titles, choices) -> PhysicalNamingContext:
+    """Project an already preloaded ORM graph; callers own loading and writes."""
     title_models = {}
     for title in titles:
         identity = None
@@ -182,3 +187,35 @@ def reset_physical_naming_choice(session: Session, owner: CatalogCollection | Ca
         else:
             session.delete(choice)
         session.expire(owner, ["physical_naming_choice"])
+
+
+def reconfirm_physical_naming_choice(
+    session: Session, owner: CatalogCollection | CatalogTitle, *, now: datetime | None = None,
+) -> PhysicalNamingChoice:
+    """Explicitly retain a historical snapshot while approving current context."""
+    import json
+    scope, owner_id = _owner_key(session, owner)
+    choice = _find_choice(session, scope, owner_id)
+    if choice is None:
+        raise ValueError("There is no physical naming choice to reconfirm.")
+    if choice.choice_kind != "parent_prefix":
+        return confirm_physical_naming_choice(session, owner, choice.physical_text, choice.choice_kind, now=now)
+    validate_physical_text(choice.physical_text)
+    timestamp = now or datetime.now(timezone.utc)
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("Naming confirmation timestamp must be timezone-aware.")
+    try:
+        source = json.loads(choice.basis_snapshot_json).get("source_title_id")
+    except (ValueError, AttributeError):
+        source = None
+    source = source if type(source) is int and source > 0 else None
+    context = load_physical_naming_context(
+        session, collection_ids=[owner.catalog_collection_id] if owner.catalog_collection_id is not None else [],
+        title_ids=[owner_id],
+    )
+    # This is historical provenance, not a fresh selection of a parent candidate.
+    # A parent's later rename must not rewrite the explicitly retained snapshot.
+    choice.basis_snapshot_json = create_basis_snapshot(context, scope, owner_id, source_title_id=source)
+    choice.confirmed_at = timestamp.astimezone(timezone.utc)
+    session.expire(owner, ["physical_naming_choice"])
+    return choice

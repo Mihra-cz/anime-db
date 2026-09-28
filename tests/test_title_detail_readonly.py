@@ -126,10 +126,11 @@ def test_readonly_title_detail_presents_confirmed_metadata_cached_artwork_and_co
     assert 'href="https://anilist.co/anime/4242"' in rendered
 
     assert 'class="title-authority-links"' in rendered
-    assert rendered.count('class="status-badge authority-status-pill ') == 3
+    assert rendered.count('class="status-badge authority-status-pill ') == 4
     assert f'href="/hierarchy-review/{collection_id}/titles/{title_id}"' in rendered
     assert f'href="/metadata-review/{title_id}"' in rendered
     assert f'href="/media-check/titles/{title_id}"' in rendered
+    assert f'title_id={title_id}' in rendered and 'Pojmenování' in rendered
     assert "Struktura, číslování, varianty a duplicity" not in rendered
     assert "Provider, kandidáti, artwork a requirement" not in rendered
     assert "Audio, titulky, hardsub a dostupnost" not in rendered
@@ -163,7 +164,12 @@ def test_physical_naming_choices_do_not_change_display_or_write_on_get(tmp_path)
             writes.append(statement)
     event.listen(engine, "before_cursor_execute", record)
     try:
-        assert _render_title_detail(app, title_id) == display_before
+        displayed_after = _render_title_detail(app, title_id)
+        # Physical Naming adds its own status; ordinary display and metadata
+        # presentation remain independent of the physical snapshot.
+        naming_pill = r'<a class="status-badge authority-status-pill [^"]*" href="/naming-review[^\"]*">.*?</a>'
+        assert re.sub(naming_pill, '', displayed_after) == re.sub(naming_pill, '', display_before)
+        assert 'V6 root text' not in displayed_after and 'V6 title prefix' not in displayed_after
         assert snapshot() == before
         assert writes == []
     finally:

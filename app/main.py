@@ -226,6 +226,9 @@ from .models import (
     ExternalTitleLink, InternalSubtitle, TitleMetadata,
     UnresolvedExternalSubtitle, Video, VideoVariantGroup, utc_now,
 )
+from .naming_review import build_naming_review
+from .naming_review_service import naming_review_context_from_models
+from .naming_review_web import install_naming_review_routes
 from .numbering import (
     apply_deterministic_bulk_renumber, apply_sequential_numbering,
     confirmed_duplicate_groups, preview_sequential_numbering,
@@ -403,11 +406,11 @@ def _homepage_collection_rows(
 
 
 def _load_collection_titles_with_artwork(
-    sessions, collection_ids: set[int] | None = None,
-) -> tuple[dict[int, tuple[CatalogTitle, ...]], dict]:
+    sessions, collection_ids: set[int] | None = None, *, include_naming: bool = False,
+):
     """Load collection cover authority in one bounded eager query."""
     if collection_ids is not None and not collection_ids:
-        return {}, {}
+        return ({}, {}, {}) if include_naming else ({}, {})
     statement = select(CatalogCollection).options(
         joinedload(CatalogCollection.titles).joinedload(CatalogTitle.artwork),
         joinedload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
@@ -417,9 +420,15 @@ def _load_collection_titles_with_artwork(
     )
     if collection_ids is not None:
         statement = statement.where(CatalogCollection.id.in_(collection_ids))
+    if include_naming:
+        statement = statement.options(
+            joinedload(CatalogCollection.physical_naming_choice),
+            joinedload(CatalogCollection.titles).joinedload(CatalogTitle.physical_naming_choice),
+            joinedload(CatalogCollection.titles).joinedload(CatalogTitle.metadata_record),
+        )
     with sessions() as session:
         collections = session.scalars(statement).unique().all()
-        return (
+        values = (
             {collection.id: tuple(collection.titles) for collection in collections},
             {
                 collection.id: build_hierarchy_review_collection_presentation(
@@ -427,6 +436,10 @@ def _load_collection_titles_with_artwork(
                 ) for collection in collections
             },
         )
+        if include_naming:
+            context = naming_review_context_from_models(collections, [title for collection in collections for title in collection.titles])
+            return (*values, build_naming_review(context).collection_badges)
+        return values
 
 
 def _catalog_thumbnail_urls(
@@ -718,8 +731,12 @@ def _load_catalog_title(session, catalog_title_id: int | None):
     if catalog_title_id is None:
         return None
     return session.scalar(select(CatalogTitle).options(
+        joinedload(CatalogTitle.physical_naming_choice),
+        selectinload(CatalogTitle.collection).joinedload(CatalogCollection.physical_naming_choice),
+        selectinload(CatalogTitle.collection).selectinload(CatalogCollection.titles).joinedload(CatalogTitle.physical_naming_choice),
+        selectinload(CatalogTitle.collection).selectinload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
         selectinload(CatalogTitle.external_links),
-        selectinload(CatalogTitle.metadata_record),
+        joinedload(CatalogTitle.metadata_record),
         selectinload(CatalogTitle.collection).selectinload(
             CatalogCollection.titles
         ).selectinload(CatalogTitle.metadata_record),
@@ -1079,6 +1096,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.sessions = sessions
     app.state.metadata_provider = AniListProvider(settings.metadata_request_timeout_seconds)
+    install_naming_review_routes(app, templates, sessions, safe_local_redirect_target, local_redirect_response)
     app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
     settings.metadata_artwork_directory.mkdir(parents=True, exist_ok=True)
     app.mount("/artwork", StaticFiles(directory=settings.metadata_artwork_directory, check_dir=False), name="artwork")
@@ -1136,7 +1154,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         explicit_sort = sort is not None
         sort, direction = normalize_group_sort(sort or "title", direction or "asc", "")
         videos, request_index, media_statuses = _load_catalog_overview(sessions)
-        collection_titles, hierarchy_statuses = _load_collection_titles_with_artwork(sessions)
+        collection_titles, hierarchy_statuses, naming_badges = _load_collection_titles_with_artwork(sessions, include_naming=True)
         thumbnail_urls = _catalog_thumbnail_urls(
             collection_titles, settings.metadata_artwork_directory,
         )
@@ -1166,6 +1184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return templates.TemplateResponse(request, "index.html", {
             "collections": collection_rows,
             "hierarchy_statuses": hierarchy_statuses,
+            "naming_badges": naming_badges,
             "media_statuses": media_statuses,
             "metadata_badges": METADATA_BADGES,
             "folders": sorted(folders.items()), "totals": totals, "message": message,
@@ -1556,6 +1575,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         catalog_title = _load_catalog_title(
                             session, legacy_collection.titles[0].id
                         )
+            title_naming_badge = None
+            if catalog_title is not None:
+                # Legacy URL lookup is reloaded through the same eager graph.
+                if catalog_title_id is None:
+                    catalog_title = _load_catalog_title(session, catalog_title.id)
+                collection = catalog_title.collection
+                naming_context = naming_review_context_from_models(
+                    [collection] if collection is not None else [],
+                    collection.titles if collection is not None else [catalog_title],
+                )
+                title_naming_badge = build_naming_review(naming_context).title_badges[catalog_title.id]
         if catalog_title and request.url.path.startswith("/catalog/"):
             parameters = {"filter_name": filter_name}
             if q:
@@ -1657,6 +1687,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 f"{catalog_title.relative_root_path}/.empty-title"
             ),
             "catalog_title": catalog_title,
+            "title_naming_badge": title_naming_badge,
             "metadata_status_labels": METADATA_STATUS_LABELS,
             "metadata_candidates": [], "metadata_error": metadata_error,
             "metadata_message": message,
@@ -1877,11 +1908,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Neznámý filtr")
         with sessions() as session:
             collection = session.scalar(select(CatalogCollection).options(
+                joinedload(CatalogCollection.physical_naming_choice),
+                selectinload(CatalogCollection.titles).joinedload(CatalogTitle.physical_naming_choice),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
                 selectinload(CatalogCollection.titles).joinedload(CatalogTitle.artwork),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
             ).where(CatalogCollection.id == collection_id))
+            naming_badge = (build_naming_review(naming_review_context_from_models([collection], collection.titles)).collection_badges[collection.id]
+                            if collection is not None else None)
         if collection is None:
             raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
         all_videos = _load_videos(
@@ -2003,6 +2038,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             state.update(sort=sort, direction=direction or "asc")
         return templates.TemplateResponse(request, "collection.html", {
             "collection": collection, "parts": tuple(parts_by_title_id.values()),
+            "naming_badge": naming_badge,
             "navigation_parts": navigation_parts, "filter_name": filter_name,
             "filter_label": FILTER_LABELS[filter_name], "q": normalize_search_query(q),
             "sort": sort or "", "direction": direction or "",

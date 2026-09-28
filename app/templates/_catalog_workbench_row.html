@@ -1,5 +1,5 @@
 {% from "_artwork_thumbnail.html" import artwork_thumbnail %}
-{% macro workbench_row(group, href, thumbnail_url, subtitle, hierarchy, media, metadata) -%}
+{% macro workbench_row(group, href, thumbnail_url, subtitle, hierarchy, media, metadata, naming=none, show_naming=false) -%}
 <tr>
   <td data-label="Anime" class="card-primary catalog-title-cell">
     <div class="artwork-title-cell">{{ artwork_thumbnail(thumbnail_url) }}<div class="artwork-title-copy">
@@ -20,5 +20,6 @@
   <td data-label="Hierarchie" class="catalog-status-cell">{% if hierarchy %}<a class="status-badge severity-{{ hierarchy.badge.severity }}" href="/hierarchy-review/{{ group.catalog_collection_id }}">{{ hierarchy.badge.label }}</a>{% if hierarchy.soft_badge %}<span class="status-badge severity-{{ hierarchy.soft_badge.severity }}">{{ hierarchy.soft_badge.label }}</span>{% endif %}{% else %}—{% endif %}</td>
   <td data-label="Média" class="catalog-status-cell">{% if media %}<a class="status-badge severity-{{ media.severity }}" href="/media-check?q={{ group.name|urlencode }}">{{ media.label }}</a>{% else %}—{% endif %}</td>
   <td data-label="Metadata" class="catalog-status-cell">{% if metadata %}<a class="status-badge severity-{{ metadata.severity }}" href="/metadata-review?status={{ 'without' if not group.metadata_ok else 'all' }}">{{ metadata.label }}</a>{% else %}—{% endif %}</td>
+  {% if show_naming %}<td data-label="Pojmenování" class="catalog-status-cell">{% if naming %}<a class="status-badge severity-{{ naming.severity }}" href="{{ naming.href }}">{{ naming.label }}{% if naming.review_count %} · {{ naming.review_count }}{% endif %}</a>{% else %}—{% endif %}</td>{% endif %}
 </tr>
 {%- endmacro %}

@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Pojmenování · AnimeDB{% endblock %}
+{% block main_class %}content-shell content-wide naming-review{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', path='/naming_review.css') }}">{% endblock %}
+
+{% macro measurements(candidate) %}
+  <span>{{ candidate.sanitized.chars if candidate.sanitized.chars is not none else '—' }} znaků · prefix {{ candidate.sanitized.utf8_bytes if candidate.sanitized.utf8_bytes is not none else '—' }} / 255 UTF-8 bytes</span>
+  {% if candidate.max_component_bytes is not none and candidate.max_component_bytes != candidate.sanitized.utf8_bytes %}<span>Nejdelší známý název souboru: {{ candidate.max_component_bytes }} / 255 UTF-8 bytes</span>{% endif %}
+  {% set longest = candidate.max_component_bytes or candidate.sanitized.utf8_bytes or 0 %}
+  {% if longest > 255 %}<strong class="naming-error">Překročeno o {{ longest - 255 }} UTF-8 bytes ({{ longest }} / 255).</strong>{% endif %}
+{% endmacro %}
+
+{% macro candidate_details(candidate) %}
+  <dl class="naming-text-pair">
+    <div><dt>RAW</dt><dd>{{ candidate.raw_text }}</dd></div>
+    <div><dt>Filesystem</dt><dd>{{ candidate.sanitized.preview_text if candidate.sanitized.preview_text is not none else 'Náhled není dostupný.' }}</dd></div>
+  </dl>
+  <div class="naming-metrics">{{ measurements(candidate) }}</div>
+  {% if candidate.transformation_labels %}<ul class="naming-transformations" aria-label="Úpravy pro filesystem">{% for text in candidate.transformation_labels %}<li>{{ text }}</li>{% endfor %}</ul>{% endif %}
+  {% if candidate.diagnostic_messages %}<ul class="naming-diagnostics">{% for text in candidate.diagnostic_messages %}<li>{{ text }}</li>{% endfor %}</ul>{% endif %}
+{% endmacro %}
+
+{% block content %}
+<div class="heading"><div><h1>Pojmenování</h1><p>Vyber fyzický název rootu nebo prefix části. Každou volbu potvrď samostatně.</p></div><p class="naming-page-dirty" data-naming-dirty aria-live="polite">Žádné neuložené změny.</p></div>
+<nav class="filter-nav naming-filters" aria-label="Filtry pojmenování">{% for key, label, url, count in filter_links %}<a href="{{ url }}" {% if key == status %}class="active" aria-current="page"{% endif %}>{{ label }} <span class="naming-filter-count">{{ count }}</span></a>{% endfor %}</nav>
+<form method="get" action="/naming-review" class="search-form naming-search" role="search"><input type="hidden" name="status" value="{{ status }}">{% if collection_id %}<input type="hidden" name="collection_id" value="{{ collection_id }}">{% endif %}{% if title_id %}<input type="hidden" name="title_id" value="{{ title_id }}">{% endif %}<label for="naming-search">Hledat kolekci nebo část</label><input id="naming-search" class="search-input" type="search" name="q" value="{{ q }}"><button type="submit">Hledat</button></form>
+{% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+{% if message %}<div class="notice success" role="status">{{ message }}</div>{% endif %}
+<div class="naming-unit-list">
+{% for row in rows %}
+{% set is_submitted = submitted and submitted.get('owner_tag') == row.owner_tag %}
+{% set chosen_key = submitted.get('candidate_key') if is_submitted else none %}
+{% set choice = row.resolution.choice %}
+<article class="panel naming-unit naming-status-{{ row.status }}{% if row.resolution.authority == 'inherited' %} naming-inherited{% endif %}" id="{{ row.anchor }}" data-naming-owner="{{ row.owner_tag }}" aria-labelledby="{{ row.anchor }}-heading">
+  <div class="naming-unit-heading"><div><span class="naming-scope">{{ row.scope_label }}</span><h2 id="{{ row.anchor }}-heading">{% if row.collection_id %}<a href="/collections/{{ row.collection_id }}">{{ row.collection_label }}</a>{% else %}{{ row.collection_label }}{% endif %}{% if row.title_label %}<span class="naming-title-separator"> / </span><a href="/titles/{{ row.owner_id }}">{{ row.title_label }}</a>{% endif %}</h2></div><span class="status-badge naming-state">{{ row.state_label }}</span></div>
+  {% if row.reason_messages %}<ul class="naming-reasons">{% for text in row.reason_messages %}<li>{{ text }}</li>{% endfor %}</ul>{% endif %}
+  {% if row.effective %}<div class="naming-effective"><h3>Aktuálně používaný název</h3>{{ candidate_details(row.effective) }}</div>{% elif row.resolution.effective_text %}<p class="naming-effective">{{ row.resolution.effective_text }}</p>{% endif %}
+  {% if choice %}<p class="naming-confirmation">Potvrzeno <time datetime="{{ choice.confirmed_at.isoformat() }}">{{ choice.confirmed_at.strftime('%d. %m. %Y %H:%M') }} UTC</time> · {{ {'romaji':'Romaji','english':'English','synonym':'Synonymum','current':'Současný název','custom':'Vlastní název','parent_prefix':'Prefix hlavní části'}.get(choice.choice_kind, choice.choice_kind) }}<br>{% if row.resolution.basis_matches %}Potvrzení odpovídá aktuálnímu kontextu.{% else %}Potvrzení vyžaduje novou kontrolu kontextu.{% endif %}{% if row.resolution.metadata_identity %}<span>Metadata kontext: {{ row.resolution.metadata_identity[0] }} · {{ row.resolution.metadata_identity[1] }}</span>{% endif %}</p>{% endif %}
+  {% if row.dependent_labels %}<div class="naming-dependents"><h3>Tento název dědí</h3><ul>{% for label in row.dependent_labels %}<li>{{ label }}</li>{% endfor %}</ul></div>{% endif %}
+  {% if row.resolution.authority != 'inherited' %}
+  <form method="post" action="/naming-review/{{ row.scope }}/{{ row.owner_id }}/save" class="naming-choice-form" data-edit-form data-preview-url="/naming-review/{{ row.scope }}/{{ row.owner_id }}/preview" {% if is_submitted %}data-dirty-on-load="true"{% endif %}>
+    <input type="hidden" name="fingerprint" value="{{ row.fingerprint }}"><input type="hidden" name="return_to" value="{{ return_to }}">
+    <fieldset><legend>Vyber název k potvrzení</legend><div class="naming-candidates">
+    {% for candidate in row.candidates %}
+      <div class="naming-candidate{% if not candidate.can_confirm %} naming-candidate-invalid{% endif %}">
+        <label class="naming-candidate-choice" for="{{ row.anchor }}-candidate-{{ loop.index }}"><input type="radio" id="{{ row.anchor }}-candidate-{{ loop.index }}" name="candidate_key" value="{{ candidate.key }}" required {% if not candidate.can_confirm %}disabled{% endif %} {% if (is_submitted and chosen_key == candidate.key) or (not is_submitted and choice and candidate.selected) %}checked{% endif %} aria-describedby="{{ row.anchor }}-detail-{{ loop.index }}"><span>{{ candidate.kind_label }}{% if candidate.is_default %}<small>Automatický výchozí</small>{% endif %}</span></label>
+        <div id="{{ row.anchor }}-detail-{{ loop.index }}">{% if candidate.source_label %}<p class="naming-source">{{ candidate.source_label }}</p>{% endif %}{{ candidate_details(candidate) }}{% if not candidate.can_confirm %}<p class="naming-error">Tento název nelze potvrdit.</p>{% endif %}</div>
+      </div>
+    {% endfor %}
+    </div>
+    <div class="naming-custom"><label class="naming-candidate-choice" for="{{ row.anchor }}-custom-choice"><input id="{{ row.anchor }}-custom-choice" type="radio" name="candidate_key" value="custom" required data-naming-custom-choice {% if is_submitted and chosen_key == 'custom' %}checked{% endif %}><span>Vlastní název</span></label>
+      <div data-naming-custom-controls>
+        <label class="naming-custom-label" for="{{ row.anchor }}-custom">Text vlastního názvu</label><input id="{{ row.anchor }}-custom" type="text" name="custom_text" value="{{ submitted.get('custom_text', '') if is_submitted else choice.physical_text if choice and choice.choice_kind == 'custom' else '' }}" data-naming-custom autocomplete="off" aria-describedby="{{ row.anchor }}-custom-preview">
+        <div id="{{ row.anchor }}-custom-preview" class="naming-custom-preview" data-naming-preview aria-live="polite" aria-atomic="true"><span class="naming-preview-status" data-preview-status></span><dl class="naming-text-pair"><div><dt>Filesystem</dt><dd data-preview-text>{{ custom_preview.sanitized.preview_text if is_submitted and custom_preview and custom_preview.sanitized.preview_text is not none else 'Zadej vlastní název pro náhled.' }}</dd></div></dl><div class="naming-metrics" data-preview-metrics>{% if is_submitted and custom_preview %}{{ measurements(custom_preview) }}{% endif %}</div><p class="naming-transformations" data-preview-transformations>{% if is_submitted and custom_preview %}{{ custom_preview.transformation_labels|join(' · ') }}{% endif %}</p><p class="naming-diagnostics" data-preview-diagnostics>{% if is_submitted and custom_preview %}{{ custom_preview.diagnostic_messages|join(' · ') }}{% endif %}</p></div>
+      </div>
+    </div></fieldset>
+    <div class="naming-save-actions"><button type="submit" data-local-save>Potvrdit název</button><span data-naming-form-dirty aria-live="polite">Žádné neuložené změny.</span></div>
+  </form>
+  {% endif %}
+  {% if choice %}<div class="naming-saved-actions">
+    {% if not row.resolution.basis_matches %}<form method="post" action="/naming-review/{{ row.scope }}/{{ row.owner_id }}/reconfirm"><input type="hidden" name="fingerprint" value="{{ row.fingerprint }}"><input type="hidden" name="return_to" value="{{ return_to }}"><button type="submit">Potvrdit tento název znovu</button></form>{% endif %}
+    <form method="post" action="/naming-review/{{ row.scope }}/{{ row.owner_id }}/reset"><input type="hidden" name="fingerprint" value="{{ row.fingerprint }}"><input type="hidden" name="return_to" value="{{ return_to }}"><button type="submit" class="button-secondary">Používat automatický/default název</button><p>Vrátí odvozený název z aktuálních metadat nebo zděděného prefixu. Automatický název zůstane bez lidského potvrzení.</p></form>
+  </div>{% endif %}
+  {% if row.planner_warnings %}<ul class="naming-reasons">{% for warning in row.planner_warnings %}<li>{{ warning.message }}{% if warning.actual_units is not none and warning.target_units is not none %} Aktuální délka: {{ warning.actual_units }} / {{ warning.target_units }}. Zkrať alespoň o {{ warning.overflow_units }}.{% endif %}</li>{% endfor %}</ul>{% endif %}
+  {% if row.deferred_file_count %}<p class="muted">U {{ row.deferred_file_count }} souborů nelze v této kontrole ověřit délku kompletního názvu. Konečné cesty a kolize se ověří při plánování.</p>{% endif %}
+</article>
+{% else %}<section class="panel naming-empty"><h2>Žádné položky</h2><p>Tomuto filtru ani hledání neodpovídá žádný název.</p></section>{% endfor %}
+</div>
+<script src="{{ url_for('static', path='/local_edit_dirty.js') }}"></script>
+<script src="{{ url_for('static', path='/naming_review.js') }}"></script>
+{% endblock %}

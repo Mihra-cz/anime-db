@@ -89,8 +89,12 @@ Hranice 70 znaků je hranice čitelnosti, nikoli limit filesystému.
 Physical Naming / Pojmenování je samostatná aplikační doména s vlastní
 centrální Naming Review sekcí. Knihovna shrnuje stav, Hierarchie určuje co
 položka je a kam patří, Metadata určuje provider authority, Media Check
-skutečný mediální obsah a Pojmenování fyzický název. Naming Review UI zatím
-není implementované.
+skutečný mediální obsah a Pojmenování fyzický název. `/naming-review` má
+výchozí frontu K vyřízení, kandidáty s portable preview a explicitní
+confirm/reconfirm/reset. Review A/B/C a basis mismatch jsou derived;
+inheritance nepřidává další lidské rozhodnutí. Hard limit se kontroluje i
+nad známými kompletními filenames. Planner konflikty a absolute-path
+warning >240 UTF-16 units přijdou až s plannerem a skutečnou cílovou cestou.
 
 ## Portable component policy v1
 
