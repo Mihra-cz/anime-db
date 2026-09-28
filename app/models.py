@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
 from .hierarchy_authority import manual_hierarchy_snapshot_is_complete
+from .physical_naming_types import MAX_PHYSICAL_TEXT_LENGTH, PHYSICAL_NAMING_CHOICE_KINDS
 
 
 def utc_now() -> datetime:
@@ -119,6 +120,10 @@ class CatalogCollection(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     titles: Mapped[list[CatalogTitle]] = relationship(back_populates="collection")
     videos: Mapped[list[Video]] = relationship(back_populates="catalog_collection")
+    physical_naming_choice: Mapped[PhysicalNamingChoice | None] = relationship(
+        foreign_keys="PhysicalNamingChoice.catalog_collection_id",
+        cascade="all, delete-orphan", passive_deletes=True,
+    )
     __table_args__ = (CheckConstraint(
         "hierarchy_status IN ('automatic','review_required','verified','conflict','not_applicable')",
         name="ck_catalog_collection_hierarchy_status",
@@ -175,6 +180,10 @@ class CatalogTitle(Base):
     metadata_record: Mapped[TitleMetadata | None] = relationship(cascade="all, delete-orphan")
     metadata_candidates: Mapped[list[MetadataCandidate]] = relationship(cascade="all, delete-orphan")
     artwork: Mapped[list[Artwork]] = relationship(cascade="all, delete-orphan")
+    physical_naming_choice: Mapped[PhysicalNamingChoice | None] = relationship(
+        foreign_keys="PhysicalNamingChoice.catalog_title_id",
+        cascade="all, delete-orphan", passive_deletes=True,
+    )
     __table_args__ = (CheckConstraint(
         "metadata_status IN ('unlinked','candidates_available','linked_auto','linked_manual','conflict','migration_review_required','unavailable','error')",
         name="ck_catalog_title_metadata_status",
@@ -212,6 +221,44 @@ class CatalogTitle(Base):
         ):
             return self.sort_order_manual
         return self.sort_order
+
+
+class PhysicalNamingChoice(Base):
+    """One explicit human text snapshot, never hierarchy or metadata authority."""
+
+    __tablename__ = "physical_naming_choices"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    catalog_collection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("catalog_collections.id", ondelete="CASCADE"), nullable=True,
+        unique=True, index=True,
+    )
+    catalog_title_id: Mapped[int | None] = mapped_column(
+        ForeignKey("catalog_titles.id", ondelete="CASCADE"), nullable=True,
+        unique=True, index=True,
+    )
+    physical_text: Mapped[str] = mapped_column(Text, nullable=False)
+    choice_kind: Mapped[str] = mapped_column(String, nullable=False)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    basis_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "(catalog_collection_id IS NOT NULL AND catalog_title_id IS NULL) OR "
+            "(catalog_collection_id IS NULL AND catalog_title_id IS NOT NULL)",
+            name="ck_physical_naming_choice_owner",
+        ),
+        CheckConstraint(
+            f"length(trim(physical_text)) BETWEEN 1 AND {MAX_PHYSICAL_TEXT_LENGTH} "
+            "AND instr(physical_text, char(0)) = 0",
+            name="ck_physical_naming_choice_text",
+        ),
+        CheckConstraint(
+            "choice_kind IN (" + ",".join(repr(kind) for kind in PHYSICAL_NAMING_CHOICE_KINDS) + ")",
+            name="ck_physical_naming_choice_kind",
+        ),
+        CheckConstraint("json_valid(basis_snapshot_json)", name="ck_physical_naming_choice_basis_json"),
+    )
 
 
 class VideoVariantGroup(Base):

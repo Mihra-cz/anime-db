@@ -82,7 +82,7 @@ Closure neznamená nulový backlog. Vědomě otevřené zůstává:
 - **V6:** fyzická disposition 52 potvrzených (VALID) duplicate secondary kopií;
   Naming Review (dlouhé Romaji, root Bananya/Monogatari, volba Season/Part
   prefixů, názvy season-level supplementary obsahu); canonical parser/formatter;
-  persistence naming choices; numbering migrace pro canonical filename grammar;
+  numbering migrace pro canonical filename grammar;
   transakce cest ve filesystemu a DB; move manifest, preview a rollback;
   fyzická strategie externích titulků.
 - **Konec V6 – completeness:** 16 CZ externích titulků `confirmed_no_match`
@@ -113,9 +113,10 @@ Přejmenování, přesuny, import či fyzický cleanup médií nejsou současné
 - Persistence: SQLAlchemy nad SQLite, foreign keys zapnuté pro každé spojení.
   Idempotentní compatibility migrace mají verzovaný startup přes `user_version`;
   stabilní restart neprovádí novou rekonstrukci celé knihovny. Aktuální
-  compatibility verze je 6 (schema verze, nikoli roadmap V6); upgrady 1→2 až
+  compatibility verze je 7 (schema verze, nikoli roadmap V6); upgrady 1→2 až
   5→6 jsou aditivní, bez rekonstrukce. Upgrade 5→6 přidává lifecycle
-  `ExternalTitleLink` s pouze mechanickým backfillem.
+  `ExternalTitleLink` s pouze mechanickým backfillem. Upgrade 6→7 vytváří prázdnou
+  `physical_naming_choices` bez rekonstrukce a bez backfillu starých názvů.
 - Scanner: rekurzivní evidence MKV/MP4/M4V/AVI, technická data přes `ffprobe`,
   párování a jazyková evidence externích titulků. Velikost a `mtime` určují,
   zda je nutné opakovat probe. Manuální autority se zachovávají.
@@ -136,6 +137,29 @@ Implementační hranice dokládají zejména [modely](../app/models.py),
 [metadata completion](../app/metadata/completion.py) a [Media Check](../app/media_check.py).
 
 ## Datový model a pravidla autority
+
+### V6 physical naming foundation
+
+`PhysicalNamingChoice` ukládá pouze explicitní lidské rozhodnutí pro právě jednu
+collection nebo title (XOR FK, unique owner, delete cascade). Nesanitizovaný
+`physical_text`, `choice_kind`, UTC `confirmed_at` a deterministic version-1
+`basis_snapshot_json` jsou oddělené od display, hierarchy, numbering a metadata
+authority. Absence row je nezkontrolovaný derived stav; i potvrzení default
+Romaji vytváří row. Confirm/reconfirm/reset service vlastní jen naming změny,
+transakci dokončuje caller; reset row odstraní.
+
+Batch loader a čistý [resolver](../app/physical_naming.py) odvozují default z
+confirmed metadata a supplementary inheritance bez nové row. Root source je
+jednoznačný S1/P1 main title, případně jediný film bez main Season title;
+ambiguita nevytváří metadata anchor. `parent_prefix` kopíruje textový snapshot,
+source title ID zůstává historickou provenance. Refresh stejné identity text
+nemění; relink/unlink zachová choice a vrací basis mismatch. Rebuild načítá a
+klonuje choices, zahrnuje je do stale-plan fingerprintu a chrání ownery před
+automatickým odstraněním, aniž vzniká manual hierarchy authority.
+
+Foundation nemá Naming Review UI, sanitizer, target planner ani filesystem
+operace. Běžné UI display resolvery physical choices nepoužívají; review
+triggery založené na sanitizované délce zatím nejsou implementované.
 
 ### Fyzická evidence a logická struktura
 

@@ -141,6 +141,35 @@ def test_readonly_title_detail_presents_confirmed_metadata_cached_artwork_and_co
     assert ">Uložit<" not in rendered
 
 
+def test_physical_naming_choices_do_not_change_display_or_write_on_get(tmp_path):
+    from sqlalchemy import event
+    from test_physical_naming import naming_api
+    service, _ = naming_api()
+    app, (collection_id, title_id) = _title_detail_app(tmp_path, confirmed=True)
+    display_before = _render_title_detail(app, title_id)
+    with app.state.sessions() as session:
+        service.confirm_physical_naming_choice(session, session.get(CatalogCollection, collection_id), "V6 root text", "custom")
+        service.confirm_physical_naming_choice(session, session.get(CatalogTitle, title_id), "V6 title prefix", "custom")
+        session.commit()
+        engine = session.get_bind()
+    def snapshot():
+        with engine.connect() as connection:
+            return tuple(tuple(connection.execute(table.select().order_by(*table.primary_key.columns)))
+                         for table in Base.metadata.sorted_tables)
+    before = snapshot()
+    writes = []
+    def record(c, cursor, statement, parameters, context, many):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            writes.append(statement)
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        assert _render_title_detail(app, title_id) == display_before
+        assert snapshot() == before
+        assert writes == []
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+
 def test_readonly_title_detail_falls_back_to_thumbnail_when_original_is_missing(
     tmp_path,
 ):

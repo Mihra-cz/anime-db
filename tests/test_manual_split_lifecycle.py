@@ -283,6 +283,34 @@ def _run_explicit_lifecycle(
     ), preview_signature
 
 
+def test_manual_split_preserves_existing_naming_choice_without_copying_to_new_title():
+    from test_physical_naming import naming_api
+    from app.models import PhysicalNamingChoice
+    service, _ = naming_api()
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(local_title="Show", normalized_local_title="show", relative_root_path="Show")
+        title = CatalogTitle(collection=collection, local_title="Season 1", normalized_local_title="season 1",
+                             relative_root_path="Show", part_type="season", season_number=1)
+        session.add(collection)
+        for n in (1, 2):
+            session.add(Video(relative_path=f"Show/E{n:02}.mkv", root_folder="Show", filename=f"E{n:02}.mkv",
+                              size=1, mtime_ns=1, catalog_title=title, catalog_collection=collection))
+        session.commit()
+        choice = service.confirm_physical_naming_choice(session, title, "Original prefix", "custom")
+        session.commit()
+        apply_manual_split(session, collection.id, [
+            _definition(title_id=title.id, name="Season 1", start=1, end=1, sort_order=0),
+            _definition(title_id=None, name="Season 2", start=2, end=2, sort_order=1, season=2),
+        ])
+        session.commit()
+        assert [(c.id, c.catalog_title_id, c.physical_text) for c in session.scalars(select(PhysicalNamingChoice))] == [
+            (choice.id, title.id, "Original prefix"),
+        ]
+        assert len(collection.titles) == 2
+
+
 def test_unique_manual_split_assignment_has_full_lifecycle_parity(
     tmp_path,
     monkeypatch,

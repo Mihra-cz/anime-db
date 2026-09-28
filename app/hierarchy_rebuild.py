@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timezone
 from enum import StrEnum
 import hashlib
 import json
@@ -40,6 +41,7 @@ from .models import (
     CatalogCollection,
     CatalogTitle,
     ManualSplitRuleVideo,
+    PhysicalNamingChoice,
     TitleMetadata,
     Video,
 )
@@ -331,6 +333,10 @@ def _load_state(
     with session.no_autoflush:
         collections = list(session.scalars(
             select(CatalogCollection).options(
+                selectinload(CatalogCollection.physical_naming_choice),
+                selectinload(CatalogCollection.titles).selectinload(
+                    CatalogTitle.physical_naming_choice
+                ),
                 selectinload(CatalogCollection.titles).selectinload(
                     CatalogTitle.metadata_record
                 ),
@@ -354,6 +360,7 @@ def _load_state(
         ))
         titles = list(session.scalars(
             select(CatalogTitle).options(
+                selectinload(CatalogTitle.physical_naming_choice),
                 selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogTitle.external_links),
                 selectinload(CatalogTitle.metadata_candidates),
@@ -373,6 +380,28 @@ def _load_state(
     return collections, titles, videos
 
 
+def _naming_choice_fingerprint(choice: PhysicalNamingChoice | None) -> tuple | None:
+    if choice is None:
+        return None
+    # SQLite reloads DateTime without tzinfo; service writes always use UTC.
+    confirmed_at = choice.confirmed_at
+    if confirmed_at.tzinfo is None:
+        confirmed_at = confirmed_at.replace(tzinfo=timezone.utc)
+    return (
+        choice.id, choice.catalog_collection_id, choice.catalog_title_id,
+        choice.physical_text, choice.choice_kind, confirmed_at.astimezone(timezone.utc).isoformat(),
+        choice.basis_snapshot_json,
+    )
+
+
+def _naming_authority_snapshot(collections, titles) -> dict[tuple[str, int], tuple]:
+    return {
+        (scope, owner.id): _naming_choice_fingerprint(owner.physical_naming_choice)
+        for scope, owners in (("collection", collections), ("title", titles))
+        for owner in owners if owner.physical_naming_choice is not None
+    }
+
+
 def _state_fingerprint(
     collections: list[CatalogCollection],
     titles: list[CatalogTitle],
@@ -390,6 +419,7 @@ def _state_fingerprint(
                 item.hierarchy_verified_at.isoformat() if item.hierarchy_verified_at else None,
                 item.hierarchy_note,
                 item.local_period_hint,
+                _naming_choice_fingerprint(item.physical_naming_choice),
             )
             for item in collections
         ],
@@ -421,6 +451,7 @@ def _state_fingerprint(
                 item.episode_end,
                 item.episode_filename_pattern,
                 item.manual_display_title,
+                _naming_choice_fingerprint(item.physical_naming_choice),
                 item.preferred_metadata_provider,
                 item.preferred_external_id,
                 item.metadata_status,
@@ -495,6 +526,8 @@ def _state_fingerprint(
 
 def _title_protection_reasons(title: CatalogTitle) -> tuple[str, ...]:
     reasons: list[str] = []
+    if title.physical_naming_choice is not None:
+        reasons.append("physical_naming_choice")
     if title.hierarchy_manual_override:
         reasons.append("hierarchy_manual_override")
     if title.hierarchy_verified_at is not None:
@@ -550,6 +583,7 @@ def _title_protection_reasons(title: CatalogTitle) -> tuple[str, ...]:
 def _collection_has_user_state(collection: CatalogCollection) -> bool:
     return bool(
         collection.manual_display_title is not None
+        or collection.physical_naming_choice is not None
         or collection.hierarchy_verified_at is not None
         or collection.hierarchy_status != "automatic"
         or collection.hierarchy_note is not None
@@ -1041,6 +1075,13 @@ def _build_collection_identities(
     }
 
 
+def _clone_naming_choice(choice: PhysicalNamingChoice) -> PhysicalNamingChoice:
+    return PhysicalNamingChoice(**{
+        column.name: getattr(choice, column.name)
+        for column in PhysicalNamingChoice.__table__.columns
+    })
+
+
 def _clone_collection(
     original: CatalogCollection | None,
     identity: CollectionIdentity | None,
@@ -1065,6 +1106,8 @@ def _clone_collection(
             if identity is not None else original.local_period_hint
         ),
     )
+    if original is not None and original.physical_naming_choice is not None:
+        clone.physical_naming_choice = _clone_naming_choice(original.physical_naming_choice)
     return clone
 
 
@@ -1119,6 +1162,8 @@ def _clone_title(spec: _TitleSpec, synthetic_id: int) -> CatalogTitle:
             episode_count=original.metadata_record.episode_count,
         )
     if original is not None:
+        if original.physical_naming_choice is not None:
+            clone.physical_naming_choice = _clone_naming_choice(original.physical_naming_choice)
         clone.manual_split_rule_videos = [
             ManualSplitRuleVideo(video_id=link.video_id)
             for link in original.manual_split_rule_videos
@@ -1522,8 +1567,13 @@ def _reload_collections(session: Session) -> dict[str, CatalogCollection]:
     }
 
 
-def _verify_applied_plan(session: Session, plan: HierarchyRebuildPlan) -> None:
+def _verify_applied_plan(
+    session: Session, plan: HierarchyRebuildPlan,
+    expected_naming_authority: dict[tuple[str, int], tuple],
+) -> None:
     collections, titles, videos = _load_state(session)
+    if _naming_authority_snapshot(collections, titles) != expected_naming_authority:
+        raise HierarchyRebuildError("Hierarchy apply změnil physical naming authority.")
     collections_by_path = {item.relative_root_path: item for item in collections}
     titles_by_path = {item.relative_root_path: item for item in titles}
     videos_by_id = {item.id: item for item in videos}
@@ -1594,6 +1644,7 @@ def apply_hierarchy_rebuild_plan(
         raise HierarchyPlanStaleError(
             "Hierarchy rebuild plan už neodpovídá aktuálnímu stavu databáze."
         )
+    expected_naming_authority = _naming_authority_snapshot(collections, titles)
     hard_blockers = tuple(item for item in plan.blockers if item.prevents_apply)
     if hard_blockers:
         raise HierarchyPlanBlockedError(
@@ -1707,7 +1758,7 @@ def apply_hierarchy_rebuild_plan(
                 include_legacy_fallback=False,
             )
         session.flush()
-        _verify_applied_plan(session, plan)
+        _verify_applied_plan(session, plan, expected_naming_authority)
         return HierarchyRebuildResult(plan=plan, applied=True)
 
 

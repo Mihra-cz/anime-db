@@ -172,8 +172,16 @@ Zvolený text Part authority nevytváří (viz [Naming ≠ hierarchy](#naming--h
 Jednou člověkem potvrzená fyzická naming choice musí být persistentní a
 znovupoužitelná: schválený root používají root-level supplementary bez
 metadat, schválený Season/Part prefix se nabízí season-level supplementary
-obsahu a změna UI display preference fyzický název nemění. Datový model této
-persistence tento kontrakt nenavrhuje; patří do V6.2.
+obsahu a změna UI display preference fyzický název nemění.
+
+Schválená persistence foundation V6.2 používá `physical_naming_choices` s právě
+jedním collection/title ownerem. Ukládá nesanitizovaný human snapshot, druh
+volby (`romaji`, `english`, `synonym`, `current`, `custom`, `parent_prefix`),
+čas potvrzení a verzovaný kontext. Absence row není potvrzení defaultu; reset
+row odstraní. Inheritance a Review status jsou derived. Metadata refresh
+snapshot nepřepisuje; změna confirmed identity jej zachová s basis mismatch.
+Season-only výběr Part prefixu je kopie textu, nikoli živá dependency ani Part
+authority. Implementovaný stav a hranice popisuje PROJECT_STATUS.
 
 ## Zaznamenaná lidská rozhodnutí
 
@@ -193,7 +201,6 @@ Následující body nejsou součástí schváleného kontraktu:
 - fyzická strategie M:N externích titulků;
 - implementace canonical parseru/formatteru, včetně sanitizace názvů;
 - numbering migrace pro canonical filename grammar;
-- schema persistence naming choices;
 - transakce aktualizace cest ve filesystemu a DB;
 - execution manifest;
 - finální rollback/recovery protokol.

@@ -47,6 +47,126 @@ PROBE_RESULT = {
 }
 
 
+@pytest.mark.parametrize("scope", ["collection", "title"])
+def test_naming_choice_protects_empty_owner_and_invalidates_rebuild_plan(scope):
+    from test_physical_naming import naming_api
+    service, _ = naming_api()
+    engine = _engine()
+    with Session(engine) as session:
+        collection = _collection("Anime/Obsolete")
+        title = _title("Anime/Obsolete", collection)
+        session.add_all([collection, title])
+        session.commit()
+        owner = collection if scope == "collection" else title
+        choice = service.confirm_physical_naming_choice(session, owner, "Keep this text", "custom")
+        session.commit()
+        plan = build_hierarchy_rebuild_plan(session)
+        items = plan.collections if scope == "collection" else plan.titles
+        item = next(item for item in items if item.relative_root_path == owner.relative_root_path)
+        assert item.action != ReconciliationAction.REMOVE
+        assert title.hierarchy_manual_override is False
+        assert title.part_type_manual is None
+        assert collection.hierarchy_verified_at is None
+        service.confirm_physical_naming_choice(session, owner, "Changed text", "custom")
+        session.commit()
+        with pytest.raises(HierarchyPlanStaleError):
+            apply_hierarchy_rebuild_plan(session, plan)
+        rebuild_hierarchy(session, apply=True)
+        session.commit()
+        assert session.get(type(owner), owner.id) is not None
+        assert session.get(type(choice), choice.id).physical_text == "Changed text"
+
+
+def test_naming_choice_is_copied_into_detached_rebuild_projection():
+    from test_physical_naming import naming_api
+    from app.hierarchy_rebuild import _clone_collection, _clone_title, _TitleSpec
+    service, _ = naming_api()
+    engine = _engine()
+    with Session(engine) as session:
+        collection = _collection("Anime/Show")
+        title = _title("Anime/Show", collection)
+        session.add_all([collection, title])
+        session.commit()
+        service.confirm_physical_naming_choice(session, collection, "Root", "custom")
+        service.confirm_physical_naming_choice(session, title, "Prefix", "custom")
+        session.commit()
+        from app.hierarchy_rebuild import _load_state
+        _load_state(session)
+        root_clone = _clone_collection(collection, None, -1)
+        spec = _TitleSpec(original=title, identity=None, collection_path=collection.relative_root_path,
+                          protected=True, protection_reasons=("physical_naming_choice",))
+        title_clone = _clone_title(spec, -2)
+        assert root_clone.physical_naming_choice.physical_text == "Root"
+        assert title_clone.physical_naming_choice.physical_text == "Prefix"
+        assert root_clone.physical_naming_choice is not collection.physical_naming_choice
+        assert title_clone.physical_naming_choice is not title.physical_naming_choice
+        assert not session.new and not session.dirty and not session.deleted
+
+
+def test_rebuild_apply_verifies_naming_authority_is_unchanged(monkeypatch):
+    import app.hierarchy_rebuild as rebuild
+    from app.database import make_engine
+    from test_physical_naming import naming_api
+    service, _ = naming_api()
+    engine = make_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = _collection("Anime/Show")
+        title = _title("Anime/Show/Season 1", collection)
+        session.add(_video("Anime/Show/Season 1/E01.mkv", title=title, collection=collection))
+        session.commit()
+        choice = service.confirm_physical_naming_choice(session, title, "Human prefix", "custom")
+        session.commit()
+        plan = build_hierarchy_rebuild_plan(session)
+        assert plan.has_changes
+        original = rebuild.finalize_collection_hierarchy
+        def lose_naming_authority(*args, **kwargs):
+            original(*args, **kwargs)
+            session.delete(choice)
+        monkeypatch.setattr(rebuild, "finalize_collection_hierarchy", lose_naming_authority)
+        with pytest.raises(rebuild.HierarchyRebuildError, match="naming"):
+            apply_hierarchy_rebuild_plan(session, plan)
+        assert session.get(type(choice), choice.id).physical_text == "Human prefix"
+
+
+def test_naming_only_protection_does_not_preserve_video_membership():
+    from test_physical_naming import naming_api
+    service, _ = naming_api()
+    engine = _engine()
+    with Session(engine) as session:
+        collection = _collection("Anime/Show")
+        old = _title("Anime/Old", collection)
+        video = _video("Anime/Show/Season 1/E01.mkv", title=old, collection=collection)
+        session.add(video)
+        session.commit()
+        choice = service.confirm_physical_naming_choice(session, old, "Keep old prefix", "custom")
+        session.commit()
+        rebuild_hierarchy(session, apply=True)
+        session.commit()
+        assert video.catalog_title is not old
+        assert video.catalog_title.relative_root_path == "Anime/Show/Season 1"
+        assert old.hierarchy_manual_override is False
+        assert old.season_number_manual is None
+        assert old.physical_naming_choice.id == choice.id
+
+
+def test_naming_timestamp_reload_does_not_make_unchanged_plan_stale():
+    from test_physical_naming import naming_api
+    service, _ = naming_api()
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as session:
+        collection = _collection("Anime/Show")
+        title = _title("Anime/Show/Season 1", collection)
+        session.add(_video("Anime/Show/Season 1/E01.mkv", title=title, collection=collection))
+        session.commit()
+        choice = service.confirm_physical_naming_choice(session, title, "Prefix", "custom")
+        session.commit()
+        assert choice.confirmed_at.tzinfo is not None
+        plan = build_hierarchy_rebuild_plan(session)
+        result = apply_hierarchy_rebuild_plan(session, plan)
+        assert result.applied
+
+
 def _engine():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

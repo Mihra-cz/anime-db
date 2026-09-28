@@ -804,6 +804,29 @@ def test_metadata_split_moves_the_active_link_row_and_keeps_history_on_source(
         assert evaluate_metadata_split(source) is None
 
 
+def test_metadata_split_keeps_naming_choice_on_original_owner():
+    from test_physical_naming import naming_api
+    service, resolver = naming_api()
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection, source, _ = supplementary_title([f"Special {n:02}.mkv" for n in range(1, 7)])
+        attach_confirmed_metadata(source, 3)
+        session.add(collection)
+        session.commit()
+        choice = service.confirm_physical_naming_choice(session, source, "Physical prefix", "custom")
+        session.commit()
+        result = apply_metadata_split(session, source.id, confirmed=True)
+        session.commit()
+        assert choice.catalog_title_id == source.id
+        context = service.load_physical_naming_context(session)
+        assert resolver.resolve_physical_name(context, "title", result.new_title.id).choice is None
+        old = resolver.resolve_physical_name(context, "title", source.id)
+        assert old.effective_text == "Physical prefix"
+        assert old.basis_matches is False
+        assert "metadata_identity_changed" in old.diagnostics
+
+
 def test_metadata_split_does_not_override_existing_range_selector_authority():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

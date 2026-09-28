@@ -386,7 +386,7 @@ def test_v5_to_v6_backfills_primary_active_and_non_primary_legacy_only(tmp_path)
     engine, completion_before = _v5_database(tmp_path)
     assert migrate_schema_at_startup(engine) is True
     with engine.connect() as connection:
-        assert connection.scalar(text("PRAGMA user_version")) == 6 == STARTUP_COMPATIBILITY_VERSION
+        assert connection.scalar(text("PRAGMA user_version")) == STARTUP_COMPATIBILITY_VERSION
     column = next(
         item for item in inspect(engine).get_columns("external_title_links")
         if item["name"] == "lifecycle_state"

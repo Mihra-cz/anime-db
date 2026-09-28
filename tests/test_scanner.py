@@ -39,6 +39,38 @@ PROBE_RESULT = {
 }
 
 
+def test_scan_preserves_naming_snapshots_and_never_authors_new_choices(tmp_path, monkeypatch):
+    from test_physical_naming import naming_api
+    service, _ = naming_api()
+    from app.models import PhysicalNamingChoice
+    for number in range(1, 11):
+        path = tmp_path / "Show" / f"Show - {number:02}.mkv"
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"fixture")
+    monkeypatch.setattr("app.scanner.service.probe_video", lambda *a, **k: PROBE_RESULT)
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        scan_library(session, tmp_path)
+        collection = session.scalar(select(CatalogCollection))
+        title = session.scalar(select(CatalogTitle))
+        assert session.scalar(select(PhysicalNamingChoice)) is None
+        service.confirm_physical_naming_choice(session, collection, "Root snapshot", "custom")
+        service.confirm_physical_naming_choice(session, title, "Prefix snapshot", "custom")
+        session.commit()
+        before = [(c.id, c.physical_text, c.confirmed_at, c.basis_snapshot_json)
+                  for c in session.scalars(select(PhysicalNamingChoice).order_by(PhysicalNamingChoice.id))]
+        new = tmp_path / "Another" / "Another - 01.mkv"
+        new.parent.mkdir()
+        new.write_bytes(b"fixture")
+        (tmp_path / "Show" / "Show - 01.mkv").rename(tmp_path / "Show" / "Show - 11.mkv")
+        scan_library(session, tmp_path)
+        after = [(c.id, c.physical_text, c.confirmed_at, c.basis_snapshot_json)
+                 for c in session.scalars(select(PhysicalNamingChoice).order_by(PhysicalNamingChoice.id))]
+        assert after == before
+        assert session.scalar(select(func.count()).select_from(CatalogCollection)) == 2
+
+
 def test_root_videos_remain_visible_unassigned_and_are_not_merged(tmp_path: Path, monkeypatch):
     paths = [tmp_path / "Movie One.mkv", tmp_path / "Movie Two.ova.mp4"]
     for path in paths:

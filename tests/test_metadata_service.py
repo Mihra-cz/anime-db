@@ -76,6 +76,32 @@ def test_confirm_creates_manual_primary_link_and_metadata(session):
     assert title.local_title == local_before
 
 
+def test_metadata_service_refresh_relink_unlink_never_rewrites_naming_snapshot(session):
+    from test_physical_naming import naming_api
+    service, resolver = naming_api()
+    title, _ = add_title(session)
+    provider = Provider({"1": data("1"), "2": data("2", "Second")})
+    confirm_anilist_candidate(session, title, "1", provider)
+    choice = service.confirm_physical_naming_choice(session, title, "Alias", "synonym")
+    session.commit()
+    saved = (choice.physical_text, choice.choice_kind, choice.confirmed_at, choice.basis_snapshot_json)
+    from dataclasses import replace
+    provider.titles["1"] = replace(provider.titles["1"], title_romaji="Refreshed Romaji", synonyms=[])
+    refresh_title_metadata(session, title, provider)
+    session.commit()
+    result = resolver.resolve_physical_name(service.load_physical_naming_context(session), "title", title.id)
+    assert (result.effective_text, result.default_candidate, result.basis_matches) == ("Alias", "Refreshed Romaji", True)
+    confirm_anilist_candidate(session, title, "2", provider)
+    session.commit()
+    result = resolver.resolve_physical_name(service.load_physical_naming_context(session), "title", title.id)
+    assert "metadata_identity_changed" in result.diagnostics
+    unlink_title_metadata(session, title)
+    session.commit()
+    result = resolver.resolve_physical_name(service.load_physical_naming_context(session), "title", title.id)
+    assert "metadata_identity_changed" in result.diagnostics
+    assert (choice.physical_text, choice.choice_kind, choice.confirmed_at, choice.basis_snapshot_json) == saved
+
+
 def test_reconfirm_is_idempotent_and_change_keeps_old_link(session):
     title, _ = add_title(session)
     provider = Provider({"1": data("1"), "2": data("2", "Second")})

@@ -20,6 +20,75 @@ from app.models import (
 from app.numbering import summarize_title_numbering
 
 
+def test_v6_to_v7_naming_is_additive_without_backfill_or_reconstruction(tmp_path, monkeypatch):
+    from app.database import make_engine
+    engine = make_engine(f"sqlite:///{tmp_path / 'v6-naming.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(
+            local_title="Old root", normalized_local_title="old root",
+            relative_root_path="Old root", manual_display_title="Old display root",
+        )
+        title = CatalogTitle(
+            collection=collection, local_title="Old title", normalized_local_title="old title",
+            relative_root_path="Old root/title", manual_display_title="Old display title",
+        )
+        title.metadata_record = TitleMetadata(display_title="Legacy display", title_romaji="Romaji")
+        session.add_all([collection, title])
+        session.commit()
+    with engine.begin() as connection:
+        if "physical_naming_choices" in inspect(connection).get_table_names():
+            connection.execute(text("DROP TABLE physical_naming_choices"))
+        connection.execute(text("PRAGMA user_version = 6"))
+        before = {name: tuple(connection.exec_driver_sql(f'SELECT * FROM "{name}" ORDER BY rowid'))
+                  for name in inspect(connection).get_table_names()}
+    def forbidden(*args, **kwargs):
+        raise AssertionError("v6 upgrade must not reconstruct existing domain data")
+    monkeypatch.setattr("app.migrations.migrate_schema", forbidden)
+    writes = []
+    def record(c, cursor, statement, parameters, context, many):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            writes.append(statement)
+    event.listen(engine, "before_cursor_execute", record)
+    assert migrate_schema_at_startup(engine) is True
+    assert "physical_naming_choices" in inspect(engine).get_table_names(), "V6 naming table is missing"
+    with engine.connect() as connection:
+        assert connection.scalar(text("PRAGMA user_version")) == 7
+        assert connection.scalar(text("SELECT count(*) FROM physical_naming_choices")) == 0
+        after = {name: tuple(connection.exec_driver_sql(f'SELECT * FROM "{name}" ORDER BY rowid')) for name in before}
+    assert after == before
+    assert writes == []
+    assert migrate_schema_at_startup(engine) is False
+    assert writes == []
+    event.remove(engine, "before_cursor_execute", record)
+
+
+def test_explicit_compatibility_reconstruction_preserves_naming_only_owners():
+    from app.database import make_engine
+    from test_physical_naming import naming_api
+    service, _ = naming_api()
+    engine = make_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        collection = CatalogCollection(local_title="Empty", normalized_local_title="empty", relative_root_path="Empty")
+        title = CatalogTitle(collection=collection, local_title="Old", normalized_local_title="old", relative_root_path="Empty/Old")
+        session.add_all([collection, title])
+        session.commit()
+        root_choice = service.confirm_physical_naming_choice(session, collection, "Root", "custom")
+        title_choice = service.confirm_physical_naming_choice(session, title, "Prefix", "custom")
+        session.commit()
+        ids = (collection.id, title.id, root_choice.id, title_choice.id)
+    migrate_schema(engine)
+    with Session(engine) as session:
+        from app.models import PhysicalNamingChoice
+        assert session.get(CatalogCollection, ids[0]) is not None
+        owner = session.get(CatalogTitle, ids[1])
+        assert owner is not None
+        assert owner.hierarchy_manual_override is False
+        assert session.get(PhysicalNamingChoice, ids[2]).physical_text == "Root"
+        assert session.get(PhysicalNamingChoice, ids[3]).physical_text == "Prefix"
+
+
 def _catalog_title_persisted_state(session: Session):
     semantic_columns = tuple(
         column.name for column in CatalogTitle.__table__.columns

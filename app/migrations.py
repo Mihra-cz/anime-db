@@ -32,7 +32,7 @@ from .manual_split import (
 )
 from .models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    InternalSubtitle, TitleMetadata, Video, VideoVariantGroup,
+    InternalSubtitle, PhysicalNamingChoice, TitleMetadata, Video, VideoVariantGroup,
 )
 from .structural_inference import infer_automatic_structural_values
 from .video_variants import reconcile_video_catalog_title
@@ -51,7 +51,8 @@ logger = logging.getLogger(__name__)
 # Version 6 adds ExternalTitleLink.lifecycle_state with a mechanical backfill
 # only (primary -> active, non-primary -> legacy_historical); it is a schema
 # compatibility step, not the start of roadmap V6.
-STARTUP_COMPATIBILITY_VERSION = 6
+# Version 7 adds an empty human naming-choice table, without reconstruction or backfill.
+STARTUP_COMPATIBILITY_VERSION = 7
 
 
 def _migrate_unnumbered_duplicate_confirmation_kind(connection) -> None:
@@ -465,12 +466,16 @@ def migrate_schema(engine) -> None:
         hierarchy = derive_library_hierarchy([video.relative_path for video in videos])
         titles = {
             title.relative_root_path: title
-            for title in session.scalars(select(CatalogTitle)).all()
+            for title in session.scalars(select(CatalogTitle).options(
+                selectinload(CatalogTitle.physical_naming_choice),
+            )).all()
         }
         original_titles = set(titles.values())
         collections = {
             collection.relative_root_path: collection
-            for collection in session.scalars(select(CatalogCollection)).all()
+            for collection in session.scalars(select(CatalogCollection).options(
+                selectinload(CatalogCollection.physical_naming_choice),
+            )).all()
         }
         grouping_targets = {
             title.relative_root_path: target
@@ -498,6 +503,9 @@ def migrate_schema(engine) -> None:
         )
         used_titles.update(
             title for title in original_titles if title.video_variant_groups
+        )
+        used_titles.update(
+            title for title in original_titles if title.physical_naming_choice is not None
         )
         for identity in identities_by_title_path.values():
             if identity.title.relative_root_path == ROOT_FOLDER:
@@ -690,6 +698,7 @@ def migrate_schema(engine) -> None:
                         or title.metadata_candidates
                         or title.artwork
                         or title.manual_display_title
+                        or title.physical_naming_choice is not None
                         or title.preferred_metadata_provider
                         or title.preferred_external_id
                         or title.metadata_locked
@@ -755,6 +764,7 @@ def migrate_schema(engine) -> None:
                 or title.id in assigned_title_ids
                 or title.manual_split_rule_videos
                 or title.video_variant_groups
+                or title.physical_naming_choice is not None
             ):
                 continue
             session.delete(title)
@@ -767,7 +777,7 @@ def migrate_schema(engine) -> None:
             has_video = session.scalar(select(Video.id).where(
                 Video.catalog_collection_id == collection.id
             )) is not None
-            if has_title or has_video:
+            if has_title or has_video or collection.physical_naming_choice is not None:
                 continue
             session.delete(collection)
             collections.pop(collection.relative_root_path, None)
@@ -783,7 +793,7 @@ def migrate_schema(engine) -> None:
             else "conflict"
         )
         for legacy in original_titles - used_titles:
-            if legacy.metadata_requirement_manual is not None:
+            if legacy.metadata_requirement_manual is not None or legacy.physical_naming_choice is not None:
                 # A retained workflow decision is not a disposable placeholder.
                 continue
             has_metadata = session.get(TitleMetadata, legacy.id) is not None
@@ -885,6 +895,7 @@ def migrate_schema_at_startup(engine) -> bool:
             _migrate_unnumbered_duplicate_confirmation_kind(connection)
         if current in (1, 2, 3, 4, 5):
             _migrate_external_title_link_lifecycle(connection)
+        PhysicalNamingChoice.__table__.create(connection, checkfirst=True)
         connection.execute(text(
             f"PRAGMA user_version = {STARTUP_COMPATIBILITY_VERSION}"
         ))
