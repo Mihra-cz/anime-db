@@ -157,9 +157,27 @@ nemění; relink/unlink zachová choice a vrací basis mismatch. Rebuild načít
 klonuje choices, zahrnuje je do stale-plan fingerprintu a chrání ownery před
 automatickým odstraněním, aniž vzniká manual hierarchy authority.
 
-Foundation nemá Naming Review UI, sanitizer, target planner ani filesystem
-operace. Běžné UI display resolvery physical choices nepoužívají; review
-triggery založené na sanitizované délce zatím nejsou implementované.
+Čistý [component sanitizer](../app/physical_naming_components.py) používá
+verzovanou policy `v1`: NFC pouze v projekci, portable character mappings,
+whitespace/dot/device pravidla a hard limit 255 UTF-8 bytes. Vrací raw text,
+preview, délky, transformace a diagnostics; naming snapshot nepřepisuje.
+Collision guards porovnávají components ve stejném parent namespace; soft
+budget 240 UTF-16 units vyžaduje explicitní absolutní Windows klientskou
+cestu od budoucího planneru. 70 code points je samostatný readability review
+údaj, nikoli hard limit.
+
+[Foundation formatter](../app/physical_naming_formatters.py) přijímá již
+resolved identity, neparsuje ji z prefixu ani filename. Skládá root/Season,
+Episode s volitelným Part/MP a schválené supplementary labels včetně exact
+Recap Decimal pozice. Lowercase extension je odděleně validovaná; finální
+filename byte limit zahrnuje suffix i extension. Film/Bonus/CM/Menu, variant
+tokeny, duplicate disposition a finální supplementary folder taxonomy jsou
+dosud otevřené a nevytváří se z nich odhadovaná grammar.
+
+Physical Naming / Pojmenování je samostatná aplikační doména s budoucí vlastní
+centrální Naming Review sekcí. Foundation nemá Naming Review UI, target
+planner ani filesystem operace. Běžné UI display resolvery physical choices
+nepoužívají; celé A/B/C/D review workflow zatím není implementované.
 
 ### Fyzická evidence a logická struktura
 

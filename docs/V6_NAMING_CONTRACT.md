@@ -86,6 +86,51 @@ Root i title prefix jdou do Naming Review, pokud platí alespoň jedno:
 
 Hranice 70 znaků je hranice čitelnosti, nikoli limit filesystému.
 
+Physical Naming / Pojmenování je samostatná aplikační doména s vlastní
+centrální Naming Review sekcí. Knihovna shrnuje stav, Hierarchie určuje co
+položka je a kam patří, Metadata určuje provider authority, Media Check
+skutečný mediální obsah a Pojmenování fyzický název. Naming Review UI zatím
+není implementované.
+
+## Portable component policy v1
+
+Sanitizace je čistá derived projekce nesanitizovaného human snapshotu,
+stejná pro všechny druhy naming choice. Nemění DB ani doménovou identitu,
+nezkracuje význam názvu a neřeší kolize pořadovými suffixy.
+
+- Unicode se normalizuje pouze na NFC. Japonština, emoji, ZWJ/ZWNJ,
+  full-width znaky a platná interpunkce zůstávají zachované.
+- NUL a kategorie `Cc`, `Cs`, `Zl`, `Zp` jsou invalid input; neodstraňují se
+  tiše. `Zs` a U+200B se mění na ASCII space; opakované spaces se slučují
+  a vnější spaces odstraňují.
+- `?` a `*` → space, `<` → `(`, `>` → `)`, `"` → `'`.
+- Run `: / \ |` se mění na jedinou pomlčku: s whitespace u runu nebo
+  uvnitř runu na ` - `, uvnitř textu bez whitespace na `-`.
+  `Bananya: Fushigi` → `Bananya - Fushigi`, `Re:Zero` → `Re-Zero`,
+  `Fate/Grand Order` → `Fate-Grand Order`. Existující platné pomlčky se
+  heuristicky neslučují; opakovaný spaced separator má diagnostic.
+- Leading dot dostane prefix `_`; trailing run spaces/dots se odstraní.
+  Internal dots zůstávají. `.` / `..` a empty/separator-only text jsou
+  invalid; placeholder se nevytváří. Samotné neviditelné fillery/blank a
+  combining marks nejsou obsah; uvnitř skutečných názvů zůstávají zachované.
+- Windows device stem před první dot se kontroluje case-insensitive,
+  včetně `CON`, `PRN`, `AUX`, `NUL`, `COM1–9`, `LPT1–9`, superscript
+  `¹²³`, `CONIN$` a `CONOUT$`. Escape je jeden leading `_`.
+- Directory/file component má hard limit **255 UTF-8 bytes**. Filename
+  se kontroluje až včetně identity, MP a extension. Overflow blokuje
+  výsledek; nikdy se automaticky netruncuje.
+- **240 UTF-16 units celé absolutní Windows klientské cesty** je soft
+  portability target. Overflow vyžaduje kratší lidský název; skutečnou
+  base path dodá až planner. Není to component limit ani 70-char trigger.
+- Extension vstupuje zvlášť, je validovaná a canonical lowercase;
+  při chybějící nebo invalid extension se nic nehádá.
+
+Sanitizer je idempotentní a vrací preview, délky, transformace a diagnostics
+s policy ID a runtime Unicode verzí. Collision guards ve stejném target
+parent namespace jsou exact text, `NFC(casefold(NFD(text)))` a
+`NFC(uppercase(text))`; kolize vyžaduje Review. Tyto hodnoty se do naming
+authority nepersistují.
+
 ## Adresářová struktura
 
 - Sezóny: `Season 01`, `Season 02`, … (dvoumístné zero padding).
@@ -167,6 +212,13 @@ Zvolený text Part authority nevytváří (viz [Naming ≠ hierarchy](#naming--h
   nevydává se za standardní Episode, např. `S02 - Recap 12.5`,
   `S03 - Recap 24.25`.
 
+Foundation formatter podporuje labels `OVA`, `Special`, `Preview`, `OP`,
+`ED`, `NCOP`, `NCED`, `Recap`, např. `<Prefix> - S01 - OVA.ext` nebo
+`<Prefix> - S01P02 - OVA 01-MP01.ext`. Padding má minimum width 2;
+vyšší čísla se netruncují. Recap přijímá exact Decimal/integer, nepoužívá
+float ani exponent notation a odstraňuje jen fractional trailing zeros.
+Film/Bonus/CM/Menu grammar zůstává otevřená; formatter ji odmítá.
+
 ## Persistence naming choices
 
 Jednou člověkem potvrzená fyzická naming choice musí být persistentní a
@@ -199,7 +251,9 @@ Následující body nejsou součástí schváleného kontraktu:
 - syntax tokenu pro video varianty (representation lanes);
 - fyzická disposition potvrzených duplicate secondary kopií;
 - fyzická strategie M:N externích titulků;
-- implementace canonical parseru/formatteru, včetně sanitizace názvů;
+- kompletní canonical grammar/parser, včetně Film/Bonus/CM/Menu a finální
+  supplementary folder taxonomy; component sanitizer a foundation formatter
+  jsou již implementované, nikoli target planner;
 - numbering migrace pro canonical filename grammar;
 - transakce aktualizace cest ve filesystemu a DB;
 - execution manifest;

@@ -524,3 +524,67 @@ def test_resolver_is_sql_free_and_batch_loader_is_bounded(session):
         assert not session.new and not session.dirty and not session.deleted
     finally:
         event.remove(session.bind, "before_cursor_execute", record)
+
+
+def test_canonical_projection_preserves_raw_choice_and_all_domain_authority(session):
+    from test_physical_naming_components import component_api
+    from test_physical_naming_formatters import formatter_api
+    components = component_api()
+    formatters, _ = formatter_api()
+    service, resolver = naming_api()
+    root = collection(session)
+    main = title(session, root, season=2, part=None)
+    session.add(Video(
+        relative_path="Show/01.mkv", root_folder="Show", filename="01.mkv", size=1,
+        mtime_ns=1, catalog_title=main, catalog_collection=root,
+        season_episode_number=1, absolute_episode_number=99, content_type_manual="episode",
+    ))
+    session.commit()
+    raw = "Cafe\u0301: 日本語 Part 2?"
+    choice = service.confirm_physical_naming_choice(session, main, raw, "custom", now=NOW)
+    session.commit()
+    before = domain_snapshot(session)
+    context = service.load_physical_naming_context(session)
+    def forbidden_sql(*args):
+        raise AssertionError("Pure canonical projections must not execute SQL")
+    event.listen(session.bind, "before_cursor_execute", forbidden_sql)
+    try:
+        resolution = resolver.resolve_physical_name(context, "title", main.id)
+        prefix = components.sanitize_component(resolution.effective_text)
+        result = formatters.format_episode_component(
+            prefix, formatters.EpisodeIdentity(main.effective_season_number, 1, part=main.effective_part_number), ".MKV",
+        )
+        assert result.component == "Café - 日本語 Part 2 - S02E01.mkv"
+        assert resolution.effective_text == choice.physical_text == raw
+        assert not session.dirty and not session.new and not session.deleted
+    finally:
+        event.remove(session.bind, "before_cursor_execute", forbidden_sql)
+    assert domain_snapshot(session) == before
+    assert choice.physical_text == raw
+
+
+def test_batch_canonical_preview_does_not_add_queries_or_fake_inheritance_choices(session):
+    from test_physical_naming_components import component_api
+    components = component_api()
+    service, resolver = naming_api()
+    for number in range(25):
+        root = collection(session, f"Show{number}")
+        title(session, root)
+        title(session, root, "NC", kind="bonus", metadata=False)
+    session.commit()
+    statements = []
+    def record(c, cursor, statement, parameters, context, many):
+        statements.append(statement)
+    event.listen(session.bind, "before_cursor_execute", record)
+    try:
+        context = service.load_physical_naming_context(session)
+        load_count = len(statements)
+        assert load_count <= 6
+        for owner in context.titles.values():
+            result = resolver.resolve_physical_name(context, "title", owner.id)
+            assert components.sanitize_component(result.effective_text).valid
+        assert len(statements) == load_count
+        assert not context.choices
+        assert not session.dirty and not session.new and not session.deleted
+    finally:
+        event.remove(session.bind, "before_cursor_execute", record)
