@@ -32,7 +32,7 @@ from .manual_split import (
 )
 from .models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
-    InternalSubtitle, PhysicalNamingChoice, TitleMetadata, Video, VideoVariantGroup,
+    InternalSubtitle, PhysicalLayoutChoice, PhysicalNamingChoice, TitleMetadata, Video, VideoVariantGroup,
 )
 from .structural_inference import infer_automatic_structural_values
 from .video_variants import reconcile_video_catalog_title
@@ -52,7 +52,8 @@ logger = logging.getLogger(__name__)
 # only (primary -> active, non-primary -> legacy_historical); it is a schema
 # compatibility step, not the start of roadmap V6.
 # Version 7 adds an empty human naming-choice table, without reconstruction or backfill.
-STARTUP_COMPATIBILITY_VERSION = 7
+# Version 8 adds an empty human layout-choice table, without reconstruction or backfill.
+STARTUP_COMPATIBILITY_VERSION = 8
 
 
 def _migrate_unnumbered_duplicate_confirmation_kind(connection) -> None:
@@ -468,6 +469,7 @@ def migrate_schema(engine) -> None:
             title.relative_root_path: title
             for title in session.scalars(select(CatalogTitle).options(
                 selectinload(CatalogTitle.physical_naming_choice),
+                selectinload(CatalogTitle.physical_layout_choice),
             )).all()
         }
         original_titles = set(titles.values())
@@ -506,6 +508,9 @@ def migrate_schema(engine) -> None:
         )
         used_titles.update(
             title for title in original_titles if title.physical_naming_choice is not None
+        )
+        used_titles.update(
+            title for title in original_titles if title.physical_layout_choice is not None
         )
         for identity in identities_by_title_path.values():
             if identity.title.relative_root_path == ROOT_FOLDER:
@@ -699,6 +704,7 @@ def migrate_schema(engine) -> None:
                         or title.artwork
                         or title.manual_display_title
                         or title.physical_naming_choice is not None
+                        or title.physical_layout_choice is not None
                         or title.preferred_metadata_provider
                         or title.preferred_external_id
                         or title.metadata_locked
@@ -765,6 +771,7 @@ def migrate_schema(engine) -> None:
                 or title.manual_split_rule_videos
                 or title.video_variant_groups
                 or title.physical_naming_choice is not None
+                or title.physical_layout_choice is not None
             ):
                 continue
             session.delete(title)
@@ -793,7 +800,9 @@ def migrate_schema(engine) -> None:
             else "conflict"
         )
         for legacy in original_titles - used_titles:
-            if legacy.metadata_requirement_manual is not None or legacy.physical_naming_choice is not None:
+            if (legacy.metadata_requirement_manual is not None
+                or legacy.physical_naming_choice is not None
+                or legacy.physical_layout_choice is not None):
                 # A retained workflow decision is not a disposable placeholder.
                 continue
             has_metadata = session.get(TitleMetadata, legacy.id) is not None
@@ -895,7 +904,9 @@ def migrate_schema_at_startup(engine) -> bool:
             _migrate_unnumbered_duplicate_confirmation_kind(connection)
         if current in (1, 2, 3, 4, 5):
             _migrate_external_title_link_lifecycle(connection)
-        PhysicalNamingChoice.__table__.create(connection, checkfirst=True)
+        if current < 7:
+            PhysicalNamingChoice.__table__.create(connection, checkfirst=True)
+        PhysicalLayoutChoice.__table__.create(connection, checkfirst=True)
         connection.execute(text(
             f"PRAGMA user_version = {STARTUP_COMPATIBILITY_VERSION}"
         ))

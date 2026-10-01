@@ -32,7 +32,7 @@ nebo odklad, nikdy „chytrý“ filename guess.
 Fyzické názvy jsou nezávislé na UI display preferenci. Změna preferovaného
 jazyka zobrazení (Romaji/English/Native) fyzickou knihovnu nepřejmenovává.
 
-## Naming ≠ hierarchy
+## Naming ≠ Layout ≠ Hierarchy
 
 Tvrdý invariant: **naming choice je fyzická presentation, hierarchy je doménová
 autorita; jsou to oddělené osy.**
@@ -44,6 +44,12 @@ autorita; jsou to oddělené osy.**
   z názvu Partu, ale tím se nikdy nestane `Part = 1`.
 - Naming Review ani uložení naming choice nemění hierarchy, numbering,
   content type, ordinal, varianty, duplicity ani metadata vazby.
+
+Physical Naming říká, jak se fyzický objekt jmenuje. Physical Layout říká,
+jak se authoritative `CatalogTitle` seskupí. Hierarchy určuje root/Season/Part
+attachment a metadata určuje provider identity. Layout choice nemá folder
+text ani hierarchy/numbering/metadata authority; název případného own folderu
+se později resolve-ne z Physical Naming stejného title.
 
 ## Collection root
 
@@ -172,6 +178,75 @@ redundanci řeší Naming Review.
 
 ## Supplementary obsah
 
+### Physical Layout
+
+Vlastní confirmed metadata identita je **candidate na own folder, nikoli
+automatický own folder**. Candidate link není own metadata authority. Mini
+Dra (`Kobayashi-san Chi no Maidragon S: Mini Dra`, Season 2) je referenční
+strong candidate: více souvisejících logical položek. Oresuki singleton OVA
+je optional candidate; člověk může explicitně potvrdit praktické `OVA/`.
+Provider episode count je pouze informace o providerovi, nikoli layout
+identity nebo completeness blocker.
+
+Bez own metadata nebo při explicitní lidské volbě sdíleného grouping platí:
+
+| Obsah | Shared grouping |
+| --- | --- |
+| OVA | `OVA/` |
+| Special | `Specials/` |
+| příběhový Preview / Episode 0 / Prologue | přímo authoritative `Season NN/`, canonical postfix |
+| Recap | přímo authoritative `Season NN/`, Recap postfix |
+| OP / ED / NCOP / NCED | `Extras/Openings & Endings/` |
+| PV / trailer / CM | `Extras/Promo/` |
+| skutečný Bonus / drama / voice drama / storyboard / music video | `Extras/Bonus/` |
+| release menu video | `Extras/Menus/` |
+
+Own folder **nahrazuje** shared grouping: Season-attached title bude
+`<Root>/Season NN/<Own Folder>/...`, root-attached title
+`<Root>/<Own Folder>/...`, nikdy `Extras/<Own Folder>/...`. Part folder
+nevzniká; Season-attached supplementary s `Part=None` zůstává u celé Season
+i při několika main Partech. Naming prefix převzatý z Partu to nemění.
+`Interviews/`, `Featurettes/` ani `Other/` nejsou schválené layout kinds.
+Interview Special je pro resolver nejednoznačný (`shared_specials` nebo
+`extras_bonus`) a vyžaduje člověka; resolver nepřeklasifikuje obsah. Pro #279
+je lidské rozhodnutí schválené (viz [Zaznamenaná lidská
+rozhodnutí](#zaznamenaná-lidská-rozhodnutí)).
+
+Implementovaný foundation ukládá `PhysicalLayoutChoice` pouze po explicitním
+lidském confirm, včetně potvrzení defaultu. Jeden CatalogTitle má nejvýše
+jednu choice; delete ownera ji smaže cascade. Absence row znamená bez
+uloženého lidského rozhodnutí. Confirm/reconfirm/reset je explicitní service,
+commit patří callerovi. Review flags jsou derived a nikdy se neukládají.
+Layout Review UI, target planner ani execution nejsou implementované.
+
+Bez choice použije čistý resolver jen jednoznačné shared defaults. Own
+metadata strong/optional candidate zůstává unresolved human Layout Review,
+nikoli automatický own folder. Authoritative Season Preview/Prologue
+(Ansatsu episode 0, Arifureta Prologue, Fate Initium Iter, SAO Reflection)
+zůstává direct Season i s own metadata. PV v Bonus kontejneru je Promo.
+Recap videa uvnitř main Season title nevytvářejí další layout ownera.
+
+Deterministic version-1 basis zahrnuje owner/collection ID, derived root/Season
+attachment, effective content/grouping profile, vlastní confirmed
+`(provider, external_id)` nebo explicitní absenci a safe logical count bucket
+`empty/singleton/multiple/unknown`. Count používá supplementary inventory:
+confirmed duplicate secondary, varianty a complete Media Parts nepřidávají
+logical identities; nevyřešená duplicate evidence ponechá count unknown.
+Arifureta OVA #289 je 1 logical item / 2 MP files.
+Neodlišené nečíslované položky stejného typu ponechají count unknown; variant
+nebo MP rows z nich nevytvářejí multi-item work. Jednoznačná shared taxonomy
+nevyžaduje vyřešené ordinaly/count: numbering review je samostatná doména.
+
+Move/attachment změna, grouping změna a metadata relink/unlink zachovají
+choice, ale vrátí basis mismatch; fresh basis vzniká jen explicitní reconfirm.
+Metadata text/synonyms/refresh timestamp, naming text/confirmed_at, release
+text (IV marker, název složky), provider count a physical row count nejsou
+basis identity; release text pouze blokuje shared default. Split ponechá
+choice na existujícím ownerovi a nepřenáší ji na nový title. Rebuild ji chrání,
+zahrnuje do fingerprint/parity a neodvozuje z ní membership. Scanner choice
+nevytváří ani nereconfirmuje. Compatibility 7→8 přidává prázdnou tabulku,
+bez backfillu nebo library reconstruction; stabilní v8 startup je no-op.
+
 ### S vlastními confirmed metadaty
 
 Má-li supplementary `CatalogTitle` vlastní potvrzenou AniList vazbu, default
@@ -202,7 +277,7 @@ nabídne názvy relevantních Partů — a pokud už člověk pro Part schválil
 či alternativní fyzický název, nabídne **tento schválený název**, nikoli znovu
 raw Romaji. Příklad: P1 schváleno `Tensura S2`, P2 `Tensura S2 Part 2`;
 season-level bonus dostane na výběr `Tensura S2`, `Tensura S2 Part 2` a custom.
-Zvolený text Part authority nevytváří (viz [Naming ≠ hierarchy](#naming--hierarchy)).
+Zvolený text Part authority nevytváří (viz [Naming ≠ Layout ≠ Hierarchy](#naming--layout--hierarchy)).
 
 ### Identita a tokeny
 
@@ -247,6 +322,7 @@ authority. Implementovaný stav a hranice popisuje PROJECT_STATUS.
 | SAO Reflection, video #2622 | Preview (nikoli Recap), S4, Part None, ordinal None; `00` ve filename není canonical identita |
 | Slime, videa #2805/#2806 | NCOP/NCED, Season S2, Part None — season-level bonus bez P1/P2 |
 | Peter Grill S2 | `Super Extra` je název Season/release, nikoli supplementary marker |
+| Isekai Maou, title #279 (2 interview videa) | content/hierarchy typ zůstává Special; budoucí Physical Layout choice `extras_bonus`, žádná samostatná `Interviews/` taxonomy; foundation choice nebackfilluje |
 
 ## Otevřené V6 design otázky
 
@@ -255,8 +331,10 @@ Následující body nejsou součástí schváleného kontraktu:
 - syntax tokenu pro video varianty (representation lanes);
 - fyzická disposition potvrzených duplicate secondary kopií;
 - fyzická strategie M:N externích titulků;
-- kompletní canonical grammar/parser, včetně Film/Bonus/CM/Menu a finální
-  supplementary folder taxonomy; component sanitizer a foundation formatter
+- kompletní canonical grammar/parser, včetně Film/Bonus/CM/Menu; supplementary
+  grouping taxonomy a persistence/resolver foundation jsou schválené a
+  implementované, Layout Review UI a target planner zatím chybí;
+  component sanitizer a foundation formatter
   jsou již implementované, nikoli target planner;
 - numbering migrace pro canonical filename grammar;
 - transakce aktualizace cest ve filesystemu a DB;

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 from .hierarchy_authority import manual_hierarchy_snapshot_is_complete
 from .physical_naming_types import MAX_PHYSICAL_TEXT_LENGTH, PHYSICAL_NAMING_CHOICE_KINDS
+from .physical_layout_types import PHYSICAL_LAYOUT_KINDS
 
 
 def utc_now() -> datetime:
@@ -184,6 +185,9 @@ class CatalogTitle(Base):
         foreign_keys="PhysicalNamingChoice.catalog_title_id",
         cascade="all, delete-orphan", passive_deletes=True,
     )
+    physical_layout_choice: Mapped[PhysicalLayoutChoice | None] = relationship(
+        cascade="all, delete-orphan", passive_deletes=True,
+    )
     __table_args__ = (CheckConstraint(
         "metadata_status IN ('unlinked','candidates_available','linked_auto','linked_manual','conflict','migration_review_required','unavailable','error')",
         name="ck_catalog_title_metadata_status",
@@ -258,6 +262,29 @@ class PhysicalNamingChoice(Base):
             name="ck_physical_naming_choice_kind",
         ),
         CheckConstraint("json_valid(basis_snapshot_json)", name="ck_physical_naming_choice_basis_json"),
+    )
+
+
+class PhysicalLayoutChoice(Base):
+    """An explicit human grouping decision owned only by one CatalogTitle."""
+
+    __tablename__ = "physical_layout_choices"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    catalog_title_id: Mapped[int] = mapped_column(
+        ForeignKey("catalog_titles.id", ondelete="CASCADE"), nullable=False,
+        unique=True, index=True,
+    )
+    layout_kind: Mapped[str] = mapped_column(String, nullable=False)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    basis_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "layout_kind IN (" + ",".join(repr(kind) for kind in PHYSICAL_LAYOUT_KINDS) + ")",
+            name="ck_physical_layout_choice_kind",
+        ),
+        CheckConstraint("json_valid(basis_snapshot_json)", name="ck_physical_layout_choice_basis_json"),
     )
 
 

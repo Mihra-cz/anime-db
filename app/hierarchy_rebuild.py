@@ -41,6 +41,7 @@ from .models import (
     CatalogCollection,
     CatalogTitle,
     ManualSplitRuleVideo,
+    PhysicalLayoutChoice,
     PhysicalNamingChoice,
     TitleMetadata,
     Video,
@@ -338,6 +339,9 @@ def _load_state(
                     CatalogTitle.physical_naming_choice
                 ),
                 selectinload(CatalogCollection.titles).selectinload(
+                    CatalogTitle.physical_layout_choice
+                ),
+                selectinload(CatalogCollection.titles).selectinload(
                     CatalogTitle.metadata_record
                 ),
                 selectinload(CatalogCollection.titles).selectinload(
@@ -361,6 +365,7 @@ def _load_state(
         titles = list(session.scalars(
             select(CatalogTitle).options(
                 selectinload(CatalogTitle.physical_naming_choice),
+                selectinload(CatalogTitle.physical_layout_choice),
                 selectinload(CatalogTitle.metadata_record),
                 selectinload(CatalogTitle.external_links),
                 selectinload(CatalogTitle.metadata_candidates),
@@ -400,6 +405,21 @@ def _naming_authority_snapshot(collections, titles) -> dict[tuple[str, int], tup
         for scope, owners in (("collection", collections), ("title", titles))
         for owner in owners if owner.physical_naming_choice is not None
     }
+
+
+def _layout_choice_fingerprint(choice: PhysicalLayoutChoice | None) -> tuple | None:
+    if choice is None:
+        return None
+    confirmed_at = choice.confirmed_at
+    if confirmed_at.tzinfo is None:
+        confirmed_at = confirmed_at.replace(tzinfo=timezone.utc)
+    return (choice.id, choice.catalog_title_id, choice.layout_kind,
+            confirmed_at.astimezone(timezone.utc).isoformat(), choice.basis_snapshot_json)
+
+
+def _layout_authority_snapshot(titles) -> dict[int, tuple]:
+    return {title.id: _layout_choice_fingerprint(title.physical_layout_choice)
+            for title in titles if title.physical_layout_choice is not None}
 
 
 def _state_fingerprint(
@@ -452,6 +472,7 @@ def _state_fingerprint(
                 item.episode_filename_pattern,
                 item.manual_display_title,
                 _naming_choice_fingerprint(item.physical_naming_choice),
+                _layout_choice_fingerprint(item.physical_layout_choice),
                 item.preferred_metadata_provider,
                 item.preferred_external_id,
                 item.metadata_status,
@@ -528,6 +549,8 @@ def _title_protection_reasons(title: CatalogTitle) -> tuple[str, ...]:
     reasons: list[str] = []
     if title.physical_naming_choice is not None:
         reasons.append("physical_naming_choice")
+    if title.physical_layout_choice is not None:
+        reasons.append("physical_layout_choice")
     if title.hierarchy_manual_override:
         reasons.append("hierarchy_manual_override")
     if title.hierarchy_verified_at is not None:
@@ -1164,6 +1187,11 @@ def _clone_title(spec: _TitleSpec, synthetic_id: int) -> CatalogTitle:
     if original is not None:
         if original.physical_naming_choice is not None:
             clone.physical_naming_choice = _clone_naming_choice(original.physical_naming_choice)
+        if original.physical_layout_choice is not None:
+            clone.physical_layout_choice = PhysicalLayoutChoice(**{
+                column.name: getattr(original.physical_layout_choice, column.name)
+                for column in PhysicalLayoutChoice.__table__.columns
+            })
         clone.manual_split_rule_videos = [
             ManualSplitRuleVideo(video_id=link.video_id)
             for link in original.manual_split_rule_videos
@@ -1570,10 +1598,13 @@ def _reload_collections(session: Session) -> dict[str, CatalogCollection]:
 def _verify_applied_plan(
     session: Session, plan: HierarchyRebuildPlan,
     expected_naming_authority: dict[tuple[str, int], tuple],
+    expected_layout_authority: dict[int, tuple],
 ) -> None:
     collections, titles, videos = _load_state(session)
     if _naming_authority_snapshot(collections, titles) != expected_naming_authority:
         raise HierarchyRebuildError("Hierarchy apply změnil physical naming authority.")
+    if _layout_authority_snapshot(titles) != expected_layout_authority:
+        raise HierarchyRebuildError("Hierarchy apply změnil physical layout authority.")
     collections_by_path = {item.relative_root_path: item for item in collections}
     titles_by_path = {item.relative_root_path: item for item in titles}
     videos_by_id = {item.id: item for item in videos}
@@ -1645,6 +1676,7 @@ def apply_hierarchy_rebuild_plan(
             "Hierarchy rebuild plan už neodpovídá aktuálnímu stavu databáze."
         )
     expected_naming_authority = _naming_authority_snapshot(collections, titles)
+    expected_layout_authority = _layout_authority_snapshot(titles)
     hard_blockers = tuple(item for item in plan.blockers if item.prevents_apply)
     if hard_blockers:
         raise HierarchyPlanBlockedError(
@@ -1758,7 +1790,7 @@ def apply_hierarchy_rebuild_plan(
                 include_legacy_fallback=False,
             )
         session.flush()
-        _verify_applied_plan(session, plan, expected_naming_authority)
+        _verify_applied_plan(session, plan, expected_naming_authority, expected_layout_authority)
         return HierarchyRebuildResult(plan=plan, applied=True)
 
 

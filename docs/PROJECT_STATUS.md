@@ -113,10 +113,11 @@ Přejmenování, přesuny, import či fyzický cleanup médií nejsou současné
 - Persistence: SQLAlchemy nad SQLite, foreign keys zapnuté pro každé spojení.
   Idempotentní compatibility migrace mají verzovaný startup přes `user_version`;
   stabilní restart neprovádí novou rekonstrukci celé knihovny. Aktuální
-  compatibility verze je 7 (schema verze, nikoli roadmap V6); upgrady 1→2 až
+  compatibility verze je 8 (schema verze, nikoli roadmap V6); upgrady 1→2 až
   5→6 jsou aditivní, bez rekonstrukce. Upgrade 5→6 přidává lifecycle
   `ExternalTitleLink` s pouze mechanickým backfillem. Upgrade 6→7 vytváří prázdnou
-  `physical_naming_choices` bez rekonstrukce a bez backfillu starých názvů.
+  `physical_naming_choices` bez rekonstrukce a bez backfillu starých názvů,
+  upgrade 7→8 stejně prázdnou `physical_layout_choices`.
 - Scanner: rekurzivní evidence MKV/MP4/M4V/AVI, technická data přes `ffprobe`,
   párování a jazyková evidence externích titulků. Velikost a `mtime` určují,
   zda je nutné opakovat probe. Manuální autority se zachovávají.
@@ -171,8 +172,9 @@ resolved identity, neparsuje ji z prefixu ani filename. Skládá root/Season,
 Episode s volitelným Part/MP a schválené supplementary labels včetně exact
 Recap Decimal pozice. Lowercase extension je odděleně validovaná; finální
 filename byte limit zahrnuje suffix i extension. Film/Bonus/CM/Menu, variant
-tokeny, duplicate disposition a finální supplementary folder taxonomy jsou
-dosud otevřené a nevytváří se z nich odhadovaná grammar.
+tokeny a duplicate disposition jsou dosud otevřené a nevytváří se z nich
+odhadovaná grammar. Schválené supplementary grouping je samostatná Physical
+Layout doména; formatter zatím cílové cesty neplánuje.
 
 Physical Naming / Pojmenování má samostatnou centrální sekci `/naming-review`
 a shared [derived review model](../app/naming_review.py) pro frontu a
@@ -190,8 +192,62 @@ suffixy a inherited prefix dependencies; dosud otevřená grammar se neodhaduje.
 Běžné UI display resolvery physical choices nepoužívají. Target planner,
 kolize, warning >240 UTF-16 units absolutní klientské cesty a filesystem
 operace zůstávají další prací; UI nyní žádnou base path nehádá. Nasazení na
-produkční DB je samostatný řízený krok: teprve první startup této verze
-provede aditivní upgrade schema 6→7 bez backfillu naming choices.
+produkční DB je samostatný řízený krok. Naming persistence přidala schema v7;
+současný startup foundation umí aditivní upgrade 7→8 pro layout, bez backfillu.
+Produkční DB zůstává na v7, dokud ji tato verze řízeně nespustí.
+
+### V6 physical layout foundation
+
+**Naming ≠ Layout ≠ Hierarchy.** Naming určuje fyzický text, Layout grouping
+authoritative title a Hierarchy root/Season/Part attachment. Title-only
+`PhysicalLayoutChoice` má unique FK s delete cascade, `layout_kind`, UTC
+`confirmed_at` a versioned deterministic `basis_snapshot_json`; nemá folder
+text ani novou metadata, content, hierarchy nebo numbering authority.
+
+Row vzniká pouze explicitním lidským confirm, i pro potvrzení defaultu.
+[Service](../app/physical_layout_service.py) poskytuje confirm/reconfirm/reset
+s caller-owned transakcí, bez autoflush nesouvisejících pending změn. Reset
+row smaže; absence znamená bez uloženého lidského rozhodnutí. Batch loader
+připraví neměnné scalar evidence pro čistý [resolver](../app/physical_layout.py),
+který nevytváří rows a nepersistuje review flags.
+
+Kinds jsou `own_folder`, `shared_ova`, `shared_specials`, `direct_season`,
+`extras_openings_endings`, `extras_promo`, `extras_bonus`, `extras_menus`.
+Schválená taxonomy je `OVA/`, `Specials/`, direct Season pro příběhový
+Preview/Prologue/Recap a `Extras/Openings & Endings/`, `Extras/Promo/`,
+`Extras/Bonus/`, `Extras/Menus/`; podrobnosti jsou v
+[layout kontraktu](V6_NAMING_CONTRACT.md#physical-layout).
+
+Own confirmed metadata znamenají candidate na own folder, nikoli automatický
+own folder. Bez choice jsou strong/optional candidates unresolved human
+Layout Review. Mini Dra je reference strong candidate; singleton Oresuki může
+člověk potvrdit do shared OVA. Authoritative Season Preview zůstává direct
+Season i s own metadata. Interview grouping ve Special je pro resolver
+nejednoznačný (shared Specials nebo Extras Bonus), bez změny content
+klasifikace. Pro #279 je schválené lidské rozhodnutí `extras_bonus` při
+zachování typu Special; foundation jej nebackfilluje, takže bez uložené
+choice zůstává unresolved.
+
+Basis sleduje title/collection identity, authoritative root/Season attachment,
+effective grouping profile, vlastní confirmed provider identity nebo absenci
+a safe logical count bucket. Count používá společnou supplementary inventory,
+takže validní duplicate secondary, varianty a complete MP nezvyšují logical
+items; duplicate evidence, která se nesloží, ponechá count unknown.
+Metadata/naming text, release text (IV marker, název složky), refresh
+timestamp, provider episode count ani physical row count nejsou identity;
+release text pouze blokuje shared default. Relevantní move/relink/unlink
+zachová choice a otevře derived basis mismatch; nový title po splitu choice
+nedostává.
+Neodlišené nečíslované položky stejného typu mají count unknown, nikoli odhad
+z physical rows. Jednoznačný shared grouping lze resolve-nout i při nejistém
+countu; řešení numbering/identity problémů zůstává jiné doméně.
+
+Rebuild chrání layout ownera, klonuje choice do detached projekce, zahrnuje ji
+do stale-plan fingerprintu a ověřuje preservation parity. Choice nikdy
+nevytváří membership selector. Scanner ji nevytváří ani nereconfirmuje.
+Compatibility 7→8 vytvoří pouze prázdnou tabulku a constraints/index, bez
+backfillu nebo rekonstrukce; druhý v8 startup je no-op. Layout Review UI,
+target planner, cílové cesty a filesystem execution zatím nejsou implementované.
 
 ### Fyzická evidence a logická struktura
 

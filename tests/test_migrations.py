@@ -20,7 +20,7 @@ from app.models import (
 from app.numbering import summarize_title_numbering
 
 
-def test_v6_to_v7_naming_is_additive_without_backfill_or_reconstruction(tmp_path, monkeypatch):
+def test_v6_naming_upgrade_is_additive_without_backfill_or_reconstruction(tmp_path, monkeypatch):
     from app.database import make_engine
     engine = make_engine(f"sqlite:///{tmp_path / 'v6-naming.db'}")
     Base.metadata.create_all(engine)
@@ -39,6 +39,7 @@ def test_v6_to_v7_naming_is_additive_without_backfill_or_reconstruction(tmp_path
     with engine.begin() as connection:
         if "physical_naming_choices" in inspect(connection).get_table_names():
             connection.execute(text("DROP TABLE physical_naming_choices"))
+        connection.execute(text("DROP TABLE physical_layout_choices"))
         connection.execute(text("PRAGMA user_version = 6"))
         before = {name: tuple(connection.exec_driver_sql(f'SELECT * FROM "{name}" ORDER BY rowid'))
                   for name in inspect(connection).get_table_names()}
@@ -53,8 +54,9 @@ def test_v6_to_v7_naming_is_additive_without_backfill_or_reconstruction(tmp_path
     assert migrate_schema_at_startup(engine) is True
     assert "physical_naming_choices" in inspect(engine).get_table_names(), "V6 naming table is missing"
     with engine.connect() as connection:
-        assert connection.scalar(text("PRAGMA user_version")) == 7
+        assert connection.scalar(text("PRAGMA user_version")) == STARTUP_COMPATIBILITY_VERSION
         assert connection.scalar(text("SELECT count(*) FROM physical_naming_choices")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM physical_layout_choices")) == 0
         after = {name: tuple(connection.exec_driver_sql(f'SELECT * FROM "{name}" ORDER BY rowid')) for name in before}
     assert after == before
     assert writes == []
