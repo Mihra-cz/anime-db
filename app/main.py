@@ -227,8 +227,10 @@ from .models import (
     UnresolvedExternalSubtitle, Video, VideoVariantGroup, utc_now,
 )
 from .naming_review import build_naming_review
-from .naming_review_service import naming_review_context_from_models
 from .naming_review_web import install_naming_review_routes
+from .layout_review import aggregate_naming_badge, build_layout_review
+from .layout_review_service import layout_review_context_from_models
+from .layout_review_web import install_layout_review_routes
 from .numbering import (
     apply_deterministic_bulk_renumber, apply_sequential_numbering,
     confirmed_duplicate_groups, preview_sequential_numbering,
@@ -425,6 +427,10 @@ def _load_collection_titles_with_artwork(
             joinedload(CatalogCollection.physical_naming_choice),
             joinedload(CatalogCollection.titles).joinedload(CatalogTitle.physical_naming_choice),
             joinedload(CatalogCollection.titles).joinedload(CatalogTitle.metadata_record),
+            joinedload(CatalogCollection.titles).joinedload(CatalogTitle.physical_layout_choice),
+            joinedload(CatalogCollection.titles).joinedload(CatalogTitle.collection),
+            joinedload(CatalogCollection.titles).joinedload(CatalogTitle.videos).joinedload(Video.catalog_title).joinedload(CatalogTitle.collection),
+            joinedload(CatalogCollection.titles).joinedload(CatalogTitle.videos).joinedload(Video.duplicate_of).joinedload(Video.catalog_title).joinedload(CatalogTitle.collection),
         )
     with sessions() as session:
         collections = session.scalars(statement).unique().all()
@@ -437,8 +443,10 @@ def _load_collection_titles_with_artwork(
             },
         )
         if include_naming:
-            context = naming_review_context_from_models(collections, [title for collection in collections for title in collection.titles])
-            return (*values, build_naming_review(context).collection_badges)
+            context = layout_review_context_from_models(collections, [title for collection in collections for title in collection.titles])
+            layout = build_layout_review(context)
+            badges = build_naming_review(context.naming).collection_badges
+            return (*values, {cid: aggregate_naming_badge(badge, layout, collection_id=cid) for cid, badge in badges.items()})
         return values
 
 
@@ -732,6 +740,8 @@ def _load_catalog_title(session, catalog_title_id: int | None):
         return None
     return session.scalar(select(CatalogTitle).options(
         joinedload(CatalogTitle.physical_naming_choice),
+        joinedload(CatalogTitle.physical_layout_choice),
+        selectinload(CatalogTitle.collection).selectinload(CatalogCollection.titles).joinedload(CatalogTitle.physical_layout_choice),
         selectinload(CatalogTitle.collection).joinedload(CatalogCollection.physical_naming_choice),
         selectinload(CatalogTitle.collection).selectinload(CatalogCollection.titles).joinedload(CatalogTitle.physical_naming_choice),
         selectinload(CatalogTitle.collection).selectinload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
@@ -1097,6 +1107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.sessions = sessions
     app.state.metadata_provider = AniListProvider(settings.metadata_request_timeout_seconds)
     install_naming_review_routes(app, templates, sessions, safe_local_redirect_target, local_redirect_response)
+    install_layout_review_routes(app, templates, sessions, safe_local_redirect_target, local_redirect_response)
     app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
     settings.metadata_artwork_directory.mkdir(parents=True, exist_ok=True)
     app.mount("/artwork", StaticFiles(directory=settings.metadata_artwork_directory, check_dir=False), name="artwork")
@@ -1581,11 +1592,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if catalog_title_id is None:
                     catalog_title = _load_catalog_title(session, catalog_title.id)
                 collection = catalog_title.collection
-                naming_context = naming_review_context_from_models(
+                naming_context = layout_review_context_from_models(
                     [collection] if collection is not None else [],
                     collection.titles if collection is not None else [catalog_title],
                 )
-                title_naming_badge = build_naming_review(naming_context).title_badges[catalog_title.id]
+                naming_badge = build_naming_review(naming_context.naming).title_badges[catalog_title.id]
+                title_naming_badge = aggregate_naming_badge(naming_badge, build_layout_review(naming_context), collection_id=catalog_title.catalog_collection_id, title_id=catalog_title.id)
         if catalog_title and request.url.path.startswith("/catalog/"):
             parameters = {"filter_name": filter_name}
             if q:
@@ -1910,13 +1922,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             collection = session.scalar(select(CatalogCollection).options(
                 joinedload(CatalogCollection.physical_naming_choice),
                 selectinload(CatalogCollection.titles).joinedload(CatalogTitle.physical_naming_choice),
+                selectinload(CatalogCollection.titles).joinedload(CatalogTitle.physical_layout_choice),
+                selectinload(CatalogCollection.titles).joinedload(CatalogTitle.collection),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.metadata_record),
-                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos),
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos).joinedload(Video.catalog_title).joinedload(CatalogTitle.collection),
+                selectinload(CatalogCollection.titles).selectinload(CatalogTitle.videos).joinedload(Video.duplicate_of).joinedload(Video.catalog_title).joinedload(CatalogTitle.collection),
                 selectinload(CatalogCollection.titles).joinedload(CatalogTitle.artwork),
                 selectinload(CatalogCollection.titles).selectinload(CatalogTitle.external_links),
             ).where(CatalogCollection.id == collection_id))
-            naming_badge = (build_naming_review(naming_review_context_from_models([collection], collection.titles)).collection_badges[collection.id]
-                            if collection is not None else None)
+            naming_badge = None
+            if collection is not None:
+                context = layout_review_context_from_models([collection], collection.titles)
+                naming_badge = aggregate_naming_badge(build_naming_review(context.naming).collection_badges[collection.id], build_layout_review(context), collection_id=collection.id)
         if collection is None:
             raise HTTPException(status_code=404, detail="Kolekce nebyla nalezena")
         all_videos = _load_videos(

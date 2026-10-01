@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Rozložení – AnimeDB{% endblock %}
+{% block main_class %}content-shell content-wide naming-review layout-review{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', path='naming_review.css') }}"><link rel="stylesheet" href="{{ url_for('static', path='layout_review.css') }}">{% endblock %}
+{% block content %}
+<div class="heading"><div><h1>Pojmenování · Rozložení</h1><p>Vyber, jak se část fyzicky seskupí. Fyzický název nastavuje záložka Názvy, umístění určuje Hierarchie.</p></div></div>
+{% include '_naming_review_tabs.html' %}
+<nav class="filter-nav naming-filters" aria-label="Filtry rozložení">{% for key, label, url, count in filter_links %}<a href="{{ url }}"{% if key == status %} class="active" aria-current="page"{% endif %}>{{ label }} <span class="naming-filter-count">{{ count }}</span></a>{% endfor %}</nav>
+<form method="get" action="/naming-review/layout" class="search-form naming-search" role="search"><input type="hidden" name="status" value="{{ status }}">{% if collection_id %}<input type="hidden" name="collection_id" value="{{ collection_id }}">{% endif %}{% if title_id %}<input type="hidden" name="title_id" value="{{ title_id }}">{% endif %}<label for="layout-search">Hledat kolekci, část nebo fyzický název</label><input id="layout-search" class="search-input" type="search" name="q" value="{{ q }}"><button type="submit">Hledat</button></form>
+{% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+<div class="naming-unit-list">
+{% for row in rows %}
+{% set choice = row.resolution.choice %}
+<article class="panel naming-unit" id="layout-title-{{ row.title_id }}" data-layout-title="{{ row.title_id }}" aria-labelledby="layout-title-{{ row.title_id }}-heading">
+  <div class="naming-unit-heading"><div><span class="naming-scope">{{ row.attachment_label }} · {{ {'ova':'OVA','special':'Special','bonus':'Bonus','preview':'Preview / Prologue'}.get(row.resolution.owner_title.hierarchy_type, 'Doplňkový obsah') }}</span><h2 id="layout-title-{{ row.title_id }}-heading">{% if row.collection_id %}<a href="/collections/{{ row.collection_id }}">{{ row.evidence.collection_label }}</a> / {% endif %}<a href="/titles/{{ row.title_id }}">{{ row.evidence.local_title }}</a></h2></div><span class="status-badge naming-state">{{ row.state_label }}</span></div>
+  <p>{% if row.resolution.logical_count is none %}Počet logických položek nelze bezpečně určit{% else %}<strong>{{ row.resolution.logical_count }} {{ 'položka' if row.resolution.logical_count == 1 else 'položky' if row.resolution.logical_count < 5 else 'položek' }}</strong>{% endif %} · {{ row.physical_count }} {{ 'soubor' if row.physical_count == 1 else 'soubory' if row.physical_count < 5 else 'souborů' }}</p>
+  {% if row.resolution.own_metadata_identity %}<p>Vlastní potvrzená metadata: <strong>{{ row.evidence.metadata_romaji or 'Název není dostupný' }}</strong><br><small>{{ row.resolution.own_metadata_identity[0] }} · {{ row.resolution.own_metadata_identity[1] }}</small></p>{% endif %}
+  {% if row.reason_messages %}<ul class="naming-reasons">{% for reason in row.reason_messages %}<li>{{ reason }}</li>{% endfor %}</ul>{% endif %}
+  {% if row.physical_naming %}<p class="layout-name">Fyzické pojmenování: <strong>{{ row.physical_naming }}</strong></p>{% endif %}
+  {% if row.naming_warning %}<p class="warning">Náhled vlastní složky může vyžadovat kontrolu názvu. <a href="/naming-review?title_id={{ row.title_id }}{% if row.collection_id %}&amp;collection_id={{ row.collection_id }}{% endif %}">Otevřít Názvy</a></p>{% endif %}
+  {% if row.layout_label %}<p>Aktuální rozložení: <strong>{{ row.layout_label }}</strong> · {{ row.attachment_label }}</p>{% endif %}
+  {% if choice %}<p class="naming-confirmation">Potvrzeno <time datetime="{{ choice.confirmed_at.isoformat() }}">{{ choice.confirmed_at.strftime('%d. %m. %Y %H:%M') }} UTC</time><br>{{ 'Potvrzení odpovídá aktuálnímu kontextu.' if row.resolution.basis_matches else 'Potvrzení vyžaduje novou kontrolu kontextu.' }}</p>{% endif %}
+  {% if row.candidates %}
+  <form class="naming-choice-form" method="post" action="/naming-review/layout/title/{{ row.title_id }}/save">
+    <input type="hidden" name="fingerprint" value="{{ row.fingerprint }}"><input type="hidden" name="return_to" value="{{ return_to }}">
+    <fieldset><legend>Kam se obsah seskupí?</legend><div class="naming-candidates">
+    {% for candidate in row.candidates %}<div class="naming-candidate{% if not candidate.valid %} naming-candidate-invalid{% endif %}">
+      <label class="naming-candidate-choice" for="layout-{{ row.title_id }}-{{ candidate.layout_kind }}"><input id="layout-{{ row.title_id }}-{{ candidate.layout_kind }}" type="radio" name="candidate_key" value="{{ candidate.layout_kind }}" required{% if not candidate.valid %} disabled{% endif %}{% if submitted and submitted.title_id == row.title_id and submitted.candidate_key == candidate.layout_kind or not submitted and choice and choice.layout_kind == candidate.layout_kind %} checked{% endif %}><span>{{ candidate.label }}{% if candidate.recommended %}<small>Doporučeno</small>{% endif %}</span></label>
+      <p>{{ candidate.explanation }}</p>{% if candidate.preview %}<pre class="layout-tree">{{ candidate.preview }}</pre>{% endif %}
+      <small class="naming-source">{{ candidate.source }}</small>
+    </div>{% endfor %}
+    </div></fieldset><div class="naming-save-actions"><button type="submit">Uložit rozložení</button><span>Doporučení se ukládá až vaším potvrzením.</span></div>
+  </form>
+  {% endif %}
+  {% if choice %}<div class="naming-saved-actions">
+    {% if row.can_reconfirm %}<form method="post" action="/naming-review/layout/title/{{ row.title_id }}/reconfirm"><input type="hidden" name="fingerprint" value="{{ row.fingerprint }}"><input type="hidden" name="return_to" value="{{ return_to }}"><button type="submit">Znovu potvrdit současné rozložení</button></form>{% endif %}
+    <form method="post" action="/naming-review/layout/title/{{ row.title_id }}/reset"><input type="hidden" name="fingerprint" value="{{ row.fingerprint }}"><input type="hidden" name="return_to" value="{{ return_to }}"><button class="button-secondary" type="submit">Vrátit k automatickému / odvozenému rozložení</button></form>
+  </div>{% endif %}
+  <details class="layout-evidence"><summary>Podrobnosti identity a souborů</summary><p>Část #{{ row.title_id }} · {{ row.evidence.media_part_count }} souborů s Media Part · {{ row.evidence.variant_count }} variantových skupin · {{ row.evidence.duplicate_count }} vazeb kopií. Správně určené varianty, kopie a Media Parts nezvyšují počet logických položek.</p></details>
+</article>
+{% else %}<div class="panel"><p>V tomto výběru není žádné rozložení k zobrazení.</p></div>{% endfor %}
+</div>
+{% endblock %}

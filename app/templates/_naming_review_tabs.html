@@ -1,0 +1,3 @@
+<nav class="filter-nav naming-filters naming-tabs" aria-label="Oblasti pojmenování">
+{% for key, label, url, count, active in review_tabs|default(()) %}<a href="{{ url }}"{% if active %} class="active" aria-current="page"{% endif %}>{{ label }} <span class="naming-filter-count">{{ count }} k vyřízení</span></a>{% endfor %}
+</nav>

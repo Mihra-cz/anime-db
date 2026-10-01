@@ -22,6 +22,7 @@
 
 {% block content %}
 <div class="heading"><div><h1>Pojmenování</h1><p>Vyber fyzický název rootu nebo prefix části. Každou volbu potvrď samostatně.</p></div><p class="naming-page-dirty" data-naming-dirty aria-live="polite">Žádné neuložené změny.</p></div>
+{% include '_naming_review_tabs.html' %}
 <nav class="filter-nav naming-filters" aria-label="Filtry pojmenování">{% for key, label, url, count in filter_links %}<a href="{{ url }}" {% if key == status %}class="active" aria-current="page"{% endif %}>{{ label }} <span class="naming-filter-count">{{ count }}</span></a>{% endfor %}</nav>
 <form method="get" action="/naming-review" class="search-form naming-search" role="search"><input type="hidden" name="status" value="{{ status }}">{% if collection_id %}<input type="hidden" name="collection_id" value="{{ collection_id }}">{% endif %}{% if title_id %}<input type="hidden" name="title_id" value="{{ title_id }}">{% endif %}<label for="naming-search">Hledat kolekci nebo část</label><input id="naming-search" class="search-input" type="search" name="q" value="{{ q }}"><button type="submit">Hledat</button></form>
 {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}

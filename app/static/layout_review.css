@@ -1,0 +1,8 @@
+.layout-review .layout-tree { white-space: pre-wrap; overflow-wrap: anywhere; margin: .8rem 0; padding: .8rem; background: #0b111b; border-radius: 6px; }
+.layout-review .layout-name { overflow-wrap: anywhere; }
+.layout-review .layout-evidence { margin-top: 1rem; color: #aab4c5; }
+.layout-review .layout-evidence summary { cursor: pointer; min-height: 44px; display: list-item; padding: .7rem 0; }
+.layout-review .layout-evidence p { line-height: 1.55; }
+.layout-review .naming-candidate p { line-height: 1.5; }
+.layout-review :is(h2, p, small) { overflow-wrap: anywhere; }
+.layout-review summary:focus-visible { outline: 3px solid #c4b5fd; outline-offset: 3px; }

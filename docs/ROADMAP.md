@@ -183,7 +183,7 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 
 Orientační pořadí; podrobné členění fází se stanoví až při jejich schválení.
 
-1. Canonical naming a struktura (naming kontrakt, Naming Review).
+1. Canonical naming a struktura (naming kontrakt, Naming Review a Layout Review).
 2. Planner a preview konkrétních operací.
 3. Bezpečný execution základ (transakce cest, manifest, rollback/recovery).
 4. Fyzický a logický úklid NAS, včetně disposition potvrzených duplicit.

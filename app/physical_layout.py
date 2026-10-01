@@ -11,7 +11,7 @@ import json
 from typing import Mapping
 
 from .hierarchy_types import SUPPLEMENTARY_PART_TYPES
-from .physical_layout_types import PHYSICAL_LAYOUT_KINDS
+from .physical_layout_types import PHYSICAL_LAYOUT_KINDS, SHARED_CONTENT_LAYOUTS
 
 
 LAYOUT_TITLE_TYPES = SUPPLEMENTARY_PART_TYPES - {"film"}
@@ -120,15 +120,8 @@ def _recommendation(title: LayoutTitle) -> tuple[str, str | None]:
         return ("OWN_FOLDER_STRONG" if title.logical_count >= 2 else "OWN_FOLDER_OPTIONAL"), "own_folder"
     if title.interview_evidence:
         return "NEEDS_HUMAN_LAYOUT", None
-    defaults = {
-        "ova": "shared_ova", "special": "shared_specials",
-        "op": "extras_openings_endings", "ed": "extras_openings_endings",
-        "ncop": "extras_openings_endings", "nced": "extras_openings_endings",
-        "cm": "extras_promo", "bonus": "extras_bonus", "menu": "extras_menus",
-    }
-    if title.hierarchy_type != "preview":
-        defaults["preview"] = "extras_promo"
-    groups = {defaults.get(kind) for kind in types}
+    groups = {None if kind == 'preview' and title.hierarchy_type == 'preview'
+              else SHARED_CONTENT_LAYOUTS.get(kind) for kind in types}
     if groups and None not in groups and len(groups) == 1:
         return "SHARED_LAYOUT", groups.pop()
     return "NEEDS_HUMAN_LAYOUT", None

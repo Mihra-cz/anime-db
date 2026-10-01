@@ -246,8 +246,39 @@ Rebuild chrání layout ownera, klonuje choice do detached projekce, zahrnuje ji
 do stale-plan fingerprintu a ověřuje preservation parity. Choice nikdy
 nevytváří membership selector. Scanner ji nevytváří ani nereconfirmuje.
 Compatibility 7→8 vytvoří pouze prázdnou tabulku a constraints/index, bez
-backfillu nebo rekonstrukce; druhý v8 startup je no-op. Layout Review UI,
-target planner, cílové cesty a filesystem execution zatím nejsou implementované.
+backfillu nebo rekonstrukce; druhý v8 startup je no-op. Target planner, cílové
+cesty a filesystem execution zatím nejsou implementované.
+
+### V6 physical layout review
+
+Layout Review UI je záložka **Rozložení** na `/naming-review/layout`, vedle
+**Názvy** na `/naming-review`. Hlavní navigace zůstává Pojmenování. Obě
+záložky ukazují oddělené derived počty; společný status v knihovně a detailech
+zahrnuje i layout práci a při ní odkazuje přímo do scope Rozložení. Naming Review semantics se nemění.
+
+[Sdílený read model](../app/layout_review.py) vytváří frontu, applicable
+kandidáty, doporučení a náhledy nad batch evidence. K vyřízení obsahuje jen
+skutečná lidská rozhodnutí a stale choices; bezpečné shared/direct Season
+defaults jsou ve Vše označené Odvozené. Vlastní metadata nikdy sama
+nepotvrzují vlastní složku. Mini Dra nabídne celý sanitized PhysicalNaming,
+Oresuki doporučené OVA a interview Special také Extras/Bonus bez změny typu.
+MP, varianty a validní duplicate copies nezvyšují zobrazený logical count;
+nejistá identita se ukáže jako neznámá, nikoli jako počet souborů.
+
+Save/reconfirm/reset používají foundation service v caller-owned transakci.
+POST znovu ověří current context, fingerprint a serverové kandidáty; root
+owner nemůže potvrdit direct Season. GET je read-only. Fingerprint sleduje
+basis, uloženou layout choice a applicability kandidátů, nikoli naming text,
+metadata Romaji, provider count, filename nebo timestamps. Platné naming
+přejmenování mění preview, nikoli layout potvrzení; naming problém má vlastní
+odkaz do Názvy a fail-safe own-folder náhled. Žádný folder text se neukládá.
+Reconfirm se nabízí jen pro stále použitelnou uloženou volbu; položka bez
+použitelného rozložení odkazuje do Hierarchie místo prázdné volby.
+
+Produkční DB zůstává schema v7, bez tabulky/rows PhysicalLayoutChoice;
+UI write workflow je ověřené pouze na dočasné v8 DB. Nasazení, řízená migrace
+a lidské potvrzení produkčních voleb zůstávají samostatným krokem. UI není
+target planner a neprovádí žádné filesystem operace.
 
 ### Fyzická evidence a logická struktura
 

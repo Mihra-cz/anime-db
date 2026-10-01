@@ -217,7 +217,21 @@ lidském confirm, včetně potvrzení defaultu. Jeden CatalogTitle má nejvýše
 jednu choice; delete ownera ji smaže cascade. Absence row znamená bez
 uloženého lidského rozhodnutí. Confirm/reconfirm/reset je explicitní service,
 commit patří callerovi. Review flags jsou derived a nikdy se neukládají.
-Layout Review UI, target planner ani execution nejsou implementované.
+Layout Review UI je implementované v záložce Rozložení na
+`/naming-review/layout`; Názvy zůstávají na `/naming-review`. Výchozí
+fronta obsahuje pouze required human decisions a stale choices. Bezpečné
+derived defaults nevyžadují další potvrzení. Radio kandidáti a jedna Save
+akce vyžadují explicitní volbu, i při potvrzení doporučeného shared defaultu.
+Server před save/reconfirm znovu ověří applicability a stale-form fingerprint.
+Direct Season lze nabídnout pouze pro applicable Season context.
+
+Náhled vlastní složky používá aktuální PhysicalNaming resolver a společný
+sanitizer; nikdy nekrátí Mini Dra na vlastní layout text. Platný naming rename
+nemění layout basis ani form identity. Unresolved/invalid Naming náhled
+zablokuje a odkazuje na Názvy, ale layout UI naming authority nepotvrzuje.
+Produkční DB stále používá schema v7 a nemá PhysicalLayoutChoice rows;
+produkční layout rozhodnutí ani backfill neproběhly. Target planner a execution
+nejsou implementované.
 
 Bez choice použije čistý resolver jen jednoznačné shared defaults. Own
 metadata strong/optional candidate zůstává unresolved human Layout Review,

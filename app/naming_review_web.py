@@ -5,9 +5,11 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .models import CatalogCollection, CatalogTitle
+from .layout_review import build_layout_review, review_tabs
+from .layout_review_service import load_layout_review_context
 from .naming_review import build_naming_review, filter_naming_units, make_naming_candidate
 from .naming_review_service import (
-    StaleNamingForm, apply_naming_review_decision, load_naming_review_context,
+    StaleNamingForm, apply_naming_review_decision,
     validate_naming_fingerprint,
 )
 
@@ -16,7 +18,7 @@ FILTERS = (('pending', 'K vyřízení'), ('roots', 'Root názvy'), ('titles', 'N
 
 def install_naming_review_routes(app, templates, sessions, safe_redirect_target, redirect_response):
     def render(request, index, *, status='pending', q='', collection_id=None, title_id=None,
-               error=None, submitted=None, custom_preview=None, status_code=200, return_to=None):
+               error=None, submitted=None, custom_preview=None, status_code=200, return_to=None, layout_index=None):
         try:
             rows = filter_naming_units(index, status=status, q=q, collection_id=collection_id, title_id=title_id)
         except ValueError as exc:
@@ -40,13 +42,16 @@ def install_naming_review_routes(app, templates, sessions, safe_redirect_target,
             # A rejected POST keeps the caller's queue for the corrected retry.
             'filter_links': filter_links, 'return_to': return_to or '/naming-review?' + urlencode(params),
             'error': error, 'message': None, 'submitted': submitted, 'custom_preview': custom_preview,
+            'review_tabs': review_tabs(index, layout_index, active='names', collection_id=collection_id, title_id=title_id),
         }, status_code=status_code)
 
     @app.get('/naming-review', response_class=HTMLResponse)
     def naming_review(request: Request, status: str = 'pending', q: str = '', collection_id: int | None = None, title_id: int | None = None):
         with sessions() as session:
-            index = build_naming_review(load_naming_review_context(session))
-        return render(request, index, status=status, q=q, collection_id=collection_id, title_id=title_id)
+            context = load_layout_review_context(session)
+            index = build_naming_review(context.naming)
+            layout_index = build_layout_review(context)
+        return render(request, index, status=status, q=q, collection_id=collection_id, title_id=title_id, layout_index=layout_index)
 
     async def checked_form(request):
         origin = request.headers.get('origin')
@@ -77,17 +82,18 @@ def install_naming_review_routes(app, templates, sessions, safe_redirect_target,
 
     def owner_index(session, owner):
         cid = owner.id if isinstance(owner, CatalogCollection) else owner.catalog_collection_id
-        return build_naming_review(load_naming_review_context(
+        context = load_layout_review_context(
             session, collection_ids=[cid] if cid is not None else [],
             title_ids=[owner.id] if isinstance(owner, CatalogTitle) else [],
-        ))
+        )
+        return build_naming_review(context.naming), build_layout_review(context)
 
     @app.post('/naming-review/{scope}/{owner_id}/preview')
     async def naming_preview(request: Request, scope: str, owner_id: int):
         form = await checked_form(request)
         with sessions() as session:
             owner = owner_for(session, scope, owner_id)
-            index = owner_index(session, owner)
+            index, layout_index = owner_index(session, owner)
             unit = index.units[scope, owner.id]
             try: validate_naming_fingerprint(unit, form.get('fingerprint'))
             except StaleNamingForm as exc: return JSONResponse({'detail': str(exc)}, status_code=409)
@@ -104,7 +110,7 @@ def install_naming_review_routes(app, templates, sessions, safe_redirect_target,
         return_to = safe_redirect_target(str(form.get('return_to') or '/naming-review'))
         with sessions() as session:
             owner = owner_for(session, scope, owner_id)
-            index = owner_index(session, owner)
+            index, layout_index = owner_index(session, owner)
             submitted = {'owner_tag': f'{scope}:{owner.id}', 'candidate_key': form.get('candidate_key', ''), 'custom_text': form.get('custom_text', '')}
             try:
                 apply_naming_review_decision(session, owner, index, action=action,
@@ -115,7 +121,7 @@ def install_naming_review_routes(app, templates, sessions, safe_redirect_target,
                 preview = make_naming_candidate(index.context, (scope, owner.id), submitted['custom_text'], 'custom') if submitted['candidate_key'] == 'custom' else None
                 return render(request, index, status='all', collection_id=index.units[scope, owner.id].collection_id,
                     error=str(exc), submitted=submitted, custom_preview=preview, status_code=409 if isinstance(exc, StaleNamingForm) else 400,
-                    return_to=return_to)
+                    return_to=return_to, layout_index=layout_index)
         return redirect_response(return_to)
 
     @app.post('/naming-review/{scope}/{owner_id}/save')
