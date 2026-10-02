@@ -1228,6 +1228,7 @@ def _clone_video(video: Video) -> Video:
         content_type_manual=video.content_type_manual,
         media_part_number=video.media_part_number,
         duplicate_status_manual=video.duplicate_status_manual,
+        duplicate_confirmation_kind=video.duplicate_confirmation_kind,
         duplicate_of_video_id=video.duplicate_of_video_id,
         duplicate_primary_missing=video.duplicate_primary_missing,
     )

@@ -5,7 +5,7 @@ from decimal import Decimal
 from pathlib import PurePosixPath
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
 from app.catalog import normalize_title
@@ -31,6 +31,8 @@ from app.models import (
     utc_now,
 )
 from app.numbering import (
+    DuplicateRelationState,
+    duplicate_relation_state,
     effective_recap_episode_number,
     set_video_episode_number_from_input,
 )
@@ -1086,6 +1088,112 @@ def test_fractional_recap_manual_change_invalidates_rebuild_plan(monkeypatch):
             apply_hierarchy_rebuild_plan(session, stale_plan)
         assert recap.recap_episode_number_manual_tenths == 55
         assert effective_recap_episode_number(recap) == Decimal("5.5")
+
+
+@pytest.fixture
+def confirmed_film_copies():
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as session:
+        collection = _collection("Anime/Film (FILM)")
+        title = _title(
+            collection.relative_root_path, collection, part_type="film",
+            hierarchy_manual_override=True, part_type_manual="film",
+        )
+        primary = _video(
+            "Anime/Film (FILM)/Film.mkv", title=title, collection=collection, file_type="other",
+        )
+        copies = [
+            _video(
+                f"Anime/Film (FILM)/{filename}", title=title, collection=collection,
+                file_type="other", duplicate_of=primary,
+                duplicate_confirmation_kind="unnumbered_supplementary_same_content",
+            )
+            for filename in ("Film copy.mkv", "Alternate film.m4v")
+        ]
+        session.add_all([primary, *copies])
+        session.commit()
+        assert all(
+            duplicate_relation_state(copy) == DuplicateRelationState.VALID
+            for copy in copies
+        )
+        yield session, collection, title, primary, copies
+    engine.dispose()
+
+
+def test_detached_video_clone_preserves_valid_unnumbered_duplicate(confirmed_film_copies):
+    from app.hierarchy_rebuild import _clone_collection, _clone_title, _clone_video, _TitleSpec
+
+    session, collection, title, primary, copies = confirmed_film_copies
+    root_clone = _clone_collection(collection, None, -1)
+    title_clone = _clone_title(
+        _TitleSpec(title, None, collection.relative_root_path, True, ()), -2,
+    )
+    title_clone.collection = root_clone
+    title_clone.catalog_collection_id = root_clone.id
+    clones = {video.id: _clone_video(video) for video in [primary, *copies]}
+    for clone in clones.values():
+        clone.catalog_title = title_clone
+        clone.catalog_title_id = title_clone.id
+        clone.catalog_collection = root_clone
+        clone.catalog_collection_id = root_clone.id
+    for copy in copies:
+        clone = clones[copy.id]
+        clone.duplicate_of = clones[primary.id]
+        assert clone.duplicate_of_video_id == primary.id
+        assert (clone.duplicate_confirmation_kind, duplicate_relation_state(clone)) == (
+            "unnumbered_supplementary_same_content", DuplicateRelationState.VALID,
+        )
+    assert not session.new and not session.dirty and not session.deleted
+
+
+def test_detached_normal_video_clone_has_no_duplicate_evidence():
+    from app.hierarchy_rebuild import _clone_video
+
+    engine = _engine()
+    with Session(engine) as session:
+        video = _video("Anime/Show/E01.mkv", file_type="episode", local_episode_number=1)
+        session.add(video)
+        session.commit()
+        clone = _clone_video(video)
+        assert clone.file_type == "episode"
+        assert clone.local_episode_number == 1
+        assert clone.duplicate_of_video_id is None
+        assert clone.duplicate_confirmation_kind is None
+        assert clone.duplicate_primary_missing is False
+        assert duplicate_relation_state(clone) is None
+        assert not session.new and not session.dirty and not session.deleted
+
+
+def test_rebuild_preview_preserves_valid_unnumbered_duplicates_read_only(confirmed_film_copies):
+    session, collection, title, primary, copies = confirmed_film_copies
+    statements = []
+
+    def require_select(_connection, _cursor, statement, _parameters, _context, _many):
+        assert statement.lstrip().upper().startswith("SELECT")
+        statements.append(statement)
+
+    event.listen(session.bind, "before_cursor_execute", require_select)
+    try:
+        plan = build_hierarchy_rebuild_plan(session)
+        assert statements
+        assert not session.new and not session.dirty and not session.deleted
+        assert not plan.blockers
+        assert "confirmed_duplicate_identity_unknown" not in {item.code for item in plan.issues}
+        assert [(item.code, item.blocking, item.video_paths) for item in plan.issues] == [(
+            "confirmed_duplicate", False,
+            tuple(sorted(video.relative_path for video in [primary, *copies])),
+        )]
+        assert plan.summary.blocking_issues == 0
+        assert plan.summary.video_assignments_changed == 0
+        assert plan.summary.numbering_changes == 0
+        assert all(
+            duplicate_relation_state(copy) == DuplicateRelationState.VALID
+            and copy.duplicate_of_video_id == primary.id
+            and copy.duplicate_confirmation_kind == "unnumbered_supplementary_same_content"
+            for copy in copies
+        )
+    finally:
+        event.remove(session.bind, "before_cursor_execute", require_select)
 
 
 def test_unverifiable_confirmed_secondary_is_preserved_for_review_during_rebuild():
