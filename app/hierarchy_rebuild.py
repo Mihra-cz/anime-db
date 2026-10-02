@@ -441,7 +441,7 @@ def _state_fingerprint(
                 item.local_period_hint,
                 _naming_choice_fingerprint(item.physical_naming_choice),
             )
-            for item in collections
+            for item in sorted(collections, key=lambda item: item.relative_root_path)
         ],
         "titles": [
             (
@@ -512,13 +512,14 @@ def _state_fingerprint(
                 tuple(sorted(link.video_id for link in item.manual_split_rule_videos)),
                 tuple(sorted(group.id for group in item.video_variant_groups)),
             )
-            for item in titles
+            for item in sorted(titles, key=lambda item: item.relative_root_path)
         ],
         "videos": [
             (
                 item.id,
                 item.relative_path,
                 item.filename,
+                item.file_type,
                 item.catalog_collection_id,
                 item.catalog_title_id,
                 item.local_episode_number,
@@ -534,11 +535,12 @@ def _state_fingerprint(
                 item.content_type_manual,
                 item.media_part_number,
                 item.duplicate_status_manual,
+                item.duplicate_confirmation_kind,
                 item.duplicate_of_video_id,
                 item.duplicate_primary_missing,
                 item.video_variant_group_id,
             )
-            for item in videos
+            for item in sorted(videos, key=lambda item: item.relative_path)
         ],
     }
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

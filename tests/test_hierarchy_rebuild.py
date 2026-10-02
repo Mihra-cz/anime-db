@@ -1120,6 +1120,103 @@ def confirmed_film_copies():
     engine.dispose()
 
 
+@pytest.mark.parametrize("confirmation_kind", [None, "different_confirmation_kind"])
+def test_duplicate_confirmation_authority_change_invalidates_rebuild_fingerprint(
+    confirmed_film_copies, confirmation_kind,
+):
+    session, _collection, _title, primary, copies = confirmed_film_copies
+    plan = build_hierarchy_rebuild_plan(session)
+    copies[0].duplicate_confirmation_kind = confirmation_kind
+    session.commit()
+    current = build_hierarchy_rebuild_plan(session)
+
+    assert copies[0].duplicate_of_video_id == primary.id
+    assert plan.source_fingerprint != current.source_fingerprint
+
+
+@pytest.mark.parametrize("changed_field", [
+    "duplicate_confirmation_kind", "duplicate_of_video_id",
+])
+def test_changed_duplicate_authority_rejects_rebuild_before_any_write(
+    confirmed_film_copies, changed_field,
+):
+    session, _collection, _title, primary, copies = confirmed_film_copies
+    plan = build_hierarchy_rebuild_plan(session)
+    if changed_field == "duplicate_confirmation_kind":
+        copies[0].duplicate_confirmation_kind = None
+        assert copies[0].duplicate_of_video_id == primary.id
+    else:
+        copies[0].duplicate_of_video_id = copies[1].id
+        assert copies[0].duplicate_confirmation_kind == "unnumbered_supplementary_same_content"
+    session.commit()
+
+    def require_select(_connection, _cursor, statement, _parameters, _context, _many):
+        assert statement.lstrip().upper().startswith("SELECT"), statement
+
+    event.listen(session.bind, "before_cursor_execute", require_select)
+    try:
+        with pytest.raises(HierarchyPlanStaleError):
+            apply_hierarchy_rebuild_plan(session, plan)
+        assert not session.new and not session.dirty and not session.deleted
+    finally:
+        event.remove(session.bind, "before_cursor_execute", require_select)
+
+
+def test_raw_content_evidence_change_invalidates_rebuild_fingerprint(confirmed_film_copies):
+    session, _collection, _title, _primary, copies = confirmed_film_copies
+    plan = build_hierarchy_rebuild_plan(session)
+    copies[0].file_type = "bonus"
+    session.commit()
+    assert duplicate_relation_state(copies[0]) == DuplicateRelationState.INVALID
+    current = build_hierarchy_rebuild_plan(session)
+    assert current.issues != plan.issues
+    assert current.source_fingerprint != plan.source_fingerprint
+    with pytest.raises(HierarchyPlanStaleError):
+        apply_hierarchy_rebuild_plan(session, plan)
+
+
+def test_unchanged_duplicate_fingerprint_is_stable_after_sqlite_reload(confirmed_film_copies):
+    session, _collection, _title, _primary, copies = confirmed_film_copies
+    before = build_hierarchy_rebuild_plan(session)
+    assert build_hierarchy_rebuild_plan(session).source_fingerprint == before.source_fingerprint
+    with Session(session.bind) as reloaded:
+        assert reloaded.get(Video, copies[0].id) is not copies[0]
+        assert build_hierarchy_rebuild_plan(reloaded).source_fingerprint == before.source_fingerprint
+        assert not reloaded.new and not reloaded.dirty and not reloaded.deleted
+
+
+def test_state_fingerprint_does_not_depend_on_input_order(confirmed_film_copies):
+    from app.hierarchy_rebuild import _load_state, _state_fingerprint
+
+    session = confirmed_film_copies[0]
+    collection = _collection("Anime/Other")
+    title = _title("Anime/Other/Season 1", collection)
+    session.add(_video("Anime/Other/Season 1/E01.mkv", title=title, collection=collection))
+    session.commit()
+    collections, titles, videos = _load_state(session)
+    expected = _state_fingerprint(collections, titles, videos)
+    for reordered in (
+        (list(reversed(collections)), titles, videos),
+        (collections, list(reversed(titles)), videos),
+        (collections, titles, list(reversed(videos))),
+    ):
+        assert _state_fingerprint(*reordered) == expected
+    assert not session.new and not session.dirty and not session.deleted
+
+
+def test_media_probe_cache_change_does_not_make_rebuild_stale(confirmed_film_copies):
+    session, _collection, _title, _primary, copies = confirmed_film_copies
+    plan = build_hierarchy_rebuild_plan(session)
+    copies[0].duration = 120.0
+    copies[0].video_codec = "hevc"
+    copies[0].width = 1280
+    copies[0].height = 720
+    session.commit()
+    assert build_hierarchy_rebuild_plan(session).source_fingerprint == plan.source_fingerprint
+    assert apply_hierarchy_rebuild_plan(session, plan).applied
+    assert duplicate_relation_state(copies[0]) == DuplicateRelationState.VALID
+
+
 def test_detached_video_clone_preserves_valid_unnumbered_duplicate(confirmed_film_copies):
     from app.hierarchy_rebuild import _clone_collection, _clone_title, _clone_video, _TitleSpec
 
