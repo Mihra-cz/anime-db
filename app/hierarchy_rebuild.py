@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timezone
 from enum import StrEnum
 import hashlib
@@ -48,6 +48,7 @@ from .models import (
 )
 from .numbering import collapses_into_duplicate_primary, effective_video_numbering
 from .video_variants import assign_video_catalog_title
+from .title_identity import ExistingTitleRef, PlannedTitleRef, TitleRef, TitleLocatorIndex, title_ref_key
 
 
 class ReconciliationAction(StrEnum):
@@ -124,6 +125,7 @@ class TitlePlanItem:
     protected: bool
     protection_reasons: tuple[str, ...]
     reason: ReconciliationReason
+    title_ref: TitleRef
 
 
 @dataclass(frozen=True)
@@ -138,15 +140,17 @@ class VideoAssignmentPlanItem:
     matched_manual_title_ids: tuple[int, ...]
     matched_manual_title_paths: tuple[str, ...]
     reason: ReconciliationReason
+    old_title_ref: ExistingTitleRef | None
+    target_title_ref: TitleRef | None
 
     @property
     def changed(self) -> bool:
         return (
             self.old_collection_path,
-            self.old_title_path,
+            self.old_title_ref,
         ) != (
             self.target_collection_path,
-            self.target_title_path,
+            self.target_title_ref,
         )
 
 
@@ -295,20 +299,22 @@ class _TitleSpec:
     collection_path: str | None
     protected: bool
     protection_reasons: tuple[str, ...]
+    planned_ref: PlannedTitleRef | None = None
 
 
 @dataclass(frozen=True)
 class _AssignmentIntent:
     collection_path: str | None
-    title_path: str | None
+    title_ref: TitleRef | None
     decision: ManualSplitVideoDecision | None
     reason: ReconciliationReason
+    planned_identity: HierarchyIdentity | None = None
 
 
 @dataclass
 class _Projection:
     collections: dict[str, CatalogCollection]
-    titles: dict[str, CatalogTitle]
+    titles: dict[TitleRef, CatalogTitle]
     videos: dict[int, Video]
     evaluations: dict[str, HierarchyEvaluationResult]
 
@@ -441,7 +447,7 @@ def _state_fingerprint(
                 item.local_period_hint,
                 _naming_choice_fingerprint(item.physical_naming_choice),
             )
-            for item in sorted(collections, key=lambda item: item.relative_root_path)
+            for item in sorted(collections, key=lambda item: (item.relative_root_path, item.id))
         ],
         "titles": [
             (
@@ -512,7 +518,7 @@ def _state_fingerprint(
                 tuple(sorted(link.video_id for link in item.manual_split_rule_videos)),
                 tuple(sorted(group.id for group in item.video_variant_groups)),
             )
-            for item in sorted(titles, key=lambda item: item.relative_root_path)
+            for item in sorted(titles, key=lambda item: (item.relative_root_path, item.id))
         ],
         "videos": [
             (
@@ -669,7 +675,7 @@ def _current_title_path(video: Video) -> str | None:
 def _assignment_candidate(
     video: Video,
     identity: HierarchyIdentity,
-    titles_by_path: dict[str, CatalogTitle],
+    titles_by_path: TitleLocatorIndex,
     collections_by_path: dict[str, CatalogCollection],
 ) -> tuple[CatalogTitle, str] | None:
     """Resolve the title this video keeps, or the existing one its path points at.
@@ -726,7 +732,13 @@ def _build_assignment_intents(
     list[RebuildBlocker],
 ]:
     collections_by_path = {item.relative_root_path: item for item in collections}
-    titles_by_path = {item.relative_root_path: item for item in titles}
+    titles_by_path = TitleLocatorIndex(titles)
+    planned_identities = {}
+    inferred = sorted(set(hierarchy.values()), key=lambda h: (h.collection.relative_root_path, h.title.relative_root_path))
+    planned_refs = {h: PlannedTitleRef(i) for i, h in enumerate(inferred, 1)}
+    inferred_candidates = {}
+    for identity in inferred:
+        inferred_candidates.setdefault(identity.title.relative_root_path, []).append(identity)
     preliminary_paths: dict[int, str | None] = {}
     path_candidates: dict[int, tuple[CatalogTitle, str] | None] = {}
     grouped: dict[str, list[Video]] = {}
@@ -862,6 +874,37 @@ def _build_assignment_intents(
             and decision.video.id not in legacy_ambiguous_video_ids
         )
 
+    for video in videos:
+        decision = decisions.get(video.id)
+        if is_root_video(video) or path_candidates[video.id] is not None or (
+            decision is not None and decision.kind != ManualSplitDecisionKind.NOT_REQUIRED
+        ):
+            continue
+        identity = hierarchy[video.relative_path]
+        locator = identity.title.relative_root_path
+        code = (
+            "ambiguous_inferred_title_locator" if len(inferred_candidates[locator]) > 1 else
+            "ambiguous_title_locator" if len(titles_by_path.candidates(locator)) > 1 else None
+        )
+        if code is not None:
+            # Keep existing FK membership even without manual protection. A
+            # locator collision is unresolved evidence, never removal authority.
+            blocked_video_ids.add(video.id)
+            blockers.append(RebuildBlocker(
+                code=code, collection_path=identity.collection.relative_root_path,
+                title_path=locator, video_path=video.relative_path, prevents_apply=True,
+            ))
+
+    def automatic_ref(identity: HierarchyIdentity) -> TitleRef:
+        candidates = titles_by_path.candidates(identity.title.relative_root_path)
+        if len(candidates) == 1:
+            return ExistingTitleRef(candidates[0].id)
+        if candidates:
+            raise HierarchyRebuildError("Ambiguous locator reached automatic routing.")
+        ref = planned_refs[identity]
+        planned_identities[ref] = identity
+        return ref
+
     intents: dict[int, _AssignmentIntent] = {}
     for video in videos:
         assert video.id is not None
@@ -874,7 +917,7 @@ def _build_assignment_intents(
             )
             intents[video.id] = _AssignmentIntent(
                 current_collection.relative_root_path if current_collection else preliminary_path,
-                current_title.relative_root_path if current_title else None,
+                ExistingTitleRef(current_title.id) if current_title else None,
                 None,
                 ReconciliationReason.CURRENT,
             )
@@ -886,7 +929,7 @@ def _build_assignment_intents(
             assert target is not None and target.collection is not None
             intents[video.id] = _AssignmentIntent(
                 target.collection.relative_root_path,
-                target.relative_root_path,
+                ExistingTitleRef(target.id),
                 decision,
                 ReconciliationReason.MANUAL_SPLIT_UNIQUE,
             )
@@ -913,7 +956,7 @@ def _build_assignment_intents(
             if candidate is not None:
                 intents[video.id] = _AssignmentIntent(
                     candidate[1],
-                    candidate[0].relative_root_path,
+                    ExistingTitleRef(candidate[0].id),
                     decision,
                     ReconciliationReason.AUTOMATIC_PATH,
                 )
@@ -923,7 +966,7 @@ def _build_assignment_intents(
                 intents[video.id] = _AssignmentIntent(
                     collection.relative_root_path if collection is not None else None,
                     (
-                        title.relative_root_path
+                        ExistingTitleRef(title.id)
                         if title is not None and title.collection is collection else None
                     ),
                     decision,
@@ -943,7 +986,7 @@ def _build_assignment_intents(
                 intents[video.id] = _AssignmentIntent(
                     preliminary_path,
                     (
-                        current.relative_root_path
+                        ExistingTitleRef(current.id)
                         if current is not None
                         and current.collection is not None
                         and current.collection.relative_root_path == preliminary_path
@@ -956,7 +999,7 @@ def _build_assignment_intents(
                 identity = hierarchy[video.relative_path]
                 intents[video.id] = _AssignmentIntent(
                     identity.collection.relative_root_path,
-                    identity.title.relative_root_path,
+                    automatic_ref(identity),
                     decision,
                     ReconciliationReason.AUTOMATIC_PATH,
                 )
@@ -968,20 +1011,20 @@ def _build_assignment_intents(
                 )
             else:
                 title = video.catalog_title
-                title_path = (
-                    title.relative_root_path
+                title_ref = (
+                    ExistingTitleRef(title.id)
                     if title is not None and title.collection is collection else None
                 )
                 intents[video.id] = _AssignmentIntent(
                     collection.relative_root_path,
-                    title_path,
+                    title_ref,
                     None,
                     ReconciliationReason.ROOT_PRESERVED,
                 )
         elif candidate is not None:
             intents[video.id] = _AssignmentIntent(
                 candidate[1],
-                candidate[0].relative_root_path,
+                ExistingTitleRef(candidate[0].id),
                 decision,
                 ReconciliationReason.AUTOMATIC_PATH,
             )
@@ -989,87 +1032,52 @@ def _build_assignment_intents(
             identity = hierarchy[video.relative_path]
             intents[video.id] = _AssignmentIntent(
                 identity.collection.relative_root_path,
-                identity.title.relative_root_path,
+                automatic_ref(identity),
                 decision,
                 ReconciliationReason.AUTOMATIC_PATH,
             )
+    intents = {id: replace(intent, planned_identity=planned_identities.get(intent.title_ref)) for id, intent in intents.items()}
     return intents, decisions, blockers
 
 
 def _build_title_specs(
-    titles: list[CatalogTitle],
-    hierarchy: dict[str, HierarchyIdentity],
-    intents: dict[int, _AssignmentIntent],
-) -> dict[str, _TitleSpec]:
-    titles_by_path = {title.relative_root_path: title for title in titles}
-    identities_by_title_path = {
-        identity.title.relative_root_path: identity for identity in hierarchy.values()
-    }
-    required_paths = {
-        intent.title_path for intent in intents.values() if intent.title_path is not None
-    }
-    specs: dict[str, _TitleSpec] = {}
+    titles: list[CatalogTitle], hierarchy: dict[str, HierarchyIdentity], intents: dict[int, _AssignmentIntent],
+) -> dict[TitleRef, _TitleSpec]:
+    locator_index = TitleLocatorIndex(titles)
+    inferred = {}
+    for identity in hierarchy.values():
+        inferred.setdefault(identity.title.relative_root_path, set()).add(identity)
+    required = {intent.title_ref for intent in intents.values() if intent.title_ref is not None}
+    specs = {}
     for title in titles:
+        ref = ExistingTitleRef(title.id)
         protection = _title_protection_reasons(title)
-        required = title.relative_root_path in required_paths
-        if not protection and not required:
+        if not protection and ref not in required:
             continue
-        identity = identities_by_title_path.get(title.relative_root_path)
-        automatic_identity = (
-            identity.title
-            if identity is not None
-            and not manual_hierarchy_snapshot_requires_preservation(title)
-            else None
-        )
-        collection_path = (
-            identity.collection.relative_root_path
-            if automatic_identity is not None
-            else title.collection.relative_root_path
-            if title.collection is not None
-            else identity.collection.relative_root_path
-            if identity is not None
-            else None
-        )
-        specs[title.relative_root_path] = _TitleSpec(
-            original=title,
-            identity=automatic_identity,
-            collection_path=collection_path,
-            protected=bool(protection),
-            protection_reasons=protection,
-        )
-
-    for path in sorted(required_paths):
-        if path in specs:
+        candidates = inferred.get(title.relative_root_path, ())
+        identity = next(iter(candidates)) if len(candidates) == 1 and len(locator_index.candidates(title.relative_root_path)) == 1 else None
+        automatic = identity.title if identity is not None and not manual_hierarchy_snapshot_requires_preservation(title) else None
+        collection_path = (identity.collection.relative_root_path if automatic is not None else
+                           title.collection.relative_root_path if title.collection is not None else
+                           identity.collection.relative_root_path if identity is not None else None)
+        specs[ref] = _TitleSpec(title, automatic, collection_path, bool(protection), protection)
+    for intent in intents.values():
+        ref = intent.title_ref
+        if not isinstance(ref, PlannedTitleRef) or ref in specs:
             continue
-        identity = identities_by_title_path.get(path)
+        identity = intent.planned_identity
         if identity is None:
-            original = titles_by_path.get(path)
-            if original is None or original.collection is None:
-                raise HierarchyRebuildError(
-                    f"Plán odkazuje na title bez reprodukovatelné collection: {path}"
-                )
-            specs[path] = _TitleSpec(
-                original=original,
-                identity=None,
-                collection_path=original.collection.relative_root_path,
-                protected=True,
-                protection_reasons=_title_protection_reasons(original),
-            )
-            continue
-        specs[path] = _TitleSpec(
-            original=None,
-            identity=identity.title,
-            collection_path=identity.collection.relative_root_path,
-            protected=False,
-            protection_reasons=(),
-        )
+            raise HierarchyRebuildError("Planned title lacks inference evidence.")
+        specs[ref] = _TitleSpec(None, identity.title, identity.collection.relative_root_path, False, (), ref)
+    if required - specs.keys():
+        raise HierarchyRebuildError("Plan references a missing title owner.")
     return specs
 
 
 def _build_collection_identities(
     collections: list[CatalogCollection],
     hierarchy: dict[str, HierarchyIdentity],
-    title_specs: dict[str, _TitleSpec],
+    title_specs: dict[TitleRef, _TitleSpec],
     intents: dict[int, _AssignmentIntent],
 ) -> dict[str, CollectionIdentity | None]:
     existing_by_path = {item.relative_root_path: item for item in collections}
@@ -1250,7 +1258,7 @@ def _build_projection(
     collections: list[CatalogCollection],
     videos: list[Video],
     collection_identities: dict[str, CollectionIdentity | None],
-    title_specs: dict[str, _TitleSpec],
+    title_specs: dict[TitleRef, _TitleSpec],
     intents: dict[int, _AssignmentIntent],
     blocked_paths: set[str],
 ) -> _Projection:
@@ -1264,9 +1272,9 @@ def _build_projection(
         if existing_collections.get(path) is None:
             next_collection_id -= 1
 
-    projected_titles: dict[str, CatalogTitle] = {}
+    projected_titles: dict[TitleRef, CatalogTitle] = {}
     next_title_id = -1
-    for path, spec in sorted(title_specs.items()):
+    for ref, spec in sorted(title_specs.items(), key=lambda item: title_ref_key(item[0])):
         clone = _clone_title(spec, next_title_id)
         if spec.original is None:
             next_title_id -= 1
@@ -1275,7 +1283,7 @@ def _build_projection(
             if spec.collection_path is not None else None
         )
         clone.catalog_collection_id = clone.collection.id if clone.collection else None
-        projected_titles[path] = clone
+        projected_titles[ref] = clone
 
     projected_videos: dict[int, Video] = {}
     for video in videos:
@@ -1288,8 +1296,8 @@ def _build_projection(
         else:
             clone.catalog_collection = None
             clone.catalog_collection_id = None
-        if intent.title_path is not None:
-            clone.catalog_title = projected_titles[intent.title_path]
+        if intent.title_ref is not None:
+            clone.catalog_title = projected_titles[intent.title_ref]
             clone.catalog_title_id = clone.catalog_title.id
             if clone.catalog_title.collection is not clone.catalog_collection:
                 raise HierarchyRebuildError(
@@ -1439,15 +1447,17 @@ def build_hierarchy_rebuild_plan(session: Session) -> HierarchyRebuildPlan:
             reason=reason,
         ))
 
-    original_titles = {item.relative_root_path: item for item in titles}
+    original_titles = {ExistingTitleRef(item.id): item for item in titles}
     title_items: list[TitlePlanItem] = []
-    target_title_paths = {
-        intent.title_path for intent in intents.values() if intent.title_path is not None
+    target_title_refs = {
+        intent.title_ref for intent in intents.values() if intent.title_ref is not None
     }
-    for path in sorted(set(original_titles) | set(projection.titles)):
-        original = original_titles.get(path)
-        desired = projection.titles.get(path)
-        spec = title_specs.get(path)
+    for ref in sorted(set(original_titles) | set(projection.titles),
+                      key=lambda ref: ((projection.titles.get(ref) or original_titles[ref]).relative_root_path, title_ref_key(ref))):
+        original = original_titles.get(ref)
+        desired = projection.titles.get(ref)
+        spec = title_specs.get(ref)
+        path = (desired or original).relative_root_path
         protection = spec.protection_reasons if spec is not None else ()
         current_snapshot = _title_snapshot(original) if original else None
         desired_snapshot = _title_snapshot(desired) if desired else None
@@ -1472,6 +1482,7 @@ def build_hierarchy_rebuild_plan(session: Session) -> HierarchyRebuildPlan:
         title_items.append(TitlePlanItem(
             action=action,
             title_id=original.id if original else None,
+            title_ref=ref,
             relative_root_path=path,
             current=current_snapshot,
             desired=desired_snapshot,
@@ -1481,7 +1492,7 @@ def build_hierarchy_rebuild_plan(session: Session) -> HierarchyRebuildPlan:
         ))
         if (
             protection
-            and path not in target_title_paths
+            and ref not in target_title_refs
             and original is not None
             and not original.hierarchy_manual_override
         ):
@@ -1507,7 +1518,9 @@ def build_hierarchy_rebuild_plan(session: Session) -> HierarchyRebuildPlan:
             old_collection_path=_current_collection_path(video),
             old_title_path=_current_title_path(video),
             target_collection_path=intent.collection_path,
-            target_title_path=intent.title_path,
+            target_title_path=projection.titles[intent.title_ref].relative_root_path if intent.title_ref is not None else None,
+            old_title_ref=ExistingTitleRef(video.catalog_title_id) if video.catalog_title_id is not None else None,
+            target_title_ref=intent.title_ref,
             manual_split_kind=decision.kind.value if decision is not None else None,
             matched_manual_title_ids=tuple(
                 title.id for title in matching_titles if title.id is not None
@@ -1602,6 +1615,7 @@ def _verify_applied_plan(
     session: Session, plan: HierarchyRebuildPlan,
     expected_naming_authority: dict[tuple[str, int], tuple],
     expected_layout_authority: dict[int, tuple],
+    owner_ids: dict[TitleRef, int] | None = None,
 ) -> None:
     collections, titles, videos = _load_state(session)
     if _naming_authority_snapshot(collections, titles) != expected_naming_authority:
@@ -1609,8 +1623,18 @@ def _verify_applied_plan(
     if _layout_authority_snapshot(titles) != expected_layout_authority:
         raise HierarchyRebuildError("Hierarchy apply změnil physical layout authority.")
     collections_by_path = {item.relative_root_path: item for item in collections}
-    titles_by_path = {item.relative_root_path: item for item in titles}
+    titles_by_id = {item.id: item for item in titles}
+    owner_ids = owner_ids or {}
     videos_by_id = {item.id: item for item in videos}
+
+    def resolved_owner_id(ref: TitleRef | None) -> int | None:
+        if ref is None:
+            return None
+        if isinstance(ref, ExistingTitleRef):
+            return ref.title_id
+        if ref not in owner_ids:
+            raise HierarchyRebuildError("Apply lacks a planned owner ID binding.")
+        return owner_ids[ref]
 
     for item in plan.collections:
         if item.desired is None:
@@ -1626,12 +1650,12 @@ def _verify_applied_plan(
             )
     for item in plan.titles:
         if item.desired is None:
-            if item.relative_root_path in titles_by_path:
+            if resolved_owner_id(item.title_ref) in titles_by_id:
                 raise HierarchyRebuildError(
                     f"Obsolete title nebyl odstraněn: {item.relative_root_path}"
                 )
             continue
-        actual = titles_by_path.get(item.relative_root_path)
+        actual = titles_by_id.get(resolved_owner_id(item.title_ref))
         if actual is None or _title_snapshot(actual) != item.desired:
             raise HierarchyRebuildError(
                 f"Apply se odchýlil od preview title: {item.relative_root_path}"
@@ -1640,10 +1664,10 @@ def _verify_applied_plan(
         video = videos_by_id[item.video_id]
         if (
             _current_collection_path(video),
-            _current_title_path(video),
+            video.catalog_title_id,
         ) != (
             item.target_collection_path,
-            item.target_title_path,
+            resolved_owner_id(item.target_title_ref),
         ):
             raise HierarchyRebuildError(
                 f"Apply se odchýlil od preview assignmentu: {item.relative_path}"
@@ -1708,7 +1732,7 @@ def apply_hierarchy_rebuild_plan(
                 )
         session.flush()
 
-        titles_by_path = {item.relative_root_path: item for item in titles}
+        titles_by_ref = {ExistingTitleRef(item.id): item for item in titles}
         for item in plan.titles:
             if item.action == ReconciliationAction.CREATE:
                 assert item.desired is not None
@@ -1719,10 +1743,10 @@ def apply_hierarchy_rebuild_plan(
                 )
                 _apply_title_snapshot(title, item.desired, collections_by_path)
                 session.add(title)
-                titles_by_path[item.relative_root_path] = title
+                titles_by_ref[item.title_ref] = title
             elif item.desired is not None:
                 _apply_title_snapshot(
-                    titles_by_path[item.relative_root_path],
+                    titles_by_ref[item.title_ref],
                     item.desired,
                     collections_by_path,
                 )
@@ -1736,8 +1760,8 @@ def apply_hierarchy_rebuild_plan(
                 if item.target_collection_path is not None else None
             )
             assign_video_catalog_title(video, (
-                titles_by_path[item.target_title_path]
-                if item.target_title_path is not None else None
+                titles_by_ref[item.target_title_ref]
+                if item.target_title_ref is not None else None
             ))
             if (
                 video.catalog_title is not None
@@ -1751,7 +1775,7 @@ def apply_hierarchy_rebuild_plan(
         for item in plan.titles:
             if item.action != ReconciliationAction.REMOVE:
                 continue
-            title = titles_by_path[item.relative_root_path]
+            title = titles_by_ref[item.title_ref]
             if (
                 title.videos
                 or title.manual_split_rule_videos
@@ -1764,7 +1788,7 @@ def apply_hierarchy_rebuild_plan(
                 title.collection.titles.remove(title)
             title.collection = None
             session.delete(title)
-            titles_by_path.pop(item.relative_root_path, None)
+            titles_by_ref.pop(item.title_ref, None)
         session.flush()
 
         for item in plan.collections:
@@ -1793,7 +1817,8 @@ def apply_hierarchy_rebuild_plan(
                 include_legacy_fallback=False,
             )
         session.flush()
-        _verify_applied_plan(session, plan, expected_naming_authority, expected_layout_authority)
+        _verify_applied_plan(session, plan, expected_naming_authority, expected_layout_authority,
+                             {ref: title.id for ref, title in titles_by_ref.items()})
         return HierarchyRebuildResult(plan=plan, applied=True)
 
 

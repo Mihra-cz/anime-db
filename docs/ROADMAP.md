@@ -174,10 +174,22 @@ neprovádí. Platí `člověk > automatika; nejistota → Review`.
 
 Stav: **Probíhá** (od uzavření Pre-V6 gate 2026-09-27).
 
-Aktuální fáze: návrh canonical naming a struktury a příprava bezpečné
-reorganizace (planner/execution foundation). Fyzický rename ani move na NAS
+Aktuální fáze: Naming a Physical Layout Review jsou uzavřené; probíhá příprava
+shared Season containers před plannerem a execution. Fyzický rename ani move na NAS
 zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
 v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
+
+### V6.3 – Oddělení logical owner identity od fyzické cesty
+
+- P1A je implementované: runtime/rebuild/grouping/scanner internals rozlišují
+  title owner ID, planned owner handle a locator. Grouping paths se řeší na IDs
+  na vstupní hranici; ambiguity zůstává review. Produkční Naming/Layout closure
+  je zachovaná, schema zůstává v8 a title locator zůstává NOT NULL a UNIQUE.
+- P1B zbývá: povolit nonunique title locator ve schema, převést grouping
+  persistence na owner-ID references a ošetřit legacy single-path URL lookup.
+  Sdílená persisted Season cesta zatím není povolená.
+- P2 zbývá: canonical parser a routing nových souborů podle authoritative tokenů.
+  P1A parser, canonical target container ani target planner neimplementuje.
 
 ### Postup V6
 

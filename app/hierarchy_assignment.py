@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from .hierarchy import HierarchyIdentity
 from .hierarchy_authority import manual_hierarchy_snapshot_requires_preservation
 from .models import CatalogCollection, CatalogTitle, Video
+from .title_identity import TitleLocatorIndex, locator_candidates
 
 
 def preserved_membership_title(video: Video) -> CatalogTitle | None:
@@ -30,7 +31,7 @@ def preserved_membership_title(video: Video) -> CatalogTitle | None:
 
 def automatic_assignment_title(
     identity: HierarchyIdentity,
-    titles_by_path: Mapping[str, CatalogTitle],
+    titles_by_path: TitleLocatorIndex | Mapping[str, tuple[CatalogTitle, ...]],
 ) -> CatalogTitle | None:
     """Resolve the one already existing title the video's own path points at.
 
@@ -41,7 +42,8 @@ def automatic_assignment_title(
     safely documented answer and the caller must leave the video for review
     rather than guess or invent a target.
     """
-    return titles_by_path.get(identity.title.relative_root_path)
+    candidates = locator_candidates(titles_by_path, identity.title.relative_root_path)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def structural_placement_collection(

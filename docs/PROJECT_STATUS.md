@@ -54,7 +54,7 @@ nejsou součástí aplikačního kontraktu a nejsou zde vydávány za ověřené
 
 Auditovaný baseline implementace: `05984ff` — Respect confirmed supplementary
 placement.
-Aktuální fáze: **V6 – Probíhá: návrh canonical naming a bezpečné reorganizace**.
+Aktuální fáze: **V6 – Probíhá: příprava bezpečné reorganizace**.
 V1–V5 jsou hotové a Pre-V6 gate je uzavřený (PASS). Fyzická reorganizace NAS
 zatím nezačala a aplikace rename/move neprovádí.
 Podrobný vývojový plán a zbývající kroky jsou výhradně v [ROADMAP.md](ROADMAP.md).
@@ -63,8 +63,10 @@ Současné zaměření V6:
 
 - canonical naming kontrakt — schválená pravidla jsou
   v [V6_NAMING_CONTRACT.md](V6_NAMING_CONTRACT.md);
-- návrh Naming Review (lidská volba fyzických názvů rootu a prefixů);
-- příprava bezpečného planneru a execution základu.
+- Naming Review a Physical Layout Review jsou implementované a produkční
+  ruční průchod je uzavřený;
+- oddělení logické title identity od locatoru jako příprava shared Season
+  containers; planner a execution zůstávají další prací.
 
 ### Pre-V6 closure checkpoint
 
@@ -191,10 +193,9 @@ Partů bez změny Part authority. Limit 255 UTF-8 bytes zahrnuje i známé filen
 suffixy a inherited prefix dependencies; dosud otevřená grammar se neodhaduje.
 Běžné UI display resolvery physical choices nepoužívají. Target planner,
 kolize, warning >240 UTF-16 units absolutní klientské cesty a filesystem
-operace zůstávají další prací; UI nyní žádnou base path nehádá. Nasazení na
-produkční DB je samostatný řízený krok. Naming persistence přidala schema v7;
-současný startup foundation umí aditivní upgrade 7→8 pro layout, bez backfillu.
-Produkční DB zůstává na v7, dokud ji tato verze řízeně nespustí.
+operace zůstávají další prací; UI nyní žádnou base path nehádá. Naming
+persistence přidala schema v7 a layout schema v8, bez automatického backfillu.
+Produkční DB již používá v8; Naming i Physical Layout Review jsou uzavřené.
 
 ### V6 physical layout foundation
 
@@ -275,10 +276,10 @@ odkaz do Názvy a fail-safe own-folder náhled. Žádný folder text se neuklád
 Reconfirm se nabízí jen pro stále použitelnou uloženou volbu; položka bez
 použitelného rozložení odkazuje do Hierarchie místo prázdné volby.
 
-Produkční DB zůstává schema v7, bez tabulky/rows PhysicalLayoutChoice;
-UI write workflow je ověřené pouze na dočasné v8 DB. Nasazení, řízená migrace
-a lidské potvrzení produkčních voleb zůstávají samostatným krokem. UI není
-target planner a neprovádí žádné filesystem operace.
+Produkční DB používá schema v8 a obsahuje potvrzené lidské
+`PhysicalLayoutChoice`. Naming i Layout mají uzavřenou actionable frontu
+a layout choices odpovídají aktuálnímu basis. UI není target planner
+a neprovádí žádné filesystem operace.
 
 ### Fyzická evidence a logická struktura
 
@@ -286,6 +287,21 @@ target planner a neprovádí žádné filesystem operace.
 a fyzický soubor. Title může představovat Season, Part, Film, OVA, Special
 nebo doplněk; není ekvivalentem fyzické složky ani jedné epizody.
 `Video.relative_path` identifikuje soubor. Logické přesuny nemění filename ani NAS.
+
+V6.3-P1A používá `CatalogTitle.id` jako persisted logical owner identity.
+Rebuild intents, specs, projekce, apply i verification rozlišují existující
+owner ID a deterministic plan-local handle nového title. Locator index vrací
+0..N kandidátů; nejednoznačný lookup nevytváří membership a vyžaduje review.
+Grouping persistence stále obsahuje legacy path references, které resolver
+na vstupní hranici převádí na owner IDs. Chybějící historické references zůstávají
+unresolved; locator collision nikdy nevybírá první title.
+
+Schema zůstává v8 a `CatalogTitle.relative_root_path` zůstává NOT NULL a UNIQUE.
+Je locator / legacy evidence, nikoli canonical target container. Sdílená Season
+cesta více persisted titles ještě není povolená; změna schema a grouping
+persistence patří do P1B. Canonical parser a routing nových canonical souborů
+nejsou implementované a patří do P2. Naming/Layout choices zůstávají owner-ID
+based a čistá změna locatoru nemění jejich basis.
 
 Season a Part jsou různé strukturální údaje. `Part 2` není `Season 2`.
 Více Season titles se stejným season číslem v collection vyžaduje unikátní

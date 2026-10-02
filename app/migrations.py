@@ -30,6 +30,9 @@ from .manual_split import (
     manual_split_titles,
     persisted_manual_split_authority_collections,
 )
+from .title_identity import TitleLocatorIndex
+from .hierarchy_assignment import preserved_membership_title
+
 from .models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
     InternalSubtitle, PhysicalLayoutChoice, PhysicalNamingChoice, TitleMetadata, Video, VideoVariantGroup,
@@ -465,14 +468,12 @@ def migrate_schema(engine) -> None:
             )
         videos = list(session.scalars(select(Video).order_by(Video.id)))
         hierarchy = derive_library_hierarchy([video.relative_path for video in videos])
-        titles = {
-            title.relative_root_path: title
-            for title in session.scalars(select(CatalogTitle).options(
-                selectinload(CatalogTitle.physical_naming_choice),
-                selectinload(CatalogTitle.physical_layout_choice),
-            )).all()
-        }
-        original_titles = set(titles.values())
+        titles = TitleLocatorIndex(session.scalars(select(CatalogTitle).options(
+            selectinload(CatalogTitle.physical_naming_choice),
+            selectinload(CatalogTitle.physical_layout_choice),
+        )).all())
+        original_titles = set(titles.by_id.values())
+
         collections = {
             collection.relative_root_path: collection
             for collection in session.scalars(select(CatalogCollection).options(
@@ -480,7 +481,7 @@ def migrate_schema(engine) -> None:
             )).all()
         }
         grouping_targets = {
-            title.relative_root_path: target
+            title.id: target
             for title, target in collection_grouping_authority_targets(session).items()
         }
         created_automatic_titles: set[CatalogTitle] = set()
@@ -488,9 +489,11 @@ def migrate_schema(engine) -> None:
         automatic_structural_inputs: dict[
             CatalogTitle, AutomaticStructuralInput
         ] = {}
-        identities_by_title_path = {
-            identity.title.relative_root_path: identity
-            for identity in hierarchy.values()
+        inferred_by_locator = {}
+        for identity in hierarchy.values():
+            inferred_by_locator.setdefault(identity.title.relative_root_path, set()).add(identity)
+        ambiguous_inferred_locators = {
+            locator for locator, candidates in inferred_by_locator.items() if len(candidates) > 1
         }
         used_titles: set[CatalogTitle] = {
             video.catalog_title
@@ -512,11 +515,18 @@ def migrate_schema(engine) -> None:
         used_titles.update(
             title for title in original_titles if title.physical_layout_choice is not None
         )
-        for identity in identities_by_title_path.values():
+        for locator, inferred_candidates in inferred_by_locator.items():
+            if locator in ambiguous_inferred_locators:
+                used_titles.update(titles.candidates(locator))
+                continue
+            identity = next(iter(inferred_candidates))
             if identity.title.relative_root_path == ROOT_FOLDER:
                 continue
             part = identity.title
-            title = titles.get(part.relative_root_path)
+            if len(titles.candidates(part.relative_root_path)) > 1:
+                used_titles.update(titles.candidates(part.relative_root_path))
+                continue
+            title = titles.unique(part.relative_root_path)
             if (
                 title is not None
                 and manual_hierarchy_snapshot_requires_preservation(title)
@@ -536,7 +546,7 @@ def migrate_schema(engine) -> None:
                 session.flush()
                 collections[collection.relative_root_path] = collection
                 created_automatic_collections.add(collection)
-            title = titles.get(part.relative_root_path)
+            title = titles.unique(part.relative_root_path)
             if title is None:
                 title = CatalogTitle(
                     local_title=part.local_title,
@@ -545,10 +555,10 @@ def migrate_schema(engine) -> None:
                 )
                 session.add(title)
                 session.flush()
-                titles[part.relative_root_path] = title
+                titles.add(title)
                 created_automatic_titles.add(title)
             title.catalog_collection_id = grouping_targets.get(
-                part.relative_root_path, collection,
+                title.id, collection,
             ).id
             title.local_title = part.local_title
             title.normalized_local_title = normalize_title(part.local_title)
@@ -565,6 +575,7 @@ def migrate_schema(engine) -> None:
 
         videos_by_collection: dict[int, list[Video]] = {}
         protected_collection_ids: set[int] = set()
+        unresolved_locator_collection_ids: set[int] = set()
         for video in videos:
             authority_collections = persisted_manual_split_authority_collections(video)
             if video.manual_split_rule_videos:
@@ -600,7 +611,18 @@ def migrate_schema(engine) -> None:
                     videos_by_collection.setdefault(assigned_collection.id, []).append(video)
                 continue
             identity = hierarchy[video.relative_path]
-            automatic_title = titles[identity.title.relative_root_path]
+            automatic_title = titles.unique(identity.title.relative_root_path)
+            if (
+                automatic_title is None
+                or identity.title.relative_root_path in ambiguous_inferred_locators
+            ) and preserved_membership_title(video) is None:
+                if video.catalog_title is not None:
+                    used_titles.add(video.catalog_title)
+                if video.catalog_collection is not None:
+                    video.catalog_collection.hierarchy_status = "review_required"
+                    protected_collection_ids.add(video.catalog_collection.id)
+                    unresolved_locator_collection_ids.add(video.catalog_collection.id)
+                continue
             legacy_conflict_collection = (
                 video.catalog_collection
                 if video.catalog_title is None
@@ -629,7 +651,7 @@ def migrate_schema(engine) -> None:
                 if manual_hierarchy_snapshot_requires_preservation(title)
                 and title.collection is not None
                 else grouping_targets.get(
-                    title.relative_root_path,
+                    title.id,
                     collections[identity.collection.relative_root_path],
                 )
             )
@@ -652,6 +674,8 @@ def migrate_schema(engine) -> None:
                 ).append(video)
 
         for collection in collections.values():
+            if collection.id in unresolved_locator_collection_ids:
+                continue
             collection_videos = videos_by_collection.get(collection.id, [])
             if not collection_videos:
                 _apply_startup_structural_inputs(
@@ -693,7 +717,7 @@ def migrate_schema(engine) -> None:
                     video.catalog_title_id for video in collection_videos
                     if video.catalog_title_id is not None
                 }
-                for title in list(titles.values()):
+                for title in list(titles.by_id.values()):
                     if (
                         title.catalog_collection_id != collection.id
                         or title.hierarchy_manual_override
@@ -728,7 +752,7 @@ def migrate_schema(engine) -> None:
                     # autoritativní manual split všechna videa přiřadil jinam,
                     # tento automatický prázdný mezivýsledek nesmí přežít sync.
                     session.delete(title)
-                    titles.pop(title.relative_root_path, None)
+                    titles.discard(title)
                 session.flush()
                 continue
             with session.no_autoflush:
@@ -766,7 +790,7 @@ def migrate_schema(engine) -> None:
         }
         for title in created_automatic_titles:
             if (
-                title.relative_root_path not in titles
+                title.id not in titles.by_id
                 or title.id in assigned_title_ids
                 or title.manual_split_rule_videos
                 or title.video_variant_groups
@@ -775,7 +799,7 @@ def migrate_schema(engine) -> None:
             ):
                 continue
             session.delete(title)
-            titles.pop(title.relative_root_path, None)
+            titles.discard(title)
         session.flush()
         for collection in created_automatic_collections:
             has_title = session.scalar(select(CatalogTitle.id).where(

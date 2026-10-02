@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.catalog import (
     classify_video, is_root_video, meaningful_root_collection, normalize_language, normalize_title,
 )
+from app.title_identity import TitleLocatorIndex
 from app.hierarchy import derive_library_hierarchy
 from app.hierarchy_assignment import (
     preserved_membership_title,
@@ -510,12 +511,9 @@ def _scan_library(
         value.relative_root_path: value
         for value in session.scalars(select(CatalogCollection)).all()
     }
-    titles = {
-        value.relative_root_path: value
-        for value in session.scalars(select(CatalogTitle)).all()
-    }
+    titles = TitleLocatorIndex(session.scalars(select(CatalogTitle)).all())
     grouping_targets = {
-        title.relative_root_path: target
+        title.id: target
         for title, target in collection_grouping_authority_targets(session).items()
     }
     protected_collection_paths: set[str] = set()
@@ -602,7 +600,17 @@ def _scan_library(
         if split_titles:
             video.catalog_collection = collection
             continue
-        catalog_title = titles.get(title_data.relative_root_path)
+        candidates = titles.candidates(title_data.relative_root_path)
+        if len(candidates) > 1:
+            # No Pxx parser exists yet. Preserve existing owner evidence and
+            # leave a new file unassigned rather than choosing a locator hit.
+            if video.catalog_title is None:
+                video.catalog_collection = collection
+            collection.hierarchy_status = "review_required"
+            protected_collection_paths.add(collection.relative_root_path)
+            logger.warning("Ambiguous title locator: %s", title_data.relative_root_path)
+            continue
+        catalog_title = titles.unique(title_data.relative_root_path)
         if catalog_title is None:
             catalog_title = CatalogTitle(
                 local_title=title_data.local_title,
@@ -610,12 +618,13 @@ def _scan_library(
                 relative_root_path=title_data.relative_root_path,
             )
             session.add(catalog_title)
-            titles[catalog_title.relative_root_path] = catalog_title
+            session.flush()
+            titles.add(catalog_title)
         # Explicit collection-merge authority wins; a protected manual snapshot
         # then keeps the title's own placement.  Neither decides membership of
         # this video: that already followed from its own canonical path.
         assignment_collection = grouping_targets.get(
-            catalog_title.relative_root_path,
+            catalog_title.id,
             structural_placement_collection(catalog_title, collection),
         )
         video.catalog_collection = assignment_collection

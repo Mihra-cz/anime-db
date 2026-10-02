@@ -82,6 +82,7 @@ from .catalog_video_presentation import (
     video_variant_group_display,
 )
 from .database import Base, make_engine, make_session_factory
+from .title_identity import TitleLocatorIndex
 from .external_subtitle_compatibility import (
     POSITIVE_COMPATIBILITY_STATUSES,
     apply_compatibility_decision,
@@ -1414,10 +1415,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     session.add(collection)
                     session.flush()
                 title_path = f"{virtual_root}/title"
-                title = session.scalar(select(CatalogTitle).where(
-                    CatalogTitle.relative_root_path == title_path
-                ))
+                root_titles = session.scalars(select(CatalogTitle).where(
+                    CatalogTitle.catalog_collection_id == collection.id
+                )).all()
+                by_id = {title.id: title for title in root_titles}
+                all_selector_ids = {link.catalog_title_id for link in video.manual_split_rule_videos}
+                selector_ids = all_selector_ids & by_id.keys()
+                if len(selector_ids) > 1:
+                    raise HTTPException(status_code=400, detail="Vyberte explicitní title ID.")
+                title = by_id.get(video.catalog_title_id)
+                if title is not None and all_selector_ids and all_selector_ids != {title.id}:
+                    raise HTTPException(status_code=400, detail="Selector a současný owner se liší; vyřešte hierarchii.")
+                if title is None and selector_ids:
+                    title = by_id[next(iter(selector_ids))]
                 if title is None:
+                    # Legacy creation locator is a candidate only; another
+                    # title in this collection is never its logical replacement.
+                    title = TitleLocatorIndex(root_titles).unique(title_path)
+                if title is None:
+                    if session.scalar(select(CatalogTitle.id).where(
+                        CatalogTitle.relative_root_path == title_path
+                    )) is not None:
+                        raise HTTPException(status_code=400, detail="Locator je obsazený; vyberte explicitní title ID.")
                     title = CatalogTitle(
                         collection=collection, local_title=name,
                         normalized_local_title=normalize_title(name),
@@ -1572,6 +1591,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with sessions() as session:
             catalog_title = _load_catalog_title(session, catalog_title_id)
             if catalog_title is None and series_path:
+                # Legacy URL compatibility under the current UNIQUE locator
+                # schema. P1B must replace this boundary with ambiguity handling.
                 catalog_title = session.scalar(select(CatalogTitle).options(
                     selectinload(CatalogTitle.external_links),
                     selectinload(CatalogTitle.metadata_record),
@@ -1633,9 +1654,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title_candidates = [
             video for video in all_videos
             if (
-                video.catalog_title_id == catalog_title.id
-                if catalog_title else video.catalog_title
-                and video.catalog_title.relative_root_path == selected_path
+                catalog_title is not None and video.catalog_title_id == catalog_title.id
             )
         ]
         detail_unresolved_duplicate_ids = unresolved_duplicate_video_ids(title_candidates)

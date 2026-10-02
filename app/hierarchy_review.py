@@ -71,6 +71,8 @@ from .manual_split import (
     replace_explicit_video_selector_authority,
     synchronize_manual_split_authority,
 )
+from .title_identity import TitleLocatorIndex
+
 from .models import (
     CatalogCollection, CatalogTitle, CollectionGroupingDecision,
     ManualSplitRuleVideo, Video, utc_now,
@@ -868,66 +870,70 @@ def _stored_title_paths(decision: CollectionGroupingDecision) -> tuple[str, ...]
     return tuple(dict.fromkeys(values))
 
 
-def collection_grouping_authority_targets(
-    session: Session,
-) -> dict[CatalogTitle, CatalogCollection]:
-    """Resolve valid persisted grouping decisions without changing membership."""
-    decisions = list(session.scalars(
-        select(CollectionGroupingDecision).order_by(
-            CollectionGroupingDecision.updated_at,
-            CollectionGroupingDecision.id,
-        )
-    ).all())
-    collections = {
-        collection.relative_root_path: collection
-        for collection in session.scalars(select(CatalogCollection)).all()
-    }
-    titles = {
-        title.relative_root_path: title
-        for title in session.scalars(select(CatalogTitle)).all()
-    }
-    projected_collections = {
-        title: title.collection for title in titles.values()
-    }
-    assignments: dict[CatalogTitle, CatalogCollection] = {}
+@dataclass(frozen=True)
+class GroupingOwnerResolution:
+    decision_id: int
+    target_collection_id: int | None
+    title_ids: tuple[int, ...]
+    missing_paths: tuple[str, ...]
+    ambiguous_paths: tuple[str, ...]
+
+
+def resolve_grouping_owner_references(decision, titles: TitleLocatorIndex, collections) -> GroupingOwnerResolution:
+    """Decode legacy persistence once; missing history never guesses an owner."""
+    owner_ids, missing, ambiguous = [], [], []
+    for path in _stored_title_paths(decision):
+        candidates = titles.candidates(path)
+        if len(candidates) == 1:
+            owner_ids.append(candidates[0].id)
+        elif candidates:
+            ambiguous.append(path)
+        else:
+            missing.append(path)
+    target = collections.get(decision.target_collection_path or "")
+    return GroupingOwnerResolution(decision.id, target.id if target else None,
+                                   tuple(sorted(set(owner_ids))), tuple(missing), tuple(ambiguous))
+
+
+def collection_grouping_authority_targets(session: Session) -> dict[CatalogTitle, CatalogCollection]:
+    """Legacy locator boundary followed by ID-only selector/owner resolution."""
+    decisions = list(session.scalars(select(CollectionGroupingDecision).order_by(
+        CollectionGroupingDecision.updated_at, CollectionGroupingDecision.id,
+    )).all())
+    collections = {c.relative_root_path: c for c in session.scalars(select(CatalogCollection)).all()}
+    collections_by_id = {c.id: c for c in collections.values()}
+    titles = TitleLocatorIndex(session.scalars(select(CatalogTitle).options(
+        selectinload(CatalogTitle.collection),
+        selectinload(CatalogTitle.manual_split_rule_videos).selectinload(ManualSplitRuleVideo.video)
+        .selectinload(Video.manual_split_rule_videos),
+    )).all())
+    projected = {id: title.catalog_collection_id for id, title in titles.by_id.items()}
+    assignments = {}
     for decision in decisions:
         if decision.decision != "merged":
             continue
-        title_paths = _stored_title_paths(decision)
-        target = collections.get(decision.target_collection_path or "")
-        if not title_paths or target is None:
-            # Legacy rows only dismissed a proposal and lack enough facts to
-            # reconstruct an authoritative merge safely.
+        resolved = resolve_grouping_owner_references(decision, titles, collections)
+        if resolved.target_collection_id is None or resolved.ambiguous_paths:
             continue
-        selected = [titles[path] for path in title_paths if path in titles]
-        if not selected:
-            continue
-        selected_ids = {title.id for title in selected}
-        for title in selected:
-            for link in title.manual_split_rule_videos:
-                resulting_collections = {
-                    target
-                    if other.catalog_title_id in selected_ids
-                    else projected_collections.get(
-                        other.catalog_title,
-                        other.catalog_title.collection,
-                    )
-                    for other in link.video.manual_split_rule_videos
-                    if other.catalog_title is not None
-                }
-                if len(resulting_collections) > 1 or None in resulting_collections:
-                    logger.warning(
-                        "Collection grouping authority %s nelze aplikovat kvůli "
-                        "konfliktní selector authority.", decision.id,
-                    )
-                    selected = []
+        selected_ids = set(resolved.title_ids)
+        conflict = False
+        for id in resolved.title_ids:
+            for link in titles.by_id[id].manual_split_rule_videos:
+                resulting = {resolved.target_collection_id if other.catalog_title_id in selected_ids
+                             else projected.get(other.catalog_title_id)
+                             for other in link.video.manual_split_rule_videos}
+                if len(resulting) > 1 or None in resulting:
+                    logger.warning("Collection grouping authority %s has conflicting selector authority.", decision.id)
+                    conflict = True
                     break
-            if not selected:
+            if conflict:
                 break
-        for title in selected:
-            projected_collections[title] = target
-            assignments[title] = target
-    return assignments
+        if conflict:
+            continue
+        for id in resolved.title_ids:
+            projected[id] = resolved.target_collection_id
+            assignments[id] = resolved.target_collection_id
+    return {titles.by_id[id]: collections_by_id[target] for id, target in assignments.items()}
 
 
 def apply_collection_grouping_authority(session: Session) -> None:
@@ -3135,12 +3141,10 @@ def apply_manual_split(
         for video in collection.videos
         if video.id in released_video_ids and not is_root_video(video)
     }
-    titles_by_path = {
-        title.relative_root_path: title
-        for title in session.scalars(select(CatalogTitle).where(
-            CatalogTitle.relative_root_path.in_(released_title_paths)
-        )).all()
-    } if released_title_paths else {}
+    titles_by_path = TitleLocatorIndex(session.scalars(select(CatalogTitle).where(
+        CatalogTitle.relative_root_path.in_(released_title_paths)
+    )).all()) if released_title_paths else TitleLocatorIndex()
+
     affected = {collection}
     affected.update(
         video.catalog_title.collection
@@ -3151,7 +3155,7 @@ def apply_manual_split(
     )
     affected.update(
         title.collection
-        for title in titles_by_path.values()
+        for title in titles_by_path.by_id.values()
         if title.collection is not None
     )
     with strict_hierarchy_write_guard(session, list(affected)):
@@ -3225,7 +3229,7 @@ def _reconcile_released_manual_split_assignments(
     collection: CatalogCollection,
     released_video_ids: set[int],
     hierarchy: Mapping[str, HierarchyIdentity],
-    titles_by_path: dict[str, CatalogTitle],
+    titles_by_path: TitleLocatorIndex,
 ) -> set[CatalogCollection]:
     """Finalize automatic assignments whose explicit selector just disappeared.
 

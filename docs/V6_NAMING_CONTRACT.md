@@ -229,9 +229,15 @@ Náhled vlastní složky používá aktuální PhysicalNaming resolver a společ
 sanitizer; nikdy nekrátí Mini Dra na vlastní layout text. Platný naming rename
 nemění layout basis ani form identity. Unresolved/invalid Naming náhled
 zablokuje a odkazuje na Názvy, ale layout UI naming authority nepotvrzuje.
-Produkční DB stále používá schema v7 a nemá PhysicalLayoutChoice rows;
-produkční layout rozhodnutí ani backfill neproběhly. Target planner a execution
-nejsou implementované.
+Produkční DB používá schema v8 a obsahuje lidské PhysicalLayoutChoice;
+Naming i Physical Layout Review jsou uzavřené. Automatický backfill se
+neprovádí. Target planner a execution nejsou implementované.
+
+P1A odděluje interní title owner identity (`CatalogTitle.id`, případně planned
+handle před vytvořením) od locatoru. `relative_root_path` zůstává NOT NULL
+a UNIQUE do P1B; sdílená persisted Season cesta zatím není povolená. Budoucí
+container je projekcí Naming + Hierarchy + Layout, nikoli novou identitou.
+Canonical parser a routing nových souborů zůstávají P2 dependency.
 
 Bez choice použije čistý resolver jen jednoznačné shared defaults. Own
 metadata strong/optional candidate zůstává unresolved human Layout Review,
@@ -336,7 +342,7 @@ authority. Implementovaný stav a hranice popisuje PROJECT_STATUS.
 | SAO Reflection, video #2622 | Preview (nikoli Recap), S4, Part None, ordinal None; `00` ve filename není canonical identita |
 | Slime, videa #2805/#2806 | NCOP/NCED, Season S2, Part None — season-level bonus bez P1/P2 |
 | Peter Grill S2 | `Super Extra` je název Season/release, nikoli supplementary marker |
-| Isekai Maou, title #279 (2 interview videa) | content/hierarchy typ zůstává Special; budoucí Physical Layout choice `extras_bonus`, žádná samostatná `Interviews/` taxonomy; foundation choice nebackfilluje |
+| Isekai Maou, title #279 (2 interview videa) | content/hierarchy typ zůstává Special; potvrzená Physical Layout choice `extras_bonus`, žádná samostatná `Interviews/` taxonomy |
 
 ## Otevřené V6 design otázky
 
@@ -347,7 +353,8 @@ Následující body nejsou součástí schváleného kontraktu:
 - fyzická strategie M:N externích titulků;
 - kompletní canonical grammar/parser, včetně Film/Bonus/CM/Menu; supplementary
   grouping taxonomy a persistence/resolver foundation jsou schválené a
-  implementované, Layout Review UI a target planner zatím chybí;
+  implementované, Layout Review UI je implementované a produkční review uzavřená;
+  canonical parser a target planner zatím chybí;
   component sanitizer a foundation formatter
   jsou již implementované, nikoli target planner;
 - numbering migrace pro canonical filename grammar;
