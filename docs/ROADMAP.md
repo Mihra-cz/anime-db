@@ -174,25 +174,31 @@ neprovádí. Platí `člověk > automatika; nejistota → Review`.
 
 Stav: **Probíhá** (od uzavření Pre-V6 gate 2026-09-27).
 
-Aktuální fáze: Naming a Physical Layout Review jsou uzavřené; probíhá příprava
-shared Season containers před plannerem a execution. Fyzický rename ani move na NAS
-zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
+Aktuální fáze: Naming (61 choices, actionable 0) a Physical Layout Review
+(32 choices, actionable 0, basis mismatch 0) jsou uzavřené. P1A/P1B jsou committed
+a produkční rollout v8→v9 je dokončený; shared Season persistence je podporovaná.
+Zbývá P2 canonical parser/routing před plannerem a execution. Fyzický rename
+ani move na NAS zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
 v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 
 ### V6.3 – Oddělení logical owner identity od fyzické cesty
 
-- P1A je implementované: runtime/rebuild/grouping/scanner internals
+- P1A je committed: runtime/rebuild/grouping/scanner internals
   rozlišují title owner ID, planned owner handle a locator; ambiguity zůstává review.
-- P1B je implementované, zatím bez produkčního
-  rollout. Compatibility v9 povoluje NOT NULL nonunique title locator s indexem,
+- P1B je committed a produkční rollout v8→v9 je COMPLETE (`user_version = 9`).
+  Compatibility v9 povoluje NOT NULL nonunique title locator s indexem,
   persistuje current grouping authority přes owner FKs a selected-title rows
   a vrací 409 při nejednoznačném legacy single-path title lookupu. Jednorázový
   grouping backfill převádí pouze jednoznačné existující owners, missing history
-  zachová bez authority a nejednoznačnost odmítne. Produkce zůstává v8 s UNIQUE;
-  stávající source locators a Naming/Layout choices se migrací nemění.
+  zachová bez authority a nejednoznačnost odmítne. Produkční migrace převedla
+  13 decisions / 24 legacy refs na 18 current title owner FKs, 6 history-only
+  NULL-owner refs a 12 target collection FKs. Stávající source locators
+  a Naming/Layout choices zůstaly beze změny.
 - P2 zbývá: canonical parser a routing nových souborů podle authoritative tokenů.
-  P1B ambiguity guard proto zůstává aktivní. P1A/P1B canonical target container,
-  target planner ani filesystem execution neimplementují.
+  P1B ambiguity guard proto zůstává aktivní: nový soubor ve shared Season
+  containeru bez další authority zůstává Review. Target Planner, filesystem
+  execution, strategie externích titulků, duplicate disposition a finální
+  completeness zůstávají pending.
 
 ### Postup V6
 

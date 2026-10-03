@@ -115,8 +115,8 @@ Přejmenování, přesuny, import či fyzický cleanup médií nejsou současné
 - Persistence: SQLAlchemy nad SQLite, foreign keys zapnuté pro každé spojení.
   Idempotentní compatibility migrace mají verzovaný startup přes `user_version`;
   stabilní restart neprovádí novou rekonstrukci celé knihovny. Aktuální
-  compatibility verze je 9 (schema verze, nikoli roadmap V6);
-  produkční DB zatím zůstává v8, rollout v9 nebyl proveden. Upgrady 1→2 až
+  compatibility i produkční schema verze je 9 (schema verze, nikoli roadmap V6);
+  řízený produkční rollout 8→9 je dokončený. Upgrady 1→2 až
   5→6 jsou aditivní, bez rekonstrukce. Upgrade 5→6 přidává lifecycle
   `ExternalTitleLink` s pouze mechanickým backfillem. Upgrade 6→7 vytváří prázdnou
   `physical_naming_choices` bez rekonstrukce a bez backfillu starých názvů,
@@ -198,7 +198,7 @@ Běžné UI display resolvery physical choices nepoužívají. Target planner,
 kolize, warning >240 UTF-16 units absolutní klientské cesty a filesystem
 operace zůstávají další prací; UI nyní žádnou base path nehádá. Naming
 persistence přidala schema v7 a layout schema v8, bez automatického backfillu.
-Produkční DB již používá v8; Naming i Physical Layout Review jsou uzavřené.
+Produkční DB používá v9; Naming Review je uzavřená s 61 choices a actionable 0.
 
 ### V6 physical layout foundation
 
@@ -250,8 +250,8 @@ Rebuild chrání layout ownera, klonuje choice do detached projekce, zahrnuje ji
 do stale-plan fingerprintu a ověřuje preservation parity. Choice nikdy
 nevytváří membership selector. Scanner ji nevytváří ani nereconfirmuje.
 Compatibility 7→8 vytvoří pouze prázdnou tabulku a constraints/index, bez
-backfillu nebo rekonstrukce; druhý v8 startup je no-op. Target planner, cílové
-cesty a filesystem execution zatím nejsou implementované.
+backfillu nebo rekonstrukce; stabilní startup na aktuální v9 je no-op.
+Target planner, cílové cesty a filesystem execution zatím nejsou implementované.
 
 ### V6 physical layout review
 
@@ -279,9 +279,9 @@ odkaz do Názvy a fail-safe own-folder náhled. Žádný folder text se neuklád
 Reconfirm se nabízí jen pro stále použitelnou uloženou volbu; položka bez
 použitelného rozložení odkazuje do Hierarchie místo prázdné volby.
 
-Produkční DB používá schema v8 a obsahuje potvrzené lidské
-`PhysicalLayoutChoice`. Naming i Layout mají uzavřenou actionable frontu
-a layout choices odpovídají aktuálnímu basis. UI není target planner
+Produkční DB používá schema v9 a obsahuje 32 potvrzených lidských
+`PhysicalLayoutChoice`, actionable 0 a basis mismatch 0. Naming i Layout mají
+uzavřenou actionable frontu. UI není target planner
 a neprovádí žádné filesystem operace.
 
 ### Fyzická evidence a logická struktura
@@ -291,24 +291,29 @@ a fyzický soubor. Title může představovat Season, Part, Film, OVA, Special
 nebo doplněk; není ekvivalentem fyzické složky ani jedné epizody.
 `Video.relative_path` identifikuje soubor. Logické přesuny nemění filename ani NAS.
 
-V6.3-P1A používá `CatalogTitle.id` jako persisted logical owner identity.
+V6.3-P1A je committed a používá `CatalogTitle.id` jako persisted logical
+owner identity.
 Rebuild intents, specs, projekce, apply i verification rozlišují existující
 owner ID a deterministic plan-local handle nového title. Locator index vrací
 0..N kandidátů; nejednoznačný lookup nevytváří membership a vyžaduje review.
-V6.3-P1B je implementované, zatím bez produkčního rollout. Ve schema v9
-je `CatalogTitle.relative_root_path` NOT NULL s neunikátním lookup indexem;
-více persisted owners smí sdílet locator. Produkce stále používá v8 s UNIQUE,
-takže nonunique persistence bude dostupná až po rollout. Migrace zachovává
-všechna title IDs a původní locator hodnoty, včetně `.catalog-part-*`.
+V6.3-P1B je committed a produkční rollout v8→v9 je dokončený
+(`user_version = 9`). `CatalogTitle.relative_root_path` je NOT NULL,
+NON-UNIQUE s neunikátním lookup indexem; shared Season persistence je podporovaná
+schema i runtime. Více persisted owners smí sdílet locator bez změny logické
+identity. Rollout zachoval všechna title IDs a původní locator hodnoty,
+včetně `.catalog-part-*`; žádné canonical cesty nebackfilloval.
 
 Current grouping authority je `CollectionGroupingDecision.target_collection_id`
 (FK) a `grouping_decision_titles.catalog_title_id` (relační selected-owner rows).
 Legacy `target_collection_path`, `selected_title_paths_json` a jednotlivé
 `title_path_snapshot` jsou pouze historie, nikdy runtime resolver key.
-Jednorázová migrace převádí jen přesně jednoznačné reference; chybějící,
-včetně šesti známých historical missing refs, zachová bez owner FK. Nejednoznačný
-backfill atomicky odmítne. Smazání title nebo target collection nastaví příslušný
-FK na NULL a zachová evidence; nové objekty na stejné cestě vztah neobnoví.
+Produkční migrace zachovala 13 decisions a převedla 24 legacy refs na 18 current
+title owner FKs a 6 history-only refs s NULL owner FK; target collection FK má
+12 decisions. Převod použil pouze jednoznačně existující ownery. Šest historical
+missing paths zůstalo zachovaných bez guessed successorů a bez current authority.
+Nejednoznačný backfill migrace atomicky odmítne. Smazání title nebo target
+collection nastaví příslušný FK na NULL a zachová evidence; nové objekty na
+stejné cestě vztah neobnoví.
 Smazání decision odstraní jeho reference rows. Explicitní nová/aktualizovaná
 lidská rozhodnutí zapisují IDs, takže přejmenování locatoru autoritu nezmění.
 
@@ -321,7 +326,11 @@ Canonical parser a routing nových canonical souborů nejsou implementované
 a patří do P2. Existing membership/explicit selectors zachovávají owners;
 nový soubor `... - S02P02E03.mkv` při ambiguous locatoru zůstává unresolved/review.
 Naming/Layout choices zůstávají owner-ID based a čistá změna locatoru nemění
-jejich basis. Planner ani filesystem execution nejsou implementované.
+jejich basis. Target Planner, filesystem execution, fyzická strategie externích
+titulků, duplicate disposition a finální completeness zůstávají pending.
+
+Produkční DB po rollout: size `7213056`, mtime_ns `1791062165382571032`,
+SHA-256 `907ca68f2fbac1b1fb61413c0c8128a719afbe9a3cfc6f898d0d3295aa6107de`.
 
 Season a Part jsou různé strukturální údaje. `Part 2` není `Season 2`.
 Více Season titles se stejným season číslem v collection vyžaduje unikátní

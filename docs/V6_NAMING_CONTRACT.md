@@ -229,20 +229,25 @@ Náhled vlastní složky používá aktuální PhysicalNaming resolver a společ
 sanitizer; nikdy nekrátí Mini Dra na vlastní layout text. Platný naming rename
 nemění layout basis ani form identity. Unresolved/invalid Naming náhled
 zablokuje a odkazuje na Názvy, ale layout UI naming authority nepotvrzuje.
-Produkční DB používá schema v8 a obsahuje lidské PhysicalLayoutChoice;
-Naming i Physical Layout Review jsou uzavřené. Naming/Layout choices se
+Produkční DB používá schema v9 po dokončeném rollout v8→v9. Naming Review
+je uzavřená s 61 choices a actionable 0; Physical Layout Review s 32 choices,
+actionable 0 a basis mismatch 0. Naming/Layout choices se
 automaticky nebackfillují. Target planner a execution nejsou implementované.
 
-P1A odděluje interní title owner identity (`CatalogTitle.id`, případně planned
-handle před vytvořením) od locatoru. `relative_root_path` zůstává NOT NULL
-a v produkčním v8 UNIQUE. P1B je implementované, zatím
-bez produkčního rollout: po compatibility migraci v9 je locator neunikátně
-indexovaný a více persisted owner IDs může sdílet Season locator. Migrace
-žádnou současnou source cestu nepřepisuje. Current grouping authority je
-relační owner-ID/FK persistence; legacy paths jsou pouze historical evidence
+P1A a P1B jsou committed. P1A odděluje interní title owner identity
+(`CatalogTitle.id`, případně planned handle před vytvořením) od locatoru.
+Po produkčním rollout P1B (`user_version = 9`) je `relative_root_path` NOT NULL,
+NON-UNIQUE a neunikátně indexovaný. Shared Season persistence je podporovaná
+schema i runtime: více persisted owner IDs může sdílet Season locator,
+který není logical identity. Rollout žádnou současnou source cestu nepřepsal.
+Current grouping authority je relační owner-ID/FK persistence;
+legacy paths jsou pouze historical evidence
 a chybějící owner se nehádá. Nejednoznačný locator nenahrazuje routing evidence.
 Budoucí container je projekcí Naming + Hierarchy + Layout, nikoli novou identitou.
-Canonical parser a routing nových souborů zůstávají P2 dependency.
+Canonical parser a routing nových souborů nejsou implementované a zůstávají
+P2 dependency. Nový soubor ve shared Season containeru bez další authority
+zůstává Review. Target Planner, execution, strategie externích titulků,
+duplicate disposition a finální completeness zůstávají pending.
 
 Bez choice použije čistý resolver jen jednoznačné shared defaults. Own
 metadata strong/optional candidate zůstává unresolved human Layout Review,
@@ -270,7 +275,7 @@ basis identity; release text pouze blokuje shared default. Split ponechá
 choice na existujícím ownerovi a nepřenáší ji na nový title. Rebuild ji chrání,
 zahrnuje do fingerprint/parity a neodvozuje z ní membership. Scanner choice
 nevytváří ani nereconfirmuje. Compatibility 7→8 přidává prázdnou tabulku,
-bez backfillu nebo library reconstruction; stabilní v8 startup je no-op.
+bez backfillu nebo library reconstruction; stabilní startup na aktuální v9 je no-op.
 
 ### S vlastními confirmed metadaty
 
