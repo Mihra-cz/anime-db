@@ -32,6 +32,7 @@ from .manual_split import (
 )
 from .title_identity import TitleLocatorIndex
 from .hierarchy_assignment import preserved_membership_title
+from .title_locator_migration import migrate_title_locator_persistence
 
 from .models import (
     CatalogCollection, CatalogTitle, ExternalSubtitle, ExternalTitleLink,
@@ -56,7 +57,8 @@ logger = logging.getLogger(__name__)
 # compatibility step, not the start of roadmap V6.
 # Version 7 adds an empty human naming-choice table, without reconstruction or backfill.
 # Version 8 adds an empty human layout-choice table, without reconstruction or backfill.
-STARTUP_COMPATIBILITY_VERSION = 8
+# Version 9 permits shared title locators and materializes grouping owner FKs.
+STARTUP_COMPATIBILITY_VERSION = 9
 
 
 def _migrate_unnumbered_duplicate_confirmation_kind(connection) -> None:
@@ -441,6 +443,7 @@ def migrate_schema(engine) -> None:
             "ON manual_split_rule_videos(video_id)"
         ))
 
+    migrate_title_locator_persistence(engine)
     legacy_external_subtitle_links = _legacy_external_subtitle_links(engine)
 
     with Session(engine) as session:
@@ -911,6 +914,9 @@ def migrate_schema_at_startup(engine) -> bool:
     if current >= STARTUP_COMPATIBILITY_VERSION:
         return False
     if current < 1:
+        # Fresh/unversioned schemas need the ordinary baseline tables first.
+        # Versioned upgrades own their new DDL atomically, before create_all.
+        Base.metadata.create_all(engine)
         migrate_schema(engine)
     with engine.begin() as connection:
         if current == 1:
@@ -931,7 +937,5 @@ def migrate_schema_at_startup(engine) -> bool:
         if current < 7:
             PhysicalNamingChoice.__table__.create(connection, checkfirst=True)
         PhysicalLayoutChoice.__table__.create(connection, checkfirst=True)
-        connection.execute(text(
-            f"PRAGMA user_version = {STARTUP_COMPATIBILITY_VERSION}"
-        ))
+    migrate_title_locator_persistence(engine, mark_version=True)
     return True

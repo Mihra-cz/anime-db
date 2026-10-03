@@ -57,7 +57,7 @@ def domain_snapshot(session):
 
 
 def test_version_7_upgrade_is_empty_additive_and_second_startup_noop(session):
-    assert STARTUP_COMPATIBILITY_VERSION == 8
+    assert STARTUP_COMPATIBILITY_VERSION == 9
     root = collection(session)
     owner = title(session, root, kind="ova")
     add_video(session, owner)
@@ -70,7 +70,7 @@ def test_version_7_upgrade_is_empty_additive_and_second_startup_noop(session):
     assert migrate_schema_at_startup(engine) is True
     assert domain_snapshot(session) == before
     assert session.connection().exec_driver_sql("SELECT count(*) FROM physical_layout_choices").scalar() == 0
-    assert session.connection().exec_driver_sql("PRAGMA user_version").scalar() == 8
+    assert session.connection().exec_driver_sql("PRAGMA user_version").scalar() == 9
     assert migrate_schema_at_startup(engine) is False
     assert not session.connection().exec_driver_sql("PRAGMA foreign_key_check").all()
 

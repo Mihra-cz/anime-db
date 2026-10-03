@@ -115,11 +115,14 @@ Přejmenování, přesuny, import či fyzický cleanup médií nejsou současné
 - Persistence: SQLAlchemy nad SQLite, foreign keys zapnuté pro každé spojení.
   Idempotentní compatibility migrace mají verzovaný startup přes `user_version`;
   stabilní restart neprovádí novou rekonstrukci celé knihovny. Aktuální
-  compatibility verze je 8 (schema verze, nikoli roadmap V6); upgrady 1→2 až
+  compatibility verze je 9 (schema verze, nikoli roadmap V6);
+  produkční DB zatím zůstává v8, rollout v9 nebyl proveden. Upgrady 1→2 až
   5→6 jsou aditivní, bez rekonstrukce. Upgrade 5→6 přidává lifecycle
   `ExternalTitleLink` s pouze mechanickým backfillem. Upgrade 6→7 vytváří prázdnou
   `physical_naming_choices` bez rekonstrukce a bez backfillu starých názvů,
-  upgrade 7→8 stejně prázdnou `physical_layout_choices`.
+  upgrade 7→8 stejně prázdnou `physical_layout_choices`. Upgrade 8→9 atomicky
+  odstraní pouze title-locator UNIQUE a mechanicky převede jednoznačné legacy
+  grouping references na existující owner FKs; knihovnu nerekonstruuje.
 - Scanner: rekurzivní evidence MKV/MP4/M4V/AVI, technická data přes `ffprobe`,
   párování a jazyková evidence externích titulků. Velikost a `mtime` určují,
   zda je nutné opakovat probe. Manuální autority se zachovávají.
@@ -292,16 +295,33 @@ V6.3-P1A používá `CatalogTitle.id` jako persisted logical owner identity.
 Rebuild intents, specs, projekce, apply i verification rozlišují existující
 owner ID a deterministic plan-local handle nového title. Locator index vrací
 0..N kandidátů; nejednoznačný lookup nevytváří membership a vyžaduje review.
-Grouping persistence stále obsahuje legacy path references, které resolver
-na vstupní hranici převádí na owner IDs. Chybějící historické references zůstávají
-unresolved; locator collision nikdy nevybírá první title.
+V6.3-P1B je implementované, zatím bez produkčního rollout. Ve schema v9
+je `CatalogTitle.relative_root_path` NOT NULL s neunikátním lookup indexem;
+více persisted owners smí sdílet locator. Produkce stále používá v8 s UNIQUE,
+takže nonunique persistence bude dostupná až po rollout. Migrace zachovává
+všechna title IDs a původní locator hodnoty, včetně `.catalog-part-*`.
 
-Schema zůstává v8 a `CatalogTitle.relative_root_path` zůstává NOT NULL a UNIQUE.
-Je locator / legacy evidence, nikoli canonical target container. Sdílená Season
-cesta více persisted titles ještě není povolená; změna schema a grouping
-persistence patří do P1B. Canonical parser a routing nových canonical souborů
-nejsou implementované a patří do P2. Naming/Layout choices zůstávají owner-ID
-based a čistá změna locatoru nemění jejich basis.
+Current grouping authority je `CollectionGroupingDecision.target_collection_id`
+(FK) a `grouping_decision_titles.catalog_title_id` (relační selected-owner rows).
+Legacy `target_collection_path`, `selected_title_paths_json` a jednotlivé
+`title_path_snapshot` jsou pouze historie, nikdy runtime resolver key.
+Jednorázová migrace převádí jen přesně jednoznačné reference; chybějící,
+včetně šesti známých historical missing refs, zachová bez owner FK. Nejednoznačný
+backfill atomicky odmítne. Smazání title nebo target collection nastaví příslušný
+FK na NULL a zachová evidence; nové objekty na stejné cestě vztah neobnoví.
+Smazání decision odstraní jeho reference rows. Explicitní nová/aktualizovaná
+lidská rozhodnutí zapisují IDs, takže přejmenování locatoru autoritu nezmění.
+
+Locator je evidence, nikoli canonical target container. Ten bude derived z
+Naming + Hierarchy + Layout; žádný canonical path field ani backfill neexistuje.
+Legacy series URL při více title kandidátech vrací 409; interní navigace používá
+title ID. Virtuální title handles se při vytváření explicitně rezervují přes
+existence lookup, bez globální uniqueness běžných fyzických locatorů.
+Canonical parser a routing nových canonical souborů nejsou implementované
+a patří do P2. Existing membership/explicit selectors zachovávají owners;
+nový soubor `... - S02P02E03.mkv` při ambiguous locatoru zůstává unresolved/review.
+Naming/Layout choices zůstávají owner-ID based a čistá změna locatoru nemění
+jejich basis. Planner ani filesystem execution nejsou implementované.
 
 Season a Part jsou různé strukturální údaje. `Part 2` není `Season 2`.
 Více Season titles se stejným season číslem v collection vyžaduje unikátní

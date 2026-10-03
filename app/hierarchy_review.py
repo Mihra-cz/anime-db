@@ -71,10 +71,10 @@ from .manual_split import (
     replace_explicit_video_selector_authority,
     synchronize_manual_split_authority,
 )
-from .title_identity import TitleLocatorIndex
+from .title_identity import TitleLocatorIndex, title_locator_is_reserved
 
 from .models import (
-    CatalogCollection, CatalogTitle, CollectionGroupingDecision,
+    CatalogCollection, CatalogTitle, CollectionGroupingDecision, GroupingDecisionTitle,
     ManualSplitRuleVideo, Video, utc_now,
 )
 from .numbering import (
@@ -811,63 +811,70 @@ def record_grouping_decision(
             session, stored, target_collection, selected_title_ids,
         )
     else:
+        stored.target_collection_id = None
+        stored.selected_titles.clear()
         stored.target_collection_path = None
         stored.selected_title_paths_json = None
+    # Reaffirming unchanged values must still outrank older overlapping decisions.
+    stored.updated_at = utc_now()
 
 
-def _selected_title_paths(session: Session, title_ids: list[int]) -> tuple[str, ...]:
+def _selected_grouping_titles(session: Session, title_ids: list[int]) -> tuple[tuple[int, str], ...]:
     selected_ids = {int(value) for value in title_ids}
     if not selected_ids:
         raise ValueError("Vyberte alespoň jednu část.")
-    paths = tuple(sorted(session.scalars(select(CatalogTitle.relative_root_path).where(
+    rows = tuple(session.execute(select(CatalogTitle.id, CatalogTitle.relative_root_path).where(
         CatalogTitle.id.in_(selected_ids)
-    )).all()))
-    if len(paths) != len(selected_ids):
+    ).order_by(CatalogTitle.id)).all())
+    if len(rows) != len(selected_ids):
         raise ValueError("Výběr obsahuje neexistující část.")
-    return paths
+    return rows
 
 
 def _store_collection_merge_authority(
     session: Session, decision: CollectionGroupingDecision,
     target_collection: CatalogCollection, selected_title_ids: list[int],
 ) -> None:
+    rows = _selected_grouping_titles(session, selected_title_ids)
+    decision.target_collection_id = target_collection.id
     decision.target_collection_path = target_collection.relative_root_path
     decision.selected_title_paths_json = json.dumps(
-        _selected_title_paths(session, selected_title_ids),
+        [path for _, path in rows],
         ensure_ascii=False,
     )
+    existing = {ref.catalog_title_id: ref for ref in decision.selected_titles
+                if ref.catalog_title_id is not None}
+    retained = []
+    for owner_id, path in rows:
+        ref = existing.get(owner_id)
+        if ref is None:
+            ref = GroupingDecisionTitle(catalog_title_id=owner_id, title_path_snapshot=path)
+        else:
+            ref.title_path_snapshot = path
+        retained.append(ref)
+    decision.selected_titles = retained
 
 
 def record_manual_collection_merge(
     session: Session, target_collection: CatalogCollection, title_ids: list[int],
 ) -> CollectionGroupingDecision:
     """Persistuje autoritu i pro obecný move formulář bez grouping proposalu."""
-    title_paths = _selected_title_paths(session, title_ids)
-    key = _digest(["manual-collection-merge", *title_paths])
+    rows = _selected_grouping_titles(session, title_ids)
+    owner_keys = [str(owner_id) for owner_id, _ in rows]
+    # Separate ID keys from old path digests (a legacy locator can be "1").
+    key = _digest(["manual-collection-merge-owner-ids", *owner_keys])
+    fingerprint = _digest([str(target_collection.id), *owner_keys])
     stored = session.scalar(select(CollectionGroupingDecision).where(
         CollectionGroupingDecision.suggestion_key == key
     ))
     if stored is None:
         stored = CollectionGroupingDecision(suggestion_key=key)
         session.add(stored)
-    stored.state_fingerprint = _digest([
-        target_collection.relative_root_path, *title_paths,
-    ])
+    stored.state_fingerprint = fingerprint
     stored.decision = "merged"
     _store_collection_merge_authority(session, stored, target_collection, title_ids)
+    stored.updated_at = utc_now()
     return stored
-
-
-def _stored_title_paths(decision: CollectionGroupingDecision) -> tuple[str, ...]:
-    try:
-        values = json.loads(decision.selected_title_paths_json or "")
-    except (TypeError, ValueError):
-        return ()
-    if not isinstance(values, list) or not all(
-        isinstance(value, str) and value for value in values
-    ):
-        return ()
-    return tuple(dict.fromkeys(values))
 
 
 @dataclass(frozen=True)
@@ -880,28 +887,30 @@ class GroupingOwnerResolution:
 
 
 def resolve_grouping_owner_references(decision, titles: TitleLocatorIndex, collections) -> GroupingOwnerResolution:
-    """Decode legacy persistence once; missing history never guesses an owner."""
-    owner_ids, missing, ambiguous = [], [], []
-    for path in _stored_title_paths(decision):
-        candidates = titles.candidates(path)
-        if len(candidates) == 1:
-            owner_ids.append(candidates[0].id)
-        elif candidates:
-            ambiguous.append(path)
+    """Resolve persisted FKs only; snapshots cannot become current authority."""
+    owner_ids, missing = [], []
+    for ref in decision.selected_titles:
+        if ref.catalog_title_id is not None and ref.catalog_title_id in titles.by_id:
+            owner_ids.append(ref.catalog_title_id)
         else:
-            missing.append(path)
-    target = collections.get(decision.target_collection_path or "")
+            missing.append(ref.title_path_snapshot)
+    target = collections.get(decision.target_collection_id)
     return GroupingOwnerResolution(decision.id, target.id if target else None,
-                                   tuple(sorted(set(owner_ids))), tuple(missing), tuple(ambiguous))
+                                   tuple(sorted(set(owner_ids))), tuple(missing), ())
 
 
 def collection_grouping_authority_targets(session: Session) -> dict[CatalogTitle, CatalogCollection]:
-    """Legacy locator boundary followed by ID-only selector/owner resolution."""
-    decisions = list(session.scalars(select(CollectionGroupingDecision).order_by(
+    """Batch-load persisted owner authority, then evaluate selector conflicts."""
+    decisions = list(session.scalars(select(CollectionGroupingDecision).options(
+        selectinload(CollectionGroupingDecision.selected_titles),
+    ).execution_options(
+        # SQLite SET NULL can change FKs behind an already-loaded ORM object.
+        # Refresh them so ID reuse cannot reactivate a deleted owner/target.
+        populate_existing=True,
+    ).order_by(
         CollectionGroupingDecision.updated_at, CollectionGroupingDecision.id,
     )).all())
-    collections = {c.relative_root_path: c for c in session.scalars(select(CatalogCollection)).all()}
-    collections_by_id = {c.id: c for c in collections.values()}
+    collections_by_id = {c.id: c for c in session.scalars(select(CatalogCollection)).all()}
     titles = TitleLocatorIndex(session.scalars(select(CatalogTitle).options(
         selectinload(CatalogTitle.collection),
         selectinload(CatalogTitle.manual_split_rule_videos).selectinload(ManualSplitRuleVideo.video)
@@ -912,7 +921,7 @@ def collection_grouping_authority_targets(session: Session) -> dict[CatalogTitle
     for decision in decisions:
         if decision.decision != "merged":
             continue
-        resolved = resolve_grouping_owner_references(decision, titles, collections)
+        resolved = resolve_grouping_owner_references(decision, titles, collections_by_id)
         if resolved.target_collection_id is None or resolved.ambiguous_paths:
             continue
         selected_ids = set(resolved.title_ids)
@@ -2679,9 +2688,7 @@ def create_title_from_videos(
     position = len(collection.titles) + 1
     virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}"
     suffix = 1
-    while session.scalar(select(CatalogTitle.id).where(
-        CatalogTitle.relative_root_path == virtual_path
-    )):
+    while title_locator_is_reserved(session, virtual_path):
         suffix += 1
         virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}-{suffix}"
     title = CatalogTitle(
@@ -3168,7 +3175,7 @@ def apply_manual_split(
             if title is None:
                 virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}"
                 suffix = 1
-                while session.scalar(select(CatalogTitle.id).where(CatalogTitle.relative_root_path == virtual_path)):
+                while title_locator_is_reserved(session, virtual_path):
                     suffix += 1
                     virtual_path = f"{collection.relative_root_path}/.catalog-part-{position}-{suffix}"
                 title = CatalogTitle(

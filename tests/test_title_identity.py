@@ -1,4 +1,4 @@
-"""Shared locators never collapse distinct logical owners; v8 stays UNIQUE."""
+"""Shared locators never collapse distinct logical owners."""
 import json
 
 import pytest
@@ -8,7 +8,7 @@ import app.hierarchy_rebuild as rebuild
 from app.hierarchy import derive_library_hierarchy
 from app.hierarchy_assignment import automatic_assignment_title
 from app.hierarchy_review import collection_grouping_authority_targets
-from app.models import CatalogCollection, CatalogTitle, CollectionGroupingDecision, ManualSplitRuleVideo
+from app.models import CatalogCollection, CatalogTitle, CollectionGroupingDecision, GroupingDecisionTitle, ManualSplitRuleVideo
 from app.title_identity import ExistingTitleRef, PlannedTitleRef, TitleLocatorIndex
 from test_hierarchy_rebuild import _engine, _collection, _title, _video
 
@@ -324,10 +324,15 @@ def test_grouping_boundary_keeps_historical_missing_reference(shared_graph):
     _session, (collections, titles, _videos) = shared_graph
     titles[0].relative_root_path = "@manual/unique-owner"
     decision = CollectionGroupingDecision(id=1, decision="merged",
+        target_collection_id=collections[0].id,
         target_collection_path=collections[0].relative_root_path,
-        selected_title_paths_json=json.dumps([titles[0].relative_root_path, "@manual/historical-missing"]))
+        selected_title_paths_json=json.dumps([titles[0].relative_root_path, "@manual/historical-missing"]),
+        selected_titles=[
+            GroupingDecisionTitle(catalog_title_id=titles[0].id, title_path_snapshot=titles[0].relative_root_path),
+            GroupingDecisionTitle(catalog_title_id=None, title_path_snapshot="@manual/historical-missing"),
+        ])
     result = resolve_grouping_owner_references(decision, TitleLocatorIndex(titles),
-        {c.relative_root_path: c for c in collections})
+        {c.id: c for c in collections})
     assert result.title_ids == (titles[0].id,)
     assert result.missing_paths == ("@manual/historical-missing",)
     assert result.ambiguous_paths == ()

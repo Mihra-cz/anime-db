@@ -82,7 +82,7 @@ from .catalog_video_presentation import (
     video_variant_group_display,
 )
 from .database import Base, make_engine, make_session_factory
-from .title_identity import TitleLocatorIndex
+from .title_identity import TitleLocatorIndex, title_locator_is_reserved
 from .external_subtitle_compatibility import (
     POSITIVE_COMPATIBILITY_STATUSES,
     apply_compatibility_decision,
@@ -1097,8 +1097,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        Base.metadata.create_all(engine)
         migrate_schema_at_startup(engine)
+        Base.metadata.create_all(engine)
         logger.info("AnimeDB spuštěno; knihovna=%s", settings.anime_path)
         yield
         engine.dispose()
@@ -1433,9 +1433,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     # title in this collection is never its logical replacement.
                     title = TitleLocatorIndex(root_titles).unique(title_path)
                 if title is None:
-                    if session.scalar(select(CatalogTitle.id).where(
-                        CatalogTitle.relative_root_path == title_path
-                    )) is not None:
+                    if title_locator_is_reserved(session, title_path):
                         raise HTTPException(status_code=400, detail="Locator je obsazený; vyberte explicitní title ID.")
                     title = CatalogTitle(
                         collection=collection, local_title=name,
@@ -1591,14 +1589,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with sessions() as session:
             catalog_title = _load_catalog_title(session, catalog_title_id)
             if catalog_title is None and series_path:
-                # Legacy URL compatibility under the current UNIQUE locator
-                # schema. P1B must replace this boundary with ambiguity handling.
-                catalog_title = session.scalar(select(CatalogTitle).options(
-                    selectinload(CatalogTitle.external_links),
-                    selectinload(CatalogTitle.metadata_record),
-                ).where(
+                candidates = session.scalars(select(CatalogTitle).where(
                     CatalogTitle.relative_root_path == series_path
-                ))
+                ).limit(2)).all()
+                if len(candidates) > 1:
+                    raise HTTPException(status_code=409, detail="Cesta odpovídá více částem; použijte odkaz s title ID.")
+                catalog_title = candidates[0] if candidates else None
                 if catalog_title is None:
                     legacy_collection = session.scalar(select(CatalogCollection).options(
                         selectinload(CatalogCollection.titles),

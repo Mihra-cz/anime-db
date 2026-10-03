@@ -230,13 +230,18 @@ sanitizer; nikdy nekrátí Mini Dra na vlastní layout text. Platný naming rena
 nemění layout basis ani form identity. Unresolved/invalid Naming náhled
 zablokuje a odkazuje na Názvy, ale layout UI naming authority nepotvrzuje.
 Produkční DB používá schema v8 a obsahuje lidské PhysicalLayoutChoice;
-Naming i Physical Layout Review jsou uzavřené. Automatický backfill se
-neprovádí. Target planner a execution nejsou implementované.
+Naming i Physical Layout Review jsou uzavřené. Naming/Layout choices se
+automaticky nebackfillují. Target planner a execution nejsou implementované.
 
 P1A odděluje interní title owner identity (`CatalogTitle.id`, případně planned
 handle před vytvořením) od locatoru. `relative_root_path` zůstává NOT NULL
-a UNIQUE do P1B; sdílená persisted Season cesta zatím není povolená. Budoucí
-container je projekcí Naming + Hierarchy + Layout, nikoli novou identitou.
+a v produkčním v8 UNIQUE. P1B je implementované, zatím
+bez produkčního rollout: po compatibility migraci v9 je locator neunikátně
+indexovaný a více persisted owner IDs může sdílet Season locator. Migrace
+žádnou současnou source cestu nepřepisuje. Current grouping authority je
+relační owner-ID/FK persistence; legacy paths jsou pouze historical evidence
+a chybějící owner se nehádá. Nejednoznačný locator nenahrazuje routing evidence.
+Budoucí container je projekcí Naming + Hierarchy + Layout, nikoli novou identitou.
 Canonical parser a routing nových souborů zůstávají P2 dependency.
 
 Bez choice použije čistý resolver jen jednoznačné shared defaults. Own

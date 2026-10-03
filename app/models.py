@@ -139,7 +139,7 @@ class CatalogTitle(Base):
     )
     local_title: Mapped[str] = mapped_column(String, nullable=False)
     normalized_local_title: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    relative_root_path: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    relative_root_path: Mapped[str] = mapped_column(String, nullable=False, index=True)
     part_type: Mapped[str] = mapped_column(String, default="title", server_default="title")
     season_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     season_label: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -357,8 +357,16 @@ class CollectionGroupingDecision(Base):
     suggestion_key: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
     state_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
     decision: Mapped[str] = mapped_column(String, nullable=False)
+    target_collection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("catalog_collections.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    # Historical snapshots only. Runtime authority never resolves these paths.
     target_collection_path: Mapped[str | None] = mapped_column(String, nullable=True)
     selected_title_paths_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected_titles: Mapped[list[GroupingDecisionTitle]] = relationship(
+        back_populates="decision", cascade="all, delete-orphan", passive_deletes=True,
+        order_by="GroupingDecisionTitle.id",
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -367,6 +375,23 @@ class CollectionGroupingDecision(Base):
         "decision IN ('separate','merged')",
         name="ck_collection_grouping_decision",
     ),)
+
+
+class GroupingDecisionTitle(Base):
+    """Current owner FK plus evidence retained when that owner disappears."""
+
+    __tablename__ = "grouping_decision_titles"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    decision_id: Mapped[int] = mapped_column(
+        ForeignKey("collection_grouping_decisions.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    catalog_title_id: Mapped[int | None] = mapped_column(
+        ForeignKey("catalog_titles.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    title_path_snapshot: Mapped[str] = mapped_column(String, nullable=False)
+    decision: Mapped[CollectionGroupingDecision] = relationship(back_populates="selected_titles")
+    __table_args__ = (UniqueConstraint("decision_id", "catalog_title_id"),)
 
 
 class ExternalTitleLink(Base):

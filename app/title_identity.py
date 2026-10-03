@@ -1,6 +1,8 @@
 """Logical title references and a non-authoritative locator candidate index."""
 from dataclasses import dataclass
 from collections.abc import Iterable, Mapping, Sequence
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from .models import CatalogTitle
 
@@ -16,6 +18,13 @@ class PlannedTitleRef:
 
 
 TitleRef = ExistingTitleRef | PlannedTitleRef
+
+
+def title_locator_is_reserved(session: Session, locator: str) -> bool:
+    """Existence check for virtual-handle allocation, never owner resolution."""
+    return bool(session.scalar(select(select(CatalogTitle.id).where(
+        CatalogTitle.relative_root_path == locator,
+    ).exists())))
 
 
 def title_ref_key(ref: TitleRef) -> tuple[int, int]:

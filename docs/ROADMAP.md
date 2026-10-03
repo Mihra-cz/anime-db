@@ -181,15 +181,18 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 
 ### V6.3 – Oddělení logical owner identity od fyzické cesty
 
-- P1A je implementované: runtime/rebuild/grouping/scanner internals rozlišují
-  title owner ID, planned owner handle a locator. Grouping paths se řeší na IDs
-  na vstupní hranici; ambiguity zůstává review. Produkční Naming/Layout closure
-  je zachovaná, schema zůstává v8 a title locator zůstává NOT NULL a UNIQUE.
-- P1B zbývá: povolit nonunique title locator ve schema, převést grouping
-  persistence na owner-ID references a ošetřit legacy single-path URL lookup.
-  Sdílená persisted Season cesta zatím není povolená.
+- P1A je implementované: runtime/rebuild/grouping/scanner internals
+  rozlišují title owner ID, planned owner handle a locator; ambiguity zůstává review.
+- P1B je implementované, zatím bez produkčního
+  rollout. Compatibility v9 povoluje NOT NULL nonunique title locator s indexem,
+  persistuje current grouping authority přes owner FKs a selected-title rows
+  a vrací 409 při nejednoznačném legacy single-path title lookupu. Jednorázový
+  grouping backfill převádí pouze jednoznačné existující owners, missing history
+  zachová bez authority a nejednoznačnost odmítne. Produkce zůstává v8 s UNIQUE;
+  stávající source locators a Naming/Layout choices se migrací nemění.
 - P2 zbývá: canonical parser a routing nových souborů podle authoritative tokenů.
-  P1A parser, canonical target container ani target planner neimplementuje.
+  P1B ambiguity guard proto zůstává aktivní. P1A/P1B canonical target container,
+  target planner ani filesystem execution neimplementují.
 
 ### Postup V6
 
