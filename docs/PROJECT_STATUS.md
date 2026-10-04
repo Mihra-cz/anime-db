@@ -322,8 +322,19 @@ Naming + Hierarchy + Layout; žádný canonical path field ani backfill neexistu
 Legacy series URL při více title kandidátech vrací 409; interní navigace používá
 title ID. Virtuální title handles se při vytváření explicitně rezervují přes
 existence lookup, bez globální uniqueness běžných fyzických locatorů.
-Canonical parser a routing nových canonical souborů nejsou implementované
-a patří do P2. Existing membership/explicit selectors zachovávají owners;
+V6.3-P2B [canonical parser core](../app/canonical_filename.py) je implementovaný.
+Pure `parse_canonical_stem` a filename
+adapter s explicitní lowercase extension vracejí immutable discriminated
+Episode/Supplementary/Recap identity, oddělený Media Part a grammar version `v1`.
+Episode číslo má explicitní `canonical` coordinate provenance; Recap používá
+exact Decimal. Přijímá pouze podporovaný formatter language a sanitizovaný
+prefix zachovává jako textovou evidence. Supplementary formatter je
+non-injective: výsledek `unique/ambiguous/not_canonical` uchovává všechny platné
+lexical alternatives v deterministic pořadí bez precedence. Schválený inverse
+proto vyžaduje následné authoritative context resolution. Parser žádného
+ownera neřeší ani nevytváří.
+Scanner routing P2C není implementovaný; produkční chování scanneru i tolerantní
+legacy parser zůstávají beze změny. Existing membership/explicit selectors zachovávají owners;
 nový soubor `... - S02P02E03.mkv` při ambiguous locatoru zůstává unresolved/review.
 Naming/Layout choices zůstávají owner-ID based a čistá změna locatoru nemění
 jejich basis. Target Planner, filesystem execution, fyzická strategie externích

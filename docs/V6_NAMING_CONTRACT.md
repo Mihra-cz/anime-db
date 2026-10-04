@@ -244,8 +244,9 @@ Current grouping authority je relační owner-ID/FK persistence;
 legacy paths jsou pouze historical evidence
 a chybějící owner se nehádá. Nejednoznačný locator nenahrazuje routing evidence.
 Budoucí container je projekcí Naming + Hierarchy + Layout, nikoli novou identitou.
-Canonical parser a routing nových souborů nejsou implementované a zůstávají
-P2 dependency. Nový soubor ve shared Season containeru bez další authority
+P2B pure canonical parser core je implementovaný; authoritative context
+resolution a scanner routing P2C zůstávají odloženou dependency.
+Produkční scanner se nezměnil. Nový soubor ve shared Season containeru bez další authority
 zůstává Review. Target Planner, execution, strategie externích titulků,
 duplicate disposition a finální completeness zůstávají pending.
 
@@ -328,6 +329,15 @@ vyšší čísla se netruncují. Recap přijímá exact Decimal/integer, nepouž
 float ani exponent notation a odstraňuje jen fractional trailing zeros.
 Film/Bonus/CM/Menu grammar zůstává otevřená; formatter ji odmítá.
 
+Schválený inverse contract je formatter → jedna nebo více syntakticky platných
+canonical interpretations → authoritative context resolution → původní logical
+identity. Supplementary formatter je non-injective: `Foo - S01 - OVA.mkv`
+může znamenat prefix `Foo` + Season 1 OVA i prefix `Foo - S01` + root OVA.
+Naming grammar se proto nemění; parser uchovává oba rozklady a deterministic
+pořadí alternatives neznamená precedence. Prefix je presentation evidence,
+nikoli title identity. P2B core reprezentuje lexical ambiguity; její řešení
+patří P2C. Episode token E je canonical coordinate, nikoli source parser číslo.
+
 ## Persistence naming choices
 
 Jednou člověkem potvrzená fyzická naming choice musí být persistentní a
@@ -361,10 +371,13 @@ Následující body nejsou součástí schváleného kontraktu:
 - syntax tokenu pro video varianty (representation lanes);
 - fyzická disposition potvrzených duplicate secondary kopií;
 - fyzická strategie M:N externích titulků;
-- kompletní canonical grammar/parser, včetně Film/Bonus/CM/Menu; supplementary
+- rozšíření canonical grammar o Film/Bonus/CM/Menu/Other a další nepodporované
+  identity; supplementary
   grouping taxonomy a persistence/resolver foundation jsou schválené a
   implementované, Layout Review UI je implementované a produkční review uzavřená;
-  canonical parser a target planner zatím chybí;
+  P2B parser core podporovaného formatter language je implementovaný,
+  scanner routing P2C a target planner zatím chybí; nepodporovaná grammar
+  se bude řešit podle blockerů Target Planneru;
   component sanitizer a foundation formatter
   jsou již implementované, nikoli target planner;
 - numbering migrace pro canonical filename grammar;

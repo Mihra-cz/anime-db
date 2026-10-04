@@ -177,7 +177,9 @@ Stav: **Probíhá** (od uzavření Pre-V6 gate 2026-09-27).
 Aktuální fáze: Naming (61 choices, actionable 0) a Physical Layout Review
 (32 choices, actionable 0, basis mismatch 0) jsou uzavřené. P1A/P1B jsou committed
 a produkční rollout v8→v9 je dokončený; shared Season persistence je podporovaná.
-Zbývá P2 canonical parser/routing před plannerem a execution. Fyzický rename
+P2B pure canonical parser core je implementovaný. Dalším hlavním krokem je
+Target Planner; P2C authoritative context resolution a scanner routing jsou
+odložené. Fyzický rename
 ani move na NAS zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
 v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 
@@ -194,7 +196,13 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   13 decisions / 24 legacy refs na 18 current title owner FKs, 6 history-only
   NULL-owner refs a 12 target collection FKs. Stávající source locators
   a Naming/Layout choices zůstaly beze změny.
-- P2 zbývá: canonical parser a routing nových souborů podle authoritative tokenů.
+- P2B pure canonical parser core je implementovaný: strict formatter grammar,
+  immutable lexical alternatives včetně supplementary ambiguity a explicitní
+  canonical coordinate provenance. P2C authoritative context resolution
+  a routing nových souborů jsou odložené; parser není zapojený do scanneru
+  a produkční chování se nezměnilo. Nepodporovaná fyzická grammar
+  (Film/Bonus/CM/Menu/Other) se bude řešit podle skutečných blockerů
+  Target Planneru.
   P1B ambiguity guard proto zůstává aktivní: nový soubor ve shared Season
   containeru bez další authority zůstává Review. Target Planner, filesystem
   execution, strategie externích titulků, duplicate disposition a finální
