@@ -66,7 +66,8 @@ Současné zaměření V6:
 - Naming Review a Physical Layout Review jsou implementované a produkční
   ruční průchod je uzavřený;
 - oddělení logické title identity od locatoru jako příprava shared Season
-  containers; planner a execution zůstávají další prací.
+  containers; read-only Target Planner foundation je implementovaný,
+  execution zůstává další prací.
 
 ### Pre-V6 closure checkpoint
 
@@ -176,10 +177,9 @@ cestu od budoucího planneru. 70 code points je samostatný readability review
 resolved identity, neparsuje ji z prefixu ani filename. Skládá root/Season,
 Episode s volitelným Part/MP a schválené supplementary labels včetně exact
 Recap Decimal pozice. Lowercase extension je odděleně validovaná; finální
-filename byte limit zahrnuje suffix i extension. Film/Bonus/CM/Menu, variant
-tokeny a duplicate disposition jsou dosud otevřené a nevytváří se z nich
-odhadovaná grammar. Schválené supplementary grouping je samostatná Physical
-Layout doména; formatter zatím cílové cesty neplánuje.
+filename byte limit zahrnuje suffix i extension. D01 podporuje také Film/Bonus/CM/Menu bez implicitního ordinalu. D03
+přidává suffix ze sanitized explicitního variant manual labelu. Schválené supplementary grouping je samostatná Physical
+Layout doména; formatter pouze skládá filename components; cílové cesty plánuje read model níže.
 
 Physical Naming / Pojmenování má samostatnou centrální sekci `/naming-review`
 a shared [derived review model](../app/naming_review.py) pro frontu a
@@ -193,10 +193,10 @@ Save/reconfirm/reset používají naming service, serverové kandidáty a stale-
 fingerprint; GET a custom preview jsou read-only. Synonym keys nezávisí na
 pořadí seznamu. Season-only supplementary nabídne snapshot textu relevantních
 Partů bez změny Part authority. Limit 255 UTF-8 bytes zahrnuje i známé filename
-suffixy a inherited prefix dependencies; dosud otevřená grammar se neodhaduje.
-Běžné UI display resolvery physical choices nepoužívají. Target planner,
-kolize, warning >240 UTF-16 units absolutní klientské cesty a filesystem
-operace zůstávají další prací; UI nyní žádnou base path nehádá. Naming
+suffixy a inherited prefix dependencies; nepodporovaná grammar se neodhaduje.
+Běžné UI display resolvery physical choices nepoužívají. Target Planner
+kontroluje full namespace kolize a známý Windows client budget; filesystem
+execution neexistuje a žádnou Windows base path neodhaduje. Naming
 persistence přidala schema v7 a layout schema v8, bez automatického backfillu.
 Produkční DB používá v9; Naming Review je uzavřená s 61 choices a actionable 0.
 
@@ -219,7 +219,7 @@ Kinds jsou `own_folder`, `shared_ova`, `shared_specials`, `direct_season`,
 `extras_openings_endings`, `extras_promo`, `extras_bonus`, `extras_menus`.
 Schválená taxonomy je `OVA/`, `Specials/`, direct Season pro příběhový
 Preview/Prologue/Recap a `Extras/Openings & Endings/`, `Extras/Promo/`,
-`Extras/Bonus/`, `Extras/Menus/`; podrobnosti jsou v
+`Extras/Bonus/`, `Extras/CM/`, `Extras/Menu/`; podrobnosti jsou v
 [layout kontraktu](V6_NAMING_CONTRACT.md#physical-layout).
 
 Own confirmed metadata znamenají candidate na own folder, nikoli automatický
@@ -251,7 +251,53 @@ do stale-plan fingerprintu a ověřuje preservation parity. Choice nikdy
 nevytváří membership selector. Scanner ji nevytváří ani nereconfirmuje.
 Compatibility 7→8 vytvoří pouze prázdnou tabulku a constraints/index, bez
 backfillu nebo rekonstrukce; stabilní startup na aktuální v9 je no-op.
-Target planner, cílové cesty a filesystem execution zatím nejsou implementované.
+Cílové cesty nyní odvozuje read-only Target Planner foundation; filesystem
+execution není implementovaný.
+
+### V6 Target Planner read-only foundation
+
+Foundation je implementovaný jako backend/read model bez UI,
+nové persistence nebo schema změn. [Immutable types](../app/target_planner_types.py)
+a [čistá projekce](../app/target_planner.py) používají současnou Naming, effective
+Hierarchy, canonical numbering, Physical Layout, explicitní varianty a duplicate
+validity. Videa se routují podle owner IDs z DB; parser není owner authority.
+P1/P2 jedné Season sdílejí fyzický Season container, supplementary Part=None se
+nemění. [D01–D06](V6_NAMING_CONTRACT.md#schválený-target-planner-contract-d01d06)
+řeší Film/Bonus/CM/Menu, variant suffix, preservation quarantine a subtitles.
+
+[Loader](../app/target_planner_service.py) požaduje clean session, načte celou
+library v jedenácti SELECT queries nezávisle na počtu Video/Subtitle rows,
+hydratuje vztahy bez business změn a předá immutable scalar evidence shared
+resolverům. SQLite entrypoint používá `mode=ro` a konzistentní read transaction,
+bez aplikačního startupu/migrací/scanneru. Session new/dirty/deleted zůstává 0/0/0.
+
+[Filesystem/preflight](../app/target_planner_filesystem.py) provede jeden traversal
+na snapshot, nefollowuje symlinks, do `#recycle` nevstupuje a nic fyzicky nemění.
+Regular files mají explicitní kategorii, chybějící/nonregular/error evidence
+zůstává viditelná. Pouze archives čte pro SHA-256 copy evidence; média neprobuje.
+Records obsahují kind/ID, source/optional target, planned action, READY/WARNING/
+BLOCKED/REVIEW, diagnostics a provenance; duplicate safety a subtitle compatibility
+jsou explicitní. Actions KEEP/MOVE/QUARANTINE/REVIEW jsou pouze návrhy; DELETE není.
+
+Preflight kontroluje full namespace exact/casefold/uppercase/file-directory
+kolize, auxiliary vs managed namespaces, component limit a runtime NAME_MAX/
+PATH_MAX. Windows 240 UTF-16 soft budget vyžaduje skutečný client root; jinak je
+NOT_CHECKED / PRE_EXECUTION_REQUIRED. Výsledek i snapshot mají deterministic hash.
+Duplicate diagnostic nikdy neopravňuje purge: budoucí delete vyžaduje čerstvou
+physical-primary regular-file existence a další D04 gates bezprostředně před akcí.
+READY quarantine move a purge readiness jsou oddělené (`purge_state` je vždy
+PRE_EXECUTION_REQUIRED). Side assets se přiřazují jen vlastnímu secondary;
+secondary v library rootu ani adresář s nepřiřaditelným souborem nejsou accounted.
+
+[CLI](../app/tools/target_plan.py) vypíše JSON bez uloženého manifestu a umí dva
+fresh běhy s porovnáním records/counts/statuses/collisions/hash a DB fingerprintu;
+exit status odliší čistý plán (0), BLOCKED/REVIEW (2) a selhání evidence (1).
+Source archives se zachovávají flat v Subs jako READY s info diagnostikou
+neklasifikovaného obsahu; auxiliary v root Extras se skutečným subtree; root TXT
+zůstává KEEP. confirmed_no_match je subtitle present/video missing,
+nikoli quarantine. D06 safe continuation používá jen přesně doloženou ručně
+confirmed series; nejistota zachová original subtitle přímo v rootu.
+P2C, execution, NAS fyzický cleanup, purge action a Completeness UI jsou pending.
 
 ### V6 physical layout review
 
@@ -337,8 +383,8 @@ Scanner routing P2C není implementovaný; produkční chování scanneru i tole
 legacy parser zůstávají beze změny. Existing membership/explicit selectors zachovávají owners;
 nový soubor `... - S02P02E03.mkv` při ambiguous locatoru zůstává unresolved/review.
 Naming/Layout choices zůstávají owner-ID based a čistá změna locatoru nemění
-jejich basis. Target Planner, filesystem execution, fyzická strategie externích
-titulků, duplicate disposition a finální completeness zůstávají pending.
+jejich basis. Read-only Target Planner D01–D06 foundation je implementovaný;
+filesystem execution, fyzická reorganizace, purge a Completeness UI jsou pending.
 
 Produkční DB po rollout: size `7213056`, mtime_ns `1791062165382571032`,
 SHA-256 `907ca68f2fbac1b1fb61413c0c8128a719afbe9a3cfc6f898d0d3295aa6107de`.

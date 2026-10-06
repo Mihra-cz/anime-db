@@ -197,9 +197,10 @@ Bez own metadata nebo při explicitní lidské volbě sdíleného grouping plat�
 | příběhový Preview / Episode 0 / Prologue | přímo authoritative `Season NN/`, canonical postfix |
 | Recap | přímo authoritative `Season NN/`, Recap postfix |
 | OP / ED / NCOP / NCED | `Extras/Openings & Endings/` |
-| PV / trailer / CM | `Extras/Promo/` |
+| PV / trailer | `Extras/Promo/` |
+| CM | `Extras/CM/` |
 | skutečný Bonus / drama / voice drama / storyboard / music video | `Extras/Bonus/` |
-| release menu video | `Extras/Menus/` |
+| release menu video | `Extras/Menu/` |
 
 Own folder **nahrazuje** shared grouping: Season-attached title bude
 `<Root>/Season NN/<Own Folder>/...`, root-attached title
@@ -232,7 +233,8 @@ zablokuje a odkazuje na Názvy, ale layout UI naming authority nepotvrzuje.
 Produkční DB používá schema v9 po dokončeném rollout v8→v9. Naming Review
 je uzavřená s 61 choices a actionable 0; Physical Layout Review s 32 choices,
 actionable 0 a basis mismatch 0. Naming/Layout choices se
-automaticky nebackfillují. Target planner a execution nejsou implementované.
+automaticky nebackfillují. Read-only Target Planner foundation je implementovaný;
+execution není implementovaný.
 
 P1A a P1B jsou committed. P1A odděluje interní title owner identity
 (`CatalogTitle.id`, případně planned handle před vytvořením) od locatoru.
@@ -247,8 +249,8 @@ Budoucí container je projekcí Naming + Hierarchy + Layout, nikoli novou identi
 P2B pure canonical parser core je implementovaný; authoritative context
 resolution a scanner routing P2C zůstávají odloženou dependency.
 Produkční scanner se nezměnil. Nový soubor ve shared Season containeru bez další authority
-zůstává Review. Target Planner, execution, strategie externích titulků,
-duplicate disposition a finální completeness zůstávají pending.
+zůstává Review. Target Planner nyní zná owner IDs z DB a na P2C nezávisí.
+Execution, fyzická reorganizace a finální Completeness UI zůstávají pending.
 
 Bez choice použije čistý resolver jen jednoznačné shared defaults. Own
 metadata strong/optional candidate zůstává unresolved human Layout Review,
@@ -327,7 +329,11 @@ Foundation formatter podporuje labels `OVA`, `Special`, `Preview`, `OP`,
 `<Prefix> - S01P02 - OVA 01-MP01.ext`. Padding má minimum width 2;
 vyšší čísla se netruncují. Recap přijímá exact Decimal/integer, nepoužívá
 float ani exponent notation a odstraňuje jen fractional trailing zeros.
-Film/Bonus/CM/Menu grammar zůstává otevřená; formatter ji odmítá.
+D01 přidává labels `Film`, `Bonus`, `CM`, `Menu` se stejnými explicitními
+Season/Part/ordinal/MP osami; např. `Tenki no Ko - Film.mkv` nebo
+`Show - S01 - Bonus 02-MP01.mkv`. Žádný implicitní ordinal `01`.
+P2B parser tuto novou grammar ani variant suffix dosud nerozpoznává;
+rozšíření parseru/routing není prerequisite read-only Target Planneru.
 
 Schválený inverse contract je formatter → jedna nebo více syntakticky platných
 canonical interpretations → authoritative context resolution → původní logical
@@ -364,22 +370,105 @@ authority. Implementovaný stav a hranice popisuje PROJECT_STATUS.
 | Peter Grill S2 | `Super Extra` je název Season/release, nikoli supplementary marker |
 | Isekai Maou, title #279 (2 interview videa) | content/hierarchy typ zůstává Special; potvrzená Physical Layout choice `extras_bonus`, žádná samostatná `Interviews/` taxonomy |
 
+## Schválený Target Planner contract D01–D06
+
+Planner je derived read model nad DB authority a čerstvým read-only filesystem
+snapshotem. Nezapisuje target paths, statuses, collisions, review flags ani
+execution state. `CatalogCollection.id`, `CatalogTitle.id`, `Video.id` a
+`ExternalSubtitle.id` jsou identity; current/target cesta je pouze locator.
+Canonical parser existujícímu Video ownera neurčuje. Shared Party téže Season
+leží ve společném `Season NN/`, nikdy v automatické `Part NN/` složce.
+
+### D02 – Film a doplňky
+
+Film bez authoritative Season attachmentu leží přímo v anime rootu, s ním
+v `Season NN/`. Povinné `Film/` ani `Movies/` nejsou. Effective Physical Layout
+zůstává autoritou grouping; relevantní explicitní `own_folder` má přednost.
+Current architecture Film z Layout choice ownerů vylučuje; planner žádnou novou
+Layout authority ani Film choice nevytváří. Bonus používá `Extras/Bonus/`, CM
+`Extras/CM/`, Menu `Extras/Menu/` relativně k root/Season contextu. Stored kinds
+`extras_promo` a `extras_menus` se nemigrují; jejich CM/Menu physical projection
+používá finální namespaces. Mini Dra explicitní own folder zachovává.
+
+### D03 – Explicitní varianty
+
+Každá explicitně assigned representation má před extension suffix
+` [<sanitized authoritative manual_label>]`, např. `[BD]`, `[TV]`, `[A]` nebo
+`[Director's cut]`. Používá stejný component sanitizer a limit celého filename.
+NULL nebo nebezpečný label znamená Review/Blocked, žádný odhad z release filename
+ani default. Suffix se používá i bez současné collision. Následuje nový full
+namespace collision gate (exact, Unicode/casefold, uppercase a file/directory).
+
+### D04 – Duplicate quarantine a budoucí purge
+
+VALID PRIMARY má běžný canonical target. VALID SECONDARY má target
+`Duplicates/<mirrored canonical primary parent>/<original secondary filename>`.
+Nejde o content classification, title, Bonus ani Extras. Secondary filename se
+necanonicalizuje, nepřidává se `[DUP]` a reorganizace nic nemaže.
+Explicitní secondary side assets sdílejí lane. U zdrojového archive copy je
+bezpečnou derived evidence pouze výhradně secondary directory, validní vazby,
+jednoznačný primary target parent a byte-identická primary archive kopie;
+nejistota zůstává Review. Primary archive patří do běžného archive flow.
+
+Diagnostic nese secondary/primary Video IDs, current primary locator,
+primary canonical target, quarantine target, validity, physical-primary stav,
+side assets právě tohoto secondary a jejich accounting. Asset jiného secondary se
+mu nepřiřazuje; secondary v library rootu nebo adresář s nepřiřaditelným souborem
+není accounted. READY quarantine move neznamená purge readiness.
+Žádný snapshot není purge authority.
+Budoucí „Smazat duplicity“ musí **bezprostředně před delete** znovu ověřit VALID
+relation, existující primary DB row, **fyzicky existující regular primary file**
+mimo Duplicates, skutečné umístění secondary pod Duplicates a accounted side assets.
+Neurčitý/error stav znamená NESMAZAT/Review. Purge/UI/executor nyní neexistují.
+
+### D05 – Externí titulky M:N
+
+1:1 subtitle používá exact stem kompatibilního video targetu a svou lowercase
+extension. Pro bezpečně jednu logical identity s explicitními TV/BD lanes a
+jedním BD targetem má jeden M:N asset jeden exact-stem BD sidecar target,
+např. `Show - S01E01 [BD].ass`. TV i BD compatibility edges zůstávají.
+Nevzniká TV physical copy ani symlink. Jiné nejednoznačné M:N placement je Review;
+planner žádný nový language suffix ani compatibility authority nevymýšlí.
+
+### D06 – Subtitle present, video missing
+
+`confirmed_no_match` není junk/quarantine: subtitle existuje a aktuální video
+owner chybí. Při známém anime rootu bez bezpečné logical/Season placement zůstává
+`<Root>/<original filename>`, například OVA 01/02. Nevzniká owner ani Season guess.
+Bezpečné pokračování může použít expected canonical stem stejné potvrzené řady.
+Foundation konzervativně požaduje přesný source pattern včetně zero-padding,
+alespoň tři souvislé pozice ručně `confirmed_compatible` řady, jednu title/Season
+identity bez variant/MP, jediný Season/Part context v collection, žádné Video na
+pokračovací ani vyšší pozici a bezprostředně následující pozici. Jinak použije
+root/original filename.
+`confirmed_no_match` se zachovává a records mají `subtitle_present_video_missing`
+pro budoucí Completeness. Completeness UI je samostatná pending část V6.
+
+### Coverage, pomocné soubory a preflight
+
+Source subtitle ZIP/RAR/7Z archives mají flat `Subs/<original filename>`;
+archive se přesouvá beze změny a obsah se záměrně neotevírá, takže record je READY
+s info diagnostikou neklasifikovaného obsahu, nikoli WARNING. Secondary archive
+copy používá D04. Associated auxiliary má
+`<Root>/Extras/<actual meaningful subtree>/...`, včetně bundle struktury a
+původních filenames. Žádný hardcoded seznam bundle names ani mechanické sloučení
+s managed Extras namespace. Skutečný namespace konflikt znamená Review/Blocked.
+Historický `seznam-souboru.txt` zůstává KEEP v library rootu a není autoritou.
+
+Synology `#recycle` je SYSTEM_EXCLUDED: bez descentu, coverage, manifest actions,
+Completeness blockeru a budoucího execution. Neznámé, nepřístupné a nonregular
+assets zůstávají explicitně Review; nic se silent skipem neztrácí.
+Na runtime NAS rootu se read-only zjistí NAME_MAX/PATH_MAX; component hard limit
+je 255 UTF-8 bytes, bez truncation. Soft 240 UTF-16 units se vyhodnotí jen při
+skutečném absolutním Windows client rootu. Bez něj je
+`NOT_CHECKED / PRE_EXECUTION_REQUIRED`, což neblokuje read-only foundation.
+
 ## Otevřené V6 design otázky
 
 Následující body nejsou součástí schváleného kontraktu:
 
-- syntax tokenu pro video varianty (representation lanes);
-- fyzická disposition potvrzených duplicate secondary kopií;
-- fyzická strategie M:N externích titulků;
-- rozšíření canonical grammar o Film/Bonus/CM/Menu/Other a další nepodporované
-  identity; supplementary
-  grouping taxonomy a persistence/resolver foundation jsou schválené a
-  implementované, Layout Review UI je implementované a produkční review uzavřená;
-  P2B parser core podporovaného formatter language je implementovaný,
-  scanner routing P2C a target planner zatím chybí; nepodporovaná grammar
-  se bude řešit podle blockerů Target Planneru;
-  component sanitizer a foundation formatter
-  jsou již implementované, nikoli target planner;
+- grammar pro `Other` a další nepodporované identity;
+- rozšíření inverse parser contractu o D01/D03 a scanner routing P2C;
 - numbering migrace pro canonical filename grammar;
 - transakce aktualizace cest ve filesystemu a DB;
 - execution manifest;

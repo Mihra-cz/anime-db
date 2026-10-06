@@ -118,7 +118,7 @@ def test_invalid_supplementary_axes_fail_without_reinterpretation(fields):
     assert "invalid_identity" in {d.code for d in result.diagnostics}
 
 
-@pytest.mark.parametrize("kind", ["film", "bonus", "cm", "menu", "other", "episode", "unknown"])
+@pytest.mark.parametrize("kind", ["other", "episode", "unknown"])
 def test_open_grammar_is_explicitly_unsupported(kind):
     api, components = formatter_api()
     result = api.format_supplementary_component(components.sanitize_component("Show"), api.SupplementaryIdentity(kind, season=1), ".mkv")
@@ -164,3 +164,35 @@ def test_formatted_results_and_collisions_are_derived_without_auto_suffixes():
     assert first == api.format_episode_component(prefix, identity, ".mkv")
     assert first.component == second.component == "A-B - S01E01.mkv"
     assert components.collision_guards_match(components.collision_keys(first.component), components.collision_keys(second.component))
+
+
+@pytest.mark.parametrize("kind,label", [("film", "Film"), ("bonus", "Bonus"), ("cm", "CM"), ("menu", "Menu")])
+@pytest.mark.parametrize("season,ordinal,mp,suffix", [
+    (None, None, None, ""), (1, 2, 1, " 02-MP01"),
+])
+def test_d01_final_labels_do_not_invent_ordinals(kind, label, season, ordinal, mp, suffix):
+    api, components = formatter_api()
+    result = api.format_supplementary_component(components.sanitize_component("Show"),
+        api.SupplementaryIdentity(kind, season=season, ordinal=ordinal, media_part=mp), ".MKV")
+    assert result.component == "Show - " + ("S01 - " if season else "") + label + suffix + ".mkv"
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("BD", "BD"), ("TV", "TV"), ("Director's cut", "Director's cut"),
+    ('日本語: café/版?', '日本語 - café-版'),
+])
+def test_variant_suffix_uses_sanitized_manual_label(raw, want):
+    api, components = formatter_api()
+    base = api.format_episode_component(components.sanitize_component("Show"), api.EpisodeIdentity(1, 1), ".mkv")
+    assert hasattr(api, "format_variant_component"), "D03 manual-label formatter missing"
+    assert api.format_variant_component(base, components.sanitize_component(raw)).component == f"Show - S01E01 [{want}].mkv"
+
+
+def test_variant_suffix_is_measured_in_final_filename_budget():
+    api, components = formatter_api()
+    base = api.format_episode_component(components.sanitize_component("a" * 237), api.EpisodeIdentity(1, 1), ".mkv")
+    assert hasattr(api, "format_variant_component"), "D03 manual-label formatter missing"
+    result = api.format_variant_component(base, components.sanitize_component("BD"))
+    assert result.component == "a" * 237 + " - S01E01 [BD].mkv"
+    overflow = api.format_variant_component(base, components.sanitize_component("BDX"))
+    assert overflow.component is None and overflow.utf8_bytes == 256

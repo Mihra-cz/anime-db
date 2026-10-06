@@ -63,6 +63,24 @@ Pokud je knihovna na hostiteli jinde, změňte levou stranu volume v `compose.ya
 pytest
 ```
 
+## V6 read-only Target Planner
+
+Backend foundation vypíše deterministic plán nad současnou DB a read-only
+filesystem snapshotem. Nespouští startup, migraci ani
+scan, neukládá manifest a nic na NAS nevykonává. Pravidla a hranice jsou v
+[V6 kontraktu](docs/V6_NAMING_CONTRACT.md#schválený-target-planner-contract-d01d06).
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.tools.target_plan \
+  --db data/anime.db --library-root /mnt/nas-anime --repeat 2
+```
+
+Volitelné `--windows-root` přijímá pouze skutečnou absolutní klientskou cestu.
+Bez ní Windows budget zůstává NOT_CHECKED / PRE_EXECUTION_REQUIRED.
+Exit status je 0 pro čistý plán, 2 pro plán s BLOCKED/REVIEW records a 1 při
+selhání determinismu nebo DB fingerprintu. Plán je pouze návrh: execution
+(rename/move/quarantine/purge), P2C scanner routing a Completeness UI jsou pending.
+
 ## Chování skenu
 
 - Přeskakuje `#recycle`, `@eaDir` a adresáře začínající tečkou.

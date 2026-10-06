@@ -14,6 +14,7 @@ _EXTENSION = re.compile(r"\.?[A-Za-z0-9]+\Z")
 _SUPPLEMENTARY_LABELS = {
     "ova": "OVA", "special": "Special", "preview": "Preview", "op": "OP",
     "ed": "ED", "ncop": "NCOP", "nced": "NCED", "recap": "Recap",
+    "film": "Film", "bonus": "Bonus", "cm": "CM", "menu": "Menu",
 }
 
 
@@ -119,7 +120,6 @@ def format_supplementary_component(
 ) -> FormattedComponent:
     label = _SUPPLEMENTARY_LABELS.get(identity.content_type)
     if label is None:
-        # Film/Bonus/CM/Menu, variants and duplicate disposition remain open.
         return _result(None, prefix, (ComponentDiagnostic("unsupported_identity", "error"),))
     position = identity.recap_position
     is_recap = identity.content_type == "recap"
@@ -147,3 +147,17 @@ def format_supplementary_component(
     if identity.media_part is not None:
         suffix += f"-MP{identity.media_part:02d}"
     return _with_prefix(prefix, suffix, extension)
+
+
+def format_variant_component(
+    filename: FormattedComponent, manual_label: SanitizedComponent,
+) -> FormattedComponent:
+    """D03 suffix for explicit membership only; the caller supplies authority."""
+    diagnostics = filename.diagnostics + manual_label.diagnostics
+    if filename.preview_text is None or not manual_label.valid:
+        return _result(None, filename.prefix, diagnostics)
+    stem, dot, extension = filename.preview_text.rpartition(".")
+    if not dot:
+        return _result(None, filename.prefix, (ComponentDiagnostic("invalid_extension", "error"),))
+    return _result(stem + " [" + manual_label.component + "]." + extension,
+                   filename.prefix, diagnostics)

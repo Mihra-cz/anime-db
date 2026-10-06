@@ -177,8 +177,9 @@ Stav: **Probíhá** (od uzavření Pre-V6 gate 2026-09-27).
 Aktuální fáze: Naming (61 choices, actionable 0) a Physical Layout Review
 (32 choices, actionable 0, basis mismatch 0) jsou uzavřené. P1A/P1B jsou committed
 a produkční rollout v8→v9 je dokončený; shared Season persistence je podporovaná.
-P2B pure canonical parser core je implementovaný. Dalším hlavním krokem je
-Target Planner; P2C authoritative context resolution a scanner routing jsou
+P2B pure canonical parser core je implementovaný. Read-only Target Planner
+foundation s D01–D06 je implementovaný; dalším hlavním krokem je execution
+(preview a potvrzení konkrétního plánu) a NAS cleanup. P2C authoritative context resolution a scanner routing jsou
 odložené. Fyzický rename
 ani move na NAS zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
 v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
@@ -200,13 +201,17 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   immutable lexical alternatives včetně supplementary ambiguity a explicitní
   canonical coordinate provenance. P2C authoritative context resolution
   a routing nových souborů jsou odložené; parser není zapojený do scanneru
-  a produkční chování se nezměnilo. Nepodporovaná fyzická grammar
-  (Film/Bonus/CM/Menu/Other) se bude řešit podle skutečných blockerů
-  Target Planneru.
+  a produkční chování se nezměnilo. D01 formatter podporuje Film/Bonus/CM/Menu, D03 explicitní variant suffix;
+  parser pro nové formy a grammar Other zůstávají pending.
   P1B ambiguity guard proto zůstává aktivní: nový soubor ve shared Season
-  containeru bez další authority zůstává Review. Target Planner, filesystem
-  execution, strategie externích titulků, duplicate disposition a finální
-  completeness zůstávají pending.
+  containeru bez další authority zůstává Review. Target Planner stávající
+  owner IDs zná a P2C není jeho prerequisite.
+- Target Planner foundation je implementovaný: čistá derived
+  projekce, read-only coverage, full namespace/path preflight, duplicate safety
+  diagnostic a deterministic double simulation. D04 je quarantine, ne delete;
+  future purge má hard fresh physical-primary regular-file existence gate.
+  Fyzická execution, potvrzení konkrétního plánu pro NAS, Completeness UI
+  po cleanupu a P2C zůstávají pending.
 
 ### Postup V6
 
