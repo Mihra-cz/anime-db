@@ -22,8 +22,15 @@ LAYOUT_LABELS = {
     'shared_specials': 'Specials/', 'direct_season': 'Přímo v Season',
     'extras_openings_endings': 'Extras/Openings & Endings/',
     'extras_promo': 'Extras/Promo/', 'extras_bonus': 'Extras/Bonus/',
-    'extras_menus': 'Extras/Menus/',
+    'extras_menus': 'Extras/Menu/',
 }
+
+
+def _layout_label(kind, title):
+    # PV and CM share a persisted kind but have different final target folders.
+    if kind == 'extras_promo' and 'cm' in title.content_types:
+        return ('Extras/Promo/ + ' if 'preview' in title.content_types else '') + 'Extras/CM/'
+    return LAYOUT_LABELS.get(kind)
 
 
 @dataclass(frozen=True)
@@ -140,7 +147,8 @@ def _candidates(context, title, resolution):
         own = kind == 'own_folder'
         valid = bool(naming_ready) if own else True
         folder = component.component if own and valid else None
-        grouping = folder + '/' if folder else LAYOUT_LABELS[kind]
+        label = _layout_label(kind, title)
+        grouping = folder + '/' if folder else label
         preview = None if own and not valid else (
             attachment + '/' if kind == 'direct_season' else attachment + '/\n└── ' + grouping
         )
@@ -148,7 +156,7 @@ def _candidates(context, title, resolution):
                        else 'Schválené seskupení podle aktuálního typu a strukturálního kontextu.')
         if own and not valid:
             explanation = 'Nejprve vyřeš fyzický název v záložce Názvy. Náhled vlastní složky není bezpečně dostupný.'
-        candidates.append(LayoutCandidate(kind, LAYOUT_LABELS[kind], kind == recommended,
+        candidates.append(LayoutCandidate(kind, label, kind == recommended,
             explanation, attachment, folder, 'Physical Naming + Hierarchie' if own else 'Layout kontrakt + Hierarchie', valid, preview))
     return tuple(candidates), name, attachment
 
@@ -199,7 +207,7 @@ def build_layout_review(context: LayoutReviewContext) -> LayoutReviewIndex:
         units[title.id] = LayoutReviewUnit(title.id, title.collection_id, context.evidence[title.id], result,
             candidates, result.requires_human_decision, _fingerprint(context, title, result, candidates),
             attachment, naming.effective_text, any(c.layout_kind == 'own_folder' and not c.valid for c in candidates),
-            tuple(reasons), state, LAYOUT_LABELS.get(kind))
+            tuple(reasons), state, _layout_label(kind, title))
     units = dict(sorted(units.items(), key=lambda pair: (
         pair[1].evidence.collection_label.casefold(),
         pair[1].resolution.attachment.season_number or 0,

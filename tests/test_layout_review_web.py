@@ -105,6 +105,44 @@ def test_mini_oresuki_mp_and_interview_candidates(web):
     assert next(c for c in interview.candidates if c.layout_kind == 'extras_bonus').recommended
 
 
+@pytest.mark.parametrize('content_types,kind,label', [
+    (('cm',), 'extras_promo', 'Extras/CM/'),
+    (('menu',), 'extras_menus', 'Extras/Menu/'),
+    (('preview',), 'extras_promo', 'Extras/Promo/'),
+    (('preview', 'cm'), 'extras_promo', 'Extras/Promo/ + Extras/CM/'),
+])
+@pytest.mark.parametrize('confirmed', [False, True])
+def test_layout_folder_presentation_matches_content_without_changing_kinds(web, content_types, kind, label, confirmed):
+    app, client, ids = web
+    with app.state.sessions() as session:
+        root = session.get(CatalogTitle, ids['mini']).collection
+        owner = title(session, root, 'Folder presentation', kind='bonus', metadata=False)
+        for content_type in content_types:
+            add_video(session, owner, 1, kind=content_type)
+        if confirmed:
+            confirm_physical_layout_choice(session, owner, kind, now=NOW)
+        session.commit()
+        owner_id = owner.id
+    before = snapshot(app)
+    row = index(app).units[owner_id]
+    candidate = next(c for c in row.candidates if c.layout_kind == kind)
+    assert row.resolution.effective_layout_kind == kind
+    assert row.layout_label == candidate.label == label
+    assert candidate.preview == 'Season 01/\n└── ' + label
+    if confirmed:
+        assert row.resolution.choice.layout_kind == kind
+    response = client.get(f'/naming-review/layout?status=all&title_id={owner_id}')
+    assert response.status_code == 200
+    output = card(response.text, owner_id)
+    assert f'Aktuální rozložení: <strong>{label}</strong>' in output
+    assert f'value="{kind}"' in output
+    assert 'Extras/Menus/' not in output
+    if content_types in {('cm',), ('menu',)}:
+        assert 'Extras/Promo/' not in output
+    assert label in output
+    assert snapshot(app) == before
+
+
 @pytest.mark.parametrize('key,kind', [('mini','own_folder'), ('ova','shared_ova'), ('interview','extras_bonus'), ('shared','shared_specials')])
 def test_save_explicit_choice_prg_and_domain_isolation(web, key, kind):
     app, client, ids = web
