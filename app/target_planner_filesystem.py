@@ -26,13 +26,29 @@ def _hash(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode('utf-8')).hexdigest()
 
 
+def validate_inventory_root(root: Path) -> Path:
+    """Reject system bins and symlinked root ancestors before any inventory I/O."""
+    root = Path(root).absolute()
+    if any(part.casefold() == '#recycle' for part in root.parts):
+        raise ValueError('library root is inside #recycle')
+    cursor = Path(root.anchor)
+    for part in root.parts[1:]:
+        cursor /= part
+        try:
+            if stat.S_ISLNK(cursor.lstat().st_mode):
+                raise ValueError('library root traverses a symlink')
+        except FileNotFoundError:
+            break
+    return root
+
+
 def inventory_filesystem(root: Path) -> FilesystemSnapshot:
     """Exactly one traversal, lstat semantics, no links or recycle-bin descent.
 
     Only source archive files are read for byte-identical-copy evidence. Videos,
     subtitles and other assets need stat only. Inaccessible paths stay explicit.
     """
-    root = Path(root).absolute()
+    root = validate_inventory_root(root)
     entries = []
     diagnostics = []
     limits = []

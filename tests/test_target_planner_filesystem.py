@@ -108,6 +108,31 @@ def test_recycle_is_pruned_before_listing_and_not_in_coverage(tmp_path, monkeypa
     assert all(r.source_relative_path != '#recycle' for r in result.records)
 
 
+def test_recycle_library_root_and_parent_symlink_are_rejected_before_inventory_syscalls(tmp_path, monkeypatch):
+    f, _ = api()
+    recycle = tmp_path / '#recycle'
+    nested = recycle / 'nested'
+    nested.mkdir(parents=True)
+    (nested / 'never-read.txt').write_text('private')
+    alias = tmp_path / 'alias'
+    alias.symlink_to(recycle, target_is_directory=True)
+    visited = []
+    real_scandir = f.os.scandir
+    real_pathconf = f.os.pathconf
+    def guarded_scandir(path):
+        visited.append(('scandir', str(path)))
+        return real_scandir(path)
+    def guarded_pathconf(path, name):
+        visited.append(('pathconf', str(path)))
+        return real_pathconf(path, name)
+    monkeypatch.setattr(f.os, 'scandir', guarded_scandir)
+    monkeypatch.setattr(f.os, 'pathconf', guarded_pathconf)
+    for root in (recycle, nested, alias, alias / 'nested'):
+        with pytest.raises(ValueError, match='library root'):
+            f.inventory_filesystem(root)
+    assert visited == []
+
+
 def test_missing_sources_symlinks_and_unknowns_remain_visible(tmp_path):
     f, _ = api()
     (tmp_path/'link').symlink_to('/etc/passwd')

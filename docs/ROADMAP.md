@@ -179,8 +179,9 @@ Aktuální fáze: Naming (61 choices, actionable 0) a Physical Layout Review
 a produkční rollout v8→v9 je dokončený; shared Season persistence je podporovaná.
 P2B pure canonical parser core je implementovaný. Read-only Target Planner
 foundation s D01–D06, post-state projection a řízený container locator contract
-jsou implementované; následuje immutable manifest
-a dry-run/preflight bez writes, potom samostatně execution a NAS cleanup.
+jsou implementované. Immutable execution manifest, deterministic serialization,
+read-only dry-run/preflight a journal data foundation jsou implementované;
+následuje samostatně executor/crash recovery a NAS cleanup.
 P2C authoritative context resolution a scanner routing jsou
 odložené. Fyzický rename
 ani move na NAS zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
@@ -230,10 +231,18 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   source/parser evidence existujícího Video ani unresolved subtitle;
   tento write lifecycle zatím změněný není.
   Execution musí probíhat se zastaveným scanner/inventory writerem nebo za
-  explicitní maintenance boundary; tento mechanismus ještě není implementovaný.
-  Next task pro execution contract zahrnuje schválenou PRIMARY/LOW failure
-  criticality podle [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md#future-execution-failure-criticality).
-  Criticality nemění Naming/Layout/Metadata a není nyní implementovaná.
+  explicitní maintenance boundary. Manifest/preflight tuto externí podmínku
+  vyžadují; persisted maintenance mechanismus zatím neexistuje.
+- [Immutable execution manifest a read-only preflight](V6_EXECUTION_MANIFEST.md)
+  zachycují jeden fresh plán, exact warning acknowledgements, locator-only
+  patches a carried duplicate evidence. Versioned canonical payload má stabilní
+  hash; dry-run jej nepřepočítává na nový plán a stale input zastaví.
+  Manifest-level PRIMARY/LOW criticality nemění Naming/Layout/Metadata;
+  Mini Dra se standalone authority je PRIMARY, Bonus není automaticky LOW.
+  Readiness vyžaduje skutečný Windows root, snapshot/DB backup evidence,
+  maintenance a ověřenou write/rename capability. Current read-only audit je
+  záměrně NOT_READY. Journal je pouze data/serialization foundation,
+  skutečný executor, filesystem/DB state transitions a recovery jsou pending.
 
 ### Postup V6
 

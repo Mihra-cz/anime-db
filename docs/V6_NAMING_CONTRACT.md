@@ -518,8 +518,8 @@ post-state cestu; verifier kontroluje existence/regular-file a size parity,
 konzistenci approved copy hashů a classification provenance, bez primary rehashu.
 Totéž identity/stat/provenance ověření platí pro DB-known subtitle sides.
 Current pure projection vystaví stejnou immutable evidence;
-nesmí mít tajný marker, který reálný reload nemůže dodat. Manifest/journal zde
-implementované nejsou. Bez evidence je quarantine accounting UNKNOWN a
+nesmí mít tajný marker, který reálný reload nemůže dodat. Immutable manifest ji
+nese přes strict JSON serialization. Bez evidence je quarantine accounting UNKNOWN a
 unprovenanced secondary archive REVIEW. Primary ZIP v Subs se znovu nehashuje.
 Fixed point vyžaduje stejné file classifications a targets, pouze settled KEEP,
 bez nových collisions/reviews a bez locator drift. Existing directory namespace
@@ -551,9 +551,10 @@ Pure post-state zachovává také detached `source_evidence_filename`; scratch
 DB reload patchuje pouze physical locators a ponechá `Video.filename` beze změny.
 Budoucí execution DB patches mění locator fields podle approved lifecycle
 (`Video.relative_path`/`root_folder`, collection/title anchors a subtitle paths),
-nikoli source/parser nebo domain authority. Future immutable manifest může
+nikoli source/parser nebo domain authority. Immutable manifest může
 obsahovat `source_evidence_filename` i `target_relative_path`; tyto významy se
-nesmí směšovat. Manifest ani DB patch executor zatím nejsou implementované.
+nesmí směšovat. Manifest locator patches filename nezahrnují; DB patch executor
+zatím neexistuje.
 
 P2C **není** prerequisite fyzické reorganizace ani read-only post-state
 verification. **Je required před ordinary write-capable scanner rescanem
@@ -564,12 +565,13 @@ být scanner/inventory writer zastavený nebo za explicitní maintenance boundar
 P2C musí vyřešit dnešní scanner create/update lifecycle: physical basename
 nesmí u existujícího Video ani unresolved subtitle zničit source/parser evidence. Canonical routing
 a práce s technical lanes zároveň musí zachovat DB-known IDs a compatibility.
-Maintenance mechanismus, manifest, journal, executor, DB write transaction,
-rollback a snapshot integration nejsou implementované.
+Manifest/preflight vyžadují external/runtime maintenance evidence. Persisted
+maintenance mechanismus, executor, DB write transaction, rollback a snapshot
+automation nejsou implementované; journal má pouze data/serialization foundation.
 
 ### Future execution failure criticality
 
-Schválené pravidlo pro **next task**, zatím bez manifest/executor implementace:
+Manifest-level pravidlo; future failure execution zatím není implementovaná:
 
 - PRIMARY: Season, Film, OVA, Special, Recap, Preview a Mini Dra či obdobný
   samostatný supplementary/Bonus s vlastním obsahem podle explicitní human/metadata authority.
@@ -577,6 +579,25 @@ Schválené pravidlo pro **next task**, zatím bez manifest/executor implementac
 
 Criticality řídí pouze future execution failure severity. Nemění Hierarchy,
 Naming, Layout, Metadata requirement/authority ani identity. Bonus není automaticky LOW.
+Ambiguous criticality vyžaduje review. Subtitle dědí nejvyšší severity platných
+M:N compatibility; D06 confirmed_no_match je mandatory preservation PRIMARY.
+PRIMARY failure vyžaduje STOP; LOW smí pokračovat pouze s nedotčeným source,
+bez partial targetu, s journaled failure a bez dependent PRIMARY action.
+
+### Immutable manifest a read-only dry-run
+
+[Execution contract](V6_EXECUTION_MANIFEST.md) definuje immutable snapshot
+jednoho fresh plánu, canonical payload/hash, exact warning acknowledgements,
+locator-only patches, carried duplicate evidence, target directories a expected
+post-state. Dry-run targets nenahrazuje; fresh planner slouží jen ke stale/parity
+comparison. Relevantní změna baseline znamená STALE a STOP.
+
+Readiness vyžaduje actual Windows root, snapshot/DB backup evidence navázané na
+baseline, scanner/inventory maintenance a ověřené write/no-replace mount
+capabilities. Current read-only audit záměrně vrací NOT_READY, pokud evidence
+chybí. Žádný library move/rename/copy/delete/mkdir, production DB DML,
+snapshot creation, permission probe ani ordinary scanner se neprovádí.
+Skutečný executor a crash recovery jsou samostatný pending task.
 
 ## Otevřené V6 design otázky
 
@@ -586,5 +607,4 @@ Následující body nejsou součástí schváleného kontraktu:
 - rozšíření inverse parser contractu o D01/D03 a scanner routing P2C;
 - numbering migrace pro canonical filename grammar;
 - transakce aktualizace cest ve filesystemu a DB;
-- execution manifest;
 - finální rollback/recovery protokol.

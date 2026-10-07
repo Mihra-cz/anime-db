@@ -332,8 +332,8 @@ hash. `verify_post_state` přijímá explicitní immutable `DuplicateExecutionEv
 pro každý secondary: jeho ID, primary ID, identities/paths jen jím vlastněných
 side assets (sousedé v adresáři se nepřiřazují), tri-state accounting, classification provenance a případné archive identity/hash
 evidence. Jsou to execution facts, nikoli AnimeDB domain authority; žádné schema
-se nepřidává. Projekce je vystaví jako přenositelný výstup pro future manifest,
-který zatím není implementovaný. Uzaki secondary archive může být ověřen touto
+se nepřidává. Immutable execution manifest tuto přenositelnou evidence nese
+přes JSON round-trip. Uzaki secondary archive může být ověřen touto
 evidence bez nového hashování primary ZIP v Subs. Bez provenance je REVIEW.
 Regression gate aplikuje přesné locator-only patches na scratch DB kopii,
 reloaduje přes normální loader a porovná celý plán i domain rows s pure projekcí;
@@ -344,8 +344,8 @@ planner evidence ji nese jako `source_evidence_filename` a post-state ji zachov�
 [Current physical filename](../app/video_paths.py) je basename locatoru; používají
 jej technical UI labels, filename sorting/similarity a physical extension budget.
 Parser/numbering, variant hints a manual split source patterns dál používají
-`Video.filename`. Future DB locator patches toto pole nesmějí měnit; manifest
-může source evidence a target locator uvádět odděleně, ale zatím není implementovaný.
+`Video.filename`. Manifest DB locator patches toto pole nemění; source evidence
+a target locator jsou oddělené. Skutečný patch executor zatím neexistuje.
 
 P2C není required pro fyzickou reorganizaci ani read-only post-state verification,
 ale je required před ordinary write-capable rescanem reorganizovaného canonical
@@ -371,6 +371,32 @@ patchuje pouze `relative_path`. Audit reads/writes rozlišuje:
 Manual assign převede unresolved row na owner-less ExternalSubtitle; rozhodnutí,
 rejection a reopen workflows žádný existující unresolved filename nepřepisují.
 Model declaration není dodatečná authority a schema se tímto contractem nemění.
+
+### Immutable execution manifest a read-only preflight
+
+[Manifest foundation](../app/target_execution_manifest.py) zachytí jeden fresh
+Target Planner result do immutable versioned payloadu se stabilním canonical
+SHA-256. Envelope creation/acknowledgement timestamps nemění semantic hash.
+KEEP/MOVE/QUARANTINE actions, exact locator-only patches, target directories,
+warnings a carried duplicate accounting/archive evidence přežijí strict JSON
+round-trip. Dry-run používá fresh planner pouze pro stale/parity check;
+schválené targets nenahrazuje. Žádná DELETE action ani filesystem executor není.
+
+Criticality PRIMARY/LOW řídí pouze future failure severity. Mini Dra a další
+standalone Bonus s explicitní own-content authority jsou PRIMARY; generic Bonus
+vyžaduje review. M:N subtitles dědí nejvyšší valid compatible severity;
+D06 confirmed_no_match má mandatory PRIMARY preservation bez Video ownera.
+Warning acknowledgements jsou konkrétní IDs/class/objects s actor/time evidence,
+nikoli class wildcard nebo globální bypass.
+
+Preflight vyžaduje externí maintenance výluku scanner/inventory writeru až do
+verification, skutečný Windows client root s 240 UTF-16 budgetem, baseline-bound
+snapshot a DB backup, safe write capability a mount rename no-replace support.
+Current read-only production audit je záměrně NOT_READY při chybějící evidence.
+Žádný snapshot, backup ani write/rename probe se nevytváří. Journal foundation
+definuje data/serialization, nikoli vykonávané filesystem state transitions.
+Podrobný [execution contract](V6_EXECUTION_MANIFEST.md) popisuje preconditions,
+criticality, stale checks a hranici budoucího executor/recovery tasku.
 
 ### V6 physical layout review
 

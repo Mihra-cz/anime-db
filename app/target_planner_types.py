@@ -99,6 +99,15 @@ class DuplicateExecutionEvidence:
 
 
 @dataclass(frozen=True)
+class LocatorBaseline:
+    """Persisted physical locator at preload time, for exact future DB preconditions."""
+    object_kind: str
+    object_id: int
+    field: str
+    value: str
+
+
+@dataclass(frozen=True)
 class PlannerContext:
     naming: PhysicalNamingContext
     layout: PhysicalLayoutContext
@@ -109,6 +118,7 @@ class PlannerContext:
     unmatched: tuple[UnmatchedSubtitle, ...]
     side_assets: tuple[SideAssetEvidence, ...] = ()
     execution_evidence: tuple[DuplicateExecutionEvidence, ...] = ()
+    locator_baselines: tuple[LocatorBaseline, ...] = ()
 
 
 @dataclass(frozen=True)

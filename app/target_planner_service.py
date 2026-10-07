@@ -27,7 +27,7 @@ from .numbering import duplicate_relation_state, effective_video_numbering, unre
 from .physical_naming_service import physical_naming_context_from_models
 from .physical_layout_service import physical_layout_context_from_models
 from .supplementary import supplementary_review_issues
-from .target_planner_types import PlannerContext, SourceCollection, TargetTitle, TargetVideo, TargetSubtitle, UnmatchedSubtitle
+from .target_planner_types import PlannerContext, SourceCollection, TargetTitle, TargetVideo, TargetSubtitle, UnmatchedSubtitle, LocatorBaseline
 from .target_planner import technical_root
 
 
@@ -156,9 +156,18 @@ def load_planner_context(session: Session) -> PlannerContext:
             locators = {p for p in (collection.relative_root_path,
                 *(v.root_folder for v in videos_by_collection[collection.id])) if p and not technical_root(p)}
             source_collections.append(SourceCollection(collection.id, tuple(sorted(locators))))
+        baselines = (
+            *(LocatorBaseline('collection', c.id, 'relative_root_path', c.relative_root_path) for c in collections),
+            *(LocatorBaseline('title', t.id, 'relative_root_path', t.relative_root_path) for t in titles),
+            *(LocatorBaseline('video', v.id, 'relative_path', v.relative_path) for v in videos),
+            *(LocatorBaseline('video', v.id, 'root_folder', v.root_folder) for v in videos),
+            *(LocatorBaseline('subtitle', s.id, 'relative_path', s.relative_path) for s in subtitles),
+            *(LocatorBaseline('unmatched_subtitle', s.id, 'relative_path', s.relative_path) for s in unmatched),
+        )
         result = PlannerContext(naming, layout, tuple(source_collections), tuple(target_titles), tuple(target_videos),
             tuple(TargetSubtitle(s.id, s.relative_path, tuple(sorted(edges_by_asset[s.id]))) for s in subtitles),
-            tuple(UnmatchedSubtitle(s.id, s.relative_path, s.status, s.filename) for s in unmatched))
+            tuple(UnmatchedSubtitle(s.id, s.relative_path, s.status, s.filename) for s in unmatched),
+            locator_baselines=tuple(baselines))
     if session.new or session.dirty or session.deleted:
         raise RuntimeError('Target Planner mutated its read-only session.')
     return result

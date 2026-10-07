@@ -93,6 +93,31 @@ Normal write-capable scanner není součást verification; po fyzické reorganiz
 jej lze znovu použít až s P2C. Během budoucí execution musí být scanner/inventory
 writer zastavený nebo za explicitní maintenance boundary.
 
+## V6 immutable manifest a read-only dry-run
+
+Immutable manifest zachytí jeden fresh plán v canonical JSON; dry-run jej pouze
+porovná s fresh read-only evidence. Změna baseline znamená STALE, bez náhrady
+schválených targets. [Execution contract](docs/V6_EXECUTION_MANIFEST.md) popisuje
+locator-only patches, duplicate provenance, PRIMARY/LOW criticality, konkrétní
+warning acknowledgements a externí preconditions.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.tools.execution_manifest \
+  generate-manifest --db data/anime.db --library-root /mnt/nas-anime \
+  --output /tmp/anime-v6-manifest.json
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.tools.execution_manifest \
+  dry-run --db data/anime.db --library-root /mnt/nas-anime \
+  --manifest /tmp/anime-v6-manifest.json --output /tmp/anime-v6-dry-run.json
+```
+
+Output musí být explicitní lokální cesta mimo repo a library/NAS; runtime manifesty
+nepatří do repozitáře. Produkční DB se otevírá `mode=ro`, NAS se pouze čte.
+Current production dry-run má záměrně vrátit NOT_READY, dokud nejsou doložené
+Windows root, snapshot, DB backup, maintenance, write/no-replace capability
+a potřebná approvals. Skutečný executor neexistuje: tyto commands nepřesouvají
+ani nepřejmenovávají soubory, nevytvářejí library directories, snapshot nebo
+backup a nespouštějí scanner. P2C a Completeness zůstávají pending.
+
 ## Chování skenu
 
 - Přeskakuje `#recycle`, `@eaDir` a adresáře začínající tečkou.

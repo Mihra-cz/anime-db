@@ -160,6 +160,109 @@ def test_real_reload_with_carried_evidence_matches_pure_fixed_point(scratch_case
     assert second == projection
 
 
+def test_manifest_json_fresh_process_preserves_incomplete_and_archive_evidence(scratch_case, tmp_path):
+    """A verifier in a new interpreter receives only JSON and a fresh DB reload."""
+    import os
+    import subprocess
+    import sys
+    from app.target_execution_manifest import build_execution_manifest, manifest_to_json
+    from app.tools.target_plan import database_fingerprint
+    source, scratch, ctx, before, projection, post_snapshot = scratch_case
+    baseline_snapshot = FilesystemSnapshot('/library', tuple(FilesystemEntry(r.source_relative_path, 'regular', 1, 1,
+            content_sha256='uzaki-identical-archive' if r.source_relative_path.endswith('.zip') else None)
+            for r in before.records), 255, 4096)
+    manifest = build_execution_manifest(ctx, baseline_snapshot, before, database_fingerprint(source),
+        created_at='2026-10-07T00:00:00Z')
+    manifest_path=tmp_path/'manifest.json'
+    snapshot_path=tmp_path/'post-snapshot.json'
+    manifest_path.write_text(manifest_to_json(manifest))
+    snapshot_path.write_text(json.dumps(asdict(post_snapshot)))
+    code = '''
+import json, sqlite3, sys
+from dataclasses import replace
+from app.target_execution_manifest import manifest_from_json, duplicate_execution_evidence, post_state_hash_from_manifest
+from app.target_planner_service import readonly_planner_session, load_planner_context
+from app.target_planner_post_state import verify_post_state
+from app.target_planner_types import FilesystemSnapshot, FilesystemEntry
+manifest=manifest_from_json(open(sys.argv[1]).read())
+raw=json.load(open(sys.argv[2]))
+snapshot=FilesystemSnapshot(raw['root'], tuple(FilesystemEntry(**e) for e in raw['entries']), raw['name_max'], raw['path_max'], tuple(raw['diagnostics']))
+# The only scratch updates come from the deserialized future patch contract.
+# This proves the manifest fields themselves, rather than a projection helper.
+with sqlite3.connect('file:'+sys.argv[3]+'?mode=ro', uri=True) as source, sqlite3.connect(sys.argv[4]) as scratch:
+    source.backup(scratch)
+    tables={'collection':'catalog_collections','title':'catalog_titles','video':'videos',
+        'subtitle':'external_subtitles','unmatched_subtitle':'unresolved_external_subtitles'}
+    allowed={'collection':{'relative_root_path'},'title':{'relative_root_path'},
+        'video':{'relative_path','root_folder'},'subtitle':{'relative_path'},
+        'unmatched_subtitle':{'relative_path'}}
+    for patch in manifest.payload.locator_patches:
+        assert patch.field in allowed[patch.object_kind]
+        table=tables[patch.object_kind]
+        cursor=scratch.execute('UPDATE '+table+' SET '+patch.field+'=? WHERE id=? AND '+patch.field+'=?',
+            (patch.after,patch.object_id,patch.before))
+        assert cursor.rowcount==1, patch
+with readonly_planner_session(sys.argv[4]) as session:
+    context=load_planner_context(session)
+evidence=duplicate_execution_evidence(manifest)
+plan=verify_post_state(context, snapshot, execution_evidence=evidence)
+with_changed_directory_times=replace(snapshot, entries=tuple(replace(e, mtime_ns=999)
+    if e.kind=='directory' else e for e in snapshot.entries))
+assert post_state_hash_from_manifest(manifest, context, with_changed_directory_times)==manifest.payload.expected_post_hash
+without=verify_post_state(context, snapshot, execution_evidence=())
+duplicates=[r for r in plan.records if r.object_kind=='video' and r.duplicate]
+assert all(r.duplicate.side_asset_accounting=='UNKNOWN' for r in without.records if r.object_kind=='video' and r.duplicate)
+archive=next(r for r in plan.records if r.object_kind=='duplicate_side_asset' and r.source_relative_path.endswith('Uzaki.zip'))
+assert sum(r.duplicate.side_asset_accounting=='INCOMPLETE' for r in duplicates)==15
+assert archive.duplicate.side_asset_accounting=='COMPLETE' and archive.action=='KEEP'
+assert any(s.primary_archive_source=='Subs/Uzaki.zip' and s.primary_archive_sha256=='uzaki-identical-archive' for e in evidence for s in e.known_side_assets)
+print(json.dumps({'incomplete':15,'archive':archive.source_relative_path}))
+'''
+    env={**os.environ, 'PYTHONDONTWRITEBYTECODE':'1'}
+    manifest_scratch=tmp_path/'manifest-patched.db'
+    completed=subprocess.run([sys.executable, '-c', code, str(manifest_path), str(snapshot_path),
+        str(source), str(manifest_scratch)],
+        text=True, capture_output=True, env=env, check=True)
+    assert json.loads(completed.stdout)['incomplete'] == 15
+    assert domain_rows(source) == domain_rows(manifest_scratch)
+    with readonly_planner_session(manifest_scratch) as session:
+        reloaded=load_planner_context(session)
+    assert reloaded == replace(projection.context, execution_evidence=())
+
+
+def test_manifest_cli_dry_run_uses_one_inventory_and_no_data_writes(scratch_case, tmp_path, capsys):
+    from app.tools.execution_manifest import main
+    from app.tools.target_plan import database_fingerprint
+    from app.target_planner_filesystem import inventory_filesystem
+    source, _, _, before, _, _ = scratch_case
+    library=tmp_path/'library'
+    library.mkdir()
+    for row in before.records:
+        path=library/row.source_relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'x')
+    db_before=database_fingerprint(source)
+    fs_before=inventory_filesystem(library)
+    output=tmp_path/'manifest.json'
+    status=main(['generate-manifest','--db',str(source),'--library-root',str(library),'--output',str(output)])
+    generated=json.loads(capsys.readouterr().out)
+    assert status in {0,2}
+    assert generated['sql_select_count'] == 11
+    assert generated['filesystem_traversals'] == 1
+    report_path=tmp_path/'dry-run.json'
+    status=main(['dry-run','--db',str(source),'--library-root',str(library),
+        '--manifest',str(output),'--output',str(report_path)])
+    capsys.readouterr()
+    report=json.loads(report_path.read_text())
+    assert status == 2 and report['outcome'] == 'NOT_READY'
+    assert report['sql_select_count'] == 11 and report['filesystem_traversals'] == 1
+    assert report['session_state'] == [0,0,0]
+    assert 'free_bytes_not_reported' not in report['diagnostics']
+    assert 'mount_identity_not_proven' not in report['diagnostics']
+    assert database_fingerprint(source) == db_before
+    assert inventory_filesystem(library) == fs_before
+
+
 def test_uzaki_real_reload_without_provenance_is_review_and_never_purge_safe(scratch_case, monkeypatch):
     source, scratch, ctx, before, projection, snap=scratch_case
     real=plan_library(reload_context(scratch, monkeypatch), snap)

@@ -106,6 +106,19 @@ def simulate_post_state(
         raise ValueError('Post-state projection has unresolved container locator REVIEW.')
     collection_targets = {r.object_id: r.target_relative_path for r in locators if r.object_kind == 'collection'}
     title_targets = {r.object_id: r.target_relative_path for r in locators if r.object_kind == 'title'}
+    locator_targets = {
+        ('collection', object_id, 'relative_root_path'): target for object_id, target in collection_targets.items()
+    }
+    locator_targets.update({('title', object_id, 'relative_root_path'): target
+        for object_id, target in title_targets.items()})
+    for row in approved_plan.records:
+        if not row.target_relative_path:
+            continue
+        kind = 'unmatched_subtitle' if row.object_kind in {'confirmed_no_match', 'unresolved_subtitle'} else row.object_kind
+        if kind in {'video', 'subtitle', 'unmatched_subtitle'}:
+            locator_targets[(kind, row.object_id, 'relative_path')] = row.target_relative_path
+        if kind == 'video':
+            locator_targets[(kind, row.object_id, 'root_folder')] = row.target_relative_path.split('/')[0]
     entries = {e.relative_path: e for e in snapshot.entries if e.kind in {'directory', 'system_excluded'}}
     for entry in snapshot.entries:
         if entry.kind in {'directory', 'system_excluded'}:
@@ -136,6 +149,8 @@ def simulate_post_state(
         subtitles=tuple(replace(s, source=by_source[s.source].target_relative_path) for s in sorted(context.subtitles, key=lambda s:s.id)),
         unmatched=tuple(replace(s, source=by_source[s.source].target_relative_path) for s in sorted(context.unmatched, key=lambda s:s.id)),
         side_assets=(), execution_evidence=evidence,
+        locator_baselines=tuple(replace(b, value=locator_targets.get((b.object_kind, b.object_id, b.field), b.value))
+            for b in context.locator_baselines),
     )
     projected_snapshot = replace(snapshot, entries=tuple(sorted(entries.values(), key=lambda e:e.relative_path)))
     result = verify_post_state(projected, projected_snapshot, execution_evidence=evidence, windows_root=windows_root)
