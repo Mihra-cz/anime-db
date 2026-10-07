@@ -11,6 +11,7 @@ import re
 
 from sqlalchemy.orm import Session
 
+from .video_paths import current_physical_filename
 from .catalog import (
     EpisodeNumberDetection, FILE_TYPE_TO_SUPPLEMENTARY_SUBTYPE,
     detect_episode_number, derive_season_info, effective_video_content_type, natural_sort_key,
@@ -1506,7 +1507,7 @@ def preview_sequential_numbering(
         proposed, group_index = proposed_by_video[id(video)]
         rows.append(SequentialNumberingRow(
             video_id=video.id,
-            filename=video.filename,
+            filename=current_physical_filename(video),
             current_episode=video.season_episode_number,
             proposed_episode=proposed,
             manual_conflict=(
@@ -2038,7 +2039,7 @@ def deterministic_bulk_renumber_proposal(
                 return None
             physical_changes.append(BulkRenumberPhysicalChange(
                 video_id=video.id,
-                filename=video.filename,
+                filename=current_physical_filename(video),
                 current_episode=current,
                 proposed_episode=proposed,
                 manual_override=video.episode_number_manual_override is not None,

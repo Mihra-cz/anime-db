@@ -28,6 +28,7 @@ from .physical_naming_service import physical_naming_context_from_models
 from .physical_layout_service import physical_layout_context_from_models
 from .supplementary import supplementary_review_issues
 from .target_planner_types import PlannerContext, SourceCollection, TargetTitle, TargetVideo, TargetSubtitle, UnmatchedSubtitle
+from .target_planner import technical_root
 
 
 @contextmanager
@@ -143,7 +144,8 @@ def load_planner_context(session: Session) -> PlannerContext:
                 numbering.supplementary_number if content != 'recap' else None,
                 numbering.supplementary_number if content == 'recap' else None, video.media_part_number,
                 video.video_variant_group_id, group.manual_label if group else None, group.release_source if group else None,
-                video.duplicate_of_video_id, validity.value if validity else None, tuple(sorted(video_issues[video.id]))))
+                video.duplicate_of_video_id, validity.value if validity else None, tuple(sorted(video_issues[video.id])),
+                source_evidence_filename=video.filename))
         edges_by_asset = defaultdict(list)
         for edge in edges:
             edges_by_asset[edge.external_subtitle_id].append((edge.video_id, edge.status))
@@ -151,11 +153,12 @@ def load_planner_context(session: Session) -> PlannerContext:
         for collection in collections:
             # Alternate current roots are explicit DB locators of member rows.
             # This index only associates owner-less assets, never Video owners.
-            locators = {collection.relative_root_path} | {v.root_folder for v in videos_by_collection[collection.id] if v.root_folder}
+            locators = {p for p in (collection.relative_root_path,
+                *(v.root_folder for v in videos_by_collection[collection.id])) if p and not technical_root(p)}
             source_collections.append(SourceCollection(collection.id, tuple(sorted(locators))))
         result = PlannerContext(naming, layout, tuple(source_collections), tuple(target_titles), tuple(target_videos),
             tuple(TargetSubtitle(s.id, s.relative_path, tuple(sorted(edges_by_asset[s.id]))) for s in subtitles),
-            tuple(UnmatchedSubtitle(s.id, s.relative_path, s.status) for s in unmatched))
+            tuple(UnmatchedSubtitle(s.id, s.relative_path, s.status, s.filename) for s in unmatched))
     if session.new or session.dirty or session.deleted:
         raise RuntimeError('Target Planner mutated its read-only session.')
     return result

@@ -10,6 +10,7 @@ from sqlalchemy.orm import joinedload, selectinload
 
 from .catalog import effective_video_content_type
 from .models import CatalogCollection, CatalogTitle
+from .video_paths import current_physical_filename
 from .numbering import effective_video_numbering
 from .physical_naming_components import sanitize_component
 from .physical_naming_formatters import (
@@ -55,7 +56,7 @@ def _known_files(title):
             # work. Naming does not invent numbers or classify those files.
             deferred += 1
             continue
-        extension = PurePosixPath(video.filename).suffix
+        extension = PurePosixPath(current_physical_filename(video)).suffix
         formatter = format_episode_component if isinstance(identity, EpisodeIdentity) else format_supplementary_component
         # An unresolved structural/numbering/extension value is not invalid
         # human text. Defer its unknown filename budget rather than requiring

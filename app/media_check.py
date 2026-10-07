@@ -5,6 +5,7 @@ from decimal import Decimal
 from math import ceil
 from typing import Literal, Mapping
 
+from .video_paths import current_physical_filename
 from .catalog import (
     AudioStatus, EpisodeNumberDetection,
     VideoLanguageProfile,
@@ -585,7 +586,7 @@ def _row_sort_key(row: MediaCheckRow) -> tuple:
         natural_sort_key(row.title_name),
         episode_value is None,
         episode_value or Decimal(0),
-        natural_sort_key(row.video.filename),
+        natural_sort_key(current_physical_filename(row.video)),
         row.video.id or 0,
     )
 

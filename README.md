@@ -81,6 +81,18 @@ Exit status je 0 pro čistý plán, 2 pro plán s BLOCKED/REVIEW records a 1 př
 selhání determinismu nebo DB fingerprintu. Plán je pouze návrh: execution
 (rename/move/quarantine/purge), P2C scanner routing a Completeness UI jsou pending.
 
+`--post-state` navíc čistě v paměti promítne intended paths a container locators,
+přenese ověřenou quarantine side-asset evidence a ověří settled planner fixed
+point. Nemění DB ani filesystem a nepřepisuje původní parser evidence.
+`Video.filename` zůstává source/parser evidence i při budoucí V6 execution;
+current physical basename se čte z `Video.relative_path`.
+Totéž platí pro `UnresolvedExternalSubtitle.filename` a jeho `relative_path`.
+Real post-state reload přijímá explicitní carried execution evidence; quarantine
+accounting bez ní zůstává UNKNOWN. READY quarantine není povolení k purge.
+Normal write-capable scanner není součást verification; po fyzické reorganizaci
+jej lze znovu použít až s P2C. Během budoucí execution musí být scanner/inventory
+writer zastavený nebo za explicitní maintenance boundary.
+
 ## Chování skenu
 
 - Přeskakuje `#recycle`, `@eaDir` a adresáře začínající tečkou.

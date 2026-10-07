@@ -10,6 +10,7 @@ from typing import cast
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from .video_paths import current_physical_filename
 from .catalog import detect_episode_number, effective_video_content_type
 from .collection_presentation import (
     RECAP_SEASON_CONTEXT_ERROR,
@@ -765,7 +766,7 @@ def preview_video_variant_assignments(
         suggestion = parser_variant_suggestion(video)
         rows.append(VariantAssignmentPreviewRow(
             video_id=video.id,
-            filename=video.filename,
+            filename=current_physical_filename(video),
             episode_label=(
                 f"E{video.season_episode_number:02d}"
                 if video.season_episode_number is not None

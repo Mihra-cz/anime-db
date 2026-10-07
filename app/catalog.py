@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Literal
 import unicodedata
 
+from .video_paths import current_physical_filename
 from .hierarchy_authority import manual_hierarchy_snapshot_is_complete
 from .hierarchy_types import (
     MAIN_CONTENT_PART_TYPES,
@@ -1957,7 +1958,7 @@ def video_sort_key(
         episode is None,
         episode if episode is not None else Decimal(0),
         TYPE_ORDER.get(video.file_type, 99),
-        video.filename.casefold(),
+        current_physical_filename(video).casefold(),
     )
 
 
@@ -2003,7 +2004,7 @@ def sort_title_videos(
         fields = {
             "season": natural_sort_key(season),
             "episode": (episode is None, episode or Decimal(0)),
-            "filename": natural_sort_key(video.filename),
+            "filename": natural_sort_key(current_physical_filename(video)),
             "type": (TYPE_ORDER.get(video.file_type, 99), natural_sort_key(video.file_type)),
             "resolution": (video.width or 0) * (video.height or 0),
             "audio": natural_sort_key(" ".join(

@@ -299,6 +299,79 @@ nikoli quarantine. D06 safe continuation používá jen přesně doloženou ruč
 confirmed series; nejistota zachová original subtitle přímo v rootu.
 P2C, execution, NAS fyzický cleanup, purge action a Completeness UI jsou pending.
 
+[Container locator projection](../app/target_planner.py) zachovává single-leaf
+locator a pro řízený CM/Promo fan-out `extras_promo` jednoho ownera vrací explicitní
+root/Season `Extras` anchor. File-level targets mají své CM/Promo leaf folders;
+owner IDs ani grouping selectors se nemění. Neznámý fan-out je Review, žádné
+obecné LCA guessing. Shared Season P1/P2 locators zůstávají podporované.
+
+`Subs`/`Duplicates`/`#recycle` jsou reserved technical roots. Flat Subs archive
+je owner-less KEEP bez content inspection; nečekaný asset zůstává Review.
+Quarantine používá DB duplicate/compatibility nebo explicitní side provenance,
+nikoli cestu jako authority. Settled assets mají KEEP se zachovanými duplicate
+diagnostics. Side accounting má explicitní stavy COMPLETE, INCOMPLETE a UNKNOWN;
+jen COMPLETE může splnit tuto podmínku future purge, stále s fresh primary gate.
+Quarantine je povolená ve všech třech stavech. Po reloadu quarantine bez carried
+execution evidence je accounting UNKNOWN, nikdy implicitně COMPLETE.
+`#recycle` je mimo aktivní knihovnu: excluded snapshot/count context bez traversal,
+inventarizace, oprávnění, obnovy či execution; Completeness jeho obsah ignoruje.
+Stale DB-known Video, subtitle nebo carried side asset s locatorem uvnitř se neztratí:
+má stávající missing-file stav `source_missing_or_not_regular` bez targetu, tedy
+bez recovery authority a bez požadavku na přístup do koše.
+Technické roots členů neposkytují collection/title locator authority;
+`Video.root_folder='Duplicates'` zůstává pouze physical locator.
+
+[Pure post-state simulation](../app/target_planner_post_state.py) aplikuje approved
+file paths a container locators na detached scalar evidence/snapshot, přenese
+ověřenou side-asset evidence a znovu použije Target Planner. Ověřuje settled
+KEEP, classification/coverage parity, target a locator fixed point i namespace
+collisions včetně existujících prázdných directories. Nevytváří manifest a
+nevolá SQL, filesystem writers nebo scanner. CLI `--post-state` vypíše také
+post-state plan, locators, provenance, convergence diagnostics a deterministic
+hash. `verify_post_state` přijímá explicitní immutable `DuplicateExecutionEvidence`
+pro každý secondary: jeho ID, primary ID, identities/paths jen jím vlastněných
+side assets (sousedé v adresáři se nepřiřazují), tri-state accounting, classification provenance a případné archive identity/hash
+evidence. Jsou to execution facts, nikoli AnimeDB domain authority; žádné schema
+se nepřidává. Projekce je vystaví jako přenositelný výstup pro future manifest,
+který zatím není implementovaný. Uzaki secondary archive může být ověřen touto
+evidence bez nového hashování primary ZIP v Subs. Bez provenance je REVIEW.
+Regression gate aplikuje přesné locator-only patches na scratch DB kopii,
+reloaduje přes normální loader a porovná celý plán i domain rows s pure projekcí;
+negative reload bez evidence nesmí poskytovat purge-safe accounting.
+`Video.filename` je persisted source/parser evidence, immutable během V6
+reorganization; `Video.relative_path` je current physical locator. Detached
+planner evidence ji nese jako `source_evidence_filename` a post-state ji zachová.
+[Current physical filename](../app/video_paths.py) je basename locatoru; používají
+jej technical UI labels, filename sorting/similarity a physical extension budget.
+Parser/numbering, variant hints a manual split source patterns dál používají
+`Video.filename`. Future DB locator patches toto pole nesmějí měnit; manifest
+může source evidence a target locator uvádět odděleně, ale zatím není implementovaný.
+
+P2C není required pro fyzickou reorganizaci ani read-only post-state verification,
+ale je required před ordinary write-capable rescanem reorganizovaného canonical
+tree. Verifier používá persisted paths a DB-known identity, bez owner inference.
+Budoucí execution vyžaduje zastavený scanner/inventory writer nebo explicitní
+maintenance boundary; její mechanismus zde není implementovaný.
+Dnešní scanner při create používá physical basename a při changed-file update
+jej zapisuje zpět do `Video.filename`; zároveň klasifikuje podle current path.
+Zachování historical evidence při canonical rescanu patří do P2C, není zde změněné.
+
+`UnresolvedExternalSubtitle.filename` má stejný source/parser contract; V6
+patchuje pouze `relative_path`. Audit reads/writes rozlišuje:
+
+| Použití | Význam a současné chování |
+| --- | --- |
+| `subtitle_review.subtitle_candidates` | A: parserový subtype/číselný hint z původního `filename`; beze změny. |
+| `subtitle_review._rank_candidate` | B: podobnost current basenames z `relative_path`, stejně jako u Video. |
+| `templates/media_check.html` | B: fyzický label z current locatoru; source evidence se nepřepisuje. |
+| `target_planner_service` | A: detached `source_evidence_filename`; fyzické umístění z `relative_path`. |
+| `scanner.service._sync_external_subtitles` | C / P2C debt: create bere basename; oba update branches (včetně confirmed_no_match) dnes přepisují filename current basename. Lifecycle zatím beze změny. |
+| `subtitle_review.reopen_manual_subtitle_link` | C: vytváří novou unresolved row s basename při reopen; ExternalSubtitle původní source filename nenese. Zachování evidence přes převody rows je lifecycle debt, bez nového schema nyní. |
+
+Manual assign převede unresolved row na owner-less ExternalSubtitle; rozhodnutí,
+rejection a reopen workflows žádný existující unresolved filename nepřepisují.
+Model declaration není dodatečná authority a schema se tímto contractem nemění.
+
 ### V6 physical layout review
 
 Layout Review UI je záložka **Rozložení** na `/naming-review/layout`, vedle

@@ -13,6 +13,7 @@ from .catalog import (
 )
 from .media_check import build_media_check_evaluation, set_czsk_availability_manual
 from .models import ExternalSubtitleCompatibility, Video
+from .video_paths import current_physical_filename
 
 
 HARDSUB_LABELS = {
@@ -80,7 +81,7 @@ def load_media_videos(session: Session, video_ids: tuple[int, ...]) -> list[Vide
 def _video_label(video: Video) -> str:
     number = video.season_episode_number
     identity = f"E{number:02d}" if number is not None else "Video"
-    return f"{identity} · {video.filename}"
+    return f"{identity} · {current_physical_filename(video)}"
 
 
 def _language_label(value: str) -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import Enum
 
 from .physical_layout import PhysicalLayoutContext
 from .physical_naming import PhysicalNamingContext
@@ -42,6 +43,9 @@ class TargetVideo:
     duplicate_primary_id: int | None = None
     duplicate_validity: str | None = None
     issues: tuple[str, ...] = ()
+    # Detached copy of persisted parser evidence, immutable across projection.
+    # This is a read-model field, never a new DB column or physical basename.
+    source_evidence_filename: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,13 @@ class UnmatchedSubtitle:
     id: int
     source: str
     match_status: str
+    source_evidence_filename: str | None = None
+
+
+class SideAssetAccounting(str, Enum):
+    COMPLETE = 'COMPLETE'
+    INCOMPLETE = 'INCOMPLETE'
+    UNKNOWN = 'UNKNOWN'
 
 
 @dataclass(frozen=True)
@@ -63,6 +74,28 @@ class SideAssetEvidence:
     source: str
     secondary_video_id: int
     provenance: str
+    expected_size: int | None = None
+    expected_sha256: str | None = None
+    object_kind: str = 'duplicate_side_asset'
+    object_id: int | str | None = None
+    # Primary archive locator in the verifier's snapshot (post-state Subs
+    # target after projection); its approved hash does not require a re-read.
+    primary_archive_source: str | None = None
+    primary_archive_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class DuplicateExecutionEvidence:
+    """Carried execution facts for a manifest/journal boundary, never DB authority."""
+    secondary_video_id: int
+    primary_video_id: int
+    known_side_assets: tuple[SideAssetEvidence, ...] = ()
+    side_asset_accounting: SideAssetAccounting = SideAssetAccounting.UNKNOWN
+    provenance: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        # Invalid/unrecognised accounting cannot silently become a fourth state.
+        object.__setattr__(self, 'side_asset_accounting', SideAssetAccounting(self.side_asset_accounting))
 
 
 @dataclass(frozen=True)
@@ -75,6 +108,18 @@ class PlannerContext:
     subtitles: tuple[TargetSubtitle, ...]
     unmatched: tuple[UnmatchedSubtitle, ...]
     side_assets: tuple[SideAssetEvidence, ...] = ()
+    execution_evidence: tuple[DuplicateExecutionEvidence, ...] = ()
+
+
+@dataclass(frozen=True)
+class ContainerLocator:
+    """Derived physical anchor; never a selector or owner identity."""
+    object_kind: str
+    object_id: int
+    target_relative_path: str | None
+    status: str
+    authority: tuple[str, ...] = ()
+    blockers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -89,10 +134,16 @@ class DuplicateDiagnostic:
     primary_outside_duplicates: bool | None = None
     secondary_in_duplicates: bool | None = None
     side_assets: tuple[str, ...] = ()
-    side_assets_accounted: bool = False
+    side_asset_accounting: SideAssetAccounting = SideAssetAccounting.UNKNOWN
+    accounting_provenance: tuple[str, ...] = ()
     # A snapshot can never grant permission to purge later. The primary must
     # be freshly checked immediately before a future delete operation.
     purge_state: str = 'PRE_EXECUTION_REQUIRED'
+
+    @property
+    def side_assets_accounted(self) -> bool:
+        """Compatibility read; UNKNOWN and INCOMPLETE both prohibit future delete."""
+        return self.side_asset_accounting == SideAssetAccounting.COMPLETE
 
 
 @dataclass(frozen=True)
@@ -155,3 +206,15 @@ class TargetPlan:
     max_nas_target_path_utf8_bytes: int | None
     windows_state: str
     diagnostics: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PostStateProjection:
+    context: PlannerContext
+    snapshot: FilesystemSnapshot
+    locators: tuple[ContainerLocator, ...]
+    plan: TargetPlan
+    converged: bool
+    blockers: tuple[str, ...]
+    projection_hash: str
+    execution_evidence: tuple[DuplicateExecutionEvidence, ...] = ()

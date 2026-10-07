@@ -11,6 +11,7 @@ from typing import Iterable, Mapping
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .video_paths import current_physical_filename
 from .catalog import EpisodeNumberDetection
 from .catalog_video_presentation import (
     video_variant_display_for_video,
@@ -570,7 +571,7 @@ def _candidate_sort_key(video: Video) -> tuple:
         video.season_episode_number or 0,
         (video.video_variant_group.manual_label.casefold()
          if video.__dict__.get("video_variant_group") is not None else ""),
-        video.filename.casefold(),
+        current_physical_filename(video).casefold(),
         video.id or 0,
     )
 

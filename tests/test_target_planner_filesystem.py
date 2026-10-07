@@ -105,8 +105,7 @@ def test_recycle_is_pruned_before_listing_and_not_in_coverage(tmp_path, monkeypa
     result = plan(replace(context(), videos=()), snap)
     assert dict(result.counts)['filesystem_visible_assets'] == 1
     assert dict(result.counts)['system_excluded_dirs'] == 1
-    assert by_source(result, '#recycle').status == 'SYSTEM_EXCLUDED'
-    assert by_source(result, '#recycle').target_relative_path is None
+    assert all(r.source_relative_path != '#recycle' for r in result.records)
 
 
 def test_missing_sources_symlinks_and_unknowns_remain_visible(tmp_path):
@@ -277,14 +276,16 @@ def test_duplicate_side_assets_belong_only_to_their_own_secondary():
     assert by_source(result,'old/copy/b.ass').target_relative_path=='Duplicates/Show/Season 01/b.ass'
 
 
-def test_library_root_secondary_is_never_accounted_without_inspection():
+@pytest.mark.parametrize('extra', [(), ('seznam-souboru.txt',)])
+def test_library_root_secondary_is_never_accounted_without_inspection(extra):
     ctx=context()
     copy=replace(ctx.videos[0],id=101,source='copy.mkv',duplicate_primary_id=100,duplicate_validity='valid')
     ctx=replace(ctx,videos=ctx.videos+(copy,))
-    result=plan(ctx,snapshot('old/source.mkv','copy.mkv','seznam-souboru.txt'))
+    result=plan(ctx,snapshot('old/source.mkv','copy.mkv',*extra))
     row=by_source(result,'copy.mkv')
     assert row.target_relative_path=='Duplicates/Show/Season 01/copy.mkv' and row.status=='READY'
     assert row.duplicate.side_assets_accounted is False
+    assert row.duplicate.side_asset_accounting == 'UNKNOWN'
     assert row.duplicate.purge_state=='PRE_EXECUTION_REQUIRED'
 
 

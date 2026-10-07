@@ -18,6 +18,7 @@ from .catalog import (
 )
 from .external_subtitle_compatibility import confirm_compatible
 from .models import ExternalSubtitle, UnresolvedExternalSubtitle, Video
+from .video_paths import current_physical_filename
 
 @dataclass(frozen=True)
 class SubtitleCandidate:
@@ -152,7 +153,7 @@ def build_subtitle_candidate_index(
         }),
         detections=MappingProxyType(resolved_detections),
         normalized_stems=MappingProxyType({
-            video: _normalized_stem(video.filename) for video in videos
+            video: _normalized_stem(current_physical_filename(video)) for video in videos
         }),
     )
 
@@ -190,7 +191,7 @@ def _rank_candidate(
     video_number: EpisodeNumberDetection,
     video_stem: str,
 ) -> SubtitleCandidate:
-    subtitle_stem = _normalized_stem(subtitle.filename)
+    subtitle_stem = _normalized_stem(current_physical_filename(subtitle))
     similarity = SequenceMatcher(None, subtitle_stem, video_stem).ratio()
     score = similarity
     reasons = [scope, f"podobnost názvu {round(similarity * 100)} %"]
@@ -242,7 +243,7 @@ def subtitle_candidates(
         ),
         key=lambda candidate: (
             -candidate.score,
-            candidate.video.filename.casefold(),
+            current_physical_filename(candidate.video).casefold(),
             candidate.video.id or 0,
         ),
     )

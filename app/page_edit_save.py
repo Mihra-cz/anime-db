@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from .video_paths import current_physical_filename
 from .catalog import (
     catalog_video_identity, effective_video_content_display,
     effective_video_content_type,
@@ -452,7 +453,7 @@ def apply_hierarchy_page_edits(
                     expected_collection_id=collection_id, recap_only=True,
                 )
                 after = catalog_video_identity(video, video.catalog_title)
-                groups.append(EditChangeGroup(video.filename, (
+                groups.append(EditChangeGroup(current_physical_filename(video), (
                     f"Ruční pozice Recapu: {before} → {values['manual_episode_number']}",
                     f"Výsledná effective identita: {after}",
                 )))
@@ -463,7 +464,7 @@ def apply_hierarchy_page_edits(
                 ))
             else:
                 video = session.get(Video, target_id)
-                filename = video.filename if video is not None else f"Video #{target_id}"
+                filename = current_physical_filename(video) if video is not None else f"Video #{target_id}"
                 changes = apply_title_video_hierarchy_edit(
                     session, collection_id, values["catalog_title_id"], target_id,
                     manual_episode_number=values["manual_episode_number"],
@@ -473,7 +474,7 @@ def apply_hierarchy_page_edits(
                 groups.append(EditChangeGroup(filename, tuple(changes)))
         except (MissingEditTarget, ValueError) as exc:
             target = (
-                session.get(Video, target_id).filename
+                current_physical_filename(session.get(Video, target_id))
                 if kind in {"recap_position", "video_hierarchy"}
                 and session.get(Video, target_id) is not None
                 else f"sekce {kind} #{target_id}"

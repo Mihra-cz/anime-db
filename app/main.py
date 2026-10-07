@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload, selectinload
 
+from .video_paths import current_physical_filename
 from .catalog import (
     AudioLanguageTrack,
     MANUAL_LANGUAGE_CHOICES,
@@ -311,6 +312,7 @@ templates = Jinja2Templates(
     directory=PACKAGE_DIR / "templates", context_processors=[_template_preferences]
 )
 templates.env.globals.update(
+    current_physical_filename=current_physical_filename,
     catalog_title_display_title=catalog_title_display_title,
     catalog_title_series_label=catalog_title_series_label,
     catalog_title_hierarchy_is_verified=catalog_title_hierarchy_is_verified,
@@ -781,7 +783,7 @@ def _hierarchy_video_groups(videos: list[Video]) -> dict[str, list]:
 
     def sort_key(item: Video):
         position = effective_video_sort_position(item)
-        return position is None, position or 0, item.filename.casefold()
+        return position is None, position or 0, current_physical_filename(item).casefold()
 
     for video in sorted(
         videos,
@@ -1263,7 +1265,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for assignment in insufficient_video_assignments(loaded_videos)
             ]
         video_assignments.sort(key=lambda item: (
-            item[0].filename.casefold(), item[0].relative_path.casefold(),
+            current_physical_filename(item[0]).casefold(), item[0].relative_path.casefold(),
         ))
         with sessions() as session:
             target_titles = list(session.scalars(select(CatalogTitle).options(
@@ -2387,7 +2389,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             unassigned_assignments = []
             assignment_rows = session.execute(select(
                 Video.id,
-                Video.filename,
                 Video.relative_path,
                 Video.catalog_collection_id.label("video_collection_id"),
                 CatalogTitle.id.label("title_id"),
@@ -2443,7 +2444,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 code, reason = kind
                 unassigned_assignments.append(InsufficientVideoAssignmentSummary(
                     video_id=assignment_row.id,
-                    filename=assignment_row.filename,
+                    filename=PurePosixPath(assignment_row.relative_path).name,
                     relative_path=assignment_row.relative_path,
                     code=code,
                     reason=reason,
@@ -3115,7 +3116,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "Změny médií nebyly uloženy.",
                         "Alespoň jedno vybrané video už nepatří do této části.",
                         tuple(
-                            video.filename for video in videos
+                            current_physical_filename(video) for video in videos
                             if video.catalog_title_id != catalog_title_id
                         ),
                         ("Obnovte stránku a zkontrolujte aktuální membership.",),
@@ -3414,7 +3415,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         request, "edit_confirmation.html", {
                             "heading": "Potvrdit hierarchy změny videa",
                             "description": (
-                                f"Video: {video.filename}. Číslování, typ obsahu "
+                                f"Video: {current_physical_filename(video)}. Číslování, typ obsahu "
                                 "a Media Part se uloží v jedné transakci."
                             ),
                             "changes": changes,

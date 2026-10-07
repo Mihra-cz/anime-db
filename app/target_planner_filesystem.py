@@ -12,9 +12,10 @@ import stat
 from .physical_naming_components import (
     collision_keys, component_preview, evaluate_windows_path_budget,
 )
-from .target_planner import project_targets, relative_locator_safe, root_targets, source_collection
+from .target_planner import project_targets, relative_locator_safe, root_targets, source_collection, technical_root
 from .target_planner_types import (
-    FilesystemEntry, FilesystemSnapshot, PlanRecord, PlannerContext, TargetCollision, TargetPlan,
+    FilesystemEntry, FilesystemSnapshot, PlanRecord, PlannerContext, SideAssetAccounting,
+    TargetCollision, TargetPlan,
 )
 
 _ARCHIVES = frozenset({'.zip', '.rar', '.7z'})
@@ -65,7 +66,7 @@ def inventory_filesystem(root: Path) -> FilesystemSnapshot:
                     walk(Path(child.path))
                 elif stat.S_ISREG(info.st_mode):
                     digest = None
-                    if Path(child.name).suffix.lower() in _ARCHIVES:
+                    if Path(child.name).suffix.lower() in _ARCHIVES and technical_root(rel) != 'Subs':
                         # O_NOFOLLOW also protects a leaf swapped after lstat.
                         descriptor = os.open(child.path, os.O_RDONLY | os.O_NOFOLLOW)
                         with os.fdopen(descriptor, 'rb') as archive:
@@ -116,6 +117,27 @@ def _duplicate_archive_evidence(context, entry, inventory, video_records, by_par
     return (members[0].id if len(targets) == 1 else None), True
 
 
+def _side_evidence_matches(side, entry, inventory):
+    """Validate carried identity/stat facts without rehashing archives in Subs."""
+    if (entry is None or entry.kind != 'regular'
+        or not isinstance(side.provenance, str) or not side.provenance.strip()
+        or (side.expected_size is not None and side.expected_size != entry.size)):
+        return False
+    preserved_archive = side.object_kind == 'subtitle_archive' and technical_root(side.source) == 'Subs'
+    if side.expected_sha256 is not None and not preserved_archive and side.expected_sha256 != entry.content_sha256:
+        return False
+    derived_copy = 'exclusive_secondary_directory_and_identical_primary_archive' in side.provenance.split(';')
+    if derived_copy or side.primary_archive_source is not None or side.primary_archive_sha256 is not None:
+        primary = inventory.get(side.primary_archive_source)
+        return bool(primary and primary.kind == 'regular' and side.expected_sha256
+            and side.primary_archive_sha256 == side.expected_sha256
+            and side.primary_archive_source != side.source
+            and PurePosixPath(side.primary_archive_source).name == PurePosixPath(side.source).name
+            and (side.expected_size is None or primary.size == side.expected_size)
+            and (primary.content_sha256 is None or primary.content_sha256 == side.primary_archive_sha256))
+    return True
+
+
 def _extra_records(context, snapshot, managed):
     roots = root_targets(context)
     inventory = {e.relative_path: e for e in snapshot.entries}
@@ -124,7 +146,10 @@ def _extra_records(context, snapshot, managed):
         by_parent[str(PurePosixPath(video.source).parent)].append(video)
     video_records = {r.object_id: r for r in managed if r.object_kind == 'video'}
     evidence = defaultdict(list)
-    for side in context.side_assets:
+    carried = tuple(side for item in context.execution_evidence for side in item.known_side_assets)
+    for side in dict.fromkeys(context.side_assets + carried):
+        if side.object_kind != 'duplicate_side_asset':
+            continue
         evidence[side.source].append(side)
     taken = {r.source_relative_path for r in managed}
     result = []
@@ -133,7 +158,6 @@ def _extra_records(context, snapshot, managed):
         if source in taken or entry.kind == 'directory':
             continue
         if entry.kind == 'system_excluded':
-            result.append(PlanRecord('system_excluded', source, source, None, 'SYSTEM_EXCLUDED', 'SYSTEM_EXCLUDED', authority=('synology_share_recycle_bin',)))
             continue
         if entry.kind != 'regular':
             result.append(PlanRecord('unknown', source, source, None, 'REVIEW', 'REVIEW', blockers=(entry.diagnostic or entry.kind,), authority=('filesystem_snapshot',)))
@@ -148,16 +172,32 @@ def _extra_records(context, snapshot, managed):
         secondary_id = side[0].secondary_video_id if len(side) == 1 else None
         possible_duplicate = bool(side)
         provenance = tuple(item.provenance for item in side)
-        if not side and suffix in _ARCHIVES:
+        if not side and suffix in _ARCHIVES and technical_root(source) != 'Subs':
             secondary_id, possible_duplicate = _duplicate_archive_evidence(context, entry, inventory, video_records, by_parent)
             provenance = ('exclusive_secondary_directory_and_identical_primary_archive',) if secondary_id else ()
         secondary = video_records.get(secondary_id)
-        if possible_duplicate:
-            target = str(PurePosixPath(secondary.target_relative_path).parent / PurePosixPath(source).name) if secondary and secondary.target_relative_path and secondary.duplicate and secondary.duplicate.validity == 'valid' else None
+        evidence_matches = all(_side_evidence_matches(item, entry, inventory) for item in side)
+        if side and technical_root(source) == 'Subs':
+            result.append(PlanRecord('duplicate_quarantine_candidate', source, source, None, 'REVIEW', 'REVIEW',
+                blockers=('side_asset_evidence_conflicts_with_subs_lane',), authority=provenance,
+                duplicate=secondary.duplicate if secondary else None))
+        elif possible_duplicate:
+            target = str(PurePosixPath(secondary.target_relative_path).parent / PurePosixPath(source).name) if evidence_matches and secondary and secondary.target_relative_path and secondary.duplicate and secondary.duplicate.validity == 'valid' else None
             result.append(PlanRecord('duplicate_side_asset' if target else 'duplicate_quarantine_candidate', source, source, target,
-                'QUARANTINE' if target else 'REVIEW', 'READY' if target else 'REVIEW',
-                blockers=() if target else ('duplicate_side_asset_association_unresolved',), authority=provenance,
+                'KEEP' if target == source else 'QUARANTINE' if target else 'REVIEW', 'READY' if target else 'REVIEW',
+                blockers=() if target else ('duplicate_side_asset_evidence_mismatch' if not evidence_matches else 'duplicate_side_asset_association_unresolved',), authority=provenance,
                 collection_id=collection_id, duplicate=secondary.duplicate if secondary else None))
+        elif technical_root(source):
+            # The flat archive lane has no anime owner. Quarantine paths alone
+            # never account for a file or grant purge authority.
+            parts = PurePosixPath(source).parts
+            if parts[0] == 'Subs' and len(parts) == 2 and suffix in _ARCHIVES:
+                result.append(PlanRecord('subtitle_archive', source, source, source, 'KEEP', 'READY',
+                    info=('archive_source_preserved_contents_not_classified',),
+                    authority=('source_archive_extension', 'reserved_subs_lane')))
+            else:
+                result.append(PlanRecord('unknown', source, source, None, 'REVIEW', 'REVIEW',
+                    blockers=('unprovenanced_or_unexpected_technical_lane_asset',), authority=('filesystem_snapshot',)))
         elif suffix in _ARCHIVES and collection_id is not None:
             result.append(PlanRecord('subtitle_archive', source, source, str(PurePosixPath('Subs') / PurePosixPath(source).name),
                 'MOVE', 'READY', info=('archive_source_preserved_contents_not_classified',), authority=('source_archive_extension',)))
@@ -179,10 +219,19 @@ def _extra_records(context, snapshot, managed):
         else:
             result.append(PlanRecord('unknown', source, source, None, 'REVIEW', 'REVIEW',
                 blockers=('unmanaged_or_ambiguous_asset',), authority=('filesystem_snapshot',), collection_id=collection_id))
+    # Carried/explicit known assets must not vanish when inventory cannot see
+    # them, including DB-known locators inside a system-excluded directory.
+    represented = taken | {r.source_relative_path for r in result}
+    for side in dict.fromkeys(context.side_assets + carried):
+        if side.source not in represented:
+            result.append(PlanRecord(side.object_kind, side.object_id if side.object_id is not None else side.source,
+                side.source, None, 'REVIEW', 'REVIEW', blockers=('known_side_asset_not_in_inventory',),
+                authority=(side.provenance,)))
+            represented.add(side.source)
     return result
 
 
-def _namespace_collisions(records):
+def _namespace_collisions(records, directories=()):
     nodes = {guard: defaultdict(list) for guard in ('exact', 'casefold', 'uppercase')}
     for index, record in enumerate(records):
         if record.status == 'SYSTEM_EXCLUDED':
@@ -197,20 +246,36 @@ def _namespace_collisions(records):
             for guard, attr in [('exact', 'exact_key'), ('casefold', 'fold_key'), ('uppercase', 'uppercase_guard')]:
                 key = tuple(getattr(k, attr) for k in keys)
                 nodes[guard][key].append((raw, length == len(components), index))
+    # Existing empty directories occupy the namespace too. They are context,
+    # not file actions; exact approved parent directories may be reused.
+    for path in directories:
+        if not relative_locator_safe(path):
+            continue
+        components = PurePosixPath(path).parts
+        for length in range(1, len(components)+1):
+            raw = '/'.join(components[:length])
+            keys = [collision_keys(p) for p in components[:length]]
+            for guard, attr in [('exact', 'exact_key'), ('casefold', 'fold_key'), ('uppercase', 'uppercase_guard')]:
+                key = tuple(getattr(k, attr) for k in keys)
+                nodes[guard][key].append((raw, False, None))
     collisions = []
     for guard, groups in nodes.items():
         for members in groups.values():
+            if not any(index is not None for _, _, index in members):
+                continue
             paths = {raw for raw, _, _ in members}
             leaves = {index for _, leaf, index in members if leaf}
-            directories = {index for _, leaf, index in members if not leaf}
-            if leaves and directories:
+            parents = [item for item in members if not item[1]]
+            if leaves and parents:
                 reason = 'file_directory'
             elif len(leaves) > 1 or len(paths) > 1:
                 reason = guard
             else:
                 continue
-            indices = sorted({index for _, _, index in members})
-            collision = TargetCollision(reason, tuple(sorted(paths)), tuple((records[i].object_kind, records[i].object_id) for i in indices))
+            indices = sorted({index for _, _, index in members if index is not None})
+            context_keys = sorted({('filesystem_directory', raw) for raw, _, index in members if index is None})
+            collision = TargetCollision(reason, tuple(sorted(paths)),
+                tuple((records[i].object_kind, records[i].object_id) for i in indices) + tuple(context_keys))
             if collision not in collisions:
                 collisions.append(collision)
             for index in indices:
@@ -226,7 +291,7 @@ def _namespace_collisions(records):
             collisions.append(TargetCollision('collection_root', (root,), tuple((records[i].object_kind, records[i].object_id) for i in indices)))
             for i in indices:
                 records[i] = _diagnose(records[i], 'collection_root_collision')
-    managed = [r for r in records if r.object_kind in {'video', 'subtitle'} and r.target_relative_path and r.action != 'QUARANTINE']
+    managed = [r for r in records if r.object_kind in {'video', 'subtitle'} and r.target_relative_path and r.duplicate is None]
     for index, record in enumerate(records):
         if record.auxiliary_namespace:
             key = tuple(collision_keys(p).fold_key for p in PurePosixPath(record.auxiliary_namespace).parts)
@@ -243,16 +308,40 @@ def plan_library(context: PlannerContext, snapshot: FilesystemSnapshot | None = 
     if windows_root is not None:
         evaluate_windows_path_budget(windows_root)
     records = list(project_targets(context))
+    videos_by_id = {v.id: v for v in context.videos}
+    carried = {}
+    for evidence in context.execution_evidence:
+        secondary = videos_by_id.get(evidence.secondary_video_id)
+        if (evidence.secondary_video_id in carried or secondary is None
+            or secondary.duplicate_primary_id != evidence.primary_video_id
+            or any(s.secondary_video_id != evidence.secondary_video_id for s in evidence.known_side_assets)
+            or not evidence.provenance or not all(isinstance(p, str) and p.strip() for p in evidence.provenance)):
+            raise ValueError('Execution evidence has conflicting IDs or missing provenance.')
+        carried[evidence.secondary_video_id] = evidence
     diagnostics = list(snapshot.diagnostics if snapshot else ('filesystem_not_checked',))
+    excluded = tuple(e.relative_path for e in snapshot.entries if e.kind == 'system_excluded') if snapshot else ()
+    def system_excluded(path):
+        return (any(collision_keys(p).fold_key == '#recycle' for p in PurePosixPath(path).parts[:-1])
+            or any(path == p or path.startswith(p + '/') for p in excluded))
     if snapshot:
         records.extend(_extra_records(context, snapshot, records))
         inventory = {e.relative_path: e for e in snapshot.entries}
-        excluded = tuple(e.relative_path for e in snapshot.entries if e.kind == 'system_excluded')
+    else:
+        represented = {r.source_relative_path for r in records}
+        for side in context.side_assets + tuple(s for item in context.execution_evidence for s in item.known_side_assets):
+            if system_excluded(side.source) and side.source not in represented:
+                records.append(PlanRecord(side.object_kind, side.object_id if side.object_id is not None else side.source,
+                    side.source, None, 'REVIEW', 'REVIEW', authority=(side.provenance,)))
+                represented.add(side.source)
+    for i, row in enumerate(records):
+        if system_excluded(row.source_relative_path):
+            # A locator inside #recycle is outside the active library: keep the
+            # row with the existing missing-file state, never a recovery target.
+            records[i] = _diagnose(replace(row, target_relative_path=None, action='REVIEW'),
+                                   'source_missing_or_not_regular')
+    if snapshot:
         for i, row in enumerate(records):
-            if row.status == 'SYSTEM_EXCLUDED':
-                continue
-            if any(row.source_relative_path == p or row.source_relative_path.startswith(p + '/') for p in excluded):
-                records[i] = replace(row, target_relative_path=None, action='SYSTEM_EXCLUDED', status='SYSTEM_EXCLUDED', blockers=('source_in_system_excluded_directory',))
+            if system_excluded(row.source_relative_path):
                 continue
             entry = inventory.get(row.source_relative_path)
             if entry is None or entry.kind != 'regular':
@@ -270,7 +359,22 @@ def plan_library(context: PlannerContext, snapshot: FilesystemSnapshot | None = 
                 if physical != 'REGULAR_FILE' or not outside:
                     row = _diagnose(row, 'duplicate_primary_physical_safety_gate')
                 records[i] = row
-    collisions = _namespace_collisions(records)
+        # DB-known subtitles bypass filesystem-only classification above, but
+        # carried identity/stat/provenance is still execution evidence for them.
+        by_source = defaultdict(list)
+        for i, row in enumerate(records):
+            by_source[row.source_relative_path].append(i)
+        for evidence in context.execution_evidence:
+            for side in evidence.known_side_assets:
+                indices = by_source[side.source]
+                matches = len(indices) == 1 and _side_evidence_matches(side, inventory.get(side.source), inventory)
+                if matches:
+                    row = records[indices[0]]
+                    matches = row.object_kind == side.object_kind and (side.object_id is None or side.object_id == row.object_id)
+                if not matches:
+                    for i in indices:
+                        records[i] = _diagnose(records[i], 'carried_side_asset_evidence_mismatch', status='REVIEW')
+    collisions = _namespace_collisions(records, (e.relative_path for e in snapshot.entries if e.kind == 'directory') if snapshot else ())
     max_component = 0
     max_path = None
     windows_state = 'NOT_CHECKED / PRE_EXECUTION_REQUIRED' if windows_root is None else 'CHECKED'
@@ -306,6 +410,9 @@ def plan_library(context: PlannerContext, snapshot: FilesystemSnapshot | None = 
     # Accounting consumes FINAL namespace/path diagnostics. An auxiliary
     # classification alone cannot prove ownership by a secondary duplicate.
     video_sources = {v.id: v.source for v in context.videos}
+    records_by_source = defaultdict(list)
+    for record in records:
+        records_by_source[record.source_relative_path].append(record)
     for i, row in enumerate(records):
         if row.duplicate is None:
             continue
@@ -313,7 +420,19 @@ def plan_library(context: PlannerContext, snapshot: FilesystemSnapshot | None = 
         secondary_source = video_sources.get(d.secondary_video_id)
         parent = str(PurePosixPath(secondary_source).parent) if secondary_source else None
         side_assets = []
-        accounted = snapshot is not None and parent is not None
+        evidence = carried.get(d.secondary_video_id)
+        # Relocation erases source-neighbour evidence. A quarantine directory
+        # cannot reconstruct its historical completeness, even when empty.
+        if evidence:
+            state = evidence.side_asset_accounting
+            provenance = evidence.provenance
+        elif snapshot is None or parent in {None, '.'} or technical_root(secondary_source):
+            state = SideAssetAccounting.UNKNOWN
+            provenance = ()
+        else:
+            state = SideAssetAccounting.COMPLETE
+            provenance = ('source_snapshot_accounting',)
+        accounted = True
         for other in records:
             source = other.source_relative_path
             # A library-root secondary shares its directory with the whole library.
@@ -322,7 +441,7 @@ def plan_library(context: PlannerContext, snapshot: FilesystemSnapshot | None = 
                 continue
             if other.status in {'REVIEW', 'BLOCKED'}:
                 accounted = False
-            elif other.duplicate and other.action == 'QUARANTINE' and other.duplicate.validity == 'valid':
+            elif other.duplicate and other.duplicate.validity == 'valid':
                 # Another secondary's quarantined asset is accounted by its owner.
                 if other.duplicate.secondary_video_id == d.secondary_video_id:
                     side_assets.append(source)
@@ -332,7 +451,19 @@ def plan_library(context: PlannerContext, snapshot: FilesystemSnapshot | None = 
                 pass
             else:
                 accounted = False
-        records[i] = replace(row, duplicate=replace(d, side_assets=tuple(sorted(side_assets)), side_assets_accounted=accounted))
+        if evidence:
+            # Known source neighbours may have moved outside quarantine. Check
+            # the carried identities/paths, rather than forgetting those files.
+            for side in evidence.known_side_assets:
+                matches = records_by_source[side.source]
+                if (len(matches) != 1 or matches[0].status in {'REVIEW', 'BLOCKED'}
+                    or matches[0].object_kind != side.object_kind
+                    or (side.object_id is not None and matches[0].object_id != side.object_id)):
+                    accounted = False
+        if state == SideAssetAccounting.COMPLETE and (not accounted or snapshot is None or d.validity != 'valid'):
+            state = SideAssetAccounting.INCOMPLETE if snapshot else SideAssetAccounting.UNKNOWN
+        records[i] = replace(row, duplicate=replace(d, side_assets=tuple(sorted(side_assets)),
+            side_asset_accounting=state, accounting_provenance=provenance))
     records = tuple(sorted(records, key=lambda r: (r.object_kind, str(r.object_id), r.source_relative_path)))
     counts = Counter(r.object_kind for r in records)
     counts['filesystem_visible_assets'] = sum(e.kind == 'regular' for e in snapshot.entries) if snapshot else 0

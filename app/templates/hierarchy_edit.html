@@ -63,7 +63,7 @@
   <p>Každé video má jeden hierarchy formulář. Média ani metadata se zde nemění.</p>
   {% for video in selected_title_videos %}{% set content = effective_video_content_display(video) %}{% set numbering = effective_video_numbering(video, selected_title) %}{% set video_failed = edit_error_scope == 'video-' ~ video.id %}{% set video_values = edit_submitted if video_failed else {} %}{% set selected_content_type = video_values.get('content_type', video.content_type_manual or '') %}{% set current_number_label = hierarchy_number_field_label(content.value) %}
   <form class="hierarchy-video-editor{% if video_failed %} has-field-error{% endif %}" data-edit-form data-save-kind="video_hierarchy" data-save-id="{{ video.id }}" data-catalog-title-id="{{ selected_title.id }}"{% if video_failed %} data-dirty-on-load="true"{% endif %} method="post" action="/hierarchy-review/{{ collection.id }}/titles/{{ selected_title.id }}/videos/{{ video.id }}/edit" id="hierarchy-video-{{ video.id }}">
-    <header class="hierarchy-video-heading"><div><strong>{{ video.filename }}</strong><small class="technical-path">{{ video.relative_path }}</small></div><span class="status-badge severity-info">{{ metadata_video_identity(video, selected_title) }}</span></header>
+    <header class="hierarchy-video-heading"><div><strong>{{ current_physical_filename(video) }}</strong><small class="technical-path">{{ video.relative_path }}</small></div><span class="status-badge severity-info">{{ metadata_video_identity(video, selected_title) }}</span></header>
     <section class="hierarchy-video-current" aria-label="Identita a současný stav">
       <h3>Identita / současný stav</h3>
       <dl class="hierarchy-identity-grid">
@@ -113,7 +113,7 @@
     <fieldset><legend>Vybraná videa</legend>
       {% for video in selected_title_videos %}{% set content = effective_video_content_display(video) %}
       <div class="hierarchy-video-current">
-        <label><input type="checkbox" name="video_ids" value="{{ video.id }}"> {{ video.filename }}</label>
+        <label><input type="checkbox" name="video_ids" value="{{ video.id }}"> {{ current_physical_filename(video) }}</label>
         <span> · {{ content.label }} · ordinal: {{ content.supplementary_ordinal if content.supplementary_ordinal is not none else 'neurčen' }}</span>
         <span> · Varianta: {{ video_variant_display_for_video(video, include_unassigned=true) }}</span>
         <span> · Media Part: {{ media_part_label(video, selected_title_videos) or '—' }}</span>
@@ -123,7 +123,7 @@
     <label>Primary
       <select name="primary_video_id" required>
         <option value="" selected disabled>Vyberte primární video</option>
-        {% for video in selected_title_videos %}<option value="{{ video.id }}">{{ video.filename }}</option>{% endfor %}
+        {% for video in selected_title_videos %}<option value="{{ video.id }}">{{ current_physical_filename(video) }}</option>{% endfor %}
       </select>
     </label>
     <button type="submit">Potvrdit vybrané soubory jako fyzické kopie stejného obsahu · zobrazit preview</button>

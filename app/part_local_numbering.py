@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from .catalog import effective_video_content_type
 from .models import CatalogTitle, Video
+from .video_paths import current_physical_filename
 from .numbering import (
     PART_LOCAL_NUMBERING_MODE,
     SUPPLEMENTAL_PART_TYPES,
@@ -263,7 +264,7 @@ def evaluate_part_local_numbering(
             current_episode=current,
             proposed_episode=proposed,
             video_ids=tuple(video.id for video in slot),
-            filenames=tuple(video.filename for video in slot),
+            filenames=tuple(current_physical_filename(video) for video in slot),
             physical_count=len(slot) - duplicate_counts[current],
             duplicate_copy_count=duplicate_counts[current],
             absolute_before=tuple(sorted(

@@ -20,7 +20,7 @@ from .physical_naming_formatters import (
     format_season_directory, normalize_extension,
 )
 from .target_planner_types import (
-    DuplicateDiagnostic, PlanRecord, PlannerContext, TargetTitle, TargetVideo,
+    ContainerLocator, DuplicateDiagnostic, PlanRecord, PlannerContext, TargetTitle, TargetVideo,
 )
 
 _SHARED_PATHS = {
@@ -30,12 +30,20 @@ _SHARED_PATHS = {
     'extras_menus': ('Extras', 'Menu'),
 }
 _AVAILABLE_EDGES = frozenset({'automatic_match', 'confirmed_compatible'})
+_TECHNICAL_ROOTS = {'subs': 'Subs', 'duplicates': 'Duplicates', '#recycle': '#recycle'}
 
 
 def relative_locator_safe(path: str) -> bool:
     return bool(path) and not path.startswith('/') and '\\' not in path and all(
         part not in ('', '.', '..') for part in path.split('/')
     )
+
+
+def technical_root(path: str) -> str | None:
+    """Reserved lanes cannot supply an owner for an owner-less asset."""
+    if not relative_locator_safe(path):
+        return None
+    return _TECHNICAL_ROOTS.get(collision_keys(path.split('/')[0]).fold_key)
 
 
 def root_targets(context: PlannerContext) -> dict[int, tuple[str | None, tuple[str, ...], str]]:
@@ -58,7 +66,7 @@ def root_targets(context: PlannerContext) -> dict[int, tuple[str | None, tuple[s
 
 def source_collection(context: PlannerContext, source: str) -> int | None:
     """Associate owner-less inventory by explicit source locators, never Video."""
-    if not relative_locator_safe(source):
+    if not relative_locator_safe(source) or technical_root(source):
         return None
     candidates = []
     for collection in context.collections:
@@ -70,6 +78,18 @@ def source_collection(context: PlannerContext, source: str) -> int | None:
     longest = max(length for length, _ in candidates)
     owners = {id for length, id in candidates if length == longest}
     return next(iter(owners)) if len(owners) == 1 else None
+
+
+def _structural_parent(root, title):
+    parent = PurePosixPath(root or '')
+    issues = []
+    if title and title.season is not None:
+        directory = format_season_directory(title.season)
+        if directory.valid:
+            parent /= directory.component
+        else:
+            issues.append('invalid_season')
+    return parent, issues
 
 
 def _video_target(context: PlannerContext, video: TargetVideo, title: TargetTitle | None, roots) -> PlanRecord:
@@ -91,13 +111,8 @@ def _video_target(context: PlannerContext, video: TargetVideo, title: TargetTitl
     authority += ('title_naming:' + prefix.authority,)
     if not prefix.ready:
         blockers.append('title_naming_unavailable')
-    parent = PurePosixPath(root or '')
-    if title.season is not None:
-        directory = format_season_directory(title.season)
-        if directory.valid:
-            parent /= directory.component
-        else:
-            blockers.append('invalid_season')
+    parent, structural_issues = _structural_parent(root, title)
+    blockers.extend(structural_issues)
     if video.content_type == 'episode' and title.season is None:
         blockers.append('episode_season_unavailable')
     layout = None
@@ -233,7 +248,7 @@ def project_targets(context: PlannerContext) -> tuple[PlanRecord, ...]:
         diagnostic = DuplicateDiagnostic(video.id, video.duplicate_primary_id, primary.source if primary else None,
             primary_record.target_relative_path if primary_record else None, target, validity)
         records[video.id] = PlanRecord('video', video.id, video.source, target,
-            'QUARANTINE' if target else 'REVIEW', 'READY' if target else 'REVIEW', blockers=tuple(blockers),
+            'KEEP' if target == video.source else 'QUARANTINE' if target else 'REVIEW', 'READY' if target else 'REVIEW', blockers=tuple(blockers),
             authority=(f'video:{video.id}', f'confirmed_duplicate_primary:{video.duplicate_primary_id}'),
             collection_id=video.collection_id, title_id=video.title_id, duplicate=diagnostic)
     result = list(records.values())
@@ -247,7 +262,7 @@ def project_targets(context: PlannerContext) -> tuple[PlanRecord, ...]:
             target = str(PurePosixPath(owner.target_relative_path).with_suffix(extension.extension))
             diagnostic = owner.duplicate
         result.append(PlanRecord('subtitle', subtitle.id, subtitle.source, target,
-            'QUARANTINE' if diagnostic and target else 'KEEP' if target == subtitle.source else 'MOVE' if target else 'REVIEW',
+            'KEEP' if target == subtitle.source else 'QUARANTINE' if diagnostic and target else 'MOVE' if target else 'REVIEW',
             'READY' if target else 'REVIEW', blockers=() if target else ('subtitle_placement_unresolved',),
             authority=(f'subtitle:{subtitle.id}', 'explicit_compatibility') + ((f'physical_sidecar_video:{selected.id}',) if selected else ()),
             collection_id=selected.collection_id if selected else None, title_id=selected.title_id if selected else None,
@@ -282,3 +297,50 @@ def project_targets(context: PlannerContext) -> tuple[PlanRecord, ...]:
             warnings=('subtitle_present_video_missing',) if kind == 'confirmed_no_match' else (),
             blockers=() if target else ('subtitle_scope_unresolved',), authority=authority, collection_id=collection_id))
     return tuple(sorted(result, key=lambda r: (r.object_kind, str(r.object_id).zfill(12), r.source_relative_path)))
+
+
+def project_container_locators(context: PlannerContext) -> tuple[ContainerLocator, ...]:
+    """Single leaves or explicitly controlled CM/Promo fan-out, never an LCA.
+
+    File placement remains the Physical Layout projection. This anchor gives
+    no membership/selector authority and permits shared Season owner IDs.
+    """
+    roots = root_targets(context)
+    rows = []
+    for collection in context.collections:
+        root, issues, authority = roots[collection.id]
+        rows.append(ContainerLocator('collection', collection.id, root,
+            'READY' if root else 'REVIEW', ('root_naming:' + authority,), issues))
+    primary_ids = {v.id for v in context.videos if v.duplicate_primary_id is None and v.duplicate_validity is None}
+    types_by_title = defaultdict(set)
+    for video in context.videos:
+        if video.id in primary_ids:
+            types_by_title[video.title_id].add(video.content_type)
+    by_title = defaultdict(list)
+    for row in project_targets(context):
+        if row.object_kind == 'video' and row.object_id in primary_ids:
+            by_title[row.title_id].append(row)
+    for title in context.titles:
+        members = by_title[title.id]
+        parents = {str(PurePosixPath(r.target_relative_path).parent) for r in members if r.target_relative_path}
+        target = None
+        blockers = []
+        authority = (f'title:{title.id}', 'file_layout_projection')
+        if not members or any(r.status in {'REVIEW', 'BLOCKED'} or not r.target_relative_path for r in members):
+            blockers.append('title_locator_unresolved')
+        elif len(parents) == 1:
+            target = next(iter(parents))
+        else:
+            layout = resolve_physical_layout(context.layout, title.id)
+            root = roots.get(title.collection_id, (None, (), 'unavailable'))[0]
+            parent, issues = _structural_parent(root, title)
+            anchor = parent / 'Extras'
+            allowed = {str(anchor / 'CM'), str(anchor / 'Promo')}
+            types = types_by_title[title.id]
+            if root and not issues and layout.effective_layout_kind == 'extras_promo' and types == {'cm', 'preview'} and parents == allowed:
+                target = str(anchor)
+                authority += ('controlled_cm_promo_children', 'layout:' + layout.authority)
+            else:
+                blockers.append('unapproved_container_fanout')
+        rows.append(ContainerLocator('title', title.id, target, 'READY' if target else 'REVIEW', authority, tuple(blockers)))
+    return tuple(sorted(rows, key=lambda r: (r.object_kind, r.object_id)))

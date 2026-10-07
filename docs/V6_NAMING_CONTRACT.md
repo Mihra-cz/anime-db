@@ -390,6 +390,18 @@ Layout authority ani Film choice nevytváří. Bonus používá `Extras/Bonus/`,
 `extras_promo` a `extras_menus` se nemigrují; jejich CM/Menu physical projection
 používá finální namespaces. Mini Dra explicitní own folder zachovává.
 
+### Container locator a owner identity
+
+`CatalogTitle.relative_root_path` je physical locator, nikoli membership
+selector ani další owner authority. Jediný leaf folder zachovává dosavadní
+semantics. Pokud stejný effective layout `extras_promo` deterministicky umístí
+CM a Preview/PV jednoho title do řízených `Extras/CM` a `Extras/Promo` child
+folders, title locator je jejich explicitní `Extras` container anchor v daném
+root/Season contextu. File-level layout stále určuje příslušný leaf.
+Nevzniká nový title ani owner; nejde o obecné LCA všech target paths.
+Neznámý fan-out znamená Review. P1/P2 mohou nadále sdílet Season locator a
+`own_folder` má svou dosavadní precedence.
+
 ### D03 – Explicitní varianty
 
 Každá explicitně assigned representation má před extension suffix
@@ -414,7 +426,11 @@ Diagnostic nese secondary/primary Video IDs, current primary locator,
 primary canonical target, quarantine target, validity, physical-primary stav,
 side assets právě tohoto secondary a jejich accounting. Asset jiného secondary se
 mu nepřiřazuje; secondary v library rootu nebo adresář s nepřiřaditelným souborem
-není accounted. READY quarantine move neznamená purge readiness.
+není accounted. Side-asset accounting je explicitně COMPLETE / INCOMPLETE / UNKNOWN.
+Chybějící carried execution evidence po reloadu znamená UNKNOWN, nikdy COMPLETE.
+INCOMPLETE se relocation nesmí změnit na COMPLETE. Quarantine je povolená ve
+všech třech stavech; future purge pouze při COMPLETE a splnění ostatních gates.
+READY quarantine move neznamená purge readiness.
 Žádný snapshot není purge authority.
 Budoucí „Smazat duplicity“ musí **bezprostředně před delete** znovu ověřit VALID
 relation, existující primary DB row, **fyzicky existující regular primary file**
@@ -455,13 +471,112 @@ původních filenames. Žádný hardcoded seznam bundle names ani mechanické sl
 s managed Extras namespace. Skutečný namespace konflikt znamená Review/Blocked.
 Historický `seznam-souboru.txt` zůstává KEEP v library rootu a není autoritou.
 
+Root-level `Subs`, `Duplicates` a `#recycle` jsou reserved technical namespaces,
+nikoli anime/content/metadata owners. Regular ZIP/RAR/7Z přímo v `Subs` je
+owner-less source subtitle archive a v post-state má KEEP; archive contents ani
+per-anime owner guessing nejsou potřeba. Nečekaný soubor, nested archive nebo
+konfliktní secondary evidence v této lane zůstává Review.
+DB-known quarantine Video/Subtitle používá stávající duplicate/compatibility
+authority. Side asset může použít explicitní ověřenou relocation provenance;
+samotné umístění v `Duplicates` ji nevytváří a nikdy neopravňuje purge.
+Already-settled quarantine má KEEP se zachovanou duplicate diagnostic, nikoli
+target→target MOVE. Neznámý/unprovenanced soubor v Duplicates zůstává Review.
+
 Synology `#recycle` je SYSTEM_EXCLUDED: bez descentu, coverage, manifest actions,
 Completeness blockeru a budoucího execution. Neznámé, nepřístupné a nonregular
 assets zůstávají explicitně Review; nic se silent skipem neztrácí.
+Excluded directory je pouze snapshot/count context, nevytváří plan record.
+Soubor v `#recycle` je pro AnimeDB smazaný / mimo aktivní knihovnu: obsah se nikdy
+netraversuje, neinventarizuje ani neobnovuje a AnimeDB k němu nežádá oprávnění.
+Stale DB-known Video/subtitle nebo carried side asset s locatorem uvnitř `#recycle`
+se neztratí: má stávající missing-file stav `source_missing_or_not_regular` bez
+targetu. Není to evidence obsahu koše, recovery authority ani požadavek na zásah
+do koše; produkce takové rows nemá.
+Technical-root-only quarantine/archive members nesmějí poskytovat anime
+collection/title locator authority. Jejich fyzický `Video.root_folder` může
+být `Duplicates`, ale container locator projection tuto technical lane ignoruje.
 Na runtime NAS rootu se read-only zjistí NAME_MAX/PATH_MAX; component hard limit
 je 255 UTF-8 bytes, bez truncation. Soft 240 UTF-16 units se vyhodnotí jen při
 skutečném absolutním Windows client rootu. Bez něj je
 `NOT_CHECKED / PRE_EXECUTION_REQUIRED`, což neblokuje read-only foundation.
+
+### Pure post-state projection a scanner boundary
+
+Read-only projekce aplikuje pouze approved target locators na in-memory
+filesystem snapshot a immutable DB-known scalar evidence, potom znovu spustí
+stejný Target Planner. Zachová IDs, hierarchy, numbering, varianty, MP,
+duplicate relations a subtitle compatibility. Derived container locators,
+ověřená side-asset provenance a původní neúplné side accounting se přenášejí
+explicitně; nejde o novou persistence. Stale nebo BLOCKED/REVIEW input je odmítnut.
+Side-asset classification/accounting je execution evidence, ne domain authority.
+`verify_post_state` musí přijmout explicitní carried evidence z budoucího immutable
+manifestu/journalu: secondary Video ID, primary Video ID, identities/paths side
+assets vlastněných právě tímto secondary (sousední soubory adresáře, primary sidecars
+ani auxiliary se mu nepřiřazují), accounting state, classification provenance a případně archive
+identity/hash evidence. Carried primary archive locator ukazuje na jeho expected
+post-state cestu; verifier kontroluje existence/regular-file a size parity,
+konzistenci approved copy hashů a classification provenance, bez primary rehashu.
+Totéž identity/stat/provenance ověření platí pro DB-known subtitle sides.
+Current pure projection vystaví stejnou immutable evidence;
+nesmí mít tajný marker, který reálný reload nemůže dodat. Manifest/journal zde
+implementované nejsou. Bez evidence je quarantine accounting UNKNOWN a
+unprovenanced secondary archive REVIEW. Primary ZIP v Subs se znovu nehashuje.
+Fixed point vyžaduje stejné file classifications a targets, pouze settled KEEP,
+bez nových collisions/reviews a bez locator drift. Existing directory namespace
+se kontroluje včetně prázdných folders; původní empty source directories se nemažou.
+Povinný closure gate zároveň vytvoří scratch DB kopii, aplikuje přesné future
+locator-only patches, reloaduje normálním production planner loaderem a plánuje
+nad simulated post-execution FS snapshotem s explicitní carried evidence.
+S pure projekcí musí souhlasit records, locators, statuses, duplicate diagnostics,
+accounting, archive provenance, actions, collisions a domain state. Negative reload
+bez evidence nesmí nic falešně označit COMPLETE ani nechat asset potichu zmizet.
+
+### Source filename a physical locator
+
+`Video.filename` je persisted source/parser evidence a při V6 physical
+reorganization je immutable. Execution jej nesmí přepsat canonical fyzickým
+názvem. `Video.relative_path` je authoritative current physical locator;
+současný physical filename je jeho basename. Tolerantní parser, supplementary
+ordinal, variant hints a explicitní source filename split patterns dál používají
+původní evidence. Fyzický název pro UI, filename similarity a extension budget
+používají current locator. Schema se tímto contractem nemění.
+
+Stejná hranice platí pro `UnresolvedExternalSubtitle.filename`: je source/parser
+evidence, V6 execution jej nemění. `relative_path` je current physical locator
+a jeho basename je current physical filename pro UI/similarity. Parserový subtype
+a číselný hint dál čtou source evidence. Scanner create/update lifecycle je P2C
+debt a v této změně se nepřepisuje.
+
+Pure post-state zachovává také detached `source_evidence_filename`; scratch
+DB reload patchuje pouze physical locators a ponechá `Video.filename` beze změny.
+Budoucí execution DB patches mění locator fields podle approved lifecycle
+(`Video.relative_path`/`root_folder`, collection/title anchors a subtitle paths),
+nikoli source/parser nebo domain authority. Future immutable manifest může
+obsahovat `source_evidence_filename` i `target_relative_path`; tyto významy se
+nesmí směšovat. Manifest ani DB patch executor zatím nejsou implementované.
+
+P2C **není** prerequisite fyzické reorganizace ani read-only post-state
+verification. **Je required před ordinary write-capable scanner rescanem
+reorganizovaného canonical tree.** Post-state verifier používá DB-known IDs,
+persisted locators, filesystem existence/parity a Target Planner; nikdy nevolá
+normal scanner ani neodhaduje ownera z filename. Během budoucí execution musí
+být scanner/inventory writer zastavený nebo za explicitní maintenance boundary.
+P2C musí vyřešit dnešní scanner create/update lifecycle: physical basename
+nesmí u existujícího Video ani unresolved subtitle zničit source/parser evidence. Canonical routing
+a práce s technical lanes zároveň musí zachovat DB-known IDs a compatibility.
+Maintenance mechanismus, manifest, journal, executor, DB write transaction,
+rollback a snapshot integration nejsou implementované.
+
+### Future execution failure criticality
+
+Schválené pravidlo pro **next task**, zatím bez manifest/executor implementace:
+
+- PRIMARY: Season, Film, OVA, Special, Recap, Preview a Mini Dra či obdobný
+  samostatný supplementary/Bonus s vlastním obsahem podle explicitní human/metadata authority.
+- LOW: OP, ED, NCOP, NCED, CM, PV, Menu a promotional/technical extras.
+
+Criticality řídí pouze future execution failure severity. Nemění Hierarchy,
+Naming, Layout, Metadata requirement/authority ani identity. Bonus není automaticky LOW.
 
 ## Otevřené V6 design otázky
 

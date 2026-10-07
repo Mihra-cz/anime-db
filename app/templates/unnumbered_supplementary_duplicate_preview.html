@@ -9,9 +9,9 @@
 <p>Potvrďte pouze v případě, že vybrané soubory skutečně obsahují stejný obsah. Nejde o potvrzení pouhého podezření.</p>
 <section class="panel">
   <h2>Primary</h2>
-  <p>{{ preview.primary.filename }}</p>
+  <p>{{ current_physical_filename(preview.primary) }}</p>
   <h2>Secondary</h2>
-  <ul>{% for video in preview.secondaries %}<li>{{ video.filename }}</li>{% endfor %}</ul>
+  <ul>{% for video in preview.secondaries %}<li>{{ current_physical_filename(video) }}</li>{% endfor %}</ul>
   <h2>Výsledek</h2>
   <p>{{ 1 + preview.secondaries|length }} fyzická videa → 1 logická {{ preview.supplementary_type|capitalize }} identita</p>
   <p>Supplementary ordinal zůstane neurčen.</p>

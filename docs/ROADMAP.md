@@ -178,8 +178,10 @@ Aktuální fáze: Naming (61 choices, actionable 0) a Physical Layout Review
 (32 choices, actionable 0, basis mismatch 0) jsou uzavřené. P1A/P1B jsou committed
 a produkční rollout v8→v9 je dokončený; shared Season persistence je podporovaná.
 P2B pure canonical parser core je implementovaný. Read-only Target Planner
-foundation s D01–D06 je implementovaný; dalším hlavním krokem je execution
-(preview a potvrzení konkrétního plánu) a NAS cleanup. P2C authoritative context resolution a scanner routing jsou
+foundation s D01–D06, post-state projection a řízený container locator contract
+jsou implementované; následuje immutable manifest
+a dry-run/preflight bez writes, potom samostatně execution a NAS cleanup.
+P2C authoritative context resolution a scanner routing jsou
 odložené. Fyzický rename
 ani move na NAS zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
 v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
@@ -210,8 +212,28 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   projekce, read-only coverage, full namespace/path preflight, duplicate safety
   diagnostic a deterministic double simulation. D04 je quarantine, ne delete;
   future purge má hard fresh physical-primary regular-file existence gate.
+  Pure post-state projekce zachovává known identities/evidence, technické lanes
+  Subs/Duplicates/#recycle a kontroluje settled target/container fixed point.
+  CM/Promo fan-out jednoho title může mít explicitní Extras anchor bez nového ownera.
+  Filename boundary je schválená: `Video.filename` zůstává source/parser evidence,
+  V6 execution mění physical locator `relative_path`, nikoli historical filename.
+  Stejný contract platí pro `UnresolvedExternalSubtitle.filename`. Post-state API
+  přijímá explicitní carried execution evidence; accounting je COMPLETE,
+  INCOMPLETE nebo UNKNOWN, po reloadu bez evidence default UNKNOWN. Closure gate
+  vyžaduje i skutečnou scratch DB kopii, locator-only patches a normální read-only
+  loader se simulated post-execution snapshotem, včetně negative reloadu bez evidence.
   Fyzická execution, potvrzení konkrétního plánu pro NAS, Completeness UI
   po cleanupu a P2C zůstávají pending.
+  P2C není prerequisite reorganizace ani read-only post-state verification,
+  je však required před ordinary write-capable scanner rescanem canonical tree.
+  P2C musí upravit scanner lifecycle tak, aby physical basename nezničil původní
+  source/parser evidence existujícího Video ani unresolved subtitle;
+  tento write lifecycle zatím změněný není.
+  Execution musí probíhat se zastaveným scanner/inventory writerem nebo za
+  explicitní maintenance boundary; tento mechanismus ještě není implementovaný.
+  Next task pro execution contract zahrnuje schválenou PRIMARY/LOW failure
+  criticality podle [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md#future-execution-failure-criticality).
+  Criticality nemění Naming/Layout/Metadata a není nyní implementovaná.
 
 ### Postup V6
 

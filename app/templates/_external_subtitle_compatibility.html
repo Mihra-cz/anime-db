@@ -8,7 +8,7 @@
     <article class="subtitle-compatibility-target">
       <div>
         <strong>{{ candidate.episode_label }} · {{ candidate.variant_label }}</strong>
-        <small class="technical-filename">{{ candidate.video.filename }}</small>
+        <small class="technical-filename">{{ current_physical_filename(candidate.video) }}</small>
         {% if candidate.variant_details %}<small>{{ candidate.variant_details|join(' · ') }}</small>{% endif %}
         <span class="status-badge severity-{{ 'success' if candidate.status == 'confirmed_compatible' else 'warning' if candidate.status == 'confirmed_incompatible' else 'info' }}">{{ candidate.status_label }}</span>
         {% if candidate.compatibility %}<small>{{ compatibility_match_method_label(candidate.compatibility.match_method) }}{% if candidate.compatibility.verified_at %} · ověřeno {{ candidate.compatibility.verified_at.strftime('%Y-%m-%d %H:%M UTC') }}{% endif %}{% if candidate.compatibility.note %} · {{ candidate.compatibility.note }}{% endif %}</small>{% endif %}
