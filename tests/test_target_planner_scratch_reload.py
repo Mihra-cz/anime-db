@@ -230,10 +230,27 @@ print(json.dumps({'incomplete':15,'archive':archive.source_relative_path}))
     assert reloaded == replace(projection.context, execution_evidence=())
 
 
-def test_manifest_cli_dry_run_uses_one_inventory_and_no_data_writes(scratch_case, tmp_path, capsys):
+@pytest.mark.parametrize('windows_root,windows_gate', [
+    pytest.param(None, 'MISSING', id='no-root'),
+    pytest.param(r'\\192.168.11.149\Anime', 'PASS', id='ip-unc'),
+    pytest.param(r'\\DS925\Anime', 'PASS', id='hostname-unc'),
+    pytest.param('Z:\\', 'PASS', id='mapped-drive'),
+    pytest.param(r'\\192.168.11.149\Anime' + '\\' + 'long' * 60,
+        'OVER_BUDGET', id='over-budget'),
+])
+def test_manifest_cli_dry_run_uses_one_inventory_and_no_data_writes(
+        scratch_case, tmp_path, capsys, monkeypatch, windows_root, windows_gate):
+    import app.tools.execution_manifest as cli
     from app.tools.execution_manifest import main
     from app.tools.target_plan import database_fingerprint
     from app.target_planner_filesystem import inventory_filesystem
+    # The supplied root must reach planner and runtime evidence verbatim.
+    seen=[]
+    preflight=cli.preflight_execution_manifest
+    def spy(*args, **kwargs):
+        seen.append((kwargs['runtime'].actual_windows_root, kwargs['windows_root']))
+        return preflight(*args, **kwargs)
+    monkeypatch.setattr(cli, 'preflight_execution_manifest', spy)
     source, _, _, before, _, _ = scratch_case
     library=tmp_path/'library'
     library.mkdir()
@@ -243,22 +260,33 @@ def test_manifest_cli_dry_run_uses_one_inventory_and_no_data_writes(scratch_case
         path.write_bytes(b'x')
     db_before=database_fingerprint(source)
     fs_before=inventory_filesystem(library)
+    windows_args=[] if windows_root is None else ['--windows-root', windows_root]
     output=tmp_path/'manifest.json'
-    status=main(['generate-manifest','--db',str(source),'--library-root',str(library),'--output',str(output)])
+    status=main(['generate-manifest','--db',str(source),'--library-root',str(library),
+        '--output',str(output)] + windows_args)
     generated=json.loads(capsys.readouterr().out)
     assert status in {0,2}
     assert generated['sql_select_count'] == 11
     assert generated['filesystem_traversals'] == 1
+    manifest_before=output.read_bytes()
     report_path=tmp_path/'dry-run.json'
     status=main(['dry-run','--db',str(source),'--library-root',str(library),
-        '--manifest',str(output),'--output',str(report_path)])
+        '--manifest',str(output),'--output',str(report_path)] + windows_args)
     capsys.readouterr()
     report=json.loads(report_path.read_text())
+    assert seen == [(windows_root, windows_root)]
     assert status == 2 and report['outcome'] == 'NOT_READY'
     assert report['sql_select_count'] == 11 and report['filesystem_traversals'] == 1
     assert report['session_state'] == [0,0,0]
     assert 'free_bytes_not_reported' not in report['diagnostics']
     assert 'mount_identity_not_proven' not in report['diagnostics']
+    assert ('actual_windows_root_not_proven' in report['diagnostics']) == (windows_gate == 'MISSING')
+    assert 'actual_windows_root_invalid' not in report['diagnostics']
+    assert any(d.startswith('windows_path_budget:') for d in report['diagnostics']) == (windows_gate == 'OVER_BUDGET')
+    assert 'scanner_maintenance_not_proven' in report['diagnostics']
+    assert 'inventory_writer_maintenance_not_proven' in report['diagnostics']
+    assert report['manifest_id'] == generated['manifest_id']
+    assert output.read_bytes() == manifest_before
     assert database_fingerprint(source) == db_before
     assert inventory_filesystem(library) == fs_before
 

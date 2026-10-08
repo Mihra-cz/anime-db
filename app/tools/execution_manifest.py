@@ -204,7 +204,8 @@ def main(argv=None) -> int:
         return 2 if manifest.payload.generation_diagnostics else 0
     observations = observe_runtime(args.library_root)
     result = preflight_execution_manifest(manifest, context, snapshot, db,
-        runtime=RuntimeEvidence(mount_identity=observations['mount_identity'],
+        runtime=RuntimeEvidence(actual_windows_root=args.windows_root,
+            mount_identity=observations['mount_identity'],
             mount_read_only_now=observations['mount_read_only_now'],
             free_bytes=observations['free_bytes']), windows_root=args.windows_root)
     report = asdict(result)
