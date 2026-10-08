@@ -578,7 +578,10 @@ Manifest-level pravidlo; future failure execution zatím není implementovaná:
 - LOW: OP, ED, NCOP, NCED, CM, PV, Menu a promotional/technical extras.
 
 Criticality řídí pouze future execution failure severity. Nemění Hierarchy,
-Naming, Layout, Metadata requirement/authority ani identity. Bonus není automaticky LOW.
+Naming, Layout, Metadata requirement/authority ani identity. Bonus ani DramaCD
+nejsou automaticky LOW. Explicitní human LOW decision pro současných 11
+Overlord/Tenki Video IDs má úzký [execution allowlist](V6_EXECUTION_MANIFEST.md#criticality-a-preservation);
+nejde o obecné pravidlo typu nebo filename. Mini Dra zůstává PRIMARY.
 Ambiguous criticality vyžaduje review. Subtitle dědí nejvyšší severity platných
 M:N compatibility; D06 confirmed_no_match je mandatory preservation PRIMARY.
 PRIMARY failure vyžaduje STOP; LOW smí pokračovat pouze s nedotčeným source,

@@ -238,7 +238,9 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   patches a carried duplicate evidence. Versioned canonical payload má stabilní
   hash; dry-run jej nepřepočítává na nový plán a stale input zastaví.
   Manifest-level PRIMARY/LOW criticality nemění Naming/Layout/Metadata;
-  Mini Dra se standalone authority je PRIMARY, Bonus není automaticky LOW.
+  Mini Dra se standalone authority je PRIMARY, Bonus/DramaCD nejsou automaticky LOW.
+  Současných 11 Overlord/Tenki criticality decisions je explicitně uzavřených jako
+  LOW podle úzkého human allowlistu v execution contractu; externí gates trvají.
   Readiness vyžaduje skutečný Windows root, snapshot/DB backup evidence,
   maintenance a ověřenou write/rename capability. Current read-only audit je
   záměrně NOT_READY. Journal je pouze data/serialization foundation,

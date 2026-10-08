@@ -71,11 +71,30 @@ Layout, Hierarchy, Metadata ani content classification.
   human/confirmed metadata authority.
 - `LOW`: OP, ED, NCOP, NCED, CM, PV, Menu a doložené promotional/technical extras.
 
-Generic Bonus nemá automaticky LOW. Chybějící explicitní authority vyžaduje
+Generic Bonus ani DramaCD nemají automaticky LOW. Chybějící explicitní authority vyžaduje
 criticality review; samotný název adresáře nebo Bonus kontejner ji nevytváří.
 Source/parser PV evidence se odlišuje od authoritative story Preview.
 Konkrétní human criticality evidence je execution rozhodnutí, nikoli změna
 doménových polí.
+
+Human decision z 2026-10-08 uzavírá současných 11 criticality reviews jako LOW:
+
+- Overlord Drama CD, Video IDs **1964–1971**: hodnotnější příběhový Bonus,
+  který není samostatným anime alespoň na úrovni ONA/OVA.
+- Tenki no Ko Bonus, Video IDs **2711–2713**: filmografie, music video a video storyboard.
+
+Generation CLI předává tato rozhodnutí existujícímu `criticality_decisions`
+contractu jako konkrétní severity/reason/actor evidence. Allowlist kontroluje
+přesná Video IDs, současný Bonus typ a title/collection owners (Overlord 147/115,
+Tenki 202/147); nepoužívá filenames ani source locators. Do manifestu se přenese
+pouze authority pro actionable Video. CLI je jediná production composition těchto
+rozhodnutí: `build_execution_manifest` pečetí pouze předanou evidence a preflight
+re-projektuje sealed authorities. Přímé API volání bez CLI je fail-closed, položky
+zůstanou REVIEW a dry-run hlásí `criticality_review_required`. Nový Bonus/DramaCD
+toto rozhodnutí nedědí. Mini Dra zůstává PRIMARY podle vlastní standalone
+authority a mandatory PRIMARY ochrana se nemění. Uzavření criticality review
+nepotvrzuje warning acknowledgements ani externí prerequisites; production
+dry-run zůstává NOT_READY.
 
 Subtitle přes platné M:N compatibility přebírá nejvyšší criticality svých
 compatible Videos. Pokud má pouze LOW relationships, je LOW.

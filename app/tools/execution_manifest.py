@@ -25,6 +25,31 @@ from ..target_planner_service import load_planner_context, readonly_planner_sess
 from .target_plan import database_fingerprint
 
 
+# Human decision 2026-10-08, limited to these current Bonus objects and owners.
+# These story/extras decisions do not define Bonus or DramaCD type defaults.
+_APPROVED_LOW_BONUS_CRITICALITY = (
+    ((1964, 1965, 1966, 1967, 1968, 1969, 1970, 1971), 147, 115,
+        'human_confirmed:Overlord story Bonus is not standalone anime'),
+    ((2711, 2712, 2713), 202, 147,
+        'human_confirmed:Tenki filmography/music video/video storyboard'),
+)
+
+
+def _approved_criticality_decisions(context, plan) -> dict:
+    """Feed existing manifest authority; source names and locators are irrelevant."""
+    actionable = {r.object_id for r in plan.records if r.object_kind == 'video'
+        and r.status in {'READY', 'WARNING'} and r.action in {'KEEP', 'MOVE', 'QUARANTINE'}
+        and r.target_relative_path}
+    decisions = {}
+    for video in context.videos:
+        if video.id not in actionable or video.content_type.lower() != 'bonus':
+            continue
+        for ids, title_id, collection_id, reason in _APPROVED_LOW_BONUS_CRITICALITY:
+            if video.id in ids and (video.title_id, video.collection_id) == (title_id, collection_id):
+                decisions[('video', video.id)] = ('LOW', reason, 'human_operator')
+    return decisions
+
+
 def _mount_details(path: Path) -> tuple[str, str] | None:
     resolved = path.resolve(strict=False)
     best = None
@@ -168,7 +193,8 @@ def main(argv=None) -> int:
         observations = observe_runtime(args.library_root)
         mount_identity = observations['mount_identity']
         manifest = build_execution_manifest(context, snapshot, plan, db,
-            mount_identity=mount_identity, windows_root=args.windows_root)
+            mount_identity=mount_identity, windows_root=args.windows_root,
+            criticality_decisions=_approved_criticality_decisions(context, plan))
         _atomic_local_write(path, manifest_to_json(manifest))
         print(json.dumps({'manifest_id': manifest.manifest_id, 'output': str(path), **metrics,
             'actions': len(manifest.payload.actions), 'counts': manifest.payload.counts,

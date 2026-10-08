@@ -384,7 +384,10 @@ schválené targets nenahrazuje. Žádná DELETE action ani filesystem executor 
 
 Criticality PRIMARY/LOW řídí pouze future failure severity. Mini Dra a další
 standalone Bonus s explicitní own-content authority jsou PRIMARY; generic Bonus
-vyžaduje review. M:N subtitles dědí nejvyšší valid compatible severity;
+ani DramaCD nemají automaticky LOW. Současných 11 Overlord/Tenki Bonus položek
+má explicitní human LOW decision přes existující manifest authority; přesný
+[allowlist a scope](V6_EXECUTION_MANIFEST.md#criticality-a-preservation) nepoužívá filenames.
+M:N subtitles dědí nejvyšší valid compatible severity;
 D06 confirmed_no_match má mandatory PRIMARY preservation bez Video ownera.
 Warning acknowledgements jsou konkrétní IDs/class/objects s actor/time evidence,
 nikoli class wildcard nebo globální bypass.

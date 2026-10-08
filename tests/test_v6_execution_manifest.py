@@ -1,5 +1,5 @@
 """Execution manifest is a sealed read model; preflight never performs writes."""
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, asdict, replace
 import json
 
 import pytest
@@ -89,7 +89,8 @@ def test_preflight_detects_db_and_source_drift_as_stale():
     assert changed_source.diagnostics == ('source_changed:old/source.mkv',)
 
 
-def test_unproved_bonus_criticality_is_review_not_low():
+@pytest.mark.parametrize('source_name', ['New Bonus.mkv', 'New DramaCD.mkv'])
+def test_unproved_bonus_criticality_is_review_not_low(source_name):
     ctx, snap = fixture(content='bonus')
     names = dict(ctx.naming.titles)
     names[10] = replace(names[10], metadata_identity=None)
@@ -98,10 +99,157 @@ def test_unproved_bonus_criticality_is_review_not_low():
     naming = replace(ctx.naming, titles=names)
     choices = dict(naming.choices)
     choices[('title', 10)] = NamingChoice(2, 'Show', 'custom', NOW, create_basis_snapshot(naming, 'title', 10))
-    ctx = replace(ctx, naming=replace(naming, choices=choices))
+    ctx = replace(ctx, naming=replace(naming, choices=choices),
+        videos=(replace(ctx.videos[0], source_evidence_filename=source_name),))
     manifest = make(ctx, snap)
     assert manifest.payload.actions[0].criticality == 'REVIEW'
     assert preflight_execution_manifest(manifest, ctx, snap, DB).outcome == 'NOT_READY'
+
+
+def current_bonus_fixture(video_id, title_id=147, collection_id=115, *, metadata=False):
+    """Production owner IDs with arbitrary locators and no filename authority."""
+    ctx, snap = fixture(content='bonus')
+    from app.physical_naming import NamingChoice, create_basis_snapshot
+    from test_target_planner import NOW
+    naming = replace(ctx.naming, collections={collection_id: (title_id,)},
+        titles={title_id: replace(ctx.naming.titles[10], id=title_id,
+            collection_id=collection_id, metadata_identity=('anilist', '1') if metadata else None)},
+        choices={})
+    naming = replace(naming, choices={
+        ('collection', collection_id): NamingChoice(1, 'Show', 'custom', NOW,
+            create_basis_snapshot(naming, 'collection', collection_id)),
+        ('title', title_id): NamingChoice(2, 'Show', 'custom', NOW,
+            create_basis_snapshot(naming, 'title', title_id)),
+    })
+    ctx = replace(ctx, naming=naming,
+        layout=replace(ctx.layout, titles={title_id: replace(ctx.layout.titles[10],
+            id=title_id, collection_id=collection_id)}, choices={}),
+        collections=(replace(ctx.collections[0], id=collection_id),),
+        titles=(replace(ctx.titles[0], id=title_id, collection_id=collection_id),),
+        videos=(replace(ctx.videos[0], id=video_id, title_id=title_id,
+            collection_id=collection_id, source_evidence_filename='Unrelated renamed source.mkv'),),
+        locator_baselines=tuple(replace(b, object_id=collection_id if b.object_kind == 'collection'
+            else title_id if b.object_kind == 'title' else video_id) for b in ctx.locator_baselines))
+    return ctx, snap
+
+
+def generate_cli_fixture(tmp_path, monkeypatch, ctx, snap):
+    import app.tools.execution_manifest as cli
+    # Replace external preload/observations; planner, sealing, serialization and
+    # preflight remain real. No production DB or library is accessed by this test.
+    monkeypatch.setattr(cli, '_read_current', lambda *args: (
+        ctx, snap, plan_library(ctx, snap), DB, {}))
+    monkeypatch.setattr(cli, 'observe_runtime', lambda root: {'mount_identity': '42:1'})
+    output = tmp_path / 'manifest.json'
+    assert cli.main(['generate-manifest', '--db', str(tmp_path / 'unused.db'),
+        '--library-root', snap.root, '--output', str(output)]) == 0
+    return manifest_from_json(output.read_text())
+
+
+@pytest.mark.parametrize('video_id,title_id,collection_id', [
+    (1964, 147, 115), (1965, 147, 115), (1966, 147, 115), (1967, 147, 115),
+    (1968, 147, 115), (1969, 147, 115), (1970, 147, 115), (1971, 147, 115),
+    (2711, 202, 147), (2712, 202, 147), (2713, 202, 147),
+])
+def test_cli_seals_current_human_low_decisions(tmp_path, monkeypatch, video_id, title_id, collection_id):
+    ctx, snap = current_bonus_fixture(video_id, title_id, collection_id)
+    manifest = generate_cli_fixture(tmp_path, monkeypatch, ctx, snap)
+    action, = manifest.payload.actions
+    assert (action.object_id, action.criticality, action.failure_policy) == (video_id, 'LOW', 'CONTINUE_IF_SAFE')
+    authority, = manifest.payload.criticality_authorities
+    assert (authority.object_kind, authority.object_id, authority.severity) == ('video', video_id, 'LOW')
+    assert authority.actor and authority.reason == action.criticality_reason
+    result = preflight_execution_manifest(manifest, ctx, snap, DB)
+    assert result.outcome == 'NOT_READY'
+    assert 'criticality_review_required' not in result.diagnostics
+    assert dict(result.checks)['manifest_projection'] == 'MATCH'
+    assert 'actual_windows_root_not_proven' in result.diagnostics
+
+
+@pytest.mark.parametrize('video_id,title_id,collection_id,source_name', [
+    (1972, 147, 115, 'New Bonus.mkv'),
+    (1972, 147, 115, 'Overlord DramaCD.mkv'),
+    (2714, 202, 147, 'New Bonus.mkv'),
+    (2714, 202, 147, 'New DramaCD.mkv'),
+    (1964, 999, 115, 'Overlord DramaCD.mkv'),
+    (1964, 147, 999, 'Overlord DramaCD.mkv'),
+    (2711, 999, 147, 'Tenki Bonus.mkv'),
+    (2711, 202, 999, 'Tenki Bonus.mkv'),
+])
+def test_cli_human_low_scope_does_not_expand(tmp_path, monkeypatch, video_id, title_id, collection_id, source_name):
+    ctx, snap = current_bonus_fixture(video_id, title_id, collection_id)
+    ctx = replace(ctx, videos=(replace(ctx.videos[0], source_evidence_filename=source_name),))
+    manifest = generate_cli_fixture(tmp_path, monkeypatch, ctx, snap)
+    assert manifest.payload.actions[0].criticality == 'REVIEW'
+    assert not manifest.payload.criticality_authorities
+    assert 'criticality_review_required' in preflight_execution_manifest(manifest, ctx, snap, DB).diagnostics
+
+
+def test_cli_mini_dra_with_own_metadata_stays_primary(tmp_path, monkeypatch):
+    ctx, snap = current_bonus_fixture(999, metadata=True)
+    names = dict(ctx.naming.titles)
+    names[147] = replace(names[147], romaji='Kobayashi-san Chi no Maidragon S: Mini Dra')
+    ctx = replace(ctx, naming=replace(ctx.naming, titles=names))
+    manifest = generate_cli_fixture(tmp_path, monkeypatch, ctx, snap)
+    assert manifest.payload.actions[0].criticality == 'PRIMARY'
+    assert not manifest.payload.criticality_authorities
+
+
+@pytest.mark.parametrize('content_type,expected', [('preview', 'REVIEW'), ('special', 'PRIMARY')])
+def test_cli_human_low_requires_current_bonus_semantics(tmp_path, monkeypatch, content_type, expected):
+    ctx, snap = current_bonus_fixture(1964)
+    ctx = replace(ctx, videos=(replace(ctx.videos[0], content_type=content_type),))
+    manifest = generate_cli_fixture(tmp_path, monkeypatch, ctx, snap)
+    assert manifest.payload.actions[0].criticality == expected
+    assert not manifest.payload.criticality_authorities
+
+
+@pytest.mark.parametrize('video_id,title_id,collection_id', [(1964, 147, 115), (2711, 202, 147)])
+def test_sealing_api_without_cli_composition_fails_closed_in_dry_run(
+        tmp_path, monkeypatch, video_id, title_id, collection_id):
+    """Skipping the CLI loses only the human LOW; the production dry-run keeps the review open."""
+    import app.tools.execution_manifest as cli
+    ctx, snap = current_bonus_fixture(video_id, title_id, collection_id)
+    composed = generate_cli_fixture(tmp_path, monkeypatch, ctx, snap)
+    direct = make(ctx, snap, mount_identity='42:1')
+    assert (direct.payload.actions[0].criticality, direct.payload.criticality_authorities) == ('REVIEW', ())
+    def outside_severity(manifest):
+        payload = asdict(manifest.payload)
+        payload['criticality_authorities'] = ()
+        payload['actions'] = [{k: v for k, v in action.items()
+            if k not in {'criticality', 'criticality_reason', 'failure_policy'}} for action in payload['actions']]
+        return payload
+    assert outside_severity(direct) == outside_severity(composed)
+    monkeypatch.setattr(cli, 'observe_runtime', lambda root: {
+        'mount_identity': '42:1', 'mount_read_only_now': True, 'free_bytes': 1})
+    for name, manifest in (('direct', direct), ('composed', composed)):
+        source = tmp_path / f'{name}.json'
+        source.write_text(manifest_to_json(manifest))
+        report = tmp_path / f'{name}-dry-run.json'
+        assert cli.main(['dry-run', '--db', str(tmp_path / 'unused.db'), '--library-root', snap.root,
+            '--manifest', str(source), '--output', str(report)]) == 2
+        result = json.loads(report.read_text())
+        assert result['outcome'] == 'NOT_READY'
+        assert ('criticality_review_required' in result['diagnostics']) == (name == 'direct')
+
+
+def test_generation_cli_is_the_only_production_human_criticality_composition():
+    """build_execution_manifest seals given evidence; preflight re-projects sealed authorities."""
+    import ast
+    from pathlib import Path
+    root = Path(__file__).parents[1]
+    calls = []
+    for path in sorted((root / 'app').rglob('*.py')):
+        for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
+            func = getattr(node, 'func', None)
+            if getattr(func, 'id', getattr(func, 'attr', None)) == 'build_execution_manifest':
+                decisions = next((ast.unparse(k.value) for k in node.keywords if k.arg == 'criticality_decisions'), None)
+                calls.append((path.relative_to(root).as_posix(), decisions))
+    assert calls == [
+        ('app/target_execution_manifest.py',
+            '{(a.object_kind, a.object_id): (a.severity, a.reason, a.actor) for a in p.criticality_authorities}'),
+        ('app/tools/execution_manifest.py', '_approved_criticality_decisions(context, plan)'),
+    ]
 
 
 def test_strict_json_rejects_tampering_and_unknown_fields():
