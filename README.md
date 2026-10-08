@@ -104,17 +104,27 @@ warning acknowledgements a externí preconditions.
 ```bash
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.tools.execution_manifest \
   generate-manifest --db data/anime.db --library-root /mnt/nas-anime \
+  --windows-root '\\192.168.11.149\Anime' \
   --output /tmp/anime-v6-manifest.json
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.tools.execution_manifest \
   dry-run --db data/anime.db --library-root /mnt/nas-anime \
+  --windows-root '\\192.168.11.149\Anime' \
   --manifest /tmp/anime-v6-manifest.json --output /tmp/anime-v6-dry-run.json
 ```
 
 Output musí být explicitní lokální cesta mimo repo a library/NAS; runtime manifesty
 nepatří do repozitáře. Produkční DB se otevírá `mode=ro`, NAS se pouze čte.
+Generation i dry-run používají stejný skutečný Windows root; DSM port 5000 není
+součást SMB/UNC cesty. Official ingress pro externí preflight evidence je volitelný
+dry-run argument `--runtime-evidence <local-json-path>`. Jeho strict JSON obsahuje
+[přesně 14 externích polí](docs/V6_EXECUTION_MANIFEST.md#runtime-evidence-cli-composition);
+Windows root dodá CLI a mount identity/RO state/free bytes vždy fresh runtime.
+Bez evidence file zůstávají externí podmínky neprokázané. Evidence nezaručuje
+readiness bez preflight binding checks a nemění manifest ani jeho semantic hash.
 Current production dry-run má záměrně vrátit NOT_READY, dokud nejsou doložené
-Windows root, snapshot, DB backup, maintenance, write/no-replace capability
-a potřebná approvals. Skutečný executor neexistuje: tyto commands nepřesouvají
+snapshot, DB backup, maintenance a write/no-replace capability. CLI nepřidává
+warning acknowledgements; bez approved envelope zůstávají blockerem.
+Skutečný executor neexistuje a NAS execution není autorizovaná: tyto commands nepřesouvají
 ani nepřejmenovávají soubory, nevytvářejí library directories, snapshot nebo
 backup a nespouštějí scanner. P2C a Completeness zůstávají pending.
 

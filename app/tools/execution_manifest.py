@@ -12,13 +12,14 @@ from dataclasses import asdict
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import sys
 from sqlalchemy import event
 
 from ..target_execution_manifest import (
     build_execution_manifest, manifest_from_json, manifest_to_json,
-    preflight_execution_manifest, RuntimeEvidence,
+    preflight_execution_manifest, RuntimeEvidence, _strict_json_load,
 )
 from ..target_planner_filesystem import inventory_filesystem, plan_library, validate_inventory_root
 from ..target_planner_service import load_planner_context, readonly_planner_session
@@ -33,6 +34,25 @@ _APPROVED_LOW_BONUS_CRITICALITY = (
     ((2711, 2712, 2713), 202, 147,
         'human_confirmed:Tenki filmography/music video/video storyboard'),
 )
+
+
+# Only external assertions enter here. Live observations are composed separately.
+_EXTERNAL_EVIDENCE_TYPES = {
+    'scanner_paused_through_verification': bool,
+    'inventory_writer_paused_through_verification': bool,
+    'snapshot_capable': bool,
+    'snapshot_id': str,
+    'snapshot_at': str,
+    'snapshot_manifest_id': str,
+    'db_backup_path': str,
+    'db_backup_sha256': str,
+    'db_backup_size': int,
+    'db_backup_user_version': int,
+    'db_backup_manifest_id': str,
+    'mount_read_write_checked': bool,
+    'safe_write_capability_proven': bool,
+    'rename_noreplace_capability_proven': bool,
+}
 
 
 def _approved_criticality_decisions(context, plan) -> dict:
@@ -130,6 +150,36 @@ def validate_local_output(output: Path, *library_roots: Path, forbidden_files: t
     return output
 
 
+def _read_runtime_evidence(path: Path, *library_roots: Path) -> dict:
+    """Read a strict local assertion object; domain/binding checks stay in preflight."""
+    path = Path(path).absolute()
+    resolved = path.resolve(strict=False)
+    for root in (Path('/mnt/nas-anime'), *library_roots):
+        library = root.resolve(strict=False)
+        if resolved == library or library in resolved.parents:
+            raise ValueError('input must be outside NAS and library roots')
+    # Reuse the inventory's ancestor no-symlink policy before opening the input.
+    validate_inventory_root(path)
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError('input must be a regular file')
+    fstype = _mount_fstype(path)
+    if fstype is None or fstype in {'cifs', 'smb3', 'nfs', 'nfs4', '9p'} or fstype.startswith(('fuse.sshfs', 'fuse.rclone')):
+        raise ValueError('input requires a verified local filesystem')
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'r', encoding='utf-8') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError('input must be an independent regular file')
+        evidence = _strict_json_load(stream.read())
+    if type(evidence) is not dict or evidence.keys() != _EXTERNAL_EVIDENCE_TYPES.keys():
+        raise ValueError('input must contain exactly the 14 external evidence fields')
+    for key, value_type in _EXTERNAL_EVIDENCE_TYPES.items():
+        value = evidence[key]
+        if type(value) is not value_type and not (value is None and value_type in (str, int)):
+            raise ValueError(f'{key} has an invalid type')
+    return evidence
+
+
 def _read_current(database_path: Path, library_root: Path, windows_root: str | None):
     before = database_fingerprint(database_path)
     with readonly_planner_session(database_path) as session:
@@ -180,14 +230,24 @@ def main(argv=None) -> int:
         else:
             p.add_argument('--manifest', type=Path, required=True)
             p.add_argument('--output', type=Path, required=True)
+            p.add_argument('--runtime-evidence', type=Path,
+                help='Local JSON with exactly 14 external RuntimeEvidence fields; live values cannot be overridden')
     args = parser.parse_args(argv)
     validate_inventory_root(args.library_root)
     if args.command == 'generate-manifest':
         path = validate_local_output(args.output, args.library_root, forbidden_files=(args.db,))
     else:
         manifest = manifest_from_json(args.manifest.read_text(encoding='utf-8'))
+        external_evidence = {}
+        if args.runtime_evidence is not None:
+            try:
+                external_evidence = _read_runtime_evidence(args.runtime_evidence,
+                    args.library_root, Path(manifest.payload.library_root))
+            except (OSError, ValueError) as error:
+                parser.error(f'runtime evidence: {error}')
+        inputs = (args.db, args.manifest) + ((args.runtime_evidence,) if args.runtime_evidence is not None else ())
         path = validate_local_output(args.output, args.library_root, Path(manifest.payload.library_root),
-            forbidden_files=(args.db, args.manifest))
+            forbidden_files=inputs)
     context, snapshot, plan, db, metrics = _read_current(args.db, args.library_root, args.windows_root)
     if args.command == 'generate-manifest':
         observations = observe_runtime(args.library_root)
@@ -204,7 +264,7 @@ def main(argv=None) -> int:
         return 2 if manifest.payload.generation_diagnostics else 0
     observations = observe_runtime(args.library_root)
     result = preflight_execution_manifest(manifest, context, snapshot, db,
-        runtime=RuntimeEvidence(actual_windows_root=args.windows_root,
+        runtime=RuntimeEvidence(**external_evidence, actual_windows_root=args.windows_root,
             mount_identity=observations['mount_identity'],
             mount_read_only_now=observations['mount_read_only_now'],
             free_bytes=observations['free_bytes']), windows_root=args.windows_root)

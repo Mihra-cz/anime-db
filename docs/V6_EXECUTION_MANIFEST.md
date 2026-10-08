@@ -144,6 +144,59 @@ backup readiness nesplní. DSM snapshot a durable maintenance lock sám neověř
 Skutečné pořízení backupu/snapshotu a doložení těchto externích podmínek patří
 samostatnému pre-execution kroku.
 
+### Runtime evidence CLI composition
+
+Official `dry-run --runtime-evidence <local-json-path>` skládá existující
+`RuntimeEvidence`; library API ji nadále smí přijmout přímo. File musí být lokální
+independent regular file, bez symlinků včetně ancestors a bez hardlink aliasu,
+mimo `/mnt/nas-anime` i actual/manifest library root. Remote nebo neověřený
+filesystem se odmítá. Output nesmí tento input přepsat.
+
+Strict JSON object musí obsahovat všech těchto 14 keys a žádné další:
+
+| External field | JSON type |
+| --- | --- |
+| `scanner_paused_through_verification` | boolean |
+| `inventory_writer_paused_through_verification` | boolean |
+| `snapshot_capable` | boolean |
+| `snapshot_id` | string nebo null |
+| `snapshot_at` | string nebo null |
+| `snapshot_manifest_id` | string nebo null |
+| `db_backup_path` | string nebo null |
+| `db_backup_sha256` | string nebo null |
+| `db_backup_size` | integer nebo null |
+| `db_backup_user_version` | integer nebo null |
+| `db_backup_manifest_id` | string nebo null |
+| `mount_read_write_checked` | boolean |
+| `safe_write_capability_proven` | boolean |
+| `rename_noreplace_capability_proven` | boolean |
+
+Missing/unknown/duplicate keys, nesprávné typy, malformed JSON nebo unsafe input
+znamenají CLI error, bez optimistic fallback. Boolean není integer. Bez argumentu
+zůstávají external fields na fail-closed `RuntimeEvidence` defaults; žádná
+podmínka se automaticky nepotvrdí. Explicitní false/null rovněž nic neprokazuje.
+
+Tyto čtyři live/current fields jsou v JSON zakázané:
+
+| Live field | Autorita |
+| --- | --- |
+| `actual_windows_root` | Explicitní `--windows-root`, stejný při generation i dry-run. |
+| `mount_identity` | Fresh `observe_runtime()` nad skutečným library mountem. |
+| `mount_read_only_now` | Fresh `observe_runtime()` nad skutečným library mountem. |
+| `free_bytes` | Fresh `observe_runtime()` nad skutečným library mountem. |
+
+JSON obsahuje pouze externí assertions. Stávající preflight dále ověřuje snapshot
+time/capability a manifest binding, existující DB backup bytes/fingerprint a
+binding, maintenance, capability assertions, mount identity, Windows budget
+a manifest freshness. Capability assertion nepřebije fresh RO state. Evidence
+není součást manifest payloadu, ID/hash, targets, actions, locator patches,
+criticality, warning acknowledgements ani duplicate evidence.
+
+Tento ingress nevytváří production artifacts, snapshot ani backup a neprovádí
+remount nebo probes. Executor stále neexistuje; NAS execution není autorizovaná.
+Operational runbook vytvořený pro starší HEAD vyžaduje po změně CLI revalidation
+proti novému committed HEAD před jakoukoli budoucí write authorization.
+
 P2C není prerequisite manifest generation, dry-run, physical reorganization
 ani read-only verification. Je required před ordinary write-capable scanner
 rescanem reorganizovaného canonical stromu. Preservation source evidence

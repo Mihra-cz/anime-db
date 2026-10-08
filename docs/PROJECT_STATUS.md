@@ -396,8 +396,14 @@ Preflight vyžaduje externí maintenance výluku scanner/inventory writeru až d
 verification, skutečný Windows client root s 240 UTF-16 budgetem, baseline-bound
 snapshot a DB backup, safe write capability a mount rename no-replace support.
 Current read-only production audit je záměrně NOT_READY při chybějící evidence.
+Official dry-run CLI skládá přes `--runtime-evidence` přesně 14 external fields;
+čtyři live/current fields dodává explicitní Windows argument a fresh runtime.
+[Composition contract](V6_EXECUTION_MANIFEST.md#runtime-evidence-cli-composition)
+odmítá overrides i unsafe inputs a ponechává binding/freshness checks v preflight.
+Runtime evidence nemění manifest semantic hash ani jeho schválený obsah.
 Žádný snapshot, backup ani write/rename probe se nevytváří. Journal foundation
 definuje data/serialization, nikoli vykonávané filesystem state transitions.
+Executor stále neexistuje a NAS execution není autorizovaná.
 Podrobný [execution contract](V6_EXECUTION_MANIFEST.md) popisuje preconditions,
 criticality, stale checks a hranici budoucího executor/recovery tasku.
 
