@@ -401,8 +401,12 @@ Official dry-run CLI skládá přes `--runtime-evidence` přesně 14 external fi
 [Composition contract](V6_EXECUTION_MANIFEST.md#runtime-evidence-cli-composition)
 odmítá overrides i unsafe inputs a ponechává binding/freshness checks v preflight.
 Runtime evidence nemění manifest semantic hash ani jeho schválený obsah.
-Žádný snapshot, backup ani write/rename probe se nevytváří. Journal foundation
-definuje data/serialization, nikoli vykonávané filesystem state transitions.
+Žádný snapshot, backup ani write/rename probe se nevytváří.
+[E1 durable journal](V6_EXECUTION_MANIFEST.md#e1-durable-execution-journal) používá
+exclusive lokální append-only soubor, hash chain, file/directory fsync a writer
+lock. Kontroluje explicitní lifecycle/manifest identity; načtená historie vyžaduje
+reconciliation a nemá automatické resume. Journal zaznamenává caller evidence,
+nikoli vykonávané filesystem/DB state transitions.
 Executor stále neexistuje a NAS execution není autorizovaná.
 Podrobný [execution contract](V6_EXECUTION_MANIFEST.md) popisuje preconditions,
 criticality, stale checks a hranici budoucího executor/recovery tasku.

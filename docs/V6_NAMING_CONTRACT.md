@@ -567,7 +567,9 @@ nesmí u existujícího Video ani unresolved subtitle zničit source/parser evid
 a práce s technical lanes zároveň musí zachovat DB-known IDs a compatibility.
 Manifest/preflight vyžadují external/runtime maintenance evidence. Persisted
 maintenance mechanismus, executor, DB write transaction, rollback a snapshot
-automation nejsou implementované; journal má pouze data/serialization foundation.
+automation nejsou implementované. [E1 journal foundation](V6_EXECUTION_MANIFEST.md#e1-durable-execution-journal)
+má durable local persistence a strict lifecycle/loading, nikoli fyzické operace
+nebo automatické resume. Naming/domain authority tím není změněná.
 
 ### Future execution failure criticality
 
@@ -584,8 +586,9 @@ Overlord/Tenki Video IDs má úzký [execution allowlist](V6_EXECUTION_MANIFEST.
 nejde o obecné pravidlo typu nebo filename. Mini Dra zůstává PRIMARY.
 Ambiguous criticality vyžaduje review. Subtitle dědí nejvyšší severity platných
 M:N compatibility; D06 confirmed_no_match je mandatory preservation PRIMARY.
-PRIMARY failure vyžaduje STOP; LOW smí pokračovat pouze s nedotčeným source,
-bez partial targetu, s journaled failure a bez dependent PRIMARY action.
+PRIMARY failure vyžaduje STOP; LOW smí pokračovat pouze po přímém durable
+`PENDING → FAILED`, s nedotčeným source, bez partial targetu, s journaled failure
+a bez dependent PRIMARY action. Pozdější FAILED vyžaduje STOP/reconciliation.
 
 ### Immutable manifest a read-only dry-run
 

@@ -102,10 +102,11 @@ Owner-less/unmatched a D06 `confirmed_no_match` mají mandatory PRIMARY safety
 preservation bez vymyšleného Video ownera. Auxiliary preservation rovněž
 nevytváří anime content identity.
 
-Future PRIMARY failure znamená STOP. LOW continuation vyžaduje nedotčený source,
-žádný částečně vytvořený target, journaled failure a žádnou dependent PRIMARY
-action. Journal foundation definuje pouze datové stavy a serialization;
-filesystem state transitions ani jejich execution nejsou implementované.
+Future PRIMARY failure znamená STOP. LOW continuation je možná pouze po přímém
+durable `PENDING → FAILED`, při nedotčeném source, žádném částečně vytvořeném
+target, journaled failure a žádné dependent PRIMARY action. Pozdější FAILED
+vyžaduje STOP/reconciliation. [E1 journal](#e1-durable-execution-journal) trvale ukládá a validuje
+caller evidence; filesystem state transitions ani jejich execution nejsou implementované.
 
 ## Warning approval
 
@@ -117,6 +118,126 @@ API `WarningAcknowledgement` ukládá tato rozhodnutí do approved envelope;
 generování je samo nepotvrzuje. `CriticalityAuthority` obdobně nese konkrétní
 human severity/reason/actor pro unresolved content. Mandatory PRIMARY nelze
 takovým rozhodnutím snížit na LOW.
+
+## E1: Durable execution journal
+
+[Izolovaná journal vrstva](../app/target_execution_journal.py) implementuje lokální
+trvalý zápis a kontrolované načítání. Existující `JournalEntry`, jeho canonical
+serializace a `can_continue_after_failure` zůstávají kompatibilní. E1 neprovádí
+filesystem actions, DB patches, reconciliation ani recovery. Nezavádí CLI command,
+runtime assertions, maintenance lock ani execution authorization.
+
+`DurableJournal.create(path, manifest)` výhradně vytvoří nový journal přes
+`O_CREAT|O_EXCL|O_NOFOLLOW`, s permissions `0600`. Vyžaduje absolutní cestu bez
+`..`, mimo repo i manifest/explicitní další library roots, na místním
+filesystemu. Reuse CLI path checks odmítá neznámý FS, remote FS ze sdíleného
+denylistu (nejde o allowlist) a input aliases; journal navíc odmítá
+`tmpfs`/`ramfs`, ancestor symlinks, `#recycle`, hardlinks, nepravidelné soubory
+a adresářové aliases (např. bind) samotného repo/library rootu. Rodič musí existovat, patřit
+účinnému uživateli a nesmí být group/world writable. Directory descriptors jsou
+otevřené bez následování symlinků; binding rodiče, file identity, permissions,
+link count a size/mtime se kontrolují také během použití.
+
+Writer drží neblokující výhradní `fcntl.flock` na původním file descriptoru po
+celou session. Nezávislý loader používá shared lock a živého writera odmítne jako
+`JournalBusyError`. Vytvoření druhého journalu na téže cestě je `FileExistsError`,
+nikdy overwrite. In-process mutex serializuje append/close; writer zděděný přes
+`fork` nesmí zapisovat ani čekat na mutex zděděný uzamčený z jiného threadu.
+Používat context manager nebo explicitní `close()`.
+
+Soubor obsahuje canonical UTF-8 JSON Lines s přesnými keys a newline framing:
+
+- Header version 1: schema, `manifest_id`, SHA-256 canonical celého manifest
+  envelope, sequence `0` a checksum. Vazba tedy zachová také konkrétní envelope
+  acknowledgements a created_at; nemění jejich approval ani manifest semantic ID.
+- Events: souvislé sequence `1..N`, digest předchozího frame, nezměněný
+  `JournalEntry` a checksum. ID/index musí přesně odpovídat immutable actions.
+- Při načítání se ověří canonical bytes, typy, schema/verze, checksum/hash chain,
+  pořadí, identity a celý lifecycle; frame má velikostní limit 64 KiB. Duplicitní,
+  neznámé, přeházené nebo neúplné records jsou STOP. Checksum není podpis ani
+  důkaz pravdivosti caller assertions.
+
+Vytvoření potvrzuje úspěch až po úplném header zápisu, file `fsync` a parent
+directory `fsync`. Každý append používá `O_APPEND`, dokončí short writes/EINTR a
+potvrdí nový in-memory stav až po file `fsync` a závěrečných binding kontrolách.
+Chyba během zápisu/barrier nebo neočekávaná vnější změna writer session zablokuje;
+žádný retry, truncate, unlink, overwrite ani oprava historie se neprovádí.
+Neúspěšně vytvořený či částečný journal zůstává zachovaný pro diagnostiku.
+
+### Explicitní lifecycle
+
+Nová action začíná pouze callerem dodaným `PENDING`. Actions se zaznamenávají
+v immutable manifest pořadí; nezačíná se další action při nedokončené předchozí.
+Journal nemá scheduler, automatické přeskakování ani alternativní topological
+ordering. Pokud canonical pořadí nemůže splnit dependencies, STOP; E1 žádný plán
+nepřepisuje. Dependencies nové action musí mít explicitní `COMPLETE`.
+
+| Předchozí stav | Přípustný další stav téže action |
+| --- | --- |
+| PENDING | FS_APPLIED nebo FAILED |
+| FS_APPLIED | FS_VERIFIED nebo FAILED |
+| FS_VERIFIED | DB_RECONCILED nebo FAILED |
+| DB_RECONCILED | COMPLETE nebo FAILED |
+| COMPLETE | Žádný; terminal |
+| FAILED | Žádný; terminal, bez automatického retry |
+
+Duplicitní, přeskočený nebo zpětný přechod je odmítnut před zápisem. Failure
+evidence patří jen `FAILED`. Každý stav je explicitní caller evidence z již
+provedené skutečné kontroly; E1 nepozoruje ani neodhaduje physical/DB outcome,
+nepředvyplňuje stav podle target existence a sama nic takového nepotvrzuje.
+REVIEW criticality nesmí vstoupit do execution lifecycle.
+
+PRIMARY failure vždy STOP. Po LOW failure lze v téže živé writer session
+zaznamenat `PENDING` následující nezávislé action pouze tehdy, když validovaná
+historie dokládá bezprostřední durable `PENDING → FAILED` stejné action s přesným
+manifest ID, action ID a indexem. Současně platí všechny původní podmínky
+`can_continue_after_failure`: failure code, intact source, absent target,
+clear PRIMARY dependencies, failure_journaled a žádná dependent PRIMARY action.
+Context-free helper poskytuje pouze nutné podmínky; neobsahuje předchozí stav
+a sám nedává continuation authority. Historickou podmínku vynucuje stejný
+validator při živém append i při načítání historie.
+
+`FAILED` po `FS_APPLIED`, `FS_VERIFIED` nebo `DB_RECONCILED` zůstává přípustným
+diagnostickým záznamem, ale další execution vyžaduje STOP/reconciliation i při
+všech boolean assertions True. E1 pozdní failure neodstraňuje ani neopravuje
+a nepovolí následující action. Failed dependency není COMPLETE ani při jinak
+bezpečném LOW failure. Neúplná, poškozená nebo nepotvrzená historie rovněž
+nemůže povolit pokračování.
+
+Boolean assertions nejsou samy důkazem skutečného FS/DB stavu. Budoucí E2 musí
+ověřit skutečný filesystem a DB stav a před fyzickou operací získat úspěšný
+durable zápis `PENDING` nové action přes journal gate. Samotný context-free
+`can_continue_after_failure` nesmí použít jako povolení execution. E1 nadále
+neobsahuje executor, rollback, recovery ani automatické resume.
+
+### Přerušení a kontrolované načítání
+
+`load_journal(path, manifest)` je pouze inspekce. Vrací immutable
+`JournalSnapshot.entries` a vždy `reconciliation_required=True`, včetně
+header-only historie. Celý frame po pádu neprokazuje, že writer obdržel durable
+acknowledgement; ztrátu celého posledního frame či všech events nelze rozlišit
+od původního platného prefixu pouhým hash chainem. Proto E1 nemá API k otevření
+existující historie pro další zápis a neumožňuje automatické resume ani při
+zaznamenaném COMPLETE. Prázdný načtený journal není důkaz, že physical execution
+nikdy nezačala.
+
+Truncated, corrupt nebo s manifestem/lifecycle nesouhlasná historie vyvolá
+`ReconciliationRequired` s record/byte diagnostikou a již validovaným prefixem
+`entries`; prefix se nesmí použít jako resume authority. Všechny bytes zůstávají
+beze změny. IO/path/lock errors rovněž znamenají STOP. Kontrolovaná physical/DB
+reconciliation a případné další otevření budou samostatnou budoucí částí executoru.
+
+Mechanismus používá standardní Linux/POSIX API bez x86 předpokladů a externích
+závislostí. ARM64/RPi5 provoz zatím není otestován. `fsync` závisí na skutečné
+podpoře filesystemu/hardware; persistent storage a container backing/retention
+musí být doložené v cílovém execution contextu. Local FS či overlay classification
+sama nedokazuje zachování artefaktů po zrušení kontejneru. Flock je advisory pro
+spolupracující uživatele této vrstvy; nechrání proti privilegovanému falšování ani
+nenahrazuje production maintenance/executor lock. Různé journal cesty neimplementují
+globální nebo distribuovanou výluku execution nad jedním manifestem/knihovnou.
+
+Journal nesmí měnit manifest/targets/criticality/warning approval ani doménovou
+autoritu. **Executor NOT IMPLEMENTED. NOT AUTHORIZED FOR NAS EXECUTION.**
 
 ## Externí pre-execution gates
 

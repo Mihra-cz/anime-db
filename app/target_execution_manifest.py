@@ -271,7 +271,12 @@ def journal_from_json(raw: str) -> JournalEntry:
 
 
 def can_continue_after_failure(manifest: ExecutionManifest, entry: JournalEntry) -> bool:
-    """Safety contract only; the future executor owns transitions and persistence."""
+    """Necessary context-free failure conditions, never continuation authority.
+
+    The durable journal must also validate a direct PENDING -> FAILED transition
+    and accept the next PENDING. E2 must verify actual FS/DB state; these caller
+    assertions alone do not prove it. This helper has no journal history.
+    """
     _validate_manifest(manifest)
     if entry.manifest_id != manifest.manifest_id or entry.action_index >= len(manifest.payload.actions):
         return False

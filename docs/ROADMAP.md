@@ -180,7 +180,7 @@ a produkční rollout v8→v9 je dokončený; shared Season persistence je podpo
 P2B pure canonical parser core je implementovaný. Read-only Target Planner
 foundation s D01–D06, post-state projection a řízený container locator contract
 jsou implementované. Immutable execution manifest, deterministic serialization,
-read-only dry-run/preflight a journal data foundation jsou implementované;
+read-only dry-run/preflight a E1 durable journal foundation jsou implementované;
 následuje samostatně executor/crash recovery a NAS cleanup.
 P2C authoritative context resolution a scanner routing jsou
 odložené. Fyzický rename
@@ -243,8 +243,10 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   LOW podle úzkého human allowlistu v execution contractu; externí gates trvají.
   Readiness vyžaduje skutečný Windows root, snapshot/DB backup evidence,
   maintenance a ověřenou write/rename capability. Current read-only audit je
-  záměrně NOT_READY. Journal je pouze data/serialization foundation,
-  skutečný executor, filesystem/DB state transitions a recovery jsou pending.
+  záměrně NOT_READY. E1 durable journal foundation implementuje exclusive lokální
+  persistence, writer lock, strict loading a explicitní lifecycle validation;
+  načtení vyžaduje reconciliation, bez automatického resume. Skutečný executor,
+  filesystem/DB state transitions a recovery jsou pending.
 
 ### Postup V6
 
