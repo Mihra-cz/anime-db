@@ -19,6 +19,7 @@ logs/
 # Local development artifacts
 .agents/
 .codex/
+/docs/_local/
 hierarchy-dry-run.txt
 
 # Python build artifacts
