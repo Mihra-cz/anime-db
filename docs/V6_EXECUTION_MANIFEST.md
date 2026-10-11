@@ -239,6 +239,121 @@ globální nebo distribuovanou výluku execution nad jedním manifestem/knihovno
 Journal nesmí měnit manifest/targets/criticality/warning approval ani doménovou
 autoritu. **Executor NOT IMPLEMENTED. NOT AUTHORIZED FOR NAS EXECUTION.**
 
+## E2A: Izolovaná filesystem rename primitive
+
+[Filesystem primitive](../app/target_execution_filesystem.py) implementuje rename
+jedné přesné sealed `MOVE` nebo `QUARANTINE` action. `KEEP` ověří source, ale
+neprovádí syscall ani fsync. `DELETE`, `REVIEW`, REVIEW criticality, unresolved
+generation diagnostics a actions s dependencies odmítá. Dependency orchestration
+patří budoucímu executoru. Immutable manifest, `JournalEntry`, criticality,
+warning approvals a locator patches se nemění.
+
+Jediný veřejný vstup je `ScratchRenameSession.create(parent)`: explicitně vytvoří
+nový prázdný `0700` scratch adresář v existujícím privátním stromu pod `/tmp`.
+Nelze otevřít existující library/execution root, přepnout do production režimu
+ani znovu otevřít ukončenou session. Testy připravují soubory výhradně uvnitř
+`pytest tmp_path`. Allocator nevytváří target parents: ty musí již existovat.
+Session vyžaduje výhradní kontrolu callerem nad scratch obsahem; permissions
+nevylučují jiný proces stejného UID ani privilegovaného uživatele.
+
+`session.rename(manifest, action)` kontroluje strict typed manifest/hash/action
+identity přes existující serialization contract, přesnou shodu celé action se
+sealed položkou a shodu library root/mount identity s drženou scratch session.
+Foreign root odmítá ještě před path observations existujícího manifest validatoru.
+Relativní cesty nesmějí obsahovat traversal, prázdné či dot components, backslash,
+NUL, absolutní cestu ani `#recycle`.
+
+Od `/` po root a dále po source/target parents se otevírají directory descriptors
+s `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`. Rename používá pouze leaf names relativně
+k těmto drženým descriptors. Source se otevírá s `O_NOFOLLOW|O_NONBLOCK`, musí
+být regular file s jedním hardlinkem, vlastněný callerem, bez group/world write,
+s přesnou manifest size/mtime_ns. Totéž ownership/write omezení platí pro root
+a adresáře pod privátním scratch parentem. Source descriptor a současný
+nofollow directory entry musejí mít stejné device/inode. Root, rodiče, mount
+identity a source binding se znovu kontrolují těsně před syscall a po něm.
+Stat evidence nenahrazuje content hash a nedokazuje bytes při zachování size/mtime.
+
+### No-overwrite a mount policy
+
+Primitive používá Linux libc `renameat2` výhradně s `RENAME_NOREPLACE`; libc volí
+platformní ABI bez hardcoded x86/ARM syscall čísla. Chybějící symbol nebo
+nepodporovaný kernel/filesystem znamená STOP. Target existence se kontroluje
+nofollow a konečný atomic no-overwrite gate vynucuje syscall, včetně targetu
+vzniklého po kontrole. Žádný `os.rename`/`os.replace`, copy/delete fallback,
+staging, retry, collision repair, implicitní target mkdir ani purge neexistuje.
+
+[Mount policy](../app/target_execution_mounts.py) je oddělená od mírnější
+read-only CLI denylist policy. Scratch allowlist obsahuje pouze `ext4`, `btrfs`
+a `overlay`; overlay povolení platí jen pro nový scratch strom. `tmpfs`/`ramfs`
+se pro durability odmítají, stejně jako neznámé, síťové, virtiofs, fuse a ceph
+filesystemy. Žádný typ ani úspěšný scratch syscall není production mount approval.
+
+Policy vyžaduje čitelný a validní `/proc/self/mountinfo`, descriptor `mnt_id`
+z `/proc/self/fdinfo`, device shodu a RW observations bez remount/probe.
+Source i rodiče musejí mít stejné device a mount ID jako root; stejné device
+samo neprokazuje absenci bind crossing. Mount uvnitř rootu (i mimo právě
+používanou cestu) je odmítnut. Filesystem root offsets všech mounts se porovnávají
+také pro differently named bind aliases rootu, jeho ancestors a libovolného
+podstromu. Identické path exposure ve filesystem sandboxu není differently
+named alias. Změněná mount table znamená STOP.
+
+Tyto kontroly pokrývají viditelnou namespace, nikoli skryté mounts, další mount
+namespaces nebo vzdálené klienty. Nezajišťují atomic inode-conditioned rename
+ani globální výluku cizích writers/mount změn. Výhradní kontrola nad novým
+scratch stromem je vstupní podmínkou. Pro produkci tyto vlastnosti zůstávají
+nedoložené a E2A žádnou production authorization API nevystavuje.
+
+### Syscall, durability a nejistota
+
+| Výsledek | Význam |
+| --- | --- |
+| `RenameResult(outcome='KEEP', syscall_succeeded=False, durability_confirmed=False)` | Kontroly prošly; žádný fyzický rename ani durability barrier. |
+| `RenameResult(outcome='DURABLE', syscall_succeeded=True, durability_confirmed=True)` | Rename uspěl, identity byly ověřeny a file/directory fsync barriers byly potvrzeny na scratch filesystemu. Není to DB reconciliation ani důkaz production hardware durability. |
+| `RenameRejected` | STOP před syscall nebo validované známé syscall odmítnutí. Neuděluje LOW continuation authority ani booleans pro journal FAILED. |
+| `RenameReconciliationRequired` | Syscall byl zkusen a výsledek či durability nelze bezpečně potvrdit; session je zablokovaná. Žádný automatický retry. |
+
+Po úspěšném rename se ověří absent source a target binding k původnímu
+source descriptoru, potom se synchronizuje file, target parent a source parent.
+Při stejném parent inode se directory fsync provádí jednou. Závěrečná kontrola
+znovu ověří paths, identities a mounts. File barrier nenahrazuje directory
+barriers. Directory/hardware durability mimo scratch prostředí není ověřená.
+`durability_confirmed` potvrzuje uvedené barriers, nikoli samostatně persistence
+předchozího vytvoření celého ancestor stromu; future executor musí zajistit také
+durable existenci execution rootu a parents před fyzickými actions.
+
+`EIO`, `EINTR`, timeout, neznámá chyba, přerušení po zahájení syscall nebo změněný
+stav po něm vyžadují reconciliation, i když okamžitá inspekce vypadá původně.
+Známé refusal errno jako `EEXIST`, `EXDEV`, `ENOSYS`, `EOPNOTSUPP`, `EINVAL`,
+`EACCES`/`EPERM` se označí jako rejection pouze po opětovné kontrole nedotčeného
+source binding a absence původního source inode v targetu. Ani tento výsledek
+neopravňuje pokračování. Každá action s pokusem o syscall je v živé session
+neopakovatelná. Neurčitá session nepovolí ani další action.
+
+Selže-li fsync nebo kontrola po úspěšném syscall, exception nese
+`syscall_succeeded=True`, `durability_confirmed=False`; fyzicky přemístěný soubor
+zůstává pro reconciliation. Při nejasném acknowledgement je
+`syscall_succeeded=None`. Selhání nelze prezentovat jako bezpečné neprovedení.
+Neexistuje automatické obrácení rename ani resumption po pádu.
+
+E2A journal neotevírá ani nezapisuje `FS_APPLIED`, `FS_VERIFIED` či
+`DB_RECONCILED`. E1 gate přímého durable `PENDING → FAILED` pro LOW pokračování
+a bezpodmínečný PRIMARY STOP zůstávají beze změny. Samostatná budoucí integrace
+musí spojit durable PENDING, skutečná filesystem pozorování a journal lifecycle;
+samotný výsledek primitive nemění DB ani nepotvrzuje reconciliation.
+
+Testy zahrnují skutečný scratch rename a souběh syscallů na jeden target;
+mount/bind/EXDEV/permission/IO faults jsou tam, kde je potřeba, explicitně
+injektované. Simulace prověřuje refusal a uncertainty logic, nikoli skutečné
+mount properties NASu. RPi5/ARM64, production ext4/btrfs, NAS/CIFS support,
+power-loss durability, jiná namespaces a production exclusion jsou **NEOVĚŘENÉ**.
+E2A nemá napojení na `generate-manifest`, `dry-run` ani jiné CLI.
+**Executor, DB reconciliation, rollback a recovery NOT IMPLEMENTED.
+NAS EXECUTION NOT AUTHORIZED.**
+
+Linux podklady: [renameat2](https://www.man7.org/linux/man-pages/man2/renameat2.2.html),
+[fsync](https://www.man7.org/linux/man-pages/man2/fsync.2.html),
+[mountinfo/fdinfo](https://www.kernel.org/doc/html/latest/filesystems/proc.html).
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.

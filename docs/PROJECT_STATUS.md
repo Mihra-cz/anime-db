@@ -407,6 +407,12 @@ exclusive lokální append-only soubor, hash chain, file/directory fsync a write
 lock. Kontroluje explicitní lifecycle/manifest identity; načtená historie vyžaduje
 reconciliation a nemá automatické resume. Journal zaznamenává caller evidence,
 nikoli vykonávané filesystem/DB state transitions.
+E2A má [izolovanou scratch filesystem primitive](V6_EXECUTION_MANIFEST.md#e2a-izolovaná-filesystem-rename-primitive)
+pro jednotlivé sealed MOVE/QUARANTINE: Linux no-overwrite rename, descriptor/mount
+checks, file/directory fsync a STOP/reconciliation při nejistotě. Existující
+library root nelze pro operace otevřít; produkční mount capability a RPi5/ARM64
+zůstávají neověřené. Integrace s journalem, DB reconciliation, rollback a recovery
+nejsou implementované.
 Executor stále neexistuje a NAS execution není autorizovaná.
 Podrobný [execution contract](V6_EXECUTION_MANIFEST.md) popisuje preconditions,
 criticality, stale checks a hranici budoucího executor/recovery tasku.
