@@ -42,7 +42,28 @@ def _close_evidence_fd(fd: int, primary: BaseException | None = None) -> None:
     except BaseException as exc:
         if primary is None:
             raise
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)) and not isinstance(primary, (KeyboardInterrupt, SystemExit)):
+            exc.add_note(f'E2A STOP: prior failure: {type(primary).__name__}: {primary}')
+            for note in tuple(getattr(primary, '__notes__', ())):
+                exc.add_note(note)
+            raise exc from primary
+        notes = tuple(getattr(exc, '__notes__', ()))
         primary.add_note(f'E2A STOP: descriptor cleanup failed: {type(exc).__name__}: {exc}')
+        for note in notes:
+            primary.add_note(note)
+
+
+def _close_evidence_fds(fds: tuple[int | None, ...], primary: BaseException | None = None) -> None:
+    selected = primary
+    for fd in fds:
+        if fd is None:
+            continue
+        try:
+            _close_evidence_fd(fd, selected)
+        except BaseException as exc:
+            selected = exc
+    if selected is not primary:
+        raise selected
 
 
 @contextmanager
@@ -130,8 +151,9 @@ class ScratchObservation:
         if os.getpid() != self._pid:
             raise RenameRejected('scratch observation inherited by another process')
         with session._mutex:
-            self._check(session, self._manifest, action)
             with ExitStack() as stack:
+                stack.push(session._block_cleanup_interruption)
+                self._check(session, self._manifest, action)
                 source_parts, target_parts = _locator(action.source), _locator(action.target)
                 source_parent = session._parent(source_parts, stack)
                 target_parent = session._parent(target_parts, stack)
@@ -192,9 +214,9 @@ def _open_absolute(path: Path) -> int:
     fd = os.open('/', _DIRECTORY)
     try:
         for i, part in enumerate(path.parts[1:], 1):
-            child = os.open(part, _DIRECTORY, dir_fd=fd)
-            os.close(fd)
-            fd = child
+            previous = fd
+            fd = os.open(part, _DIRECTORY, dir_fd=previous)
+            os.close(previous)
             # /tmp is sticky shared storage; every directory below it is private
             # to the caller's tree (other same-UID writers remain out of scope).
             if path.parts[1] == 'tmp' and i > 1:
@@ -255,6 +277,7 @@ class ScratchRenameSession:
         if not parent.is_relative_to(Path('/tmp')) or parent == Path('/tmp'):
             raise RenameRejected('scratch parent must be an existing private directory under /tmp')
         parent_fd = root_fd = None
+        primary = session = None
         try:
             _load_renameat2()
             parent_fd = _open_absolute(parent)
@@ -285,13 +308,23 @@ class ScratchRenameSession:
             return session
         except (OSError, ValueError) as exc:
             if isinstance(exc, RenameRejected):
+                primary = exc
                 raise
-            raise RenameRejected(str(exc), getattr(exc, 'errno', None)) from exc
+            primary = RenameRejected(str(exc), getattr(exc, 'errno', None))
+            raise primary from exc
+        except BaseException as exc:
+            primary = exc
+            raise
         finally:
-            if root_fd is not None:
-                os.close(root_fd)
-            if parent_fd is not None:
-                os.close(parent_fd)
+            try:
+                _close_evidence_fds((root_fd, parent_fd), primary)
+            except BaseException as exc:
+                if session is not None and root_fd is None:
+                    # Allocation succeeded but parent cleanup failed: this
+                    # unreturned session must release its root exactly once.
+                    session._closed = True
+                    _close_evidence_fd(session._root_fd, exc)
+                raise
 
     @property
     def root(self) -> Path:
@@ -327,6 +360,11 @@ class ScratchRenameSession:
             raise RenameRejected('cross-filesystem operation forbidden', errno.EXDEV)
         if _mount_id(fd) != self._mount_id:
             raise RenameRejected('mount crossing forbidden')
+
+    def _block_cleanup_interruption(self, _type, exc, _traceback) -> None:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            self._poisoned = True
+            exc.add_note('E2A STOP: scratch evidence interrupted; session blocked; no retry')
 
     def _parent(self, parts: tuple[str, ...], stack: ExitStack) -> int:
         fd = self._root_fd
@@ -375,6 +413,7 @@ class ScratchRenameSession:
         if os.getpid() != self._pid:
             raise RenameRejected('scratch session inherited by another process')
         with ExitStack() as stack:
+            stack.push(self._block_cleanup_interruption)
             with self._mutex:
                 if self._closed or self._poisoned:
                     raise RenameRejected('scratch session unavailable for observation')
@@ -475,11 +514,15 @@ class ScratchRenameSession:
                     self._verify_applied(action, source_fd, source_parent, target_parent, before)
                 return RenameResult(manifest.manifest_id, action.action_id, 'DURABLE', True, True)
             except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    self._poisoned = True
+                    if attempted:
+                        exc.add_note('E2A STOP: syscall attempted; session blocked; reconciliation required')
+                    else:
+                        exc.add_note('E2A STOP: scratch operation interrupted; session blocked; no retry')
+                    raise
                 if attempted:
                     self._poisoned = True
-                    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                        exc.add_note('E2A STOP: syscall attempted; session blocked; reconciliation required')
-                        raise
                     raise RenameReconciliationRequired('filesystem outcome requires reconciliation: ' + str(exc),
                         syscall_succeeded=True if succeeded else None) from exc
                 if isinstance(exc, RenameRejected):
@@ -512,5 +555,15 @@ class ScratchRenameSession:
             raise RenameRejected('scratch session closed or inherited')
         return self
 
-    def __exit__(self, *_exc) -> None:
-        self.close()
+    def __exit__(self, _type, primary, _traceback) -> None:
+        try:
+            self.close()
+        except BaseException as exc:
+            if primary is None:
+                raise
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)) and not isinstance(primary, (KeyboardInterrupt, SystemExit)):
+                raise exc from primary
+            notes = tuple(getattr(exc, '__notes__', ()))
+            primary.add_note(f'E2A STOP: cleanup failed: {type(exc).__name__}: {exc}')
+            for note in notes:
+                primary.add_note(note)

@@ -312,7 +312,7 @@ nedoložené a E2A žádnou production authorization API nevystavuje.
 | `RenameResult(outcome='DURABLE', syscall_succeeded=True, durability_confirmed=True)` | Rename uspěl, identity byly ověřeny a file/directory fsync barriers byly potvrzeny na scratch filesystemu. Není to DB reconciliation ani důkaz production hardware durability. |
 | `RenameRejected` | STOP před syscall nebo validované známé syscall odmítnutí. Neuděluje LOW continuation authority ani booleans pro journal FAILED. |
 | `RenameReconciliationRequired` | Syscall byl zkusen a výsledek či durability nelze bezpečně potvrdit; session je zablokovaná. Žádný automatický retry. |
-| `KeyboardInterrupt` / `SystemExit` | Původní přerušení se propaguje beze změny třídy a instance. Po pokusu o syscall je session zablokovaná a exception note vyžaduje STOP/reconciliation. |
+| `KeyboardInterrupt` / `SystemExit` | Původní přerušení se propaguje beze změny třídy a instance. Přerušení během observe/rename/verify session zablokuje i před syscall; další `rename` vrací `RenameReconciliationRequired`. Po pokusu o syscall exception note vyžaduje STOP/reconciliation. |
 
 Po úspěšném rename se ověří absent source a target binding k původnímu
 source descriptoru, potom se synchronizuje file, target parent a source parent.
@@ -421,6 +421,17 @@ chyba. Výjimky zachovávají příčinu a phase. `KeyboardInterrupt` a `SystemE
 se propagují jako původní instance s phase/STOP note, nikoli jako běžné rejection;
 session je spotřebovaná, žádný catch-all Exception je nezamlčuje. Po pokusu o
 syscall E2A navíc zablokuje filesystem session a vyžaduje reconciliation.
+
+Cleanup E1/E2A/E2B zachovává původní běžnou STOP chybu a další běžné chyby
+připojí diagnosticky. Cleanup `KeyboardInterrupt`/`SystemExit` má před běžnou
+STOP chybou přednost; propaguje se původní instance s nezměněným exit code
+a původní STOP zůstává v exception cause. Pokud už je primární chybou přerušení,
+zachová se právě toto přerušení i při dalším cleanup přerušení. Bez primární
+chyby se cleanup přerušení propaguje přímo. Zbývající bezpečný cleanup proběhne,
+diagnostika všech chyb se zachová a žádný nejistý close se neopakuje. E2A
+zablokuje session při každém přerušení během observe/rename/verify, i před
+syscall; žádný retry se neuděluje. Spotřebovaná E2B session si ponechá kategorii
+a phase primární STOP chyby; cleanup přerušení ji nepřepíše.
 
 Testy provádějí skutečné isolated scratch renames a read-only inode observations,
 injektují chyby a deterministicky ukončují child proces na lifecycle boundaries.

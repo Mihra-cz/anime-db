@@ -182,25 +182,35 @@ class ScratchActionSession:
         if not failures:
             return
         # Closing is never retried: a failed close may already have released fd.
-        if primary is not None:
+        interruption = next((failure for failure in failures
+            if isinstance(failure[0], (KeyboardInterrupt, SystemExit))), None)
+        if primary is not None and (isinstance(primary, (KeyboardInterrupt, SystemExit)) or interruption is None):
             for exc, _ in failures:
+                notes = tuple(getattr(exc, '__notes__', ()))
                 primary.add_note(f'E2B STOP: cleanup failed: {type(exc).__name__}: {exc}')
+                for note in notes:
+                    primary.add_note(note)
             return
-        exc, self._stop_class = next((failure for failure in failures
-            if isinstance(failure[0], (KeyboardInterrupt, SystemExit))), failures[0])
-        self._stop_phase = 'CLOSE'
+        exc, category = interruption or failures[0]
+        if primary is None:
+            # A primary STOP keeps its category/phase; cleanup adds no new authority.
+            self._stop_class, self._stop_phase = category, 'CLOSE'
+        for other, _ in failures:
+            if other is not exc:
+                exc.add_note(f'E2B cleanup failed: {type(other).__name__}: {other}')
+                for note in tuple(getattr(other, '__notes__', ())):
+                    exc.add_note(note)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             exc.add_note('E2B STOP: interrupted cleanup; session spent; no retry/resume')
-            for other, _ in failures:
-                if other is not exc:
-                    exc.add_note(f'E2B cleanup failed: {type(other).__name__}: {other}')
+            if primary is not None:
+                raise exc from primary
             raise exc
         raise self._stop_class('STOP: scratch resource cleanup failed', 'CLOSE') from exc
 
     def close(self) -> None:
         if os.getpid() != self._pid:
-            self._filesystem.close()
             self._closed = True
+            self._filesystem.close()
             return
         with self._mutex:
             if not self._closed:
@@ -212,5 +222,15 @@ class ScratchActionSession:
             raise ScratchCoordinationStopped('STOP: scratch coordination session unavailable', 'VALIDATION')
         return self
 
-    def __exit__(self, *_exc) -> None:
-        self.close()
+    def __exit__(self, _type, primary, _traceback) -> None:
+        try:
+            self.close()
+        except BaseException as exc:
+            if primary is None:
+                raise
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)) and not isinstance(primary, (KeyboardInterrupt, SystemExit)):
+                raise exc from primary
+            notes = tuple(getattr(exc, '__notes__', ()))
+            primary.add_note(f'E2B STOP: cleanup failed: {type(exc).__name__}: {exc}')
+            for note in notes:
+                primary.add_note(note)

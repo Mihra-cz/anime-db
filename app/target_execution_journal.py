@@ -1,6 +1,7 @@
 """Local durable V6 journal. Records caller evidence; never executes or resumes it."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
 import hashlib
@@ -130,9 +131,9 @@ def _open_parent(path: Path, manifest: ExecutionManifest, library_roots: tuple[P
     try:
         ancestors = {_identity(os.fstat(fd))}
         for part in path.parent.parts[1:]:
-            child = os.open(part, flags, dir_fd=fd)
-            os.close(fd)
-            fd = child
+            previous = fd
+            fd = os.open(part, flags, dir_fd=previous)
+            os.close(previous)
             ancestors.add(_identity(os.fstat(fd)))
         # Also reject a differently named directory alias (for example a bind
         # alias) of the repository/library, without traversing their contents.
@@ -168,7 +169,54 @@ def _close_after_failure(fd: int, primary: BaseException) -> None:
         os.close(fd)
     except BaseException as exc:
         # A failed close may already have released fd; preserve cause, no retry.
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)) and not isinstance(primary, (KeyboardInterrupt, SystemExit)):
+            exc.add_note(f'journal STOP: prior failure: {type(primary).__name__}: {primary}')
+            for note in tuple(getattr(primary, '__notes__', ())):
+                exc.add_note(note)
+            raise exc from primary
+        notes = tuple(getattr(exc, '__notes__', ()))
         primary.add_note(f'journal STOP: cleanup failed: {type(exc).__name__}: {exc}')
+        for note in notes:
+            primary.add_note(note)
+
+
+def _close_fds(fds: tuple[int | None, ...], primary: BaseException | None = None) -> None:
+    selected = primary
+    for fd in fds:
+        if fd is None:
+            continue
+        try:
+            if selected is None:
+                os.close(fd)
+            else:
+                _close_after_failure(fd, selected)
+        except BaseException as exc:
+            selected = exc
+    if selected is not primary:
+        raise selected
+
+
+@contextmanager
+def _history_reader(fd: int):
+    stream = os.fdopen(os.dup(fd), 'rb')
+    primary = None
+    try:
+        yield stream
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        try:
+            stream.close()
+        except BaseException as exc:
+            if primary is None:
+                raise
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)) and not isinstance(primary, (KeyboardInterrupt, SystemExit)):
+                raise exc from primary
+            notes = tuple(getattr(exc, '__notes__', ()))
+            primary.add_note(f'journal STOP: reader cleanup failed: {type(exc).__name__}: {exc}')
+            for note in notes:
+                primary.add_note(note)
 
 
 def _check_parent(path: Path, parent_fd: int) -> None:
@@ -176,9 +224,9 @@ def _check_parent(path: Path, parent_fd: int) -> None:
     fd = os.open(path.anchor, flags)
     try:
         for part in path.parent.parts[1:]:
-            child = os.open(part, flags, dir_fd=fd)
-            os.close(fd)
-            fd = child
+            previous = fd
+            fd = os.open(part, flags, dir_fd=previous)
+            os.close(previous)
         info = os.fstat(fd)
         if (_identity(info) != _identity(os.fstat(parent_fd)) or info.st_uid != os.geteuid()
                 or info.st_mode & 0o022):
@@ -218,7 +266,7 @@ def _read_history(fd: int, manifest: ExecutionManifest) -> tuple[JournalEntry, .
     completed: set[str] = set()
     previous_digest = None
     # The duplicate descriptor preserves the held lock; this reader never writes.
-    with os.fdopen(os.dup(fd), 'rb') as stream:
+    with _history_reader(fd) as stream:
         stream.seek(0)
         sequence = 0
         while True:
@@ -269,6 +317,7 @@ def load_journal(path: Path, manifest: ExecutionManifest, *,
     _header(manifest)
     parent_fd = _open_parent(path, manifest, library_roots, forbidden_files)
     fd = None
+    primary = None
     try:
         fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
             dir_fd=parent_fd)
@@ -286,10 +335,11 @@ def load_journal(path: Path, manifest: ExecutionManifest, *,
         # A header-only prefix can also result from losing every event. The
         # loader therefore grants no resumption authority even for zero entries.
         return JournalSnapshot(manifest.manifest_id, entries, True)
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        if fd is not None:
-            os.close(fd)
-        os.close(parent_fd)
+        _close_fds((fd, parent_fd), primary)
 
 
 class DurableJournal:
@@ -334,9 +384,7 @@ class DurableJournal:
             return writer
         except BaseException as exc:
             # Keep every created byte for diagnosis; no unlink/truncate/repair.
-            if fd is not None:
-                _close_after_failure(fd, exc)
-            _close_after_failure(parent_fd, exc)
+            _close_fds((fd, parent_fd), exc)
             raise
 
     @property
@@ -411,21 +459,27 @@ class DurableJournal:
             # mutex possibly inherited locked from another parent thread.
             if not self._closed:
                 self._closed = True
-                os.close(self._fd)
-                os.close(self._parent_fd)
+                _close_fds((self._fd, self._parent_fd))
             return
         with self._mutex:
             if not self._closed:
                 self._closed = True
-                try:
-                    os.close(self._fd)
-                finally:
-                    os.close(self._parent_fd)
+                _close_fds((self._fd, self._parent_fd))
 
     def __enter__(self) -> DurableJournal:
         if self._closed or os.getpid() != self._pid:
             raise JournalError('writer closed or inherited by another process')
         return self
 
-    def __exit__(self, *_exc) -> None:
-        self.close()
+    def __exit__(self, _type, primary, _traceback) -> None:
+        try:
+            self.close()
+        except BaseException as exc:
+            if primary is None:
+                raise
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)) and not isinstance(primary, (KeyboardInterrupt, SystemExit)):
+                raise exc from primary
+            notes = tuple(getattr(exc, '__notes__', ()))
+            primary.add_note(f'journal STOP: cleanup failed: {type(exc).__name__}: {exc}')
+            for note in notes:
+                primary.add_note(note)
