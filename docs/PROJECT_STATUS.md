@@ -56,7 +56,7 @@ Auditovaný baseline implementace: `05984ff` — Respect confirmed supplementary
 placement.
 Aktuální fáze: **V6 – Probíhá: příprava bezpečné reorganizace**.
 V1–V5 jsou hotové a Pre-V6 gate je uzavřený (PASS). Fyzická reorganizace NAS
-zatím nezačala a aplikace rename/move neprovádí.
+zatím nezačala a aplikace rename/move na NAS neprovádí.
 Podrobný vývojový plán a zbývající kroky jsou výhradně v [ROADMAP.md](ROADMAP.md).
 
 Současné zaměření V6:
@@ -67,7 +67,7 @@ Současné zaměření V6:
   ruční průchod je uzavřený;
 - oddělení logické title identity od locatoru jako příprava shared Season
   containers; read-only Target Planner foundation je implementovaný,
-  execution zůstává další prací.
+  produkční execution zůstává další prací.
 
 ### Pre-V6 closure checkpoint
 
@@ -402,24 +402,61 @@ Official dry-run CLI skládá přes `--runtime-evidence` přesně 14 external fi
 odmítá overrides i unsafe inputs a ponechává binding/freshness checks v preflight.
 Runtime evidence nemění manifest semantic hash ani jeho schválený obsah.
 Žádný snapshot, backup ani write/rename probe se nevytváří.
+
 [E1 durable journal](V6_EXECUTION_MANIFEST.md#e1-durable-execution-journal) používá
 exclusive lokální append-only soubor, hash chain, file/directory fsync a writer
 lock. Kontroluje explicitní lifecycle/manifest identity; načtená historie vyžaduje
 reconciliation a nemá automatické resume. Journal zaznamenává caller evidence;
 sám filesystem/DB state transitions nevykonává.
+
 E2A má [izolovanou scratch filesystem primitive](V6_EXECUTION_MANIFEST.md#e2a-izolovaná-filesystem-rename-primitive)
 pro jednotlivé sealed MOVE/QUARANTINE: Linux no-overwrite rename, descriptor/mount
 checks, file/directory fsync a STOP/reconciliation při nejistotě. Existující
 library root nelze pro operace otevřít; produkční mount capability a RPi5/ARM64
 zůstávají neověřené.
+
 [E2B](V6_EXECUTION_MANIFEST.md#e2b-scratch-only-koordinace-jedné-action) koordinuje
 pouze jednu action v novém scratch rootu a novém journalu: durable PENDING,
 rename, durable FS_APPLIED, nezávislá inode/path verification a durable FS_VERIFIED.
+Při execution drží živý source inode pin jako důkaz identity přes rename.
 Session je jednorázová, bez FAILED assertions, DB_RECONCILED/COMPLETE a resume.
-Původní inode evidence je jen v paměti, takže journal není identity důkaz pro recovery.
-Globální execution lock, produkční maintenance boundary, DB reconciliation,
-rollback a crash recovery nejsou implementované.
-Executor stále neexistuje a NAS execution není autorizovaná.
+
+[E3A](V6_EXECUTION_MANIFEST.md#e3a-scratch-only-durable-file-identity-evidence)
+ukládá samostatný durable artefakt se skutečnými filesystem metadata včetně
+`st_dev`/`st_ino`, velikosti a `mtime_ns` a plným content SHA-256. Strict záznam
+je vázaný na immutable manifest/action a scratch root/mount; capture vyžaduje
+file i parent directory fsync a opakované ověření stability zdroje. Samostatná
+E3A poskytuje pouze capture/load/read-only comparison, nikoli execution.
+
+[E3B](V6_EXECUTION_MANIFEST.md#e3b-povinná-durable-identity-evidence-ve-scratch-coordination)
+vynucuje tuto evidence pro jedinou MOVE/QUARANTINE action na indexu 0.
+E3A/E2B sdílejí jeden nově vytvořený scratch context; identity session vlastní
+filesystem a koordinátor jej pouze vypůjčuje. Durable evidence a její ověření
+předcházejí durable PENDING i rename. Po nové pre-rename identity kontrole
+následuje E2A rename; pouze potvrzené DURABLE dovolí durable FS_APPLIED.
+Nezávislá filesystem verification a nové E3A MATCH původního živého inode,
+metadat a plného obsahu jsou podmínkou durable FS_VERIFIED. Kontroluje se
+source ABSENT / target PRESENT i nezměněná původně potvrzená evidence.
+
+Po restartu se živý inode pin ztrácí. Persistentní dev/inode ani shodný SHA-256
+samy neprokazují fyzickou provenance původního inode; hash dokazuje shodu obsahu.
+Read-only restart reconciliation zatím není implementovaná. Identity evidence
+sama ani MATCH neopravňují k execution a FS_VERIFIED není DB_RECONCILED ani COMPLETE.
+Každý nejednoznačný výsledek znamená STOP/reconciliation; automatický retry ani
+resume neexistují.
+
+Dokončené E1–E3B foundations platí pouze pro povolený izolovaný rozsah.
+Scratch testy nejsou důkazem produkční capability: ARM64/RPi5 není provozně
+ověřené, NAS filesystem rename capability ani power-loss durability produkčního
+úložiště nejsou potvrzené. Limit 8 MiB je scratch hranice, nikoli produkční limit;
+opakované plné hashování velkých videí vyžaduje samostatné výkonnostní posouzení.
+Produkční executor, globální execution lock, maintenance boundary,
+DB reconciliation, automatické resume, rollback, crash recovery a NAS physical
+execution nejsou implementované. **NOT AUTHORIZED FOR NAS EXECUTION.**
+
+Otevřené INFO-1 (možný fd leak při selhání `os.fdopen` po `os.dup` v E1)
+a INFO-2 (možné zavření recyklovaného čísla fd v jednom regresním testu)
+zůstávají nedořešené.
 Podrobný [execution contract](V6_EXECUTION_MANIFEST.md) popisuje preconditions,
 criticality, stale checks a hranici budoucího executor/recovery tasku.
 

@@ -180,11 +180,12 @@ a produkční rollout v8→v9 je dokončený; shared Season persistence je podpo
 P2B pure canonical parser core je implementovaný. Read-only Target Planner
 foundation s D01–D06, post-state projection a řízený container locator contract
 jsou implementované. Immutable execution manifest, deterministic serialization,
-read-only dry-run/preflight, E1 durable journal foundation, izolovaná E2A
-scratch rename primitive a E2B scratch koordinace jedné action s journalem
-jsou implementované. Produkční mount capability je
-neověřená; globální lock/maintenance boundary, executor/DB reconciliation,
-rollback/crash recovery a NAS cleanup zůstávají samostatnou budoucí prací.
+read-only dry-run/preflight a execution foundations E1–E3B jsou implementované
+v povoleném izolovaném rozsahu. E3B vynucuje durable identity evidence pro jednu
+scratch action; další fáze E4A read-only restart reconciliation je plánovaná.
+Produkční mount capability je neověřená; globální lock/maintenance boundary,
+produkční executor/DB reconciliation, automatické resume, rollback/crash recovery
+a NAS cleanup zůstávají samostatnou budoucí prací.
 P2C authoritative context resolution a scanner routing jsou
 odložené. Fyzický rename
 ani move na NAS zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
@@ -246,17 +247,46 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   LOW podle úzkého human allowlistu v execution contractu; externí gates trvají.
   Readiness vyžaduje skutečný Windows root, snapshot/DB backup evidence,
   maintenance a ověřenou write/rename capability. Current read-only audit je
-  záměrně NOT_READY. E1 durable journal foundation implementuje exclusive lokální
-  persistence, writer lock, strict loading a explicitní lifecycle validation;
-  načtení vyžaduje reconciliation, bez automatického resume.
-  [E2A](V6_EXECUTION_MANIFEST.md#e2a-izolovaná-filesystem-rename-primitive) poskytuje
-  scratch-only no-overwrite rename a explicitní durability/uncertainty výsledky.
-  [E2B](V6_EXECUTION_MANIFEST.md#e2b-scratch-only-koordinace-jedné-action) spojuje
-  pouze jednu scratch action s novým journalem a nezávislou FS verification,
-  bez DB_RECONCILED/COMPLETE či automatického resume.
-  Produkční mount capability, globální lock/maintenance boundary, skutečný
-  executor, DB reconciliation, rollback a recovery jsou pending. NAS execution
-  není autorizovaná.
+  záměrně NOT_READY. Implementované execution foundations a další plánovanou
+  fázi rozlišuje přehled níže; produkční execution tím není povolená.
+
+### V6 execution foundations
+
+| Fáze | Rozsah | Stav |
+| --- | --- | --- |
+| E1 | [Durable execution journal](V6_EXECUTION_MANIFEST.md#e1-durable-execution-journal) | HOTOVO |
+| E2A | [Scratch-only safe rename](V6_EXECUTION_MANIFEST.md#e2a-izolovaná-filesystem-rename-primitive) | HOTOVO |
+| E2B | [Scratch-only journal/filesystem coordination](V6_EXECUTION_MANIFEST.md#e2b-scratch-only-koordinace-jedné-action) | HOTOVO |
+| E3A | [Scratch-only durable identity evidence](V6_EXECUTION_MANIFEST.md#e3a-scratch-only-durable-file-identity-evidence) | HOTOVO |
+| E3B | [Povinná integrace evidence do scratch execution](V6_EXECUTION_MANIFEST.md#e3b-povinná-durable-identity-evidence-ve-scratch-coordination) | HOTOVO |
+| E4A | Read-only restart reconciliation | PLÁNOVÁNO |
+
+HOTOVO u E1–E3B označuje pouze dokončený povolený izolovaný rozsah.
+E1 poskytuje append-only durable journal, writer lock, strict loading a validovaný
+lifecycle; načtená historie vyžaduje reconciliation, bez automatického resume.
+E2A používá `RENAME_NOREPLACE` bez overwrite/fallbacku a explicitní
+durability/uncertainty výsledky. E2B koordinuje jednu scratch action
+s novým journalem a živým inode pinem. E3A ukládá durable filesystem metadata
+včetně dev/inode a plný content SHA-256. E3B sdílí jeden nový scratch context,
+vyžaduje ověřenou durable evidence před PENDING a rename, durable FS_APPLIED
+po potvrzeném rename a nezávislou verification i nové E3A MATCH před FS_VERIFIED.
+Identity evidence sama neopravňuje k execution; FS_VERIFIED není DB_RECONCILED
+ani COMPLETE. Nejednoznačný výsledek znamená STOP/reconciliation bez automatického
+retry či resume. Persistentní dev/inode a hash nenahrazují živý inode pin ztracený
+po restartu ani neprokazují fyzickou provenance. E4A zatím není implementovaná.
+
+V6 zůstává **Probíhá**. Produkční executor, globální execution lock,
+maintenance boundary, DB reconciliation, automatické resume, rollback,
+crash recovery a NAS physical execution nejsou implementované.
+Scratch testy nejsou důkazem produkční capability: ARM64/RPi5 není provozně
+ověřené, NAS filesystem rename capability není ověřená a power-loss durability
+produkčního úložiště není potvrzená. Scratch limit 8 MiB není produkční limit;
+opakované plné hashování velkých videí vyžaduje samostatné výkonnostní posouzení.
+**NOT AUTHORIZED FOR NAS EXECUTION.**
+
+INFO-1 (možný fd leak při selhání `os.fdopen` po `os.dup` v E1) a INFO-2
+(možné zavření recyklovaného čísla fd v jednom regresním testu) zůstávají
+otevřené; dokončení foundations neznamená jejich vyřešení.
 
 ### Postup V6
 
