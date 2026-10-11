@@ -1,4 +1,4 @@
-"""One fresh scratch action: journal -> rename -> independent observation.
+"""One fresh scratch action: durable identity -> journal -> rename -> verification.
 
 No production entry point, existing-root/writer adoption, retry or DB lifecycle.
 """
@@ -10,8 +10,11 @@ from pathlib import Path
 import threading
 
 from .target_execution_filesystem import (
-    ScratchRenameSession, ScratchVerification, RenameResult,
-    RenameRejected, RenameReconciliationRequired,
+    ScratchVerification, RenameResult, RenameRejected, RenameReconciliationRequired,
+)
+from .target_execution_identity import (
+    ScratchIdentitySession, FileIdentityEvidence, IdentityComparison,
+    IdentityEvidenceReconciliationRequired, _file_stat,
 )
 from .target_execution_journal import DurableJournal, ReconciliationRequired
 from .target_execution_manifest import ExecutionManifest, ManifestAction, JournalEntry
@@ -47,7 +50,7 @@ class VerifiedScratchOutcome:
 
 
 class ScratchActionSession:
-    """Factory-only new root and adjacent journal; execute once, then close.
+    """Factory-only new root, identity and journal; execute once, then close.
 
     Caller prepares isolated assets and a synthetic immutable single-action
     manifest. Exposes no existing root/writer argument or restart API.
@@ -58,16 +61,21 @@ class ScratchActionSession:
 
     @classmethod
     def create(cls, parent: Path) -> ScratchActionSession:
-        filesystem = ScratchRenameSession.create(parent)
-        session = object.__new__(cls)
-        session._filesystem = filesystem
-        session._journal_path = filesystem.root.parent / (filesystem.root.name + '.journal.jsonl')
-        session._mutex = threading.Lock()
-        session._pid = os.getpid()
-        session._spent = session._closed = False
-        session._stop_class = ScratchCoordinationStopped
-        session._stop_phase = 'VALIDATION'
-        return session
+        identity = ScratchIdentitySession.create(parent)
+        try:
+            session = object.__new__(cls)
+            session._identity = identity  # Sole owner of the filesystem and capture pins.
+            session._filesystem = identity._filesystem  # Borrowed; never close separately.
+            session._journal_path = identity.root.parent / (identity.root.name + '.journal.jsonl')
+            session._mutex = threading.Lock()
+            session._pid = os.getpid()
+            session._spent = session._closed = False
+            session._stop_class = ScratchCoordinationStopped
+            session._stop_phase = 'VALIDATION'
+            return session
+        except BaseException as exc:
+            identity.__exit__(type(exc), exc, exc.__traceback__)
+            raise
 
     @property
     def root(self) -> Path:
@@ -80,6 +88,43 @@ class ScratchActionSession:
     @property
     def journal_path(self) -> Path:
         return self._journal_path
+
+    @property
+    def evidence_path(self) -> Path:
+        return self._identity.evidence_path
+
+    def _check_identity_anchor(self, manifest, action, captured, fd, parent, before, phase) -> None:
+        # The held artefact prevents inode reuse. Rehashed replacement records
+        # cannot supplant the immutable capture acknowledged by this live owner.
+        try:
+            if (self._identity.load(manifest, action, action_index=0) != captured
+                    or _file_stat(self._identity._check_artifact(fd, parent)) != before):
+                raise ScratchFilesystemReconciliationRequired('STOP: acknowledged identity evidence changed', phase)
+        except (KeyboardInterrupt, SystemExit):
+            self._stop_class, self._stop_phase = ScratchFilesystemReconciliationRequired, phase
+            raise
+        except Exception as exc:
+            if isinstance(exc, ScratchCoordinationStopped):
+                raise
+            raise ScratchFilesystemReconciliationRequired('STOP: identity artefact untrusted', phase) from exc
+
+    def _require_identity(self, manifest, action, captured, fd, parent, before, phase, *, moved) -> None:
+        self._check_identity_anchor(manifest, action, captured, fd, parent, before, phase)
+        comparison = self._identity.compare(manifest, action, action_index=0)
+        if (type(comparison) is not IdentityComparison or comparison.outcome != 'MATCH'
+                or comparison.source is None or comparison.target is None
+                or comparison.source.locator != action.source or comparison.target.locator != action.target
+                or comparison.source.presence != ('ABSENT' if moved else 'PRESENT')
+                or comparison.target.presence != ('PRESENT' if moved else 'ABSENT')):
+            raise ScratchFilesystemReconciliationRequired('STOP: no unique live identity MATCH', phase)
+        current = comparison.target if moved else comparison.source
+        attributes = ('st_dev', 'st_ino', 'size', 'mtime_ns', 'file_type', 'nlink', 'mode', 'uid', 'gid')
+        if (current.physical_identity_match != 'MATCH' or current.filesystem_match != 'MATCH'
+                or current.content_match != 'MATCH' or current.observed_file is None
+                or current.observed_content != captured.content
+                or any(getattr(current.observed_file, key) != getattr(captured.filesystem, key) for key in attributes)):
+            raise ScratchFilesystemReconciliationRequired('STOP: actual identity/content evidence mismatch', phase)
+        self._check_identity_anchor(manifest, action, captured, fd, parent, before, phase)
 
     def execute(self, manifest: ExecutionManifest, action: ManifestAction, *,
                 action_index: int) -> VerifiedScratchOutcome:
@@ -99,6 +144,16 @@ class ScratchActionSession:
                         or action.action not in {'MOVE', 'QUARANTINE'}):
                     raise ScratchCoordinationStopped('STOP: exactly one sealed MOVE/QUARANTINE at index 0 required', phase)
                 with self._filesystem.observe(manifest, action) as observation:
+                    phase = 'EVIDENCE_CAPTURE'
+                    captured = self._identity.capture(manifest, action, action_index=0)
+                    phase = 'EVIDENCE_VERIFY'
+                    if (type(captured) is not FileIdentityEvidence
+                            or captured.filesystem != _file_stat(observation._before)):
+                        raise ScratchFilesystemReconciliationRequired('STOP: capture differs from original observation', phase)
+                    # Borrow pins owned by E3A, acquired before capture acknowledgement.
+                    fd, parent = self._identity._artifact_fd, self._identity._artifact_parent_fd
+                    before = _file_stat(self._identity._check_artifact(fd, parent))
+                    self._require_identity(manifest, action, captured, fd, parent, before, phase, moved=False)
                     phase = 'JOURNAL_CREATE'
                     try:
                         writer = DurableJournal.create(self.journal_path, manifest)
@@ -109,6 +164,7 @@ class ScratchActionSession:
                     history: list[JournalEntry] = []
 
                     def append(state):
+                        self._check_identity_anchor(manifest, action, captured, fd, parent, before, state)
                         entry = JournalEntry(manifest.manifest_id, action.action_id, action_index, state)
                         try:
                             writer.append(entry)
@@ -117,9 +173,12 @@ class ScratchActionSession:
                                 raise ReconciliationRequired('STOP: unexpected live journal history')
                         except Exception as exc:
                             raise ScratchJournalReconciliationRequired('STOP: journal durability/integrity failed', state) from exc
+                        self._check_identity_anchor(manifest, action, captured, fd, parent, before, state)
 
                     phase = 'PENDING'
                     append('PENDING')
+                    phase = 'PRE_RENAME_IDENTITY'
+                    self._require_identity(manifest, action, captured, fd, parent, before, phase, moved=False)
                     phase = 'RENAME'
                     result = self._filesystem.rename(manifest, action, observation=observation)
                     if (type(result) is not RenameResult or result.manifest_id != manifest.manifest_id
@@ -134,24 +193,34 @@ class ScratchActionSession:
                             or verification.manifest_id != manifest.manifest_id
                             or verification.action_id != action.action_id):
                         raise ScratchFilesystemReconciliationRequired('STOP: independent evidence binding mismatch', phase)
+                    phase = 'IDENTITY_VERIFICATION'
+                    self._require_identity(manifest, action, captured, fd, parent, before, phase, moved=True)
                     phase = 'FS_VERIFIED'
                     append('FS_VERIFIED')
                     return VerifiedScratchOutcome(manifest.manifest_id, action.action_id, action_index,
                         self.journal_path, verification)
             except (KeyboardInterrupt, SystemExit) as exc:
                 primary = exc
-                if phase in {'JOURNAL_CREATE', 'PENDING', 'FS_APPLIED', 'FS_VERIFIED'}:
+                if self._stop_phase == phase and self._stop_class is ScratchFilesystemReconciliationRequired:
+                    pass  # An identity read at a journal boundary already classified the interruption.
+                elif phase in {'JOURNAL_CREATE', 'PENDING', 'FS_APPLIED', 'FS_VERIFIED'}:
                     self._stop_class = ScratchJournalReconciliationRequired
-                elif phase in {'RENAME', 'VERIFICATION'}:
+                elif phase in {'EVIDENCE_CAPTURE', 'EVIDENCE_VERIFY', 'PRE_RENAME_IDENTITY',
+                        'RENAME', 'VERIFICATION', 'IDENTITY_VERIFICATION'}:
                     self._stop_class = ScratchFilesystemReconciliationRequired
+                # A cleanup interruption can promote an already classified STOP.
+                cause = exc.__cause__
+                if isinstance(cause, ScratchCoordinationStopped):
+                    self._stop_class, phase = type(cause), cause.phase
                 self._stop_phase = phase
                 exc.add_note(f'E2B STOP: phase={phase}; session spent; no retry/resume; journal={self.journal_path}')
                 raise
             except Exception as exc:
                 if isinstance(exc, ScratchCoordinationStopped):
                     error = exc
-                elif (isinstance(exc, RenameReconciliationRequired)
-                        or phase in {'VERIFICATION', 'FS_APPLIED', 'FS_VERIFIED'}
+                elif (isinstance(exc, (RenameReconciliationRequired, IdentityEvidenceReconciliationRequired))
+                        or phase in {'EVIDENCE_VERIFY', 'PRE_RENAME_IDENTITY', 'IDENTITY_VERIFICATION',
+                            'VERIFICATION', 'FS_APPLIED', 'FS_VERIFIED'}
                         or (phase == 'RENAME' and not isinstance(exc, RenameRejected))):
                     error = ScratchFilesystemReconciliationRequired('STOP: filesystem evidence unconfirmed', phase)
                 else:
@@ -172,7 +241,7 @@ class ScratchActionSession:
         self._closed = True
         failures = []
         for resource, category in ((writer, ScratchJournalReconciliationRequired),
-                (self._filesystem, ScratchFilesystemReconciliationRequired)):
+                (self._identity, ScratchFilesystemReconciliationRequired)):
             if resource is None:
                 continue
             try:
@@ -210,12 +279,12 @@ class ScratchActionSession:
     def close(self) -> None:
         if os.getpid() != self._pid:
             self._closed = True
-            self._filesystem.close()
+            self._identity.close()
             return
         with self._mutex:
             if not self._closed:
                 self._closed = True
-                self._filesystem.close()
+                self._identity.close()
 
     def __enter__(self) -> ScratchActionSession:
         if self._closed or os.getpid() != self._pid:

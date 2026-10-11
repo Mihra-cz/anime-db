@@ -375,12 +375,13 @@ existujícího rootu, session, journal writera či načtené historie. KEEP, DEL
 dependencies, REVIEW a víceakční manifest jsou odmítnuté.
 
 Po strict manifest/action validation a root/mount binding checks se zachytí
-read-only pre-rename evidence. E1 vytvoří nový journal výhradně přes `O_EXCL`.
+read-only pre-rename evidence. E3B nyní povinně doplňuje durable E3A identity
+artefakt a kontroly popsané níže; teprve pak E1 vytvoří nový journal přes `O_EXCL`.
 Nové read-only `DurableJournal.inspect_live(manifest)` kontroluje přesný envelope,
 file/parent binding, canonical historii a shodu s durable acknowledged entries
 živého writera. Nemění journal ani neotevírá existující writer pro resume.
 
-Pořadí je pevné:
+E2B journal/filesystem lifecycle zůstává pevný; úplné pořadí s E3B gates je níže:
 
 1. Durable `PENDING`: append, file fsync, potvrzení E1 a live history kontrola.
 2. E2A rename s původní observation; až výsledek `DURABLE` povolí další krok.
@@ -392,11 +393,11 @@ Pořadí je pevné:
 5. Durable `FS_VERIFIED` append a kontrola live historie; teprve pak
    `VerifiedScratchOutcome(outcome='FS_VERIFIED')`.
 
-Původní device/inode evidence existuje pouze v paměti živé session (včetně
-drženého source descriptoru) a ve vráceném `VerifiedScratchOutcome`. Journal
-frames ji neukládají a manifest nese jen size/mtime_ns, které záměnu souboru se
-shodnými metadaty neodhalí. Durable journal s manifestem proto po pádu nejsou
-dostatečným identity důkazem pro budoucí recovery.
+Živou kontinuitu původního inode poskytuje držený source descriptor. E3B také
+uchovává pozorované device/inode/metadata a plný content hash v odděleném E3A
+artefaktu. Journal frames se nemění a tuto evidence nenesou. Ani persistent
+dev/inode a shodný obsah po ztrátě živého důkazu neprokazují původ fyzického inode.
+Reconciliation/recovery po restartu nejsou implementované.
 
 Session je jednorázová i při odmítnutí; descriptors se při návratu/chybě zavřou
 a artefakty zůstanou pro diagnostiku. Žádné automatické retry/continuation,
@@ -446,8 +447,9 @@ D06 approval a schema se nemění. **NAS execution není autorizovaná.**
 ## E3A: Scratch-only durable file identity evidence
 
 [E3A](../app/target_execution_identity.py) poskytuje samostatný artefakt identity,
-strict načtení a read-only porovnání jedné MOVE/QUARANTINE action. **Není
-integrovaná do E2B**: její pořadí, journal frames ani transitions se nemění.
+strict načtení a read-only porovnání jedné MOVE/QUARANTINE action. Samostatná E3A
+nezapisuje journal ani neprovádí rename; E3B ji používá jako povinnou podmínku
+scratch coordination. Evidence format, journal frames a transitions se nemění.
 Read-only crash reconciliation engine zatím neexistuje. Evidence ani výsledek
 MATCH nejsou execution authority, READY_FOR_EXECUTION, FS_VERIFIED, COMPLETE či
 DB reconciliation.
@@ -517,6 +519,14 @@ to neověřený předpoklad exkluzivního vlastnictví. Selhání zachová všec
 bytes pro diagnostiku, session zablokuje a neprovede rename ani journal append.
 KeyboardInterrupt/SystemExit a cleanup precedence respektují E2B-MINOR-01.
 
+Živá E3A session drží také read-only artefakt descriptor a jeho parent descriptor,
+pořízené před capture acknowledgement. Read-only open má vlastní open-file
+description; neduplikuje writerův exclusive flock. Původní record a pozorované
+artefakt stats se uchovají jako immutable in-memory anchor. Následný `load`
+odmítne změněný record, přepsání i výměnu artefaktu/parentu, včetně validního JSON
+s přepočítaným checksumem. Po close se živé pins neužívají a nevzniká restart
+provenance. Samotný parseable záznam nepředstavuje capture acknowledgement.
+
 Pád před vytvořením může zanechat chybějící artefakt; partial write je neplatný
 record. Celý record po write/fsync chybě může být strict parseable, ale sám
 neprokazuje acknowledgement původního writera ani aktuální source stabilitu.
@@ -567,6 +577,93 @@ rollback a resume stále chybějí. **NAS execution není autorizovaná.**
 Otevřené INFO-1 (možný fd leak při `os.fdopen(os.dup(...))`) a INFO-2 (riziko
 close recyklovaného fd v dřívějším testu) zůstávají neřešené; E3A tyto větve
 nemění. Naming/Hierarchy/Metadata authority, D06 approval a schema se nemění.
+
+## E3B: Povinná durable identity evidence ve scratch coordination
+
+E3B integruje E1 durable journal, E2A scratch rename a E3A durable identity pro
+jednu MOVE/QUARANTINE action, výhradně index 0. **Není produkční executor.**
+Veřejná factory zůstává `ScratchActionSession.create(parent)`; nevzniká nový
+root/session/journal adoption, reopen ani resume argument. Factory vytvoří jednu
+`ScratchIdentitySession`, která vytvoří a vlastní jedinou `ScratchRenameSession`.
+Koordinátor filesystem a capture pins pouze vypůjčuje a vlastní nový E1 writer.
+Evidence a journal jsou sousední artefakty téhož nového privátního `/tmp` rootu.
+Caller poté připraví scratch soubory a syntetický manifest; `execute` validuje
+jeho přesnou vazbu na tento factory context před capture a jakýmkoli zápisem.
+`evidence_path` je read-only odvozená property, nikoli volitelná output path.
+
+### Pořadí a binding
+
+1. Strict immutable single-action validation a E2A observation původního source,
+   parents, rootu a mountu.
+2. E3A capture: plný streaming SHA-256, skutečné file stats, přesný manifest
+   envelope/action/index/root/mount binding; exclusive evidence create, file
+   fsync, parent fsync, opakované source hash/stability checks a úspěšný cleanup
+   dočasných descriptors. Artefakt/source/parent pins zůstávají u E3A vlastníka.
+3. `EVIDENCE_VERIFY`: strict load roven potvrzenému capture; artefakt/pins beze
+   změny. Capture filesystem evidence musí odpovídat původní E2A observation.
+   Fresh E3A MATCH musí ukázat source PRESENT, target ABSENT, původní živý inode,
+   shodný plný obsah i metadata.
+4. Nový E1 journal, durable header; durable PENDING a `inspect_live` kontrola.
+5. `PRE_RENAME_IDENTITY`: nové plné read-only E3A porovnání i artefakt checks,
+   opět source PRESENT / target ABSENT / živý inode MATCH.
+6. E2A `renameat2(RENAME_NOREPLACE)` s původní observation. Pouze potvrzený
+   `DURABLE` výsledek po file/parent barriers dovolí pokračovat.
+7. Durable FS_APPLIED a kontrola live journal historie.
+8. Nezávislá E2B `observation.verify()` znovu otevře locators a ověří skutečný
+   post-rename stav. Výsledek syscallu tuto kontrolu nenahrazuje.
+9. `IDENTITY_VERIFICATION`: E3A opět strict načte původní capture a nově hashováním
+   porovná skutečný soubor; povinné source ABSENT / target PRESENT, původní živý
+   inode, odpovídající metadata/bindings a FULL content MATCH.
+10. Teprve poté durable FS_VERIFIED a live history kontrola. `VerifiedScratchOutcome`
+    znamená pouze ověřený scratch filesystem výsledek, **nikoli COMPLETE nebo DB
+    reconciliation**.
+
+Před i po každém journal append se znovu kontroluje původní artefakt. Podvržené
+validní records se nesmějí stát novým capture anchor. Evidence není nahraditelná
+tvrzením volajícího, boolean assertions nebo samotným `outcome='MATCH'`: gate
+kontroluje i direction/presence a skutečná file/content observations. Porovnávání
+je read-only, neprovádí další fsync, rename nebo změnu journalu.
+
+### STOP a crash windows
+
+| Window | Zachovaný stav / klasifikace |
+| --- | --- |
+| Validation nebo známé odmítnutí před evidence create | STOP, žádný journal ani rename. |
+| Evidence create/write/fsync zahájeno, acknowledgement selže | Filesystem reconciliation required v EVIDENCE_CAPTURE; zachovat partial/full bytes, žádný rename. |
+| Evidence durable, PENDING ještě nevzniklo | Zachovat artefakt, STOP při přerušení; žádný automatic resume. |
+| PENDING append/header/fsync selže | Journal reconciliation required; evidence zůstává, žádný rename. |
+| Evidence + PENDING durable, source/content/inode/parents nebo artefakt se změnily | STOP/filesystem reconciliation; žádný rename. |
+| Přerušení po PENDING před syscall | Session spotřebovaná; PENDING neuděluje pokračování. |
+| Syscall zahájen, výsledek nebo fsync nejasný | Filesystem reconciliation; historie může končit PENDING při fyzicky přesunutém souboru. |
+| DURABLE rename, FS_APPLIED append selže | Journal reconciliation; target zachovat, žádný rollback. |
+| FS_APPLIED durable, independent/E3A verification selže nebo vrátí UNKNOWN/MISMATCH | Filesystem reconciliation; žádný FS_VERIFIED. |
+| E3A MATCH, FS_VERIFIED append/fsync selže | Journal reconciliation; nezaměňovat parseable bytes za acknowledgement. |
+| FS_VERIFIED durable, další kontrola artefaktu selže nebo proces skončí | Zachovat historii a files; žádná oprava historie, COMPLETE ani DB_RECONCILED. |
+| Source i target existují nebo oba chybějí | E3A UNKNOWN / STOP; žádný výběr locatoru odhadem. |
+
+E3B při žádné chybě nepokračuje. Session mutex serializuje současná volání; jen
+první smí zkusit action/capture a každá session je jednorázová i při odmítnutí.
+Repeated execute zachová kategorii a phase původního STOP. Cleanup zavře writer,
+potom identity vlastníka včetně všech pins a jediného filesystem root fd; borrowed
+filesystem se nezavírá samostatně. Factory failure rovněž uvolní svého vlastníka.
+Původní KeyboardInterrupt/SystemExit instance, exit code a příčina zůstávají podle
+E2B-MINOR-01; bezpečný cleanup pokračuje a žádný nejistý close se neopakuje.
+
+Crash testy deterministicky ukončují child proces nad tmp_path. Po jeho ztrátě
+zbývá jen strict byte diagnostika a read-only E1 historie, nikdy restart execution.
+**Read-only restart reconciliation engine, recovery, rollback a resume stále
+neexistují.** Persistent inode/metadata/hash neprokazují nepřerušenou historii inode.
+
+Limit 8 MiB patří scratch mechanismu, není produkční omezení velikosti videa.
+Capture čte celý obsah dvakrát, další identity gates jej čtou znovu; I/O cost
+velkých videí a produkční policy nejsou vyřešené. Exclusive scratch ownership
+zůstává předpoklad, nikoli globální writer/maintenance lock. Kontroly nejsou
+atomické s každým možným cizím writerem; jiné UID/namespaces/privilegované změny
+nejsou pokryté produkční výlukou. Scratch/fault testy nepotvrzují NAS power-loss
+durability. **ARM64/RPi5 a NAS mount capabilities jsou neověřené.** Produkční
+executor, maintenance boundary, globální lock a DB reconciliation chybějí.
+Generate-manifest/dry-run/CLI nemají cestu k execution; Naming/Hierarchy/Metadata,
+D06, schema a otevřené INFO-1/INFO-2 se nemění. **NAS execution není autorizovaná.**
 
 ## Externí pre-execution gates
 

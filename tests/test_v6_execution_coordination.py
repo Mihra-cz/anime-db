@@ -158,6 +158,7 @@ def test_cleanup_error_cannot_mask_process_interruption(case, monkeypatch, inter
 def test_observation_descriptor_cleanup_preserves_interruption(case, monkeypatch, interruption):
     session, manifest, source, target = case
     signal = interruption('interrupted syscall')
+    syscall_started = False
     opened, open_fd, close_fd = set(), os.open, os.close
     def track_open(path, flags, *args, **kwargs):
         fd = open_fd(path, flags, *args, **kwargs)
@@ -168,8 +169,11 @@ def test_observation_descriptor_cleanup_preserves_interruption(case, monkeypatch
         close_fd(fd)
         if fd in opened:
             opened.remove(fd)
-            raise OSError(errno.EIO, 'descriptor cleanup')
+            if syscall_started:
+                raise OSError(errno.EIO, 'descriptor cleanup')
     def interrupt(*args):
+        nonlocal syscall_started
+        syscall_started = True
         raise signal
     monkeypatch.setattr(os, 'open', track_open)
     monkeypatch.setattr(os, 'close', fail_close)
@@ -259,10 +263,12 @@ def test_outer_handled_exception_cannot_hide_descriptor_failure(case, monkeypatc
     try:
         raise ValueError('unrelated caller error')
     except ValueError as outer:
-        with pytest.raises(api().ScratchFilesystemReconciliationRequired):
+        with pytest.raises(api().ScratchFilesystemReconciliationRequired) as error:
             session.execute(manifest, manifest.payload.actions[0], action_index=0)
         assert not hasattr(outer, '__notes__')
-    assert states(session, manifest) == ['PENDING']
+    # Capture now closes its temporary source before any journal creation.
+    assert error.value.phase == 'EVIDENCE_CAPTURE'
+    assert not session.journal_path.exists()
 
 
 @pytest.mark.parametrize('interruption', [KeyboardInterrupt, SystemExit])

@@ -205,6 +205,8 @@ class ScratchIdentitySession:
             session._attempted = session._closed = session._poisoned = session._durable = False
             session._pin_fd = None
             session._source_parent_fd = session._target_parent_fd = None
+            session._artifact_fd = session._artifact_parent_fd = None
+            session._captured_record = session._artifact_stat = None
             session._mount = next(m for m in filesystem._mounts if m.mount_id == filesystem._mount_id)
             return session
         except BaseException as exc:
@@ -339,7 +341,19 @@ class ScratchIdentitySession:
                                 or _file_stat(info) != _file_stat(self._check_artifact(fd, parent))
                                 or os.pread(fd, _MAX_RECORD_BYTES + 1, 0) != raw):
                             raise IdentityEvidenceReconciliationRequired('STOP: source/evidence changed after final hash')
+                        # Independent read-only open: duplicating the writer fd
+                        # would retain its exclusive flock and block later loads.
+                        artifact_pin = os.open(self.evidence_path.name, fs._FILE, dir_fd=parent)
+                        self._resources.enter_context(fs._held_evidence_fd(artifact_pin))
+                        self._artifact_fd = artifact_pin
+                        parent_pin = os.dup(parent)
+                        self._resources.enter_context(fs._held_evidence_fd(parent_pin))
+                        self._artifact_parent_fd = parent_pin
+                        if (_file_stat(self._check_artifact(artifact_pin, parent_pin)) != _file_stat(info)
+                                or os.pread(artifact_pin, _MAX_RECORD_BYTES + 1, 0) != raw):
+                            raise IdentityEvidenceReconciliationRequired('STOP: artefact changed while pinning capture')
                 # Both source checks, barriers and descriptor cleanup acknowledged.
+                self._captured_record, self._artifact_stat = evidence, _file_stat(info)
                 self._durable = True
                 return evidence
             except BaseException as exc:
@@ -384,6 +398,12 @@ class ScratchIdentitySession:
                     raise IdentityEvidenceRejected('STOP: oversized or incomplete evidence read')
                 evidence = _decode_frame(raw)
                 self._validate_record(evidence, manifest, action, index, envelope)
+                if self._captured_record is not None:
+                    if evidence != self._captured_record or before != self._artifact_stat:
+                        raise IdentityEvidenceReconciliationRequired('STOP: acknowledged capture artefact changed')
+                    if not self._closed and (_directory(parent) != _directory(self._artifact_parent_fd)
+                            or _file_stat(self._check_artifact(self._artifact_fd, parent)) != before):
+                        raise IdentityEvidenceReconciliationRequired('STOP: original capture artefact/parent replaced')
                 if before != _file_stat(self._check_artifact(fd, parent)):
                     raise IdentityEvidenceReconciliationRequired('STOP: evidence changed during load')
             # Parseability does not prove a crashed writer's fsync acknowledgement.

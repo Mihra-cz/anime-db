@@ -732,13 +732,15 @@ def test_capture_rejects_unsafe_scratch_sources_without_artifact(case, invalid):
     assert not session.evidence_path.exists() and not target.exists()
 
 
-def test_e2b_stays_independent_of_new_evidence(tmp_path, monkeypatch):
+def test_standalone_identity_does_not_invoke_coordination(tmp_path, monkeypatch):
     from app.target_execution_coordination import ScratchActionSession
-    monkeypatch.setattr(api().ScratchIdentitySession, 'capture', lambda *args, **kwargs: pytest.fail('E3A integrated into E2B'))
-    with ScratchActionSession.create(tmp_path) as session:
-        manifest, _, _ = prepare(session)
-        assert session.execute(manifest, manifest.payload.actions[0], action_index=0).outcome == 'FS_VERIFIED'
-        assert not list(tmp_path.glob('*.identity.json'))
+    monkeypatch.setattr(ScratchActionSession, 'execute', lambda *args, **kwargs: pytest.fail('standalone E3A executed'))
+    with api().ScratchIdentitySession.create(tmp_path) as session:
+        manifest, source, target = prepare(session)
+        record = capture(session, manifest)
+        assert session.compare(manifest, record.action, action_index=0).outcome == 'MATCH'
+        assert source.exists() and not target.exists()
+        assert not list(tmp_path.glob('*.journal.jsonl'))
 
 
 def crash_probe(parent, phase, sender):
@@ -892,3 +894,31 @@ def test_rejection_after_durable_artifact_write_requires_reconciliation(case, mo
         capture(session, manifest)
     assert changed == [1] and session.evidence_path.read_bytes()
     assert session._poisoned and not session._durable and not target.exists()
+
+
+@pytest.mark.parametrize('tamper', ['rechecksummed_digest', 'same_bytes_new_inode', 'ctime_only'])
+def test_live_compare_refuses_changed_acknowledged_artifact(case, tamper):
+    session, manifest, source, _ = case
+    capture(session, manifest)
+    path = session.evidence_path
+    if tamper == 'rechecksummed_digest':
+        # Same pinned inode, changed bytes, and a strict record claiming them.
+        info = source.stat()
+        source.write_bytes(b'X' * info.st_size)
+        os.utime(source, ns=(info.st_atime_ns, info.st_mtime_ns))
+        frame = json.loads(path.read_bytes())
+        frame['evidence']['content']['digest'] = hashlib.sha256(source.read_bytes()).hexdigest()
+        frame['sha256'] = hashlib.sha256(canonical(frame['evidence']).encode()).hexdigest()
+        path.write_bytes((canonical(frame) + '\n').encode())
+    elif tamper == 'same_bytes_new_inode':
+        raw = path.read_bytes()
+        path.rename(path.with_name('displaced.identity.json'))
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    else:
+        info = path.stat()
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+    # Comparison first: only the acknowledged in-memory capture anchor can refuse it.
+    assert compare(session, manifest).outcome == 'UNKNOWN'
+    with pytest.raises(api().IdentityEvidenceReconciliationRequired):
+        load(session, manifest)
