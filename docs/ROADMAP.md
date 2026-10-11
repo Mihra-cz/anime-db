@@ -180,9 +180,10 @@ a produkční rollout v8→v9 je dokončený; shared Season persistence je podpo
 P2B pure canonical parser core je implementovaný. Read-only Target Planner
 foundation s D01–D06, post-state projection a řízený container locator contract
 jsou implementované. Immutable execution manifest, deterministic serialization,
-read-only dry-run/preflight, E1 durable journal foundation a izolovaná E2A
-scratch rename primitive jsou implementované. Produkční mount capability je
-neověřená; integrace primitive s journalem, executor/DB reconciliation,
+read-only dry-run/preflight, E1 durable journal foundation, izolovaná E2A
+scratch rename primitive a E2B scratch koordinace jedné action s journalem
+jsou implementované. Produkční mount capability je
+neověřená; globální lock/maintenance boundary, executor/DB reconciliation,
 rollback/crash recovery a NAS cleanup zůstávají samostatnou budoucí prací.
 P2C authoritative context resolution a scanner routing jsou
 odložené. Fyzický rename
@@ -250,7 +251,10 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   načtení vyžaduje reconciliation, bez automatického resume.
   [E2A](V6_EXECUTION_MANIFEST.md#e2a-izolovaná-filesystem-rename-primitive) poskytuje
   scratch-only no-overwrite rename a explicitní durability/uncertainty výsledky.
-  Produkční mount capability, integrace filesystem/journal lifecycle, skutečný
+  [E2B](V6_EXECUTION_MANIFEST.md#e2b-scratch-only-koordinace-jedné-action) spojuje
+  pouze jednu scratch action s novým journalem a nezávislou FS verification,
+  bez DB_RECONCILED/COMPLETE či automatického resume.
+  Produkční mount capability, globální lock/maintenance boundary, skutečný
   executor, DB reconciliation, rollback a recovery jsou pending. NAS execution
   není autorizovaná.
 

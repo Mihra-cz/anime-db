@@ -147,8 +147,8 @@ def _open_parent(path: Path, manifest: ExecutionManifest, library_roots: tuple[P
         if info.st_uid != os.geteuid() or info.st_mode & 0o022:
             raise JournalError('journal parent must be owned by writer and not group/world writable')
         return fd
-    except BaseException:
-        os.close(fd)
+    except BaseException as exc:
+        _close_after_failure(fd, exc)
         raise
 
 
@@ -163,6 +163,14 @@ def _identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
+def _close_after_failure(fd: int, primary: BaseException) -> None:
+    try:
+        os.close(fd)
+    except BaseException as exc:
+        # A failed close may already have released fd; preserve cause, no retry.
+        primary.add_note(f'journal STOP: cleanup failed: {type(exc).__name__}: {exc}')
+
+
 def _check_parent(path: Path, parent_fd: int) -> None:
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     fd = os.open(path.anchor, flags)
@@ -175,7 +183,10 @@ def _check_parent(path: Path, parent_fd: int) -> None:
         if (_identity(info) != _identity(os.fstat(parent_fd)) or info.st_uid != os.geteuid()
                 or info.st_mode & 0o022):
             raise JournalError('journal parent changed or became unsafe')
-    finally:
+    except BaseException as exc:
+        _close_after_failure(fd, exc)
+        raise
+    else:
         os.close(fd)
 
 
@@ -321,16 +332,46 @@ class DurableJournal:
             writer._poisoned = False
             writer._closed = False
             return writer
-        except BaseException:
+        except BaseException as exc:
             # Keep every created byte for diagnosis; no unlink/truncate/repair.
             if fd is not None:
-                os.close(fd)
-            os.close(parent_fd)
+                _close_after_failure(fd, exc)
+            _close_after_failure(parent_fd, exc)
             raise
 
     @property
     def entries(self) -> tuple[JournalEntry, ...]:
         return tuple(self._entries)
+
+    def inspect_live(self, manifest: ExecutionManifest) -> tuple[JournalEntry, ...]:
+        """Read/check this live writer's exact binding and acknowledged history.
+
+        This neither opens an existing writer nor grants restart authority.
+        Bytes beyond acknowledged entries (even valid frames) require STOP.
+        """
+        if os.getpid() != self._pid:
+            raise JournalError('writer inherited by another process')
+        with self._mutex:
+            if self._closed:
+                raise JournalError('writer closed')
+            if self._poisoned:
+                raise ReconciliationRequired('STOP: interrupted writer requires reconciliation', self._entries)
+            if _header(manifest) != _header(self._manifest):
+                raise JournalError('live writer exact manifest binding mismatch')
+            try:
+                _check_parent(self._path, self._parent_fd)
+                before = _check_file(self._fd, self._parent_fd, self._path.name)
+                entries = _read_history(self._fd, manifest)
+                after = _check_file(self._fd, self._parent_fd, self._path.name)
+                _check_parent(self._path, self._parent_fd)
+                if (entries != tuple(self._entries)
+                        or (before.st_size, before.st_mtime_ns) != self._stat
+                        or (after.st_size, after.st_mtime_ns) != self._stat):
+                    raise ReconciliationRequired('STOP: live history differs from durable acknowledgements', entries)
+                return entries
+            except BaseException:
+                self._poisoned = True
+                raise
 
     def append(self, entry: JournalEntry) -> None:
         if os.getpid() != self._pid:

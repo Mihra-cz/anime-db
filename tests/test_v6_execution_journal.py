@@ -67,6 +67,33 @@ def complete(writer, manifest, index=0):
         writer.append(entry(manifest, state, index))
 
 
+def test_live_inspection_requires_exact_envelope_and_observed_history(tmp_path):
+    manifest = scratch_manifest(tmp_path)
+    with api().DurableJournal.create(tmp_path / 'live.jsonl', manifest) as writer:
+        assert hasattr(writer, 'inspect_live'), 'live read-only journal inspection is missing'
+        assert writer.inspect_live(manifest) == ()
+        writer.append(entry(manifest))
+        assert writer.inspect_live(manifest) == (entry(manifest),)
+        with pytest.raises(api().JournalError):
+            writer.inspect_live(replace(manifest, created_at='2026-10-09T00:00:00Z'))
+
+
+def test_live_inspection_preserves_corrupt_bytes_and_blocks_writer(tmp_path):
+    manifest = scratch_manifest(tmp_path)
+    path = tmp_path / 'live.jsonl'
+    with api().DurableJournal.create(path, manifest) as writer:
+        assert hasattr(writer, 'inspect_live'), 'live read-only journal inspection is missing'
+        writer.append(entry(manifest))
+        with path.open('ab') as stream:
+            stream.write(b'partial')
+        raw = path.read_bytes()
+        with pytest.raises(api().ReconciliationRequired):
+            writer.inspect_live(manifest)
+        with pytest.raises(api().ReconciliationRequired):
+            writer.append(entry(manifest, 'FS_APPLIED'))
+        assert path.read_bytes() == raw
+
+
 def test_create_is_exclusive_and_header_bound_to_exact_manifest(tmp_path):
     journal = api()
     manifest = scratch_manifest(tmp_path)

@@ -109,6 +109,22 @@ def test_keep_checks_identity_without_syscall_or_fsync(tmp_path, monkeypatch):
         assert source == target and source.read_bytes() == b'original scratch video'
 
 
+@pytest.mark.parametrize('interruption', [KeyboardInterrupt, SystemExit])
+def test_interrupted_syscall_preserves_process_signal_and_blocks_session(case, monkeypatch, interruption):
+    fs = api()
+    session, manifest, source, target = case
+    signal = interruption('injected interruption')
+    def interrupt(*args):
+        raise signal
+    monkeypatch.setattr(fs, '_rename_noreplace', interrupt)
+    with pytest.raises(interruption) as error:
+        session.rename(manifest, manifest.payload.actions[0])
+    assert error.value is signal
+    with pytest.raises(fs.RenameReconciliationRequired):
+        session.rename(manifest, manifest.payload.actions[0])
+    assert source.exists() and not target.exists()
+
+
 @pytest.mark.parametrize('kind', ['file', 'symlink', 'dangling_symlink', 'directory'])
 def test_existing_target_is_never_replaced(case, kind):
     fs = api()

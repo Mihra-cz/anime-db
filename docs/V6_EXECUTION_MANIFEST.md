@@ -106,7 +106,8 @@ Future PRIMARY failure znamená STOP. LOW continuation je možná pouze po pří
 durable `PENDING → FAILED`, při nedotčeném source, žádném částečně vytvořeném
 target, journaled failure a žádné dependent PRIMARY action. Pozdější FAILED
 vyžaduje STOP/reconciliation. [E1 journal](#e1-durable-execution-journal) trvale ukládá a validuje
-caller evidence; filesystem state transitions ani jejich execution nejsou implementované.
+caller evidence; [E2B](#e2b-scratch-only-koordinace-jedné-action) provádí pouze
+izolované scratch filesystem transitions. Produkční executor není implementovaný.
 
 ## Warning approval
 
@@ -204,8 +205,8 @@ a nepovolí následující action. Failed dependency není COMPLETE ani při jin
 bezpečném LOW failure. Neúplná, poškozená nebo nepotvrzená historie rovněž
 nemůže povolit pokračování.
 
-Boolean assertions nejsou samy důkazem skutečného FS/DB stavu. Budoucí E2 musí
-ověřit skutečný filesystem a DB stav a před fyzickou operací získat úspěšný
+Boolean assertions nejsou samy důkazem skutečného FS/DB stavu. E2B ověřuje pouze
+scratch filesystem; budoucí executor musí ověřit také DB stav a před fyzickou operací získat úspěšný
 durable zápis `PENDING` nové action přes journal gate. Samotný context-free
 `can_continue_after_failure` nesmí použít jako povolení execution. E1 nadále
 neobsahuje executor, rollback, recovery ani automatické resume.
@@ -311,6 +312,7 @@ nedoložené a E2A žádnou production authorization API nevystavuje.
 | `RenameResult(outcome='DURABLE', syscall_succeeded=True, durability_confirmed=True)` | Rename uspěl, identity byly ověřeny a file/directory fsync barriers byly potvrzeny na scratch filesystemu. Není to DB reconciliation ani důkaz production hardware durability. |
 | `RenameRejected` | STOP před syscall nebo validované známé syscall odmítnutí. Neuděluje LOW continuation authority ani booleans pro journal FAILED. |
 | `RenameReconciliationRequired` | Syscall byl zkusen a výsledek či durability nelze bezpečně potvrdit; session je zablokovaná. Žádný automatický retry. |
+| `KeyboardInterrupt` / `SystemExit` | Původní přerušení se propaguje beze změny třídy a instance. Po pokusu o syscall je session zablokovaná a exception note vyžaduje STOP/reconciliation. |
 
 Po úspěšném rename se ověří absent source a target binding k původnímu
 source descriptoru, potom se synchronizuje file, target parent a source parent.
@@ -337,9 +339,17 @@ Neexistuje automatické obrácení rename ani resumption po pádu.
 
 E2A journal neotevírá ani nezapisuje `FS_APPLIED`, `FS_VERIFIED` či
 `DB_RECONCILED`. E1 gate přímého durable `PENDING → FAILED` pro LOW pokračování
-a bezpodmínečný PRIMARY STOP zůstávají beze změny. Samostatná budoucí integrace
-musí spojit durable PENDING, skutečná filesystem pozorování a journal lifecycle;
-samotný výsledek primitive nemění DB ani nepotvrzuje reconciliation.
+a bezpodmínečný PRIMARY STOP zůstávají beze změny. E2B spojuje pouze scratch
+filesystem a journal lifecycle; samotný výsledek primitive nemění DB ani
+nepotvrzuje reconciliation.
+
+Read-only `session.observe(manifest, action)` drží původní source inode a rodiče
+po dobu context manageru. `rename(..., observation=observation)` navíc porovná
+skutečné syscall descriptors s touto evidence; nepovoluje jiný root nebo slabší
+kontroly. `ScratchObservation.verify()` znovu otevírá parents a target přes
+nofollow dirfds a porovnává je s původní evidence. Neprovádí rename ani fsync.
+Držený source descriptor brání falešné shodě přes recyklovaný inode. Expired,
+foreign nebo inherited observation je odmítnutá. KEEP observation lifecycle nemá.
 
 Testy zahrnují skutečný scratch rename a souběh syscallů na jeden target;
 mount/bind/EXDEV/permission/IO faults jsou tam, kde je potřeba, explicitně
@@ -353,6 +363,74 @@ NAS EXECUTION NOT AUTHORIZED.**
 Linux podklady: [renameat2](https://www.man7.org/linux/man-pages/man2/renameat2.2.html),
 [fsync](https://www.man7.org/linux/man-pages/man2/fsync.2.html),
 [mountinfo/fdinfo](https://www.kernel.org/doc/html/latest/filesystems/proc.html).
+
+## E2B: Scratch-only koordinace jedné action
+
+[Koordinátor](../app/target_execution_coordination.py) má pouze factory
+`ScratchActionSession.create(parent)`. E2A vytvoří nový privátní root pod `/tmp`;
+session sama určí sousední journal path. Caller připraví izolované assets a
+syntetický immutable manifest. `execute(manifest, action, action_index=0)` přijímá
+výhradně jednoakční MOVE/QUARANTINE manifest. Neexistuje argument pro převzetí
+existujícího rootu, session, journal writera či načtené historie. KEEP, DELETE,
+dependencies, REVIEW a víceakční manifest jsou odmítnuté.
+
+Po strict manifest/action validation a root/mount binding checks se zachytí
+read-only pre-rename evidence. E1 vytvoří nový journal výhradně přes `O_EXCL`.
+Nové read-only `DurableJournal.inspect_live(manifest)` kontroluje přesný envelope,
+file/parent binding, canonical historii a shodu s durable acknowledged entries
+živého writera. Nemění journal ani neotevírá existující writer pro resume.
+
+Pořadí je pevné:
+
+1. Durable `PENDING`: append, file fsync, potvrzení E1 a live history kontrola.
+2. E2A rename s původní observation; až výsledek `DURABLE` povolí další krok.
+3. Durable `FS_APPLIED` append a kontrola live historie.
+4. Nezávislé read-only `observation.verify()`: source locator absent včetně
+   symlinků, target regular file s původním device/inode, size/mtime_ns, bezpečné
+   původní parents/root a stejný mount binding. Pouhá existence ani RenameResult
+   nejsou verification evidence.
+5. Durable `FS_VERIFIED` append a kontrola live historie; teprve pak
+   `VerifiedScratchOutcome(outcome='FS_VERIFIED')`.
+
+Původní device/inode evidence existuje pouze v paměti živé session (včetně
+drženého source descriptoru) a ve vráceném `VerifiedScratchOutcome`. Journal
+frames ji neukládají a manifest nese jen size/mtime_ns, které záměnu souboru se
+shodnými metadaty neodhalí. Durable journal s manifestem proto po pádu nejsou
+dostatečným identity důkazem pro budoucí recovery.
+
+Session je jednorázová i při odmítnutí; descriptors se při návratu/chybě zavřou
+a artefakty zůstanou pro diagnostiku. Žádné automatické retry/continuation,
+FAILED boolean assertions, DB_RECONCILED nebo COMPLETE se nezapisují.
+FS_VERIFIED není dokončení celé action ani DB reconciliation. E1 původní LOW
+continuation pravidla se nemění; E2B při každé chybě zastaví.
+
+| Crash/failure window | Výsledek a zachovaná evidence |
+| --- | --- |
+| Před potvrzeným PENDING, včetně header/append/fsync chyby | Žádný rename. STOP; journal bytes mohou obsahovat neacknowledged nebo částečný frame. |
+| Durable PENDING, před syscall | STOP; source může zůstat původní. Journal neuděluje resume authority. |
+| Zahájený syscall, neznámý acknowledgement nebo FS fsync chyba | FS reconciliation required; PENDING může nesouhlasit s fyzickým stavem. Žádný druhý rename. |
+| DURABLE rename, před FS_APPLIED acknowledgement | Journal reconciliation required při journal chybě; přesunutý soubor se zachová, žádný rollback. |
+| Durable FS_APPLIED, před úspěšnou independent verification | FS reconciliation required; target existence neprokazuje správnou identitu. |
+| Verification prošla, FS_VERIFIED append/fsync selhal | Journal reconciliation required; zachovaná celá frame není durable acknowledgement. |
+| Process crash / poškozená historie při následné inspekci | E1 loader poskytuje jen diagnostic prefix, vždy reconciliation required; žádný recovery writer. |
+
+`ScratchCoordinationStopped` je známé bezpečné odmítnutí/STOP;
+`ScratchFilesystemReconciliationRequired` je nejednoznačný physical/evidence
+výsledek; `ScratchJournalReconciliationRequired` je journal durability/integrity
+chyba. Výjimky zachovávají příčinu a phase. `KeyboardInterrupt` a `SystemExit`
+se propagují jako původní instance s phase/STOP note, nikoli jako běžné rejection;
+session je spotřebovaná, žádný catch-all Exception je nezamlčuje. Po pokusu o
+syscall E2A navíc zablokuje filesystem session a vyžaduje reconciliation.
+
+Testy provádějí skutečné isolated scratch renames a read-only inode observations,
+injektují chyby a deterministicky ukončují child proces na lifecycle boundaries.
+To ověřuje ordering a STOP policy, nikoli power-loss durability NASu. Zůstávají
+všechna omezení E2A: exclusive scratch ownership, viditelná mount namespace,
+nedoložená produkční durability/storage/mount capability a ARM64/RPi5 chování.
+Globální execution lock, produkční maintenance boundary, DB reconciliation,
+crash recovery, rollback, resume a produkční executor **nejsou implementované**.
+Generate-manifest/dry-run nemají cestu k této vrstvě; Naming/Hierarchy/Metadata,
+D06 approval a schema se nemění. **NAS execution není autorizovaná.**
 
 ## Externí pre-execution gates
 

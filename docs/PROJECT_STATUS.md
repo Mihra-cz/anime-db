@@ -405,14 +405,20 @@ Runtime evidence nemění manifest semantic hash ani jeho schválený obsah.
 [E1 durable journal](V6_EXECUTION_MANIFEST.md#e1-durable-execution-journal) používá
 exclusive lokální append-only soubor, hash chain, file/directory fsync a writer
 lock. Kontroluje explicitní lifecycle/manifest identity; načtená historie vyžaduje
-reconciliation a nemá automatické resume. Journal zaznamenává caller evidence,
-nikoli vykonávané filesystem/DB state transitions.
+reconciliation a nemá automatické resume. Journal zaznamenává caller evidence;
+sám filesystem/DB state transitions nevykonává.
 E2A má [izolovanou scratch filesystem primitive](V6_EXECUTION_MANIFEST.md#e2a-izolovaná-filesystem-rename-primitive)
 pro jednotlivé sealed MOVE/QUARANTINE: Linux no-overwrite rename, descriptor/mount
 checks, file/directory fsync a STOP/reconciliation při nejistotě. Existující
 library root nelze pro operace otevřít; produkční mount capability a RPi5/ARM64
-zůstávají neověřené. Integrace s journalem, DB reconciliation, rollback a recovery
-nejsou implementované.
+zůstávají neověřené.
+[E2B](V6_EXECUTION_MANIFEST.md#e2b-scratch-only-koordinace-jedné-action) koordinuje
+pouze jednu action v novém scratch rootu a novém journalu: durable PENDING,
+rename, durable FS_APPLIED, nezávislá inode/path verification a durable FS_VERIFIED.
+Session je jednorázová, bez FAILED assertions, DB_RECONCILED/COMPLETE a resume.
+Původní inode evidence je jen v paměti, takže journal není identity důkaz pro recovery.
+Globální execution lock, produkční maintenance boundary, DB reconciliation,
+rollback a crash recovery nejsou implementované.
 Executor stále neexistuje a NAS execution není autorizovaná.
 Podrobný [execution contract](V6_EXECUTION_MANIFEST.md) popisuje preconditions,
 criticality, stale checks a hranici budoucího executor/recovery tasku.

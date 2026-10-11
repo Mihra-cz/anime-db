@@ -5,7 +5,7 @@ Caller controls scratch contents exclusively. No production mount is authorized.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import ctypes
 from dataclasses import asdict, dataclass
 import errno
@@ -32,6 +32,30 @@ _KNOWN_REJECTIONS = frozenset({errno.EEXIST, errno.EXDEV, errno.ENOSYS, errno.EO
     errno.EISDIR, errno.ELOOP, errno.ENAMETOOLONG, errno.ENOTEMPTY})
 
 
+def _close_evidence_fd(fd: int, primary: BaseException | None = None) -> None:
+    """Preserve an active failure/signal when discarding read-only evidence.
+
+    Never retry close: the descriptor may already have been released.
+    """
+    try:
+        os.close(fd)
+    except BaseException as exc:
+        if primary is None:
+            raise
+        primary.add_note(f'E2A STOP: descriptor cleanup failed: {type(exc).__name__}: {exc}')
+
+
+@contextmanager
+def _held_evidence_fd(fd: int):
+    try:
+        yield fd
+    except BaseException as exc:
+        _close_evidence_fd(fd, exc)
+        raise
+    else:
+        _close_evidence_fd(fd)
+
+
 class RenameRejected(ValueError):
     """STOP. No continuation authority or journal failure evidence is granted."""
 
@@ -56,6 +80,71 @@ class RenameResult:
     outcome: str
     syscall_succeeded: bool
     durability_confirmed: bool
+
+
+@dataclass(frozen=True)
+class ScratchVerification:
+    manifest_id: str
+    action_id: str
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+
+
+class ScratchObservation:
+    """Session-minted read-only evidence; held inode prevents inode reuse.
+
+    Valid only inside ScratchRenameSession.observe's context. No root adoption,
+    journal assertions, rename, or recovery capability is exposed here.
+    """
+
+    def __init__(self):
+        raise TypeError('use live ScratchRenameSession.observe')
+
+    def _check(self, session, manifest, action) -> None:
+        if (self._closed or os.getpid() != self._pid or session is not self._session
+                or session._closed or session._poisoned
+                or manifest != self._manifest or action != self._action):
+            raise RenameRejected('invalid or expired scratch observation binding')
+        session._check_root()
+        session._parent_binding(_locator(action.source), self._source_parent)
+        session._parent_binding(_locator(action.target), self._target_parent)
+        session._check_fd(self._source_fd)
+        held = os.fstat(self._source_fd)
+        if (_identity(held) != _identity(self._before) or held.st_nlink != 1
+                or held.st_size != self._before.st_size or held.st_mtime_ns != self._before.st_mtime_ns):
+            raise RenameRejected('observed source inode or metadata changed')
+
+    def check_before(self, session, manifest, action, source_fd, source_parent, target_parent) -> None:
+        """Constrain the actual syscall's descriptors to original observed evidence."""
+        self._check(session, manifest, action)
+        if (_identity(os.fstat(source_fd)) != _identity(self._before)
+                or _identity(os.fstat(source_parent)) != _identity(os.fstat(self._source_parent))
+                or _identity(os.fstat(target_parent)) != _identity(os.fstat(self._target_parent))):
+            raise RenameRejected('pre-rename observation identity mismatch')
+
+    def verify(self) -> ScratchVerification:
+        """Independently reopen paths and target after rename; perform no writes."""
+        session, action = self._session, self._action
+        if os.getpid() != self._pid:
+            raise RenameRejected('scratch observation inherited by another process')
+        with session._mutex:
+            self._check(session, self._manifest, action)
+            with ExitStack() as stack:
+                source_parts, target_parts = _locator(action.source), _locator(action.target)
+                source_parent = session._parent(source_parts, stack)
+                target_parent = session._parent(target_parts, stack)
+                _absent(source_parent, source_parts[-1])
+                target_fd = os.open(target_parts[-1], _FILE, dir_fd=target_parent)
+                stack.enter_context(_held_evidence_fd(target_fd))
+                session._check_fd(target_fd)
+                current = _check_source(target_fd, target_parent, target_parts[-1], action, self._before)
+                self._check(session, self._manifest, action)
+                _absent(source_parent, source_parts[-1])
+                _check_source(target_fd, target_parent, target_parts[-1], action, self._before)
+                return ScratchVerification(self._manifest.manifest_id, action.action_id,
+                    current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
 
 
 @lru_cache(maxsize=1)
@@ -111,8 +200,8 @@ def _open_absolute(path: Path) -> int:
             if path.parts[1] == 'tmp' and i > 1:
                 _secure_directory(fd)
         return fd
-    except BaseException:
-        os.close(fd)
+    except BaseException as exc:
+        _close_evidence_fd(fd, exc)
         raise
 
 
@@ -226,8 +315,11 @@ class ScratchRenameSession:
             if (_identity(os.fstat(fd)) != self._root_identity
                     or _mount_id(fd) != self._mount_id):
                 raise RenameRejected('execution root binding changed')
-        finally:
-            os.close(fd)
+        except BaseException as exc:
+            _close_evidence_fd(fd, exc)
+            raise
+        else:
+            _close_evidence_fd(fd)
         _secure_directory(self._root_fd)
 
     def _check_fd(self, fd: int) -> None:
@@ -240,7 +332,7 @@ class ScratchRenameSession:
         fd = self._root_fd
         for part in parts[:-1]:
             fd = os.open(part, _DIRECTORY, dir_fd=fd)
-            stack.callback(os.close, fd)
+            stack.enter_context(_held_evidence_fd(fd))
             _secure_directory(fd)
             self._check_fd(fd)
         return fd
@@ -277,7 +369,42 @@ class ScratchRenameSession:
         _locator(action.source)
         _locator(action.target)
 
-    def rename(self, manifest: ExecutionManifest, action: ManifestAction) -> RenameResult:
+    @contextmanager
+    def observe(self, manifest: ExecutionManifest, action: ManifestAction):
+        """Capture read-only evidence for this live scratch session only."""
+        if os.getpid() != self._pid:
+            raise RenameRejected('scratch session inherited by another process')
+        with ExitStack() as stack:
+            with self._mutex:
+                if self._closed or self._poisoned:
+                    raise RenameRejected('scratch session unavailable for observation')
+                self._validate(manifest, action)
+                if action.action not in {'MOVE', 'QUARANTINE'}:
+                    raise RenameRejected('observation requires MOVE or QUARANTINE')
+                self._check_root()
+                source_parts, target_parts = _locator(action.source), _locator(action.target)
+                source_parent = self._parent(source_parts, stack)
+                target_parent = self._parent(target_parts, stack)
+                source_fd = os.open(source_parts[-1], _FILE, dir_fd=source_parent)
+                stack.enter_context(_held_evidence_fd(source_fd))
+                self._check_fd(source_fd)
+                before = _check_source(source_fd, source_parent, source_parts[-1], action)
+                _absent(target_parent, target_parts[-1])
+                self._check_root()
+                self._parent_binding(source_parts, source_parent)
+                self._parent_binding(target_parts, target_parent)
+                evidence = object.__new__(ScratchObservation)
+                evidence._session, evidence._manifest, evidence._action = self, manifest, action
+                evidence._source_parent, evidence._target_parent = source_parent, target_parent
+                evidence._source_fd, evidence._before = source_fd, before
+                evidence._pid, evidence._closed = os.getpid(), False
+            try:
+                yield evidence
+            finally:
+                evidence._closed = True
+
+    def rename(self, manifest: ExecutionManifest, action: ManifestAction, *,
+               observation: ScratchObservation | None = None) -> RenameResult:
         if os.getpid() != self._pid:
             raise RenameRejected('scratch session inherited by another process')
         with self._mutex:
@@ -297,7 +424,7 @@ class ScratchRenameSession:
                     source_parent = self._parent(source_parts, stack)
                     target_parent = self._parent(target_parts, stack)
                     source_fd = os.open(source_parts[-1], _FILE, dir_fd=source_parent)
-                    stack.callback(os.close, source_fd)
+                    stack.enter_context(_held_evidence_fd(source_fd))
                     self._check_fd(source_fd)
                     before = _check_source(source_fd, source_parent, source_parts[-1], action)
                     if action.action != 'KEEP':
@@ -306,6 +433,10 @@ class ScratchRenameSession:
                     self._parent_binding(source_parts, source_parent)
                     self._parent_binding(target_parts, target_parent)
                     _check_source(source_fd, source_parent, source_parts[-1], action, before)
+                    if observation is not None:
+                        if type(observation) is not ScratchObservation:
+                            raise RenameRejected('session-minted scratch observation required')
+                        observation.check_before(self, manifest, action, source_fd, source_parent, target_parent)
                     if action.action == 'KEEP':
                         return RenameResult(manifest.manifest_id, action.action_id, 'KEEP', False, False)
                     self._attempted.add(key)
@@ -346,6 +477,9 @@ class ScratchRenameSession:
             except BaseException as exc:
                 if attempted:
                     self._poisoned = True
+                    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                        exc.add_note('E2A STOP: syscall attempted; session blocked; reconciliation required')
+                        raise
                     raise RenameReconciliationRequired('filesystem outcome requires reconciliation: ' + str(exc),
                         syscall_succeeded=True if succeeded else None) from exc
                 if isinstance(exc, RenameRejected):
