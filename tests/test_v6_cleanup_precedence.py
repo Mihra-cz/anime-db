@@ -1,6 +1,7 @@
 """Cleanup faults use only files/session roots created in pytest tmp_path."""
 from contextlib import ExitStack
 import errno
+import io
 import os
 
 import pytest
@@ -329,7 +330,7 @@ def test_e1_history_stream_cleanup_preserves_reader_failure(tmp_path, monkeypatc
     raw = path.read_bytes()
     primary = failure(primary_kind, 'history read failure')
     cleanup = failure(cleanup_kind, 'stream cleanup', 95)
-    fdopen, closes = os.fdopen, []
+    open_stream, closes = io.open, []
     class FaultStream:
         def __init__(self, stream):
             self.stream = stream
@@ -347,10 +348,15 @@ def test_e1_history_stream_cleanup_preserves_reader_failure(tmp_path, monkeypatc
             return self
         def __exit__(self, *args):
             self.close()
-    monkeypatch.setattr(os, 'fdopen', lambda *args, **kwargs: FaultStream(fdopen(*args, **kwargs)))
     expected = selected(primary, [cleanup])
-    with pytest.raises(BaseException) as error:
-        journal.load_journal(path, manifest)
+    def open_reader(file, *args, **kwargs):
+        stream = open_stream(file, *args, **kwargs)
+        # Inject only the held-fd reader; local path/mount checks stay real.
+        return FaultStream(stream) if isinstance(file, int) or kwargs.get('opener') else stream
+    with monkeypatch.context() as injected:
+        injected.setattr(io, 'open', open_reader)
+        with pytest.raises(BaseException) as error:
+            journal.load_journal(path, manifest)
     assert error.value is expected
     assert_diagnostics(error.value, primary, [cleanup])
     assert closes == [1] and path.read_bytes() == raw

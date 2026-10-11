@@ -4,6 +4,7 @@ import errno
 import hashlib
 import importlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -904,3 +905,206 @@ def test_failed_entry_without_history_is_not_continuation_authority(tmp_path):
             writer.append(entry(manifest, index=1))
         assert writer.entries == ()
         assert path.read_bytes() == before
+
+
+@pytest.fixture
+def history_reader_case(tmp_path):
+    manifest = scratch_manifest(tmp_path)
+    path = tmp_path / 'history.jsonl'
+    with api().DurableJournal.create(path, manifest) as writer:
+        writer.append(entry(manifest))
+        yield writer, manifest, path, path.read_bytes()
+
+
+def test_history_reader_owns_only_its_copy_and_preserves_writer_lock(history_reader_case):
+    writer, manifest, path, raw = history_reader_case
+    original = os.fstat(writer._fd)
+    with api()._history_reader(writer._fd) as stream:
+        duplicate = stream.fileno()
+        assert duplicate != writer._fd and not os.get_inheritable(duplicate)
+        assert stream.readable() and not stream.writable()
+        stream.seek(0)
+        assert stream.read() == raw and stream.tell() == len(raw)
+    assert stream.closed
+    with pytest.raises(OSError) as closed:
+        os.fstat(duplicate)
+    assert closed.value.errno == errno.EBADF
+    current = os.fstat(writer._fd)
+    # Reading may update atime; descriptor identity and journal metadata remain.
+    fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size', 'st_mtime_ns')
+    assert tuple(getattr(current, field) for field in fields) == tuple(
+        getattr(original, field) for field in fields)
+    with pytest.raises(api().JournalBusyError):
+        api().load_journal(path, manifest)
+    assert writer.inspect_live(manifest) == (entry(manifest),)
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize('kind', [OSError, KeyboardInterrupt, SystemExit])
+def test_history_reader_dup_failure_keeps_original_exception_and_journal(history_reader_case, monkeypatch, kind):
+    writer, manifest, path, raw = history_reader_case
+    primary = kind(183)
+    original, calls = os.fstat(writer._fd), []
+    def fail(fd):
+        assert fd == writer._fd
+        calls.append(fd)
+        raise primary
+    with monkeypatch.context() as injected:
+        injected.setattr(os, 'dup', fail)
+        with pytest.raises(kind) as error:
+            with api()._history_reader(writer._fd):
+                pytest.fail('reader entered after failed duplication')
+    assert error.value is primary and primary.__traceback__ is not None
+    if kind is SystemExit:
+        assert primary.code == 183
+    assert calls == [writer._fd] and os.fstat(writer._fd) == original
+    assert writer.inspect_live(manifest) == (entry(manifest),)
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize('kind', [MemoryError, KeyboardInterrupt, SystemExit])
+def test_history_reader_failure_before_stream_ownership_cannot_leak_copy(history_reader_case, monkeypatch, kind):
+    writer, manifest, path, raw = history_reader_case
+    primary = kind(185)
+    duplicate, close = os.dup, os.close
+    owned, attempts = set(), []
+    def duplicated(fd):
+        copy = duplicate(fd)
+        owned.add(copy)
+        return copy
+    def closed(fd):
+        owned.discard(fd)  # retire ownership before any potentially uncertain close
+        close(fd)
+    def fail(*args, **kwargs):
+        # os.fdopen delegates to io.open. This fault is BEFORE either FileIO
+        # or a buffered stream can own the supplied descriptor.
+        attempts.append(1)
+        raise primary
+    try:
+        with monkeypatch.context() as injected:
+            injected.setattr(os, 'dup', duplicated)
+            injected.setattr(os, 'close', closed)
+            injected.setattr(io, 'open', fail)
+            with pytest.raises(kind) as error:
+                with api()._history_reader(writer._fd):
+                    pytest.fail('reader entered without successful allocation')
+        assert error.value is primary and primary.__traceback__ is not None
+        if kind is SystemExit:
+            assert primary.code == 185
+        assert not owned, 'copy allocated before stream ownership leaked'
+        assert attempts == [1] and path.read_bytes() == raw
+    finally:
+        # Only this pre-ownership fault retains copies; no stream or other
+        # allocator took them. Observed closes retire them before this cleanup.
+        while owned:
+            close(owned.pop())
+    assert writer.inspect_live(manifest) == (entry(manifest),)
+
+
+def test_history_reader_raw_initialization_failure_releases_owned_copy(tmp_path):
+    # A directory triggers a real FileIO constructor error after allocation.
+    # Public journal callers reject directories earlier; this tests ownership.
+    # Isolate the old leaking case in a child: never close a possibly retired
+    # numeric descriptor to tidy a failing regression in the pytest process.
+    code = '''
+import errno, json, os, sys
+from app.target_execution_journal import _history_reader
+original = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+duplicate, copies = os.dup, []
+def duplicated(fd):
+    copy = duplicate(fd)
+    copies.append(copy)
+    return copy
+os.dup = duplicated
+try:
+    with _history_reader(original):
+        raise AssertionError('directory accepted as history stream')
+except IsADirectoryError:
+    pass
+assert len(copies) == 1
+try:
+    os.fstat(copies[0])
+except OSError as exc:
+    assert exc.errno == errno.EBADF
+    released = True
+else:
+    released = False
+original_intact = os.fstat(original).st_ino == os.stat(sys.argv[1]).st_ino
+os.close(original)
+print(json.dumps({'released': released, 'original_intact': original_intact}))
+'''
+    result = subprocess.run([sys.executable, '-c', code, str(tmp_path)],
+        capture_output=True, text=True, check=True, timeout=15)
+    assert json.loads(result.stdout) == {'released': True, 'original_intact': True}
+
+
+def test_history_reader_failure_after_raw_ownership_is_already_closed(history_reader_case, monkeypatch):
+    writer, manifest, path, raw = history_reader_case
+    opener, duplicate = io.open, os.dup
+    copies, primary = [], []
+    def duplicated(fd):
+        copy = duplicate(fd)
+        copies.append(copy)
+        return copy
+    def fail(file, *args, **kwargs):
+        # Real io.open allocates FileIO, then rejects unbuffered text mode
+        # and closes its owner. This is the opposite of the early failure.
+        try:
+            return opener(file, 'r', buffering=0, opener=kwargs.get('opener'))
+        except ValueError as exc:
+            primary.append(exc)
+            raise
+    with monkeypatch.context() as injected:
+        injected.setattr(os, 'dup', duplicated)
+        injected.setattr(io, 'open', fail)
+        with pytest.raises(ValueError) as error:
+            with api()._history_reader(writer._fd):
+                pytest.fail('reader entered after native allocation failure')
+    assert error.value is primary[0] and error.value.__traceback__ is not None
+    assert len(copies) == 1
+    with pytest.raises(OSError) as closed:
+        os.fstat(copies[0])
+    assert closed.value.errno == errno.EBADF
+    assert writer.inspect_live(manifest) == (entry(manifest),)
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize('kind', [MemoryError, KeyboardInterrupt, SystemExit])
+def test_history_reader_closed_allocation_cannot_close_recycled_other_owner(history_reader_case, tmp_path, monkeypatch, kind):
+    writer, manifest, path, raw = history_reader_case
+    other = tmp_path / 'other-owner.bin'
+    other.write_bytes(b'owned by another object')
+    original_other = os.open(other, os.O_RDONLY)
+    opener, duplicate, close = io.open, os.dup, os.close
+    primary, replacement, closes = kind(187), set(), []
+    def fail(*args, **kwargs):
+        stream = opener(*args, **kwargs)
+        retired = stream.fileno()
+        stream.close()  # runtime owner already released the reader descriptor
+        copied_other = duplicate(original_other)  # never overwrites an occupied fd
+        replacement.add(copied_other)
+        assert copied_other == retired, 'deterministic recycled-number scenario unavailable'
+        raise primary
+    def closed(fd):
+        if fd in replacement:
+            replacement.remove(fd)
+            closes.append(fd)
+        close(fd)
+    try:
+        with monkeypatch.context() as injected:
+            injected.setattr(io, 'open', fail)
+            injected.setattr(os, 'close', closed)
+            with pytest.raises(kind) as error:
+                with api()._history_reader(writer._fd):
+                    pytest.fail('reader entered after closed allocation')
+        assert error.value is primary and primary.__traceback__ is not None
+        if kind is SystemExit:
+            assert primary.code == 187
+        assert len(replacement) == 1 and not closes
+        assert os.read(next(iter(replacement)), 64) == b'owned by another object'
+        assert writer.inspect_live(manifest) == (entry(manifest),)
+        assert path.read_bytes() == raw
+    finally:
+        while replacement:
+            close(replacement.pop())
+        close(original_other)

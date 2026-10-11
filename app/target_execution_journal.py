@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
 import hashlib
+import io
 import os
 from pathlib import Path
 import stat
@@ -198,7 +199,9 @@ def _close_fds(fds: tuple[int | None, ...], primary: BaseException | None = None
 
 @contextmanager
 def _history_reader(fd: int):
-    stream = os.fdopen(os.dup(fd), 'rb')
+    # FileIO owns copies returned by its opener, including constructor failure.
+    # The label is not reopened: only the held journal descriptor is duplicated.
+    stream = io.open('<journal-history>', 'rb', opener=lambda _name, _flags: os.dup(fd))
     primary = None
     try:
         yield stream
