@@ -443,6 +443,131 @@ crash recovery, rollback, resume a produkční executor **nejsou implementované
 Generate-manifest/dry-run nemají cestu k této vrstvě; Naming/Hierarchy/Metadata,
 D06 approval a schema se nemění. **NAS execution není autorizovaná.**
 
+## E3A: Scratch-only durable file identity evidence
+
+[E3A](../app/target_execution_identity.py) poskytuje samostatný artefakt identity,
+strict načtení a read-only porovnání jedné MOVE/QUARANTINE action. **Není
+integrovaná do E2B**: její pořadí, journal frames ani transitions se nemění.
+Read-only crash reconciliation engine zatím neexistuje. Evidence ani výsledek
+MATCH nejsou execution authority, READY_FOR_EXECUTION, FS_VERIFIED, COMPLETE či
+DB reconciliation.
+
+Jediná factory je `ScratchIdentitySession.create(parent)`. E2A vytvoří nový
+privátní scratch root pod `/tmp`; evidence path se pevně odvodí jako sousední
+`<root-name>.identity.json`, mimo root/media i repo. Nelze předat existující root,
+libovolnou output path ani převzít session jiného procesu. Caller připravuje
+pouze izolované scratch assets a vlastní je výhradně. Veřejné metody jsou
+`capture(manifest, action, action_index=...)`, `load(...)`, `compare(...)`
+a `close()`/context manager; žádný rename, recovery, rollback ani resume API.
+Každá session smí zkusit capture jen jednou, včetně odmítnutých pokusů.
+
+### Evidence format 1
+
+Jeden immutable UTF-8 canonical JSON record s přesnou závěrečnou newline:
+`{"evidence":<body>,"sha256":<SHA-256 canonical body>}`. Keys jsou seřazené,
+separators bez whitespace, Unicode escapované stejně jako v manifest/journal
+kontraktu. Maximum je 64 KiB. Duplicate/unknown/missing keys, neplatné typy
+(včetně bool místo int), necanonical bytes, další records, neúplná newline,
+checksum mismatch nebo neznámá verze znamenají STOP. Checksum není podpis
+a nechrání před cíleným falšováním jiným writerem stejného UID/privilegovaným
+uživatelem. Žádná oprava, truncation ani přepsání poškozené evidence neexistuje.
+
+Body má přesná pole frozen `FileIdentityEvidence`:
+
+| Pole | Pozorovaná nebo immutable vazba |
+| --- | --- |
+| `schema`, `version` | `animedb-v6-file-identity`, integer `1` |
+| `manifest_id`, `manifest_sha256` | Semantic manifest ID a SHA-256 canonical celého envelope včetně created_at/acknowledgements, stejně jako E1 binding |
+| `action_index`, `action` | Přesný index a celý nezměněný `ManifestAction`: action ID, object kind/ID, schválené source/target, preconditions, criticality a další immutable payload |
+| `binding` | Root path a root/source-parent/target-parent device/inode; mount ID, fstype/source/point/fs-root a SHA-256 canonical raw mount record/table values |
+| `filesystem` | Skutečně pozorované `st_dev`, `st_ino`, size, mtime_ns, ctime_ns, regular-file type, nlink, mode, uid a gid |
+| `content` | `algorithm='sha256'`, digest, `coverage='FULL'` a skutečně přečtený `bytes_hashed` rovnající se size |
+
+Timestampy pocházejí pouze z file stats; artefakt nepřidává umělý capture čas,
+maintenance/capability assertions ani falešný durable timestamp. Ctime pomáhá
+odhalit změnu během čtení/capture; po rename se jako stabilní precondition
+neporovnává, protože rename jej může změnit.
+
+### Capture, durability a partial write
+
+Capture validuje stávající strict immutable manifest/action contract a vazbu
+na factory root/mount ještě před čtením souboru. E2A observation drží očekávaný
+regular file a bezpečné parents. SHA-256 používá bounded `pread` po 64 KiB až
+do EOF; počet bytes a stat včetně ctime se kontrolují před/po každém full read.
+Verze 1 odmítá scratch soubory větší než **8 MiB** před content read; limit je
+pouze scratch hranice, nikoli produkční video policy.
+
+Artefakt používá E1 local-output/alias checks a nofollow directory descriptors,
+E2A scratch mount allowlist/bind-crossing policy, `O_EXCL|O_NOFOLLOW`, mode 0600
+a výhradní flock. Symlink/hardlink/special file a unsafe parent se odmítají.
+Root a artefakt parent/mount binding se ověří ještě před vytvořením souboru.
+Short writes se dokončí; write/fsync chyba či EINTR se automaticky neopakuje.
+Po úplném zápisu následují **file fsync a parent directory fsync**.
+
+Po barriers se znovu přečte celý source a porovná hash/metadata; ověří se jeho
+skutečný nofollow locator, target absence, root/parent/mount binding a aktuální
+artefakt bytes/identity. Úspěch capture se potvrzuje až po těchto kontrolách
+a úspěšném cleanupu dočasných descriptors. Selhání před pokusem o vytvoření
+artefaktu je `IdentityEvidenceRejected`, změna source během čtení jeho podtřída
+`IdentityEvidenceReconciliationRequired`; po pokusu o vytvoření vždy tato
+podtřída (přerušení se propaguje beze změny).
+Dvojí čtení a stat/ctime kontroly odhalí pozorovatelné změny, ale stabilitu
+source mimo okamžiky čtení a po capture nezaručují; bez maintenance boundary je
+to neověřený předpoklad exkluzivního vlastnictví. Selhání zachová všechny existující
+bytes pro diagnostiku, session zablokuje a neprovede rename ani journal append.
+KeyboardInterrupt/SystemExit a cleanup precedence respektují E2B-MINOR-01.
+
+Pád před vytvořením může zanechat chybějící artefakt; partial write je neplatný
+record. Celý record po write/fsync chybě může být strict parseable, ale sám
+neprokazuje acknowledgement původního writera ani aktuální source stabilitu.
+`load` proto potvrzuje pouze data/binding, nikoli durable acknowledgement či
+continuation. Chyba `load` session zablokuje; další read-only diagnostika je
+možná, ale ani externí obnovení původních bytes nemůže vrátit výsledek MATCH.
+File/parent barriers nedokazují power-loss behavior storage ani
+durable existenci všech ancestors nebo původních scratch assets.
+
+### Read-only comparison a ztráta živé identity
+
+`compare` znovu strict načte evidence a dirfd-relative otevře obě schválené
+cesty. Ověří root, parents, mount, regular/single-link file, plný digest,
+metadata a závěrečnou stabilitu locators i artefaktu. Neprovádí write/fsync,
+nevytváří parents, nečte DB a nevybírá recovery akci.
+
+Výsledek odděluje presence, skutečné file/content observations,
+`filesystem_match` (shodu numerických attributes bez ctime), `content_match`
+a `physical_identity_match`. Content digest prokazuje pouze shodu bytes.
+Device/inode nejsou trvalým univerzálním identifikátorem: po uvolnění původního
+file descriptoru mohou být recyklované, zvlášť napříč reboot/mount lifecycle.
+
+E3A drží do `close()` původní file a parent descriptors. Celkový **MATCH**
+vyžaduje právě jeden present locator a druhý absent, shodná metadata i obsah
+a nepřerušený živý inode důkaz. Prokázaný rozdíl obsahu/metadata nebo jiný inode
+oproti živému pinu znamená **MISMATCH**. Obě/žádná cesta, unsafe/unreadable
+observations či ztráta původního pinu znamenají **UNKNOWN**. Stejné bytes
+v jiném inode po ztrátě pinu stále znamenají UNKNOWN; shodný dev/inode bez
+pinu jej rovněž nepovýší na MATCH. MISMATCH/UNKNOWN znamenají STOP.
+
+Po `close()` zůstává ve stejném factory-minted objektu povolená pouze read-only
+inspekce jeho původního scratch kontextu; živý inode důkaz je již ztracený.
+To umožňuje deterministicky simulovat ztrátu in-memory evidence, **neotevírá
+existující root po skutečném restartu**. Pro child-process crash testy zbývají
+pouze persistent bytes a E1 diagnostic history; žádné restart writer API.
+Budoucí read-only reconciliation musí tuto nejistotu zachovat a samostatně
+vyřešit bezpečnou autorizovanou inspekci persistent scratch contextu.
+
+Plný hash velkých videí bude vyžadovat celý soubor přečíst; nynější capture jej
+čte dvakrát a comparison znovu. Paměť zůstává bounded, ale I/O a čas jsou
+lineární v délce obsahu. Produkční cost/storage policy se tím neschvaluje;
+rychlý částečný fingerprint není náhradou za FULL content proof. Produkční
+knihovna se nehashuje. Scratch/fault/process-exit testy nejsou NAS power-loss
+ani ARM64/RPi5 capability proof. Produkční mount a platforma jsou **NEOVĚŘENÉ**.
+Globální executor/lock, maintenance boundary, DB reconciliation, recovery,
+rollback a resume stále chybějí. **NAS execution není autorizovaná.**
+
+Otevřené INFO-1 (možný fd leak při `os.fdopen(os.dup(...))`) a INFO-2 (riziko
+close recyklovaného fd v dřívějším testu) zůstávají neřešené; E3A tyto větve
+nemění. Naming/Hierarchy/Metadata authority, D06 approval a schema se nemění.
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.
