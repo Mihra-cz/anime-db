@@ -3,6 +3,9 @@ from contextlib import ExitStack
 import errno
 import io
 import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -425,50 +428,93 @@ def test_e1_loader_completes_cleanup_and_preserves_prefix(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize('layer', ['e1_open', 'e1_check', 'e2a_open'])
 @pytest.mark.parametrize('cleanup_kind', ['io', 'keyboard', 'exit'])
-def test_directory_walk_does_not_retry_uncertain_close(tmp_path, monkeypatch, layer, cleanup_kind):
+@pytest.mark.parametrize('close_outcome', ['released', 'still_open', 'recycled'])
+def test_directory_walk_does_not_retry_uncertain_close(tmp_path, layer, cleanup_kind, close_outcome):
+    # The child owns every injected fd; exiting releases even uncertain ones
+    # without retrying close or guessing ownership from a recycled fd number.
+    code = '''
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+from test_v6_cleanup_precedence import _directory_walk_cleanup_case
+_directory_walk_cleanup_case(Path(sys.argv[2]), *sys.argv[3:])
+'''
+    foreign = tmp_path / 'parent-owned'
+    foreign.write_bytes(b'parent descriptor remains open')
+    with foreign.open('rb') as stream:
+        result = subprocess.run([sys.executable, '-Werror::ResourceWarning', '-c', code,
+            str(Path(__file__).resolve()), str(tmp_path), layer, cleanup_kind, close_outcome],
+            cwd=Path(__file__).resolve().parents[1],
+            env={**os.environ, 'DATABASE_URL': 'sqlite://', 'ANIME_PATH': str(tmp_path / 'library'),
+                'METADATA_DOWNLOAD_ARTWORK': 'false'},
+            capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stderr == ''
+        # A silent early return must not pass: the helper reports completion last.
+        assert result.stdout == f'directory walk verified: {layer} {cleanup_kind} {close_outcome}\n'
+        assert stream.read() == b'parent descriptor remains open'
+
+
+def _directory_walk_cleanup_case(tmp_path, layer, cleanup_kind, close_outcome):
     child = tmp_path / 'child'
     child.mkdir(mode=0o700)
     manifest = scratch_manifest(tmp_path)
     cleanup = failure(cleanup_kind, 'ancestor close', 101)
-    open_fd, close_fd = os.open, os.close
-    parent_fd = open_fd(child, os.O_RDONLY | os.O_DIRECTORY) if layer == 'e1_check' else None
-    opened, closed = [], []
-    def track_open(*args, **kwargs):
-        fd = open_fd(*args, **kwargs)
-        opened.append(fd)
-        return fd
+    close_fd = os.close
+    parent_fd = os.open(child, os.O_RDONLY | os.O_DIRECTORY) if layer == 'e1_check' else None
+    closed, uncertain = [], []
+    foreign = tmp_path / 'child-owned'
+    foreign.write_bytes(b'foreign descriptor remains open')
+    def descriptors():
+        result = {}
+        for fd in os.listdir('/proc/self/fd'):
+            try:
+                result[int(fd)] = os.readlink(f'/proc/self/fd/{fd}')
+            except FileNotFoundError:
+                pass  # os.listdir's own directory descriptor is already closed.
+        return result
     def fail_close(fd):
         try:
             name = os.readlink(f'/proc/self/fd/{fd}')
         except FileNotFoundError:
             name = 'already closed'
         closed.append(name)
-        close_fd(fd)
         if name == str(tmp_path):
+            uncertain.append(fd)
+            if close_outcome != 'still_open':
+                close_fd(fd)
+            if close_outcome == 'recycled':
+                # Reuse only the fd just released in this single-threaded child.
+                os.dup2(stream.fileno(), fd)
             raise cleanup
-    monkeypatch.setattr(os, 'open', track_open)
-    monkeypatch.setattr(os, 'close', fail_close)
-    try:
-        with pytest.raises(BaseException) as error:
-            if layer == 'e2a_open':
-                filesystem._open_absolute(child)
-            elif layer == 'e1_check':
-                journal._check_parent(child / 'journal.jsonl', parent_fd)
-            else:
-                journal._open_parent(child / 'journal.jsonl', manifest, (), ())
+        close_fd(fd)
+    with foreign.open('rb') as stream:
+        before = descriptors()
+        with pytest.MonkeyPatch.context() as injected:
+            injected.setattr(os, 'close', fail_close)
+            with pytest.raises(BaseException) as error:
+                if layer == 'e2a_open':
+                    filesystem._open_absolute(child)
+                elif layer == 'e1_check':
+                    journal._check_parent(child / 'journal.jsonl', parent_fd)
+                else:
+                    journal._open_parent(child / 'journal.jsonl', manifest, (), ())
         assert error.value is cleanup
         assert closed[-2:] == [str(tmp_path), str(child)]
-    finally:
-        # The baseline leaks the newly opened child. Close only proven live fds
-        # after assertions, never repeat a close whose result is uncertain.
-        for fd in set(opened):
-            try:
-                os.fstat(fd)
-            except OSError:
-                continue
-            close_fd(fd)
-        if parent_fd is not None:
-            close_fd(parent_fd)
+        assert len(closed) == len(set(closed)) and len(uncertain) == 1
+        if isinstance(cleanup, SystemExit):
+            assert error.value.code == 101
+        expected = before.copy()
+        if close_outcome != 'released':
+            expected[uncertain[0]] = str(tmp_path) if close_outcome == 'still_open' else str(foreign)
+        assert descriptors() == expected
+        if close_outcome == 'recycled':
+            assert os.read(uncertain[0], 100) == b'foreign descriptor remains open'
+            stream.seek(0)
+        assert stream.read() == b'foreign descriptor remains open'
+    # No numeric-fd cleanup: the process releases the caller-owned parent_fd,
+    # any deliberately unreleased ancestor, and the foreign alias on exit.
+    print(f'directory walk verified: {layer} {cleanup_kind} {close_outcome}')
 
 
 @pytest.mark.parametrize('parent_kind,root_kind', [
