@@ -166,8 +166,9 @@ def _read_runtime_evidence(path: Path, *library_roots: Path) -> dict:
     fstype = _mount_fstype(path)
     if fstype is None or fstype in {'cifs', 'smb3', 'nfs', 'nfs4', '9p'} or fstype.startswith(('fuse.sshfs', 'fuse.rclone')):
         raise ValueError('input requires a verified local filesystem')
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, 'r', encoding='utf-8') as stream:
+    # FileIO owns allocation and cleanup on stream constructor failure.
+    with io.open(path, 'r', encoding='utf-8', opener=lambda name, _flags:
+            os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)) as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise ValueError('input must be an independent regular file')

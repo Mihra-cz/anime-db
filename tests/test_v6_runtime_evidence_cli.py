@@ -1,8 +1,15 @@
 """External assertions cannot replace live observations or bypass preflight."""
 from dataclasses import asdict
+import errno
+import gc
+import io
 import json
 import os
+from pathlib import Path
+import resource
 import sqlite3
+import subprocess
+import sys
 
 import pytest
 
@@ -26,6 +33,20 @@ STRING_FIELDS = (
 )
 INT_FIELDS = ('db_backup_size', 'db_backup_user_version')
 LIVE_FIELDS = ('actual_windows_root', 'mount_identity', 'mount_read_only_now', 'free_bytes')
+
+
+def _isolate_nas_paths(monkeypatch, tmp_path):
+    # Exercise the same location guard without resolving a production mount.
+    nas = Path('/mnt/nas-anime')
+    def scratch_path(value, *parts):
+        path = Path(value, *parts)
+        return tmp_path / 'denied-nas' / path.relative_to(nas) if path == nas or nas in path.parents else path
+    monkeypatch.setattr(cli, 'Path', scratch_path)
+
+
+@pytest.fixture(autouse=True)
+def isolated_nas_paths(monkeypatch, tmp_path):
+    _isolate_nas_paths(monkeypatch, tmp_path)
 
 
 @pytest.fixture
@@ -309,3 +330,208 @@ def test_report_cannot_overwrite_runtime_evidence_input(case):
     with pytest.raises(ValueError, match='replace an input file'):
         run(case, output=case[-2])
     assert case[-2].read_bytes() == before
+
+
+def _reader_child(tmp_path, scenario, kind='io'):
+    code = '''
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+from test_v6_runtime_evidence_cli import _reader_case
+_reader_case(Path(sys.argv[2]), *sys.argv[3:])
+'''
+    parent = tmp_path / 'parent-owner'
+    parent.write_bytes(b'parent descriptor')
+    with parent.open('rb') as stream:
+        result = subprocess.run([sys.executable, '-Werror::ResourceWarning', '-c', code,
+            str(Path(__file__).resolve()), str(tmp_path), scenario, kind],
+            cwd=Path(__file__).resolve().parents[1],
+            env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'DATABASE_URL': 'sqlite://',
+                'ANIME_PATH': str(tmp_path / 'library'), 'METADATA_DOWNLOAD_ARTWORK': 'false'},
+            capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stderr == ''
+        # This is printed only after all child assertions, including fd checks.
+        assert result.stdout == f'runtime reader verified: {scenario} {kind}\n'
+        assert stream.read() == b'parent descriptor'
+
+
+def test_runtime_reader_valid_utf8_evidence_stays_readonly(tmp_path):
+    _reader_child(tmp_path, 'valid')
+
+
+@pytest.mark.parametrize('scenario', ('early', 'repeated', 'open_error', 'closed_allocation', 'parser_error'))
+@pytest.mark.parametrize('kind', ('io', 'memory', 'keyboard', 'exit'))
+def test_runtime_reader_fault_preserves_ownership_and_exception(tmp_path, scenario, kind):
+    _reader_child(tmp_path, scenario, kind)
+
+
+def test_runtime_reader_late_native_text_failure_preserves_recycled_fd(tmp_path):
+    _reader_child(tmp_path, 'late')
+
+
+@pytest.mark.parametrize('scenario', ('directory_swap', 'symlink_swap', 'fifo_swap'))
+def test_runtime_reader_rejects_changed_leaf_without_leaking_fd(tmp_path, scenario):
+    _reader_child(tmp_path, scenario)
+
+
+@pytest.mark.parametrize('scenario', ('symlink', 'hardlink', 'invalid_json'))
+def test_runtime_reader_guard_failure_closes_owned_stream(tmp_path, scenario):
+    _reader_child(tmp_path, scenario)
+
+
+def _reader_case(tmp_path, scenario, kind):
+    target = tmp_path / 'evidence.json'
+    evidence = {**dict.fromkeys(BOOL_FIELDS, True),
+                **dict.fromkeys(STRING_FIELDS, 'scratch-Žluťoučký'),
+                **dict.fromkeys(INT_FIELDS, 1)}
+    target.write_text('{' if scenario == 'invalid_json' else json.dumps(evidence, ensure_ascii=False),
+                      encoding='utf-8')
+    before_bytes, before_stat = target.read_bytes(), target.stat()
+    foreign_path = tmp_path / 'foreign-owner'
+    foreign_path.write_bytes(b'foreign descriptor')
+    if scenario == 'symlink':
+        target.rename(tmp_path / 'original')
+        target.symlink_to(foreign_path)
+    if scenario == 'hardlink':
+        os.link(target, tmp_path / 'second-link')
+    primary = (OSError(errno.EIO, 'reader fault') if kind == 'io' else
+               MemoryError('reader fault') if kind == 'memory' else
+               KeyboardInterrupt('reader fault') if kind == 'keyboard' else SystemExit(113))
+    native_open, native_io_open = os.open, io.open
+    native_parser = cli._strict_json_load
+    opens, streams, recycled, outcomes = [], [], [], []
+    armed = False
+    constructor_faults = 0
+
+    def reject_fileio(event, args):
+        nonlocal constructor_faults
+        # Native FileIO audits before adopting an existing fd or invoking opener.
+        if (armed and scenario in {'early', 'repeated'} and event == 'open' and args[1] == 'r'
+                and (isinstance(args[0], int) or args[0] == str(target))):
+            constructor_faults += 1
+            raise primary
+    sys.addaudithook(reject_fileio)
+
+    def opened(path, flags, *args, **kwargs):
+        assert os.fspath(path) == str(target), 'reader changed its input path'
+        assert flags == os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        opens.append(None)
+        if scenario == 'open_error':
+            raise primary
+        if scenario in {'directory_swap', 'symlink_swap', 'fifo_swap'}:
+            target.rename(tmp_path / 'original')
+            if scenario == 'directory_swap':
+                target.mkdir()
+            elif scenario == 'symlink_swap':
+                target.symlink_to(foreign_path)
+            else:
+                os.mkfifo(target)
+        fd = native_open(path, flags, *args, **kwargs)
+        opens[-1] = fd
+        return fd
+
+    def open_stream(file, *args, **kwargs):
+        nonlocal primary
+        if (not args or args[0] != 'r'
+                or (not isinstance(file, int) and os.fspath(file) != str(target))):
+            return native_io_open(file, *args, **kwargs)
+        if scenario == 'late':
+            # A real TextIOWrapper failure follows successful raw/buffer creation.
+            arguments, options = list(args), dict(kwargs)
+            if len(arguments) >= 3:
+                arguments[2] = 'missing-v6-test-codec'
+            else:
+                options['encoding'] = 'missing-v6-test-codec'
+            try:
+                native_io_open(file, *arguments, **options)
+            except LookupError as exc:
+                primary = exc
+            else:
+                raise AssertionError('native text construction did not fail')
+        else:
+            stream = native_io_open(file, *args, **kwargs)
+            streams.append(stream)
+            if scenario != 'closed_allocation':
+                return stream
+            stream.close()
+        replacement = io.FileIO(foreign_path, 'rb')
+        recycled.append(replacement)
+        assert replacement.fileno() == opens[-1]
+        raise primary
+
+    def parse(raw):
+        assert raw == before_bytes.decode('utf-8')
+        if scenario == 'parser_error':
+            raise primary
+        return native_parser(raw)
+
+    def forbid_numeric_close(fd):
+        raise AssertionError('reader attempted numeric close/retry')
+
+    limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+    with io.FileIO(foreign_path, 'rb') as foreign:
+        def fd_inventory():
+            result = {}
+            for name in os.listdir('/proc/self/fd'):
+                try:
+                    result[int(name)] = os.readlink(f'/proc/self/fd/{name}')
+                except FileNotFoundError:
+                    pass  # os.listdir's own fd is already closed.
+            return result
+        before = fd_inventory()
+        try:
+            if scenario == 'repeated':
+                resource.setrlimit(resource.RLIMIT_NOFILE, (max(before) + 12, limits[1]))
+            with pytest.MonkeyPatch.context() as injected:
+                _isolate_nas_paths(injected, tmp_path)
+                injected.setattr(os, 'open', opened)
+                injected.setattr(io, 'open', open_stream)
+                injected.setattr(os, 'close', forbid_numeric_close)
+                injected.setattr(cli, '_strict_json_load', parse)
+                armed = True
+                for _ in range(32 if scenario == 'repeated' else 1):
+                    result = error = None
+                    try:
+                        result = cli._read_runtime_evidence(target, tmp_path / 'library')
+                    except BaseException as exc:
+                        error = exc
+                    outcomes.append((result, error))
+        finally:
+            armed = False
+            resource.setrlimit(resource.RLIMIT_NOFILE, limits)
+        gc.collect()
+        after = fd_inventory()
+        expected = {**before, **{s.fileno(): str(foreign_path) for s in recycled}}
+        assert after == expected, ('runtime evidence fd leak', len(after) - len(expected))
+        for stream in recycled:
+            assert stream.read() == b'foreign descriptor'
+            stream.close()  # The stream object owns the deliberately reused fd.
+        assert fd_inventory() == before
+        assert foreign.read() == b'foreign descriptor'
+        assert all(stream.closed for stream in streams)
+
+    for result, error in outcomes:
+        if scenario == 'valid':
+            assert result == evidence and len(result) == 14 and error is None
+        elif scenario in {'early', 'repeated', 'open_error', 'closed_allocation', 'parser_error', 'late'}:
+            assert error is primary and error.__traceback__ is not None
+            if kind == 'exit':
+                assert error.code == 113
+        elif scenario in {'directory_swap', 'symlink_swap'}:
+            assert isinstance(error, OSError)
+            assert error.errno == (errno.EISDIR if scenario == 'directory_swap' else errno.ELOOP)
+        else:
+            assert isinstance(error, ValueError)
+            if scenario in {'hardlink', 'fifo_swap'}:
+                assert str(error) == 'input must be an independent regular file'
+            if scenario == 'symlink':
+                assert 'symlink' in str(error)
+    if scenario in {'early', 'repeated'}:
+        assert constructor_faults == len(outcomes) and not opens
+    if scenario == 'symlink':
+        assert not opens
+    original = tmp_path / 'original' if scenario in {'symlink', 'directory_swap', 'symlink_swap', 'fifo_swap'} else target
+    assert original.read_bytes() == before_bytes
+    assert (original.stat().st_size, original.stat().st_mtime_ns) == (before_stat.st_size, before_stat.st_mtime_ns)
+    print(f'runtime reader verified: {scenario} {kind}')
