@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import asdict, replace
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -84,8 +85,9 @@ def inventory_filesystem(root: Path) -> FilesystemSnapshot:
                     digest = None
                     if Path(child.name).suffix.lower() in _ARCHIVES and technical_root(rel) != 'Subs':
                         # O_NOFOLLOW also protects a leaf swapped after lstat.
-                        descriptor = os.open(child.path, os.O_RDONLY | os.O_NOFOLLOW)
-                        with os.fdopen(descriptor, 'rb') as archive:
+                        # FileIO owns allocation and cleanup on constructor failure.
+                        with io.open(child.path, 'rb', opener=lambda path, _flags:
+                                os.open(path, os.O_RDONLY | os.O_NOFOLLOW)) as archive:
                             current = os.fstat(archive.fileno())
                             if not stat.S_ISREG(current.st_mode):
                                 raise OSError('archive_no_longer_regular')
