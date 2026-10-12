@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 from dataclasses import asdict
+import io
 import json
 import os
 from pathlib import Path
@@ -204,17 +205,36 @@ def _read_current(database_path: Path, library_root: Path, windows_root: str | N
 
 
 def _atomic_local_write(path: Path, content: str):
-    descriptor, temporary = tempfile.mkstemp(prefix='.v6-manifest-', suffix='.tmp', dir=path.parent)
+    temporary = None
+    primary = None
+
+    def open_temporary(_name, _flags):
+        nonlocal temporary
+        # FileIO owns the returned fd, including cleanup on constructor failure.
+        descriptor, temporary = tempfile.mkstemp(prefix='.v6-manifest-', suffix='.tmp', dir=path.parent)
+        return descriptor
+
     try:
-        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+        with io.open(path, 'w', encoding='utf-8', opener=open_temporary) as stream:
             stream.write(content)
             stream.write('\n')
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        if temporary is not None:
+            try:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            except BaseException as exc:
+                if primary is None:
+                    raise
+                primary.add_note(f'atomic local write cleanup failed for {temporary}: {type(exc).__name__}: {exc}')
+                for note in tuple(getattr(exc, '__notes__', ())):
+                    primary.add_note(note)
 
 
 def main(argv=None) -> int:
