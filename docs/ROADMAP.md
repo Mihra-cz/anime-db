@@ -180,9 +180,12 @@ a produkční rollout v8→v9 je dokončený; shared Season persistence je podpo
 P2B pure canonical parser core je implementovaný. Read-only Target Planner
 foundation s D01–D06, post-state projection a řízený container locator contract
 jsou implementované. Immutable execution manifest, deterministic serialization,
-read-only dry-run/preflight a execution foundations E1–E3B jsou implementované
+read-only dry-run/preflight a execution foundations E1–E4A jsou implementované
 v povoleném izolovaném rozsahu. E3B vynucuje durable identity evidence pro jednu
-scratch action; další fáze E4A read-only restart reconciliation je plánovaná.
+scratch action. E4A read-only restart inspekce existujícího scratch kontextu
+po zániku původního procesu vrací diagnostiku a STOP bez recovery authority;
+je HOTOVO po nezávislém review s výsledkem PASS. Nejde o potvrzené reboot/mount
+recovery.
 Produkční mount capability je neověřená; globální lock/maintenance boundary,
 produkční executor/DB reconciliation, automatické resume, rollback/crash recovery
 a NAS cleanup zůstávají samostatnou budoucí prací.
@@ -247,8 +250,8 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   LOW podle úzkého human allowlistu v execution contractu; externí gates trvají.
   Readiness vyžaduje skutečný Windows root, snapshot/DB backup evidence,
   maintenance a ověřenou write/rename capability. Current read-only audit je
-  záměrně NOT_READY. Implementované execution foundations a další plánovanou
-  fázi rozlišuje přehled níže; produkční execution tím není povolená.
+  záměrně NOT_READY. Implementované execution foundations rozlišuje přehled
+  níže; produkční execution tím není povolená.
 
 ### V6 execution foundations
 
@@ -259,9 +262,9 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 | E2B | [Scratch-only journal/filesystem coordination](V6_EXECUTION_MANIFEST.md#e2b-scratch-only-koordinace-jedné-action) | HOTOVO |
 | E3A | [Scratch-only durable identity evidence](V6_EXECUTION_MANIFEST.md#e3a-scratch-only-durable-file-identity-evidence) | HOTOVO |
 | E3B | [Povinná integrace evidence do scratch execution](V6_EXECUTION_MANIFEST.md#e3b-povinná-durable-identity-evidence-ve-scratch-coordination) | HOTOVO |
-| E4A | Read-only restart reconciliation | PLÁNOVÁNO |
+| E4A | [Read-only restart inspekce](V6_EXECUTION_MANIFEST.md#e4a-read-only-restart-inspekce) | HOTOVO |
 
-HOTOVO u E1–E3B označuje pouze dokončený povolený izolovaný rozsah.
+HOTOVO u E1–E4A označuje pouze dokončený povolený izolovaný rozsah.
 E1 poskytuje append-only durable journal, writer lock, strict loading a validovaný
 lifecycle; načtená historie vyžaduje reconciliation, bez automatického resume.
 E2A používá `RENAME_NOREPLACE` bez overwrite/fallbacku a explicitní
@@ -273,7 +276,10 @@ po potvrzeném rename a nezávislou verification i nové E3A MATCH před FS_VERI
 Identity evidence sama neopravňuje k execution; FS_VERIFIED není DB_RECONCILED
 ani COMPLETE. Nejednoznačný výsledek znamená STOP/reconciliation bez automatického
 retry či resume. Persistentní dev/inode a hash nenahrazují živý inode pin ztracený
-po restartu ani neprokazují fyzickou provenance. E4A zatím není implementovaná.
+po restartu ani neprokazují fyzickou provenance. E4A načte existující scratch
+důkazy a popíše filesystem stav, ale kontinuitu identity nechává UNKNOWN
+a vždy vyžaduje STOP/ruční vyhodnocení. Nevytváří execution kontext, nic
+nezapisuje a nepokračuje v operaci.
 
 V6 zůstává **Probíhá**. Produkční executor, globální execution lock,
 maintenance boundary, DB reconciliation, automatické resume, rollback,

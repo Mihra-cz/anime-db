@@ -256,6 +256,30 @@ def _absent(parent: int, name: str) -> None:
     raise RenameRejected('target already exists; STOP', errno.EEXIST)
 
 
+def _validate_scratch_action(manifest: ExecutionManifest, action: ManifestAction,
+                             root: Path, mount_identity: str) -> None:
+    """Shared strict binding for live execution and read-only restart inspection."""
+    if type(manifest) is not ExecutionManifest or type(action) is not ManifestAction:
+        raise RenameRejected('typed immutable manifest and action required')
+    # Reject foreign roots before the manifest validator can lstat their paths.
+    if (manifest.payload.library_root != str(root)
+            or manifest.payload.mount_identity != mount_identity):
+        raise RenameRejected('manifest execution root/mount binding mismatch')
+    try:
+        manifest_from_json(manifest_to_json(manifest))
+        _decode_type(ManifestAction, _strict_json_load(_canonical(asdict(action))))
+    except (TypeError, ValueError, KeyError, OverflowError) as exc:
+        raise RenameRejected('invalid manifest: ' + str(exc)) from exc
+    if action not in manifest.payload.actions:
+        raise RenameRejected('action does not exactly match sealed manifest')
+    if action.action not in {'KEEP', 'MOVE', 'QUARANTINE'} or action.criticality == 'REVIEW':
+        raise RenameRejected('action requires review or is unsupported')
+    if manifest.payload.generation_diagnostics or action.depends_on:
+        raise RenameRejected('primitive cannot authorize unresolved plan or dependencies')
+    _locator(action.source)
+    _locator(action.target)
+
+
 class ScratchRenameSession:
     """An unreopenable fresh scratch root. Each syscall action is attempted once.
 
@@ -384,28 +408,7 @@ class ScratchRenameSession:
             self._check_fd(held)
 
     def _validate(self, manifest: ExecutionManifest, action: ManifestAction) -> None:
-        if type(manifest) is not ExecutionManifest or type(action) is not ManifestAction:
-            raise RenameRejected('typed immutable manifest and action required')
-        # Reject a foreign root before the existing validator's read-only lstat
-        # checks: even an invalid production proposal must not observe the NAS.
-        if (manifest.payload.library_root != str(self.root)
-                or manifest.payload.mount_identity != self.mount_identity):
-            raise RenameRejected('manifest execution root/mount binding mismatch')
-        # The existing strict decoder additionally rejects permissive dataclass
-        # values such as bool instead of int, without changing the E1 contracts.
-        try:
-            manifest_from_json(manifest_to_json(manifest))
-            _decode_type(ManifestAction, _strict_json_load(_canonical(asdict(action))))
-        except (TypeError, ValueError, KeyError, OverflowError) as exc:
-            raise RenameRejected('invalid manifest: ' + str(exc)) from exc
-        if action not in manifest.payload.actions:
-            raise RenameRejected('action does not exactly match sealed manifest')
-        if action.action not in {'KEEP', 'MOVE', 'QUARANTINE'} or action.criticality == 'REVIEW':
-            raise RenameRejected('action requires review or is unsupported')
-        if manifest.payload.generation_diagnostics or action.depends_on:
-            raise RenameRejected('primitive cannot authorize unresolved plan or dependencies')
-        _locator(action.source)
-        _locator(action.target)
+        _validate_scratch_action(manifest, action, self.root, self.mount_identity)
 
     @contextmanager
     def observe(self, manifest: ExecutionManifest, action: ManifestAction):

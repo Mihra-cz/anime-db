@@ -43,9 +43,10 @@ class JournalBusyError(JournalError):
 class ReconciliationRequired(JournalError):
     """History is ambiguous; validated prefix is diagnostic evidence only."""
 
-    def __init__(self, message: str, entries: tuple[JournalEntry, ...] = ()):
+    def __init__(self, message: str, entries: tuple[JournalEntry, ...] = (), *, header_valid: bool = False):
         super().__init__(message)
         self.entries = tuple(entries)
+        self.header_valid = header_valid
 
 
 @dataclass(frozen=True)
@@ -306,7 +307,8 @@ def _read_history(fd: int, manifest: ExecutionManifest) -> tuple[JournalEntry, .
                 sequence += 1
             except (ValueError, TypeError, UnicodeError, KeyError, RecursionError) as exc:
                 raise ReconciliationRequired(
-                    f'STOP: journal record {sequence} at byte {offset}: {exc}', entries) from exc
+                    f'STOP: journal record {sequence} at byte {offset}: {exc}', entries,
+                    header_valid=sequence > 0) from exc
     if previous_digest is None:
         raise ReconciliationRequired('STOP: missing journal header')
     return tuple(entries)

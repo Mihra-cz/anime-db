@@ -440,12 +440,20 @@ source ABSENT / target PRESENT i nezměněná původně potvrzená evidence.
 
 Po restartu se živý inode pin ztrácí. Persistentní dev/inode ani shodný SHA-256
 samy neprokazují fyzickou provenance původního inode; hash dokazuje shodu obsahu.
-Read-only restart reconciliation zatím není implementovaná. Identity evidence
-sama ani MATCH neopravňují k execution a FS_VERIFIED není DB_RECONCILED ani COMPLETE.
+[E4A read-only restart inspekce](V6_EXECUTION_MANIFEST.md#e4a-read-only-restart-inspekce)
+načte existující scratch root, journal a identity evidence bez execution session.
+Report odděluje validní journal prefix a poslední zaznamenanou fázi, validitu
+evidence, source/target observations, shodu obsahu a numerických metadat.
+Kontinuita fyzické identity, úplnost historie a původní fsync acknowledgement
+zůstávají UNKNOWN; výsledek je vždy STOP k ručnímu vyhodnocení. Nezávislé
+review E4A dopadlo PASS: jde pouze o read-only scratch diagnostiku po zániku
+původního procesu, nikoli o potvrzené reboot/mount recovery. Identity evidence
+sama ani MATCH neopravňují k execution a FS_VERIFIED není DB_RECONCILED ani
+COMPLETE.
 Každý nejednoznačný výsledek znamená STOP/reconciliation; automatický retry ani
 resume neexistují.
 
-Dokončené E1–E3B foundations platí pouze pro povolený izolovaný rozsah.
+Dokončené E1–E4A foundations platí pouze pro povolený izolovaný rozsah.
 Scratch testy nejsou důkazem produkční capability: ARM64/RPi5 není provozně
 ověřené, NAS filesystem rename capability ani power-loss durability produkčního
 úložiště nejsou potvrzené. Limit 8 MiB je scratch hranice, nikoli produkční limit;

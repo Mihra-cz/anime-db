@@ -172,6 +172,77 @@ def _decode_frame(raw: bytes) -> FileIdentityEvidence:
         raise IdentityEvidenceRejected('STOP: invalid evidence record: ' + str(exc)) from exc
 
 
+def _validate_record(evidence: FileIdentityEvidence, manifest: ExecutionManifest,
+                     action: ManifestAction, index: int, manifest_sha256: str, *,
+                     root: Path, root_identity: DirectoryIdentity, mount, mounts) -> None:
+    if (evidence.schema != _SCHEMA or evidence.version != _VERSION
+            or evidence.manifest_id != manifest.manifest_id or evidence.manifest_sha256 != manifest_sha256
+            or evidence.action != action or evidence.action_index != index):
+        raise IdentityEvidenceRejected('STOP: evidence version/manifest/action binding mismatch')
+    binding = evidence.binding
+    if (binding.root != str(root) or binding.root_identity != root_identity
+            or (binding.mount_id, binding.mount_fstype, binding.mount_source,
+                binding.mount_point, binding.mount_fs_root, binding.mount_record_sha256, binding.mount_table_sha256)
+            != (mount.mount_id, mount.fstype, mount.source, str(mount.point), str(mount.fs_root),
+                _digest(mount.raw), _digest(tuple(m.raw for m in mounts)))
+            or any(parent.st_dev != binding.root_identity.st_dev or parent.st_ino <= 0
+                for parent in (binding.source_parent, binding.target_parent))):
+        raise IdentityEvidenceRejected('STOP: evidence scratch root/parent/mount binding mismatch')
+    value, content = evidence.filesystem, evidence.content
+    _safe_file(value)
+    if (value.st_dev != binding.root_identity.st_dev
+            or (value.size, value.mtime_ns) != (action.expected_size, action.expected_mtime_ns)
+            or content.algorithm != 'sha256' or content.coverage != 'FULL'
+            or content.bytes_hashed != value.size or re.fullmatch('[0-9a-f]{64}', content.digest) is None):
+        raise IdentityEvidenceRejected('STOP: invalid filesystem/full-content evidence')
+
+
+def _current_parent(root: int, parts: tuple[str, ...], stack: ExitStack,
+                    expected: DirectoryIdentity | None, mount_id: int) -> int:
+    fd = root
+    for part in parts[:-1]:
+        fd = os.open(part, fs._DIRECTORY, dir_fd=fd)
+        stack.enter_context(fs._held_evidence_fd(fd))
+        fs._secure_directory(fd)
+        if os.fstat(fd).st_dev != os.fstat(root).st_dev or fs._mount_id(fd) != mount_id:
+            raise IdentityEvidenceRejected('STOP: parent mount crossing')
+    if expected is not None and _directory(fd) != expected:
+        raise IdentityEvidenceRejected('STOP: original action parent replaced')
+    return fd
+
+
+def _locator_comparison(locator: str, parent: int, evidence: FileIdentityEvidence | None,
+                        stack: ExitStack, mount_id: int, pin_fd: int | None = None
+                        ) -> tuple[LocatorComparison, int | None]:
+    name = fs._locator(locator)[-1]
+    try:
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return LocatorComparison(locator, 'ABSENT', None, None, 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', ()), None
+    current = _file_stat(info)
+    _safe_file(current)
+    fd = os.open(name, fs._FILE, dir_fd=parent)
+    stack.enter_context(fs._held_evidence_fd(fd))
+    if fs._mount_id(fd) != mount_id:
+        raise IdentityEvidenceRejected('STOP: file mount crossing')
+    observed, content = _hash_file(fd)
+    if current != observed or _file_stat(os.stat(name, dir_fd=parent, follow_symlinks=False)) != observed:
+        raise IdentityEvidenceReconciliationRequired('STOP: locator changed during comparison')
+    numeric, content_match, physical = 'UNKNOWN', 'UNKNOWN', 'UNKNOWN'
+    if evidence is not None:
+        expected = evidence.filesystem
+        # Rename changes ctime; it detects mutations within a read, not across rename.
+        attributes = ('st_dev', 'st_ino', 'size', 'mtime_ns', 'file_type', 'nlink', 'mode', 'uid', 'gid')
+        numeric = 'MATCH' if all(getattr(observed, k) == getattr(expected, k) for k in attributes) else 'MISMATCH'
+        content_match = 'MATCH' if content == evidence.content else 'MISMATCH'
+        if pin_fd is not None:
+            pin = _file_stat(os.fstat(pin_fd))
+            if (pin.st_dev, pin.st_ino) != (expected.st_dev, expected.st_ino):
+                raise IdentityEvidenceRejected('STOP: live file pin binding changed')
+            physical = 'MATCH' if (observed.st_dev, observed.st_ino) == (pin.st_dev, pin.st_ino) else 'MISMATCH'
+    return LocatorComparison(locator, 'PRESENT', observed, content, numeric, content_match, physical, ()), fd
+
+
 def _write_record(fd: int, raw: bytes) -> None:
     remaining = memoryview(raw)
     while remaining:
@@ -248,26 +319,9 @@ class ScratchIdentitySession:
 
     def _validate_record(self, evidence: FileIdentityEvidence, manifest: ExecutionManifest,
                          action: ManifestAction, index: int, manifest_sha256: str) -> None:
-        if (evidence.schema != _SCHEMA or evidence.version != _VERSION
-                or evidence.manifest_id != manifest.manifest_id or evidence.manifest_sha256 != manifest_sha256
-                or evidence.action != action or evidence.action_index != index):
-            raise IdentityEvidenceRejected('STOP: evidence version/manifest/action binding mismatch')
-        binding, mount, filesystem = evidence.binding, self._mount, self._filesystem
-        if (binding.root != str(self.root) or binding.root_identity != DirectoryIdentity(*filesystem._root_identity)
-                or (binding.mount_id, binding.mount_fstype, binding.mount_source,
-                    binding.mount_point, binding.mount_fs_root, binding.mount_record_sha256, binding.mount_table_sha256)
-                != (mount.mount_id, mount.fstype, mount.source, str(mount.point), str(mount.fs_root),
-                    _digest(mount.raw), _digest(tuple(m.raw for m in filesystem._mounts)))
-                or any(parent.st_dev != binding.root_identity.st_dev or parent.st_ino <= 0
-                    for parent in (binding.source_parent, binding.target_parent))):
-            raise IdentityEvidenceRejected('STOP: evidence scratch root/parent/mount binding mismatch')
-        value, content = evidence.filesystem, evidence.content
-        _safe_file(value)
-        if (value.st_dev != binding.root_identity.st_dev
-                or (value.size, value.mtime_ns) != (action.expected_size, action.expected_mtime_ns)
-                or content.algorithm != 'sha256' or content.coverage != 'FULL'
-                or content.bytes_hashed != value.size or re.fullmatch('[0-9a-f]{64}', content.digest) is None):
-            raise IdentityEvidenceRejected('STOP: invalid filesystem/full-content evidence')
+        _validate_record(evidence, manifest, action, index, manifest_sha256, root=self.root,
+            root_identity=DirectoryIdentity(*self._filesystem._root_identity),
+            mount=self._mount, mounts=self._filesystem._mounts)
 
     def _check_artifact_parent(self, parent: int) -> None:
         journal._check_parent(self.evidence_path, parent)
@@ -425,47 +479,12 @@ class ScratchIdentitySession:
 
     def _current_parent(self, root: int, parts: tuple[str, ...], stack: ExitStack,
                         expected: DirectoryIdentity) -> int:
-        fd = root
-        for part in parts[:-1]:
-            fd = os.open(part, fs._DIRECTORY, dir_fd=fd)
-            stack.enter_context(fs._held_evidence_fd(fd))
-            fs._secure_directory(fd)
-            if (os.fstat(fd).st_dev != expected.st_dev
-                    or fs._mount_id(fd) != self._filesystem._mount_id):
-                raise IdentityEvidenceRejected('STOP: parent mount crossing')
-        if _directory(fd) != expected:
-            raise IdentityEvidenceRejected('STOP: original action parent replaced')
-        return fd
+        return _current_parent(root, parts, stack, expected, self._filesystem._mount_id)
 
     def _locator_comparison(self, locator: str, parent: int, evidence: FileIdentityEvidence,
                             stack: ExitStack) -> tuple[LocatorComparison, int | None]:
-        name = fs._locator(locator)[-1]
-        try:
-            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        except FileNotFoundError:
-            return LocatorComparison(locator, 'ABSENT', None, None, 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', ()), None
-        current = _file_stat(info)
-        _safe_file(current)  # Never open/hash symlinks, multiple hardlinks or special files.
-        fd = os.open(name, fs._FILE, dir_fd=parent)
-        stack.enter_context(fs._held_evidence_fd(fd))
-        if fs._mount_id(fd) != evidence.binding.mount_id:
-            raise IdentityEvidenceRejected('STOP: file mount crossing')
-        observed, content = _hash_file(fd)
-        if current != observed or _file_stat(os.stat(name, dir_fd=parent, follow_symlinks=False)) != observed:
-            raise IdentityEvidenceReconciliationRequired('STOP: locator changed during comparison')
-        # Rename legitimately changes ctime. It only detects mutations within a read.
-        expected = evidence.filesystem
-        attributes = ('st_dev', 'st_ino', 'size', 'mtime_ns', 'file_type', 'nlink', 'mode', 'uid', 'gid')
-        numeric_match = all(getattr(observed, key) == getattr(expected, key) for key in attributes)
-        physical = 'UNKNOWN'
-        if not self._closed and self._pin_fd is not None:
-            pin = _file_stat(os.fstat(self._pin_fd))
-            if (pin.st_dev, pin.st_ino) != (expected.st_dev, expected.st_ino):
-                raise IdentityEvidenceRejected('STOP: live file pin binding changed')
-            physical = 'MATCH' if (observed.st_dev, observed.st_ino) == (pin.st_dev, pin.st_ino) else 'MISMATCH'
-        return LocatorComparison(locator, 'PRESENT', observed, content,
-            'MATCH' if numeric_match else 'MISMATCH',
-            'MATCH' if content == evidence.content else 'MISMATCH', physical, ()), fd
+        return _locator_comparison(locator, parent, evidence, stack, self._filesystem._mount_id,
+            self._pin_fd if not self._closed else None)
 
     def compare(self, manifest: ExecutionManifest, action: ManifestAction, *,
                 action_index: int) -> IdentityComparison:

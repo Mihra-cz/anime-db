@@ -397,7 +397,7 @@ E2B journal/filesystem lifecycle zůstává pevný; úplné pořadí s E3B gates
 uchovává pozorované device/inode/metadata a plný content hash v odděleném E3A
 artefaktu. Journal frames se nemění a tuto evidence nenesou. Ani persistent
 dev/inode a shodný obsah po ztrátě živého důkazu neprokazují původ fyzického inode.
-Reconciliation/recovery po restartu nejsou implementované.
+Read-only restart inspekci poskytuje E4A níže; recovery není implementované.
 
 Session je jednorázová i při odmítnutí; descriptors se při návratu/chybě zavřou
 a artefakty zůstanou pro diagnostiku. Žádné automatické retry/continuation,
@@ -450,7 +450,7 @@ D06 approval a schema se nemění. **NAS execution není autorizovaná.**
 strict načtení a read-only porovnání jedné MOVE/QUARANTINE action. Samostatná E3A
 nezapisuje journal ani neprovádí rename; E3B ji používá jako povinnou podmínku
 scratch coordination. Evidence format, journal frames a transitions se nemění.
-Read-only crash reconciliation engine zatím neexistuje. Evidence ani výsledek
+Read-only restart inspekce E4A je popsaná níže. Evidence ani výsledek
 MATCH nejsou execution authority, READY_FOR_EXECUTION, FS_VERIFIED, COMPLETE či
 DB reconciliation.
 
@@ -562,8 +562,8 @@ inspekce jeho původního scratch kontextu; živý inode důkaz je již ztracen�
 To umožňuje deterministicky simulovat ztrátu in-memory evidence, **neotevírá
 existující root po skutečném restartu**. Pro child-process crash testy zbývají
 pouze persistent bytes a E1 diagnostic history; žádné restart writer API.
-Budoucí read-only reconciliation musí tuto nejistotu zachovat a samostatně
-vyřešit bezpečnou autorizovanou inspekci persistent scratch contextu.
+Samostatná E4A níže umožňuje read-only inspekci persistent scratch kontextu
+v novém procesu a tuto nejistotu zachovává.
 
 Plný hash velkých videí bude vyžadovat celý soubor přečíst; nynější capture jej
 čte dvakrát a comparison znovu. Paměť zůstává bounded, ale I/O a čas jsou
@@ -651,7 +651,7 @@ E2B-MINOR-01; bezpečný cleanup pokračuje a žádný nejistý close se neopaku
 
 Crash testy deterministicky ukončují child proces nad tmp_path. Po jeho ztrátě
 zbývá jen strict byte diagnostika a read-only E1 historie, nikdy restart execution.
-**Read-only restart reconciliation engine, recovery, rollback a resume stále
+E4A níže doplňuje read-only restart inspekci. **Recovery, rollback a resume stále
 neexistují.** Persistent inode/metadata/hash neprokazují nepřerušenou historii inode.
 
 Limit 8 MiB patří scratch mechanismu, není produkční omezení velikosti videa.
@@ -664,6 +664,62 @@ durability. **ARM64/RPi5 a NAS mount capabilities jsou neověřené.** Produkčn
 executor, maintenance boundary, globální lock a DB reconciliation chybějí.
 Generate-manifest/dry-run/CLI nemají cestu k execution; Naming/Hierarchy/Metadata,
 D06, schema a otevřené INFO-1/INFO-2 se nemění. **NAS execution není autorizovaná.**
+
+## E4A: Read-only restart inspekce
+
+[API](../app/target_execution_reconciliation.py)
+`inspect_scratch_action(manifest, action, action_index=..., scratch_root=...,
+journal_path=..., evidence_path=...)` otevře pouze existující E2A scratch root
+v privátním adresáři pod `/tmp` a jeho původní sousední E3B artefakty.
+Nevytváří execution session, writer ani adresář. Nemá CLI ani napojení na
+produkční manifest/preflight, scanner, startup či DB. Nezávislé review E4A
+dopadlo PASS.
+
+Používá stejné strict manifest/action, E1 journal a E3A evidence validátory,
+nofollow dirfds, private regular/single-link file checks a scratch mount policy.
+Kořen a cesty artefaktů odmítne před validátory, které mohou lstatovat root;
+symlinky nenásleduje. Artefakty drží pouze read-only se shared nonblocking flock,
+kontroluje jejich file/parent binding a závěrečnou stabilitu observations.
+Neexistující či unsafe artefakt nebrání bezpečné diagnostice ostatních vstupů.
+Unsafe parent/root však neopravňuje k čtení obsahu přes tuto cestu.
+
+Frozen report obsahuje manifest/action/index/root, journal status a poslední
+validní zaznamenanou fázi konkrétní action, validitu a načtený record evidence,
+obě locator observations, rozpory, důvody STOP a diagnostiku. `VALID` označuje
+validované pozorované bytes; neprokazuje úplnost historie ani acknowledgement
+původního writera/capture. Poškozená historie zachová pouze validovaný prefix.
+Ztrátu celých posledních frames nelze ze zbývajícího validního prefixu dokázat:
+`history_completeness` i `capture_acknowledgement` proto zůstávají `UNKNOWN`.
+Checksum odhaluje poškození, nikoli cílené přepsání a přepočítání checksumu
+po ztrátě původního živého artefakt anchor.
+
+| Pole | Význam |
+| --- | --- |
+| `observed_state` | `SOURCE_ONLY`, `TARGET_ONLY`, `BOTH_PRESENT`, `BOTH_ABSENT`, `UNSAFE` nebo `UNKNOWN`; pouze aktuální pozorování |
+| `content_match` | Plný SHA-256 a byte count proti validní evidence; bez ní `UNKNOWN` |
+| `filesystem_match` | Shoda numerických metadat včetně dev/inode, bez ctime měněného rename; bez evidence `UNKNOWN` |
+| `physical_identity_match`, `identity_continuity` | Vždy `UNKNOWN`: nový descriptor nenahrazuje původní živý inode pin |
+| `outcome`, `manual_review_required` | Vždy `STOP`, `True`; ani shodný obsah a metadata neopravňují k pokračování |
+
+Source i target present, oba absent, změněný obsah/metadata, unsafe soubor,
+neplatný binding nebo nedostatek důkazů mají konkrétní STOP důvod. Target-only
+při PENDING je nezaznamenaný filesystem progress k vyhodnocení, nikoli odhad
+provedeného rename. Zaznamenané FS_APPLIED/FS_VERIFIED při chybějícím targetu
+je rozpor. **PENDING nedokazuje rename, FS_APPLIED nedokazuje DB aktualizaci
+a FS_VERIFIED nedokazuje COMPLETE.** Ani případné pozdější fáze v E1 historii
+se nepotvrzují jako aktuální DB stav.
+
+API nic nepřesouvá, nepřejmenovává, nevytváří parents, nevolá fsync,
+nepíše journal/evidence/DB, nevybírá opravu a neprovádí rollback/resume.
+Nevzniká COMPLETE ani DB_RECONCILED. Scratch hranice 8 MiB a exclusive ownership
+zůstávají; nejde o produkční recovery, reboot/mount recovery ani NAS capability.
+
+Testy ukončí původní proces přes SIGKILL při PENDING před rename, po rename před
+FS_APPLIED, po FS_APPLIED a po FS_VERIFIED. Další nový proces provede inspekci;
+parent vyžaduje úspěšný exit i závěrečný assertion marker, takže předčasný exit 0
+není PASS. Audit odmítá write syscalls a vytvoření execution kontextu;
+scratch bytes/hash, paths a metadata kromě kernelových read access times
+se porovnávají před/po každé inspekci. **NAS execution není autorizovaná.**
 
 ## Externí pre-execution gates
 
