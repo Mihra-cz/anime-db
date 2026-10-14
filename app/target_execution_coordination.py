@@ -1,6 +1,7 @@
 """One fresh scratch action: durable identity -> journal -> rename -> verification.
 
-No production entry point, existing-root/writer adoption, retry or DB lifecycle.
+E5A adds one explicit scratch Video/SQLite lane, inside the same writer lifetime.
+No production entry point, existing-root/writer adoption, retry or resume.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from .target_execution_identity import (
 )
 from .target_execution_journal import DurableJournal, ReconciliationRequired
 from .target_execution_manifest import ExecutionManifest, ManifestAction, JournalEntry
+from .target_execution_database import _ScratchVideoDatabase
 
 
 class ScratchCoordinationStopped(ValueError):
@@ -39,6 +41,11 @@ class ScratchJournalReconciliationRequired(ScratchCoordinationStopped):
     reconciliation_required = True
 
 
+class ScratchDatabaseReconciliationRequired(ScratchCoordinationStopped):
+    """STOP: DB conflict/error or commit/verification is uncertain; no retry."""
+    reconciliation_required = True
+
+
 @dataclass(frozen=True)
 class VerifiedScratchOutcome:
     manifest_id: str
@@ -47,6 +54,20 @@ class VerifiedScratchOutcome:
     journal_path: Path
     verification: ScratchVerification
     outcome: str = 'FS_VERIFIED'
+
+
+@dataclass(frozen=True)
+class CompletedScratchVideoOutcome:
+    manifest_id: str
+    action_id: str
+    action_index: int
+    journal_path: Path
+    database_path: Path
+    video_id: int
+    relative_path: str
+    root_folder: str
+    verification: ScratchVerification
+    outcome: str = 'COMPLETE'
 
 
 class ScratchActionSession:
@@ -72,6 +93,7 @@ class ScratchActionSession:
             session._spent = session._closed = False
             session._stop_class = ScratchCoordinationStopped
             session._stop_phase = 'VALIDATION'
+            session._database = None
             return session
         except BaseException as exc:
             identity.__exit__(type(exc), exc, exc.__traceback__)
@@ -92,6 +114,11 @@ class ScratchActionSession:
     @property
     def evidence_path(self) -> Path:
         return self._identity.evidence_path
+
+    @property
+    def database_path(self) -> Path:
+        """Caller-prepared test SQLite only; the session never creates its schema."""
+        return self.root.parent / (self.root.name + '.sqlite')
 
     def _check_identity_anchor(self, manifest, action, captured, fd, parent, before, phase) -> None:
         # The held artefact prevents inode reuse. Rehashed replacement records
@@ -128,6 +155,14 @@ class ScratchActionSession:
 
     def execute(self, manifest: ExecutionManifest, action: ManifestAction, *,
                 action_index: int) -> VerifiedScratchOutcome:
+        return self._execute(manifest, action, action_index=action_index, reconcile_video=False)
+
+    def execute_video_move(self, manifest: ExecutionManifest, action: ManifestAction, *,
+                           action_index: int) -> CompletedScratchVideoOutcome:
+        """One MOVE into this fresh session's adjacent test SQLite; no reopen API."""
+        return self._execute(manifest, action, action_index=action_index, reconcile_video=True)
+
+    def _execute(self, manifest, action, *, action_index, reconcile_video):
         if os.getpid() != self._pid:
             raise ScratchCoordinationStopped('STOP: inherited scratch coordination session', 'VALIDATION')
         with self._mutex:
@@ -143,6 +178,11 @@ class ScratchActionSession:
                         or len(manifest.payload.actions) != 1 or action != manifest.payload.actions[0]
                         or action.action not in {'MOVE', 'QUARANTINE'}):
                     raise ScratchCoordinationStopped('STOP: exactly one sealed MOVE/QUARANTINE at index 0 required', phase)
+                if reconcile_video:
+                    phase = 'DB_VALIDATION'
+                    self._filesystem._validate(manifest, action)
+                    self._database = _ScratchVideoDatabase(self._filesystem, self.database_path, manifest, action)
+                    phase = 'VALIDATION'
                 with self._filesystem.observe(manifest, action) as observation:
                     phase = 'EVIDENCE_CAPTURE'
                     captured = self._identity.capture(manifest, action, action_index=0)
@@ -175,6 +215,13 @@ class ScratchActionSession:
                             raise ScratchJournalReconciliationRequired('STOP: journal durability/integrity failed', state) from exc
                         self._check_identity_anchor(manifest, action, captured, fd, parent, before, state)
 
+                    def require_journal():
+                        try:
+                            if writer.inspect_live(manifest) != tuple(history):
+                                raise ReconciliationRequired('STOP: live journal differs from acknowledged history')
+                        except Exception as exc:
+                            raise ScratchJournalReconciliationRequired('STOP: journal identity/history unconfirmed', phase) from exc
+
                     phase = 'PENDING'
                     append('PENDING')
                     phase = 'PRE_RENAME_IDENTITY'
@@ -197,14 +244,46 @@ class ScratchActionSession:
                     self._require_identity(manifest, action, captured, fd, parent, before, phase, moved=True)
                     phase = 'FS_VERIFIED'
                     append('FS_VERIFIED')
+                    if reconcile_video:
+                        phase = 'JOURNAL_DB_GATE'
+                        require_journal()
+                        phase = 'DB_PRE_UPDATE'
+                        if observation.verify() != verification:
+                            raise ScratchFilesystemReconciliationRequired('STOP: physical verification changed', phase)
+                        self._require_identity(manifest, action, captured, fd, parent, before, phase, moved=True)
+                        phase = 'DB_UPDATE'
+                        self._database._apply()
+                        phase = 'DB_COMMIT'
+                        self._database._commit()
+                        phase = 'DB_VERIFICATION'
+                        self._database._verify_stored()
+                        if observation.verify() != verification:
+                            raise ScratchFilesystemReconciliationRequired('STOP: physical verification changed', phase)
+                        self._require_identity(manifest, action, captured, fd, parent, before, phase, moved=True)
+                        phase = 'DB_RECONCILED'
+                        require_journal()
+                        append('DB_RECONCILED')
+                        phase = 'DB_FINAL_VERIFICATION'
+                        self._database._verify_stored()
+                        if observation.verify() != verification:
+                            raise ScratchFilesystemReconciliationRequired('STOP: physical verification changed', phase)
+                        self._require_identity(manifest, action, captured, fd, parent, before, phase, moved=True)
+                        phase = 'COMPLETE'
+                        require_journal()
+                        append('COMPLETE')
+                        return CompletedScratchVideoOutcome(manifest.manifest_id, action.action_id, action_index,
+                            self.journal_path, self.database_path, action.object_id, self._database.relative_path,
+                            self._database.root_folder, verification)
                     return VerifiedScratchOutcome(manifest.manifest_id, action.action_id, action_index,
                         self.journal_path, verification)
             except (KeyboardInterrupt, SystemExit) as exc:
                 primary = exc
                 if self._stop_phase == phase and self._stop_class is ScratchFilesystemReconciliationRequired:
                     pass  # An identity read at a journal boundary already classified the interruption.
-                elif phase in {'JOURNAL_CREATE', 'PENDING', 'FS_APPLIED', 'FS_VERIFIED'}:
+                elif phase in {'JOURNAL_CREATE', 'JOURNAL_DB_GATE', 'PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE'}:
                     self._stop_class = ScratchJournalReconciliationRequired
+                elif phase.startswith('DB_'):
+                    self._stop_class = ScratchDatabaseReconciliationRequired
                 elif phase in {'EVIDENCE_CAPTURE', 'EVIDENCE_VERIFY', 'PRE_RENAME_IDENTITY',
                         'RENAME', 'VERIFICATION', 'IDENTITY_VERIFICATION'}:
                     self._stop_class = ScratchFilesystemReconciliationRequired
@@ -218,6 +297,8 @@ class ScratchActionSession:
             except Exception as exc:
                 if isinstance(exc, ScratchCoordinationStopped):
                     error = exc
+                elif phase.startswith('DB_'):
+                    error = ScratchDatabaseReconciliationRequired('STOP: ' + str(exc), phase)
                 elif (isinstance(exc, (RenameReconciliationRequired, IdentityEvidenceReconciliationRequired))
                         or phase in {'EVIDENCE_VERIFY', 'PRE_RENAME_IDENTITY', 'IDENTITY_VERIFICATION',
                             'VERIFICATION', 'FS_APPLIED', 'FS_VERIFIED'}
@@ -240,7 +321,8 @@ class ScratchActionSession:
     def _finish(self, writer, primary: BaseException | None) -> None:
         self._closed = True
         failures = []
-        for resource, category in ((writer, ScratchJournalReconciliationRequired),
+        for resource, category in ((self._database, ScratchDatabaseReconciliationRequired),
+                (writer, ScratchJournalReconciliationRequired),
                 (self._identity, ScratchFilesystemReconciliationRequired)):
             if resource is None:
                 continue

@@ -419,7 +419,8 @@ zůstávají neověřené.
 pouze jednu action v novém scratch rootu a novém journalu: durable PENDING,
 rename, durable FS_APPLIED, nezávislá inode/path verification a durable FS_VERIFIED.
 Při execution drží živý source inode pin jako důkaz identity přes rename.
-Session je jednorázová, bez FAILED assertions, DB_RECONCILED/COMPLETE a resume.
+Původní `execute()` je jednorázové, bez FAILED assertions,
+DB_RECONCILED/COMPLETE a resume; explicitní E5A lane je popsaná níže.
 
 [E3A](V6_EXECUTION_MANIFEST.md#e3a-scratch-only-durable-file-identity-evidence)
 ukládá samostatný durable artefakt se skutečnými filesystem metadata včetně
@@ -453,13 +454,26 @@ COMPLETE.
 Každý nejednoznačný výsledek znamená STOP/reconciliation; automatický retry ani
 resume neexistují.
 
-Dokončené E1–E4A foundations platí pouze pro povolený izolovaný rozsah.
+[E5A](V6_EXECUTION_MANIFEST.md#e5a-jeden-scratch-video-move-a-testovací-sqlite)
+přidává `ScratchActionSession.execute_video_move()` pro jednu syntetickou MOVE
+action a sousední testovací SQLite. Původní E1 writer i živé identity pins
+zůstávají u stejného koordinátoru až do konce. Manifest fingerprint, původní
+Video locators a přesný rozsah patches se ověří před rename; další patches
+jiných objektů jsou STOP. Po FS_VERIFIED se jedním podmíněným SQL UPDATE změní
+pouze `Video.relative_path` a `Video.root_folder`, bez ORM/scanner lifecycle.
+Úspěšný commit, nové nezávislé DB čtení, nezměněné ostatní rows, běžný planner
+loader a shodný post-state hash jsou podmínky DB_RECONCILED. Nová kontrola
+živého journalu, fyzické identity a uloženého DB stavu předchází COMPLETE.
+Nejasný commit/acknowledgement znamená STOP bez retry nebo fyzického rollbacku.
+Nezávislé review E5A dopadlo PASS; E4A dál pouze diagnostikuje.
+
+Dokončené E1–E5A foundations platí pouze pro povolený izolovaný rozsah.
 Scratch testy nejsou důkazem produkční capability: ARM64/RPi5 není provozně
 ověřené, NAS filesystem rename capability ani power-loss durability produkčního
 úložiště nejsou potvrzené. Limit 8 MiB je scratch hranice, nikoli produkční limit;
 opakované plné hashování velkých videí vyžaduje samostatné výkonnostní posouzení.
 Produkční executor, globální execution lock, maintenance boundary,
-DB reconciliation, automatické resume, rollback, crash recovery a NAS physical
+produkční DB reconciliation, automatické resume, rollback, crash recovery a NAS physical
 execution nejsou implementované. **NOT AUTHORIZED FOR NAS EXECUTION.**
 
 Otevřené INFO-1 (možný fd leak při selhání `os.fdopen` po `os.dup` v E1)

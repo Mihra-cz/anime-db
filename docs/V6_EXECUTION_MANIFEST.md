@@ -721,6 +721,84 @@ není PASS. Audit odmítá write syscalls a vytvoření execution kontextu;
 scratch bytes/hash, paths a metadata kromě kernelových read access times
 se porovnávají před/po každé inspekci. **NAS execution není autorizovaná.**
 
+## E5A: Jeden scratch Video MOVE a testovací SQLite
+
+`ScratchActionSession.execute_video_move(manifest, action, action_index=0)`
+integruje jednu syntetickou Video MOVE action s callerem připravenou SQLite
+na read-only property `session.database_path`: sousední `<root-name>.sqlite`.
+Přijímá pouze nově vytvořený privátní E2A scratch context pod `/tmp`.
+Nezávislé review E5A dopadlo PASS.
+
+Původní `execute()` dál končí na FS_VERIFIED a zavírá své prostředky.
+Obě metody sdílejí původní jednorázové jádro koordinátoru; E5A pokračuje uvnitř
+stejného volání, než se writer a identity pins uzavřou. Jediným vlastníkem
+jediného nového E1 writeru je koordinátor. E1 frame format, hash chain,
+transitions a strict validators se nemění. Žádné otevření uzavřeného writeru,
+append mimo E1, převzetí existujícího rootu ani restart/resume API nevzniká.
+
+### DB scope a předpoklady
+
+[DB helper](../app/target_execution_database.py) přijímá pouze odvozenou
+sousední testovací DB. Nezakládá schema, nemigruje a nespouští app/scanner.
+Soubor musí již existovat jako privátní independent regular file na stejném
+scratch mountu. Nofollow descriptors a původní parent/file/mount binding
+zůstávají držené po celou operaci. Platí původní exclusive scratch ownership,
+včetně DB a jejích sidecars; nejde o produkční maintenance boundary proti
+cizím same-UID nebo privilegovaným změnám cest. Chybějící, prázdná nebo nepodporovaná SQLite,
+WAL, `-wal`/`-shm` nebo existující `-journal` znamenají STOP před RW připojením.
+Kontrola [SQLite headeru](https://sqlite.org/fileformat.html#file_format_version_numbers)
+zabraňuje otevření WAL ještě před SQL PRAGMA kontrolou. Používá se `mode=rw`
+bez implicitního vytvoření DB a DELETE transaction journal se synchronous FULL.
+Sdílený E3A full-file reader omezuje také scratch DB fingerprint na 8 MiB.
+
+Před rename se získá SQLite `BEGIN IMMEDIATE` writer reservation. Ověří se
+celý manifest-bound DB fingerprint, jedno pozitivní integer Video.id,
+source/size/mtime, původní relative_path/root_folder a cílová DB kolize.
+Manifest musí mít právě tuto MOVE action a použitelný expected post-state hash.
+Všechny locator patches musí přesně odpovídat skutečným změnám tohoto Video
+na action.target a jeho první path component. Další Video/title/collection/
+subtitle patch, vynechaná potřebná změna či nesprávné before/after znamenají
+STOP; patches se nepřiřazují k action odhadem. Pokud root_folder zůstává stejný,
+nový patch se nevymýšlí. Video.filename a všechny ostatní columns zůstávají.
+
+### Pořadí a ověření
+
+1. DB preconditions a writer reservation, pak nezměněné E3B capture/journal/
+   rename/identity gates až po durable FS_VERIFIED.
+2. Nová strict kontrola živého E1 journalu, independent filesystem verification
+   a plný live inode/content MATCH. Teprve potom jeden podmíněný UPDATE videos,
+   který nastaví pouze relative_path/root_folder podle přesných before hodnot.
+3. Před commitem kontrola všech app rows a schema/user_version proti projekci
+   právě těchto povolených fields jednoho Video; kontrolují se i trigger side
+   effects. Vše je v jedné explicitní SQLite transakci, bez savepointů a ORM flush.
+4. Jediný commit. Při nejasném výsledku žádný druhý pokus. Po potvrzení se získá
+   nová prázdná writer reservation pro následné čtení a journal acknowledgement.
+5. Jiná read-only connection ověří skutečně uložené rows/schema. Běžný
+   `load_planner_context` a scratch inventory musí přes existující
+   `post_state_hash_from_manifest` vrátit schválený expected hash. Znovu se ověří
+   živý inode, obsah i manifest-bound journal; až potom E1 append DB_RECONCILED.
+6. Nové DB/post-state/filesystem/identity/journal ověření, pak E1 COMPLETE.
+   Teprve po acknowledged append a cleanupu se vrací CompletedScratchVideoOutcome.
+
+Při DB chybě před commitem se neuložená transakce při uzavření zruší. Fyzický
+přesun se nevrací. Po commitu se DB neopravuje zpět a ani nejistý commit se
+neopakuje. Journal/evidence bytes a částečný filesystem stav se zachovají pro
+inspekci. Celý parseable frame po ztrátě fsync acknowledgement stále není
+potvrzení writera: E5A vrací STOP i při zachovaném DB_RECONCILED/COMPLETE frame.
+Session je spotřebovaná po úspěchu i chybě; další execute nic neopakuje.
+
+E4A zůstává beze změny read-only: po zániku původního procesu nezná kontinuitu
+inode ani původní commit/journal acknowledgement a neposkytuje resume authority.
+Kill testy pokrývají FS_VERIFIED před DB update, commit před DB_RECONCILED
+a DB_RECONCILED před COMPLETE. Původní proces je skutečně SIGKILL/reaped;
+nový inspekční proces musí dokončit assertions a vydat terminal marker.
+Exit 0 před assertions není PASS. Inspekce porovnává bytes/hash a metadata
+scratch artefaktů před/po; FD cleanup a ResourceWarning se kontrolují samostatně.
+
+E5A neprovádí dávky, produkční DB reconciliation, recovery/rollback/resume,
+NAS operace ani purge/delete actions. Standardní interní SQLite transaction
+journal nenahrazuje E1 evidence. **NAS execution není autorizovaná.**
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.
