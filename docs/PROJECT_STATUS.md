@@ -467,7 +467,17 @@ loader a shodný post-state hash jsou podmínky DB_RECONCILED. Nová kontrola
 Nejasný commit/acknowledgement znamená STOP bez retry nebo fyzického rollbacku.
 Nezávislé review E5A dopadlo PASS; E4A dál pouze diagnostikuje.
 
-Dokončené E1–E5A foundations platí pouze pro povolený izolovaný rozsah.
+[E5B](V6_EXECUTION_MANIFEST.md#e5b-read-only-fsdb-diagnostika-po-přerušení) je
+HOTOVO; nezávislé review dopadlo PASS. Nové read-only API spojuje E4A
+filesystem/journal/evidence report s původní SQLite odvozenou pouze z existujícího
+scratch rootu. Sidecar `-journal`, `-wal`, `-shm` či nejistý stav brání SQLite
+připojení; původní soubory zůstávají zachované. Čistou stabilní DB čte v `mode=ro`
+s běžným zamykáním. Rozlišuje schválené původní/cílové locators, rozpory,
+neinspectovatelnou DB a UNKNOWN. Shoda locatorů neprokazuje plný DB post-state,
+původní commit acknowledgement ani inode continuity. Výsledek je vždy STOP
+a ruční vyhodnocení, bez execution authority či recovery v originálu nebo kopii.
+
+Dokončené E1–E5B foundations platí pouze pro povolený izolovaný rozsah.
 Scratch testy nejsou důkazem produkční capability: ARM64/RPi5 není provozně
 ověřené, NAS filesystem rename capability ani power-loss durability produkčního
 úložiště nejsou potvrzené. Limit 8 MiB je scratch hranice, nikoli produkční limit;

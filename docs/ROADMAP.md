@@ -180,7 +180,7 @@ a produkční rollout v8→v9 je dokončený; shared Season persistence je podpo
 P2B pure canonical parser core je implementovaný. Read-only Target Planner
 foundation s D01–D06, post-state projection a řízený container locator contract
 jsou implementované. Immutable execution manifest, deterministic serialization,
-read-only dry-run/preflight a execution foundations E1–E5A jsou implementované
+read-only dry-run/preflight a execution foundations E1–E5B jsou implementované
 v povoleném izolovaném rozsahu. E3B vynucuje durable identity evidence pro jednu
 scratch action. E4A read-only restart inspekce existujícího scratch kontextu
 po zániku původního procesu vrací diagnostiku a STOP bez recovery authority;
@@ -189,6 +189,10 @@ recovery.
 E5A integruje jednu syntetickou scratch Video MOVE action s testovací SQLite
 a validovanými DB_RECONCILED/COMPLETE; je HOTOVO po nezávislém review s výsledkem
 PASS.
+E5B read-only diagnostika přerušené scratch Video MOVE operace je HOTOVO
+po nezávislém review s výsledkem PASS. Spojuje E4A s inspekcí původní E5A
+SQLite, odmítá SQLite připojení při sidecarech a vždy vrací STOP k ručnímu
+rozhodnutí.
 Produkční mount capability je neověřená; globální lock/maintenance boundary,
 produkční executor/DB reconciliation, automatické resume, rollback/crash recovery
 a NAS cleanup zůstávají samostatnou budoucí prací.
@@ -267,8 +271,9 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 | E3B | [Povinná integrace evidence do scratch execution](V6_EXECUTION_MANIFEST.md#e3b-povinná-durable-identity-evidence-ve-scratch-coordination) | HOTOVO |
 | E4A | [Read-only restart inspekce](V6_EXECUTION_MANIFEST.md#e4a-read-only-restart-inspekce) | HOTOVO |
 | E5A | [Jeden scratch Video MOVE a testovací SQLite](V6_EXECUTION_MANIFEST.md#e5a-jeden-scratch-video-move-a-testovací-sqlite) | HOTOVO |
+| E5B | [Read-only FS/DB diagnostika po přerušení](V6_EXECUTION_MANIFEST.md#e5b-read-only-fsdb-diagnostika-po-přerušení) | HOTOVO |
 
-HOTOVO u E1–E5A označuje pouze dokončený povolený izolovaný rozsah.
+HOTOVO u E1–E5B označuje pouze dokončený povolený izolovaný rozsah.
 E1 poskytuje append-only durable journal, writer lock, strict loading a validovaný
 lifecycle; načtená historie vyžaduje reconciliation, bez automatického resume.
 E2A používá `RENAME_NOREPLACE` bez overwrite/fallbacku a explicitní

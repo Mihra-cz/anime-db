@@ -799,6 +799,80 @@ E5A neprovádí dávky, produkční DB reconciliation, recovery/rollback/resume,
 NAS operace ani purge/delete actions. Standardní interní SQLite transaction
 journal nenahrazuje E1 evidence. **NAS execution není autorizovaná.**
 
+## E5B: Read-only FS/DB diagnostika po přerušení
+
+**HOTOVO; nezávislé review dopadlo PASS.**
+
+[API](../app/target_execution_diagnostics.py)
+`inspect_scratch_video_move(manifest, action, action_index=0, scratch_root=...,
+journal_path=..., evidence_path=...)` diagnostikuje jednu sealed immutable Video
+MOVE action existujícího E5A scratch kontextu. Nepřijímá externí DB cestu:
+jediná povolená SQLite je `<scratch-root>.sqlite` vedle rootu podle E5A.
+FS a journal inspekce používají nezměněné E4A API a původní E1/E3A validátory.
+Nevytváří se execution session, writer, nový manifest ani journal format.
+
+Před SQLite připojením se ověřují lexical scratch boundary, přesný manifest,
+action/index a patches, nofollow private root/parent/regular single-link files,
+mount binding, stabilita stat/hash a původní SQLite header s rollback format
+versions 1/1. Všechny `-journal`, `-wal`, `-shm` se zkoumají bez SQLite;
+přítomný, prázdný, unsafe nebo nejistý sidecar znamená `SQLITE_SIDECAR`,
+`DB_UNINSPECTED` / `UNINSPECTED`, žádné SQLite připojení k originálu. Report
+zachová dostupná metadata a bezpečně čitelné hashe artefaktů. Existence sidecaru
+**nedokazuje hot journal ani necommitnutou transakci**. Soubory se nemažou,
+neopravují a neotevírají kvůli recovery, ani na kopii.
+
+Pouze čistá stabilní SQLite se čte přes `mode=ro`, s `query_only`, běžným
+SQLite locking a explicitní read transaction. `immutable` ani `nolock` se
+nepoužívají. Ověřuje se DELETE mode, strukturální čitelnost, správné `Video.id`,
+`relative_path`, `root_folder`, size/mtime preconditions a případné jiné Video
+na source/target locatoru. Před a po čtení se kontrolují držené descriptors,
+file/parent/root/mount bindings, hashe, nepřítomnost sidecarů a stabilita E1
+journalu i identity evidence. Opakovaná E4A inspekce musí souhlasit s prvním
+pozorováním. Změna či nejistota znamená STOP, nikoli nový pokus o opravu.
+Stále platí exclusive scratch ownership z E4A/E5A; nejde o maintenance boundary
+proti cizím same-UID či privilegovaným zásahům.
+
+Limit WAL/SHM: E5B před SQLite připojením odmítá existující `-journal`, `-wal`
+i `-shm` a předpokládá exclusive scratch ownership. Pokud jiný proces tento
+předpoklad poruší a vytvoří `-wal` mezi kontrolou a otevřením, může i SQLite
+`mode=ro` vytvořit nebo změnit `-shm`. Následná kontrola změnu detekuje a vrátí
+STOP, ale již provedenému zápisu zpětně nezabrání. Limit nebrání dokončení
+scratch-only E5B, nenahrazuje však budoucí produkční maintenance boundary
+a writer exclusion.
+
+Frozen report obsahuje manifest/action ID a index, E4A report včetně poslední
+validní zaznamenané fáze, SQLite status, aktuální/očekávané Video locators,
+schválené patches, size/mtime, dostupné SQLite artefakty, konkrétní rozpory
+a STOP reasons. `locator_state` rozlišuje:
+
+| Stav | Význam |
+| --- | --- |
+| `OLD_VALUES` | Locators odpovídají schváleným before hodnotám a preconditions |
+| `NEW_VALUES` | Locators odpovídají schváleným after hodnotám a preconditions |
+| `MISMATCH` | Jiný locator, size/mtime, chybějící/nesprávné Video.id či kolize |
+| `UNINSPECTED` | Originál nebylo bezpečné otevřít přes SQLite |
+| `UNKNOWN` | Čtení selhalo nebo nelze doložit stabilní výsledek |
+
+TARGET_ONLY + OLD_VALUES znamená pozorovaný fyzický progress při původních DB
+locators; SOURCE_ONLY + NEW_VALUES opačný rozpor. TARGET_ONLY + NEW_VALUES
+popisuje souhlas pozorovaných cest, s inode continuity stále UNKNOWN.
+BOTH_PRESENT/BOTH_ABSENT nevybírají správný soubor. Journal phase nikdy
+nedokazuje aktuální FS/DB; parseable frame neprokazuje fsync acknowledgement,
+hash neprokazuje inode continuity, FS_VERIFIED není DB_RECONCILED a DB_RECONCILED
+není automaticky COMPLETE. Shoda dvou locator polí ani porovnání s původním DB
+fingerprintem neprokazují plný DB post-state; `full_post_state` a
+`transaction_state` zůstávají UNKNOWN.
+
+`outcome=STOP` a `manual_review_required=True` platí i po zaznamenaném COMPLETE.
+API nezapisuje DB/journal/evidence, nemění locators, nepřejmenovává soubory,
+neprovádí resume/rollback/recovery ani neuděluje execution authority.
+Nové procesní testy používají existující E5A kill/reap/snapshot harness, reálný
+SIGKILL včetně otevřené SQLite transakce se zachovaným rollback journalem a nový
+inspekční proces s povinným terminal assertion markerem. Předčasný exit 0 není
+PASS. Kontrolují bytes/hash/metadata před/po, nulové SQLite připojení při
+sidecarech, skutečné SQLite zamykání, změny během inspekce a FD/ResourceWarning.
+Produkční DB/NAS, RPi5 ani produkční startup/scanner/executor se nepoužívají.
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.
