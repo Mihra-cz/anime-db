@@ -45,6 +45,14 @@ VIDEO_VARIANT_CONTENT_VARIANTS = frozenset(
 )
 
 
+class VideoVariantValidationError(ValueError):
+    """A deliberate validation message safe for an HTTP response."""
+
+    def __init__(self, public_message: str):
+        super().__init__(public_message)
+        self.public_message = public_message
+
+
 _UNSPECIFIED_GROUP = object()
 _UNSPECIFIED_TITLE = object()
 
@@ -157,7 +165,7 @@ class StructuralABPreview:
 def _normalize_manual_label(value: str) -> str:
     normalized = value.strip()
     if not normalized:
-        raise ValueError("Označení video variant group nesmí být prázdné.")
+        raise VideoVariantValidationError("Označení video variant group nesmí být prázdné.")
     return normalized
 
 
@@ -171,7 +179,7 @@ def _normalize_taxonomy_value(
     if not normalized:
         return None
     if normalized not in supported:
-        raise ValueError(f"Neplatná hodnota {field_label}.")
+        raise VideoVariantValidationError(f"Neplatná hodnota {field_label}.")
     return normalized
 
 
@@ -185,14 +193,14 @@ def _titles_match(first: CatalogTitle | None, second: CatalogTitle | None) -> bo
 
 def _require_persisted_title(title: CatalogTitle | None) -> CatalogTitle:
     if title is None or title.id is None:
-        raise ValueError("Video variant group musí patřit existujícímu CatalogTitle.")
+        raise VideoVariantValidationError("Video variant group musí patřit existujícímu CatalogTitle.")
     return title
 
 
 def validate_video_variant_group(group: VideoVariantGroup) -> None:
     """Validate the persisted manual authority fields without changing the group."""
     if group.id is None:
-        raise ValueError("Video variant group musí být před přiřazením uložená.")
+        raise VideoVariantValidationError("Video variant group musí být před přiřazením uložená.")
     _require_persisted_title(group.catalog_title)
     _normalize_manual_label(group.manual_label)
     _normalize_taxonomy_value(
@@ -279,7 +287,7 @@ def validate_video_variant_assignment(
         else cast(CatalogTitle | None, catalog_title)
     )
     if title is None or not _titles_match(title, group.catalog_title):
-        raise ValueError(
+        raise VideoVariantValidationError(
             "Video lze přiřadit pouze k variant group ze stejného CatalogTitle."
         )
 
@@ -303,7 +311,7 @@ def _validate_direct_duplicate_assignment(
     for other in related:
         other_group = _known_group_identity(other)
         if target is not None and other_group is not None and target != other_group:
-            raise ValueError(CONFIRMED_DUPLICATE_VARIANT_CONFLICT_MESSAGE)
+            raise VideoVariantValidationError(CONFIRMED_DUPLICATE_VARIANT_CONFLICT_MESSAGE)
 
 
 def assign_video_variant_group(
@@ -425,7 +433,7 @@ def _load_variant_title(
         CatalogTitle.catalog_collection_id == collection_id,
     ))
     if title is None or title.collection is None:
-        raise ValueError("Video varianty lze spravovat pouze u platné části kolekce.")
+        raise VideoVariantValidationError("Video varianty lze spravovat pouze u platné části kolekce.")
     return title
 
 
@@ -469,7 +477,7 @@ def update_video_variant_group_for_title(
         None,
     )
     if group is None:
-        raise ValueError("Video variant group nebyla v této části nalezena.")
+        raise VideoVariantValidationError("Video variant group nebyla v této části nalezena.")
     update_video_variant_group(
         group,
         manual_label=manual_label,
@@ -493,12 +501,12 @@ def delete_empty_video_variant_group(
         None,
     )
     if group is None:
-        raise ValueError("Video variant group nebyla v této části nalezena.")
+        raise VideoVariantValidationError("Video variant group nebyla v této části nalezena.")
     assigned_count = session.scalar(select(func.count(Video.id)).where(
         Video.video_variant_group_id == group.id
     )) or 0
     if assigned_count:
-        raise ValueError(
+        raise VideoVariantValidationError(
             "Neprázdnou video variant group nelze odstranit. Nejprve videa "
             "přeřaďte nebo jejich assignment vyčistěte."
         )
@@ -515,11 +523,11 @@ def _normalized_drafts(
     for draft in drafts:
         key = draft.key.strip()
         if not key or key == "null" or key in by_key:
-            raise ValueError("Návrh variant groups obsahuje neplatný nebo duplicitní klíč.")
+            raise VideoVariantValidationError("Návrh variant groups obsahuje neplatný nebo duplicitní klíč.")
         if draft.existing_group_id is not None:
             group = groups_by_id.get(draft.existing_group_id)
             if group is None:
-                raise ValueError("Vybraná video variant group nepatří k této části.")
+                raise VideoVariantValidationError("Vybraná video variant group nepatří k této části.")
             normalized = VariantGroupDraft(
                 key=key,
                 existing_group_id=group.id,
@@ -612,7 +620,7 @@ def _validate_prospective_duplicate_groups(
             len(current_identities) <= 1
             or any(video.id in prospective for video in component)
         ):
-            raise ValueError(CONFIRMED_DUPLICATE_VARIANT_CONFLICT_MESSAGE)
+            raise VideoVariantValidationError(CONFIRMED_DUPLICATE_VARIANT_CONFLICT_MESSAGE)
 
 
 def _prospective_collision_counts(
@@ -702,11 +710,11 @@ def preview_video_variant_assignments(
         sorted((int(video_id), key.strip()) for video_id, key in assignments)
     )
     if not normalized_assignments:
-        raise ValueError("Vyberte alespoň jedno video.")
+        raise VideoVariantValidationError("Vyberte alespoň jedno video.")
     if len({video_id for video_id, _key in normalized_assignments}) != len(
         normalized_assignments
     ):
-        raise ValueError("Jedno video je v návrhu uvedeno vícekrát.")
+        raise VideoVariantValidationError("Jedno video je v návrhu uvedeno vícekrát.")
     normalized_drafts = _normalized_drafts(title, drafts)
     drafts_by_key = {draft.key: draft for draft in normalized_drafts}
     selected_by_id = {
@@ -714,7 +722,7 @@ def preview_video_variant_assignments(
         if video.id in {video_id for video_id, _key in normalized_assignments}
     }
     if len(selected_by_id) != len(normalized_assignments):
-        raise ValueError("Výběr obsahuje cizí nebo neexistující video.")
+        raise VideoVariantValidationError("Výběr obsahuje cizí nebo neexistující video.")
     if workflow == "collision":
         collision_identities = {
             logical_episode_identity(video, catalog_title=title)
@@ -731,7 +739,7 @@ def preview_video_variant_assignments(
                 for video in selected_by_id.values()
             )
         ):
-            raise ValueError(
+            raise VideoVariantValidationError(
                 "Jako různé varianty lze potvrdit pouze aktivní reprezentace "
                 "stejné bezpečně známé canonical epizody."
             )
@@ -747,7 +755,7 @@ def preview_video_variant_assignments(
         else:
             draft = drafts_by_key.get(key)
             if draft is None:
-                raise ValueError("Návrh odkazuje na chybějící video variant group.")
+                raise VideoVariantValidationError("Návrh odkazuje na chybějící video variant group.")
             target_identity = _draft_identity(draft)
             target_label = _draft_display_label(draft)
         prospective[video_id] = target_identity
@@ -784,7 +792,7 @@ def preview_video_variant_assignments(
         any(identity is None for identity in target_identities)
         or len(set(target_identities)) != expected_distinct_count
     ):
-        raise ValueError(
+        raise VideoVariantValidationError(
             "Potvrzení různých variant vyžaduje pro každé video jinou "
             "potvrzenou non-NULL group."
         )
@@ -881,7 +889,7 @@ def apply_video_variant_assignments(
         require_distinct=require_distinct,
     )
     if not expected_fingerprint or preview.fingerprint != expected_fingerprint:
-        raise ValueError(
+        raise VideoVariantValidationError(
             "Náhled variant už neodpovídá aktuálnímu stavu. Načtěte jej znovu."
         )
     title = _load_variant_title(session, collection_id, catalog_title_id)
@@ -917,17 +925,17 @@ def apply_video_variant_assignments(
             )
             for video in title.videos
         }:
-            raise ValueError("Variant assignment nesmí měnit canonical numbering.")
+            raise VideoVariantValidationError("Variant assignment nesmí měnit canonical numbering.")
         if duplicate_before != {
             video.id: (video.duplicate_of_video_id, video.duplicate_primary_missing)
             for video in title.videos
         }:
-            raise ValueError("Variant assignment nesmí měnit duplicate vztahy.")
+            raise VideoVariantValidationError("Variant assignment nesmí měnit duplicate vztahy.")
         if hierarchy_before != {
             video.id: (video.catalog_title_id, video.catalog_collection_id)
             for video in title.collection.videos
         }:
-            raise ValueError("Variant assignment nesmí měnit hierarchy membership.")
+            raise VideoVariantValidationError("Variant assignment nesmí měnit hierarchy membership.")
     return preview
 
 
@@ -1049,7 +1057,7 @@ def preview_repeated_variant_lane(
     title = _load_variant_title(session, collection_id, catalog_title_id)
     proposal = repeated_variant_lane_proposal(title)
     if proposal is None or proposal.fingerprint != expected_proposal_fingerprint:
-        raise ValueError(
+        raise VideoVariantValidationError(
             "Hromadný návrh už neodpovídá bezpečnému aktuálnímu patternu."
         )
     assignments = tuple(
@@ -1143,7 +1151,7 @@ def preview_structural_ab_confirmation(
         if item.video_a_id == video_a_id and item.video_b_id == video_b_id
     ), None)
     if proposal is None or proposal.fingerprint != expected_proposal_fingerprint:
-        raise ValueError("A/B návrh už neodpovídá aktuálnímu bezpečnému stavu.")
+        raise VideoVariantValidationError("A/B návrh už neodpovídá aktuálnímu bezpečnému stavu.")
     assignment_preview = preview_video_variant_assignments(
         session,
         collection_id,
@@ -1184,7 +1192,7 @@ def apply_structural_ab_confirmation(
         expected_proposal_fingerprint=expected_proposal_fingerprint,
     )
     if preview.assignment_preview.fingerprint != expected_assignment_fingerprint:
-        raise ValueError(
+        raise VideoVariantValidationError(
             "A/B náhled už neodpovídá aktuálnímu stavu. Načtěte jej znovu."
         )
     title = _load_variant_title(session, collection_id, catalog_title_id)
@@ -1203,5 +1211,5 @@ def apply_structural_ab_confirmation(
             or second.video_variant_group_id is None
             or first.video_variant_group_id == second.video_variant_group_id
         ):
-            raise ValueError("A/B potvrzení nevytvořilo očekávaný atomický stav.")
+            raise VideoVariantValidationError("A/B potvrzení nevytvořilo očekávaný atomický stav.")
     return preview

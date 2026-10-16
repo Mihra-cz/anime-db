@@ -72,6 +72,8 @@ from .media_edit_save import (
     MediaEditValidationError, apply_media_edits, load_media_videos,
 )
 from .collection_presentation import (
+    RECAP_SEASON_CONTEXT_ERROR,
+    RecapSeasonContextError,
     build_collection_presentation,
     is_collection_part_artwork_worthy,
     validate_effective_recap_season_context,
@@ -202,6 +204,7 @@ from .video_variants import (
     VIDEO_VARIANT_CONTENT_VARIANT_CHOICES,
     VIDEO_VARIANT_RELEASE_SOURCE_CHOICES,
     VariantGroupDraft,
+    VideoVariantValidationError,
     apply_structural_ab_confirmation,
     apply_video_variant_assignments,
     assign_video_catalog_title,
@@ -853,7 +856,7 @@ def _variant_choice_from_form(form, key: str, *, allow_null: bool = False):
     try:
         group_id = int(choice)
     except (TypeError, ValueError) as exc:
-        raise ValueError("Vyberte existující variant group nebo vytvoření nové.") from exc
+        raise VideoVariantValidationError("Vyberte existující variant group nebo vytvoření nové.") from exc
     return key, VariantGroupDraft(key=key, existing_group_id=group_id)
 
 
@@ -887,14 +890,14 @@ def _variant_preview_payload_from_form(form):
             raw_video_id, key = str(raw).split("|", 1)
             assignments.append((int(raw_video_id), key))
         except (TypeError, ValueError) as exc:
-            raise ValueError("Náhled variant obsahuje neplatné video.") from exc
+            raise VideoVariantValidationError("Náhled variant obsahuje neplatné video.") from exc
     drafts = []
     for key in dict.fromkeys(str(value) for value in form.getlist("draft_key")):
         raw_existing = str(form.get(f"draft_existing_{key}") or "").strip()
         try:
             existing_group_id = int(raw_existing) if raw_existing else None
         except ValueError as exc:
-            raise ValueError("Náhled obsahuje neplatnou variant group.") from exc
+            raise VideoVariantValidationError("Náhled obsahuje neplatnou variant group.") from exc
         drafts.append(VariantGroupDraft(
             key=key,
             existing_group_id=existing_group_id,
@@ -3457,9 +3460,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return local_redirect_response(return_to)
 
     def variant_workflow_error(request: Request, collection_id: int, error: object):
+        if isinstance(error, VideoVariantValidationError):
+            message = error.public_message
+        elif isinstance(error, RecapSeasonContextError):
+            message = RECAP_SEASON_CONTEXT_ERROR
+        else:
+            logger.exception("Video variant workflow failed for collection %s", collection_id)
+            message = "Změny video variant nebyly přijaty. Obnovte stránku a zkuste to znovu."
         if "application/json" in request.headers.get("accept", ""):
-            return JSONResponse({"error": str(error)}, status_code=400)
-        response = hierarchy_review_context(request, collection_id, error=str(error))
+            return JSONResponse({"error": message}, status_code=400)
+        response = hierarchy_review_context(request, collection_id, error=message)
         response.status_code = 400
         return response
 
@@ -3594,7 +3604,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if str(form.get("confirm_delete_group") or "").casefold() not in {
                         "true", "on", "1",
                     }:
-                        raise ValueError("Odstranění prázdné variant group je nutné potvrdit.")
+                        raise VideoVariantValidationError("Odstranění prázdné variant group je nutné potvrdit.")
                     delete_empty_video_variant_group(
                         session,
                         collection_id,
@@ -3603,7 +3613,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                     message = "Prázdná video variant group byla odstraněna."
                 else:
-                    raise ValueError("Neplatná operace video variant group.")
+                    raise VideoVariantValidationError("Neplatná operace video variant group.")
                 session.commit()
         except (TypeError, ValueError) as exc:
             return variant_workflow_error(request, collection_id, exc)
@@ -3639,7 +3649,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 assignments, drafts = tuple(assignments_list), tuple(drafts_list)
                 heading = "Náhled potvrzení různých video variant"
             else:
-                raise ValueError("Neplatný variant assignment workflow.")
+                raise VideoVariantValidationError("Neplatný variant assignment workflow.")
             with sessions() as session:
                 preview = preview_video_variant_assignments(
                     session,
@@ -3681,11 +3691,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if str(form.get("confirm_variant_assignment") or "").casefold() not in {
                 "true", "on", "1",
             }:
-                raise ValueError("Variant assignment je nutné explicitně potvrdit.")
+                raise VideoVariantValidationError("Variant assignment je nutné explicitně potvrdit.")
             title_id = int(str(form.get("catalog_title_id") or ""))
             workflow = str(form.get("workflow") or "").strip()
             if workflow not in {"manual_bulk", "collision"}:
-                raise ValueError("Neplatný variant assignment workflow.")
+                raise VideoVariantValidationError("Neplatný variant assignment workflow.")
             assignments, drafts = _variant_preview_payload_from_form(form)
             with sessions() as session:
                 apply_video_variant_assignments(
@@ -3763,7 +3773,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if str(form.get("confirm_variant_assignment") or "").casefold() not in {
                 "true", "on", "1",
             }:
-                raise ValueError("Hromadné potvrzení variant je nutné potvrdit checkboxem.")
+                raise VideoVariantValidationError("Hromadné potvrzení variant je nutné potvrdit checkboxem.")
             title_id = int(str(form.get("catalog_title_id") or ""))
             assignments, drafts = _variant_preview_payload_from_form(form)
             drafts_by_key = {draft.key: draft for draft in drafts}
@@ -3780,7 +3790,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 expected = str(form.get("expected_fingerprint") or "")
                 if current_preview.fingerprint != expected:
-                    raise ValueError(
+                    raise VideoVariantValidationError(
                         "Hromadný náhled už neodpovídá aktuálnímu stavu."
                     )
                 apply_video_variant_assignments(
@@ -3855,7 +3865,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if str(form.get("confirm_ab_variant") or "").casefold() not in {
                 "true", "on", "1",
             }:
-                raise ValueError("A/B canonical potvrzení je nutné potvrdit checkboxem.")
+                raise VideoVariantValidationError("A/B canonical potvrzení je nutné potvrdit checkboxem.")
             title_id = int(str(form.get("catalog_title_id") or ""))
             _assignments, drafts = _variant_preview_payload_from_form(form)
             drafts_by_key = {draft.key: draft for draft in drafts}

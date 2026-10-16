@@ -18,6 +18,7 @@ from .physical_naming_formatters import (
     format_supplementary_component,
 )
 from .physical_naming_service import (
+    PhysicalNamingValidationError,
     confirm_physical_naming_choice, physical_naming_context_from_models,
     reconfirm_physical_naming_choice, reset_physical_naming_choice,
 )
@@ -27,7 +28,7 @@ from .naming_review import (
 )
 
 
-class StaleNamingForm(ValueError):
+class StaleNamingForm(PhysicalNamingValidationError):
     pass
 
 
@@ -129,18 +130,18 @@ def apply_naming_review_decision(session, owner, index, *, action, fingerprint, 
         return reset_physical_naming_choice(session, owner)
     if action == 'reconfirm':
         if unit.resolution.choice is None or unit.effective is None or not unit.effective.can_confirm:
-            raise ValueError('Tento název nelze znovu potvrdit. Vyber použitelný název.')
+            raise PhysicalNamingValidationError('Tento název nelze znovu potvrdit. Vyber použitelný název.')
         return reconfirm_physical_naming_choice(session, owner)
     if action != 'save':
-        raise ValueError('Neznámá naming akce.')
+        raise PhysicalNamingValidationError('Neznámá naming akce.')
     if unit.resolution.authority == 'inherited':
-        raise ValueError('Zděděný prefix se potvrzuje u nadřazené naming položky.')
+        raise PhysicalNamingValidationError('Zděděný prefix se potvrzuje u nadřazené naming položky.')
     candidate = (make_naming_candidate(index.context, key, custom_text, 'custom')
                  if candidate_key == 'custom' else next((c for c in unit.candidates if c.key == candidate_key), None))
     if candidate is None:
-        raise ValueError('Vyber aktuální kandidát nebo vlastní název.')
+        raise PhysicalNamingValidationError('Vyber aktuální kandidát nebo vlastní název.')
     if not candidate.can_confirm:
-        raise ValueError(' '.join(candidate.diagnostic_messages) or 'Název nelze potvrdit.')
+        raise PhysicalNamingValidationError(' '.join(candidate.diagnostic_messages) or 'Název nelze potvrdit.')
     if candidate.key == 'saved':
         return reconfirm_physical_naming_choice(session, owner)
     return confirm_physical_naming_choice(

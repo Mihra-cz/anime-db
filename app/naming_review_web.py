@@ -1,4 +1,5 @@
 """Physical Naming routes; GET/preview are read-only and POST writes choices only."""
+import logging
 from urllib.parse import urlencode, urlsplit
 
 from fastapi import HTTPException, Request
@@ -12,6 +13,10 @@ from .naming_review_service import (
     StaleNamingForm, apply_naming_review_decision,
     validate_naming_fingerprint,
 )
+from .physical_naming_service import PhysicalNamingValidationError
+
+
+logger = logging.getLogger(__name__)
 
 FILTERS = (('pending', 'K vyřízení'), ('roots', 'Root názvy'), ('titles', 'Názvy částí'), ('confirmed', 'Potvrzené'), ('all', 'Vše'))
 
@@ -96,7 +101,7 @@ def install_naming_review_routes(app, templates, sessions, safe_redirect_target,
             index, layout_index = owner_index(session, owner)
             unit = index.units[scope, owner.id]
             try: validate_naming_fingerprint(unit, form.get('fingerprint'))
-            except StaleNamingForm as exc: return JSONResponse({'detail': str(exc)}, status_code=409)
+            except StaleNamingForm as exc: return JSONResponse({'detail': exc.public_message}, status_code=409)
             candidate = make_naming_candidate(index.context, unit.owner_key, form.get('custom_text', ''), 'custom')
         return JSONResponse({
             'preview_text': candidate.sanitized.preview_text, 'chars': candidate.sanitized.chars,
@@ -118,9 +123,14 @@ def install_naming_review_routes(app, templates, sessions, safe_redirect_target,
                 session.commit()
             except ValueError as exc:
                 session.rollback()
+                if isinstance(exc, PhysicalNamingValidationError):
+                    message = exc.public_message
+                else:
+                    logger.exception('Physical naming decision failed for %s %s', scope, owner_id)
+                    message = 'Volbu pojmenování se nepodařilo uložit. Obnovte stránku a zkuste to znovu.'
                 preview = make_naming_candidate(index.context, (scope, owner.id), submitted['custom_text'], 'custom') if submitted['candidate_key'] == 'custom' else None
                 return render(request, index, status='all', collection_id=index.units[scope, owner.id].collection_id,
-                    error=str(exc), submitted=submitted, custom_preview=preview, status_code=409 if isinstance(exc, StaleNamingForm) else 400,
+                    error=message, submitted=submitted, custom_preview=preview, status_code=409 if isinstance(exc, StaleNamingForm) else 400,
                     return_to=return_to, layout_index=layout_index)
         return redirect_response(return_to)
 

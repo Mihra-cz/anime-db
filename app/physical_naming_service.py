@@ -19,12 +19,20 @@ from .physical_naming import (
 from .physical_naming_types import MAX_PHYSICAL_TEXT_LENGTH, PHYSICAL_NAMING_CHOICE_KINDS
 
 
+class PhysicalNamingValidationError(ValueError):
+    """A deliberate validation message safe for an HTTP response."""
+
+    def __init__(self, public_message: str):
+        super().__init__(public_message)
+        self.public_message = public_message
+
+
 def validate_physical_text(value: str) -> str:
     if not isinstance(value, str) or any(unicodedata.category(char) in {"Cc", "Cs", "Zl", "Zp"} for char in value):
-        raise ValueError("Physical naming text cannot contain controls, line breaks or surrogates.")
+        raise PhysicalNamingValidationError("Physical naming text cannot contain controls, line breaks or surrogates.")
     normalized = value.strip()
     if not normalized or len(normalized) > MAX_PHYSICAL_TEXT_LENGTH:
-        raise ValueError("Physical naming text must contain 1–500 Unicode characters.")
+        raise PhysicalNamingValidationError("Physical naming text must contain 1–500 Unicode characters.")
     return normalized
 
 
@@ -116,7 +124,7 @@ def _owner_key(session: Session, owner: CatalogCollection | CatalogTitle) -> tup
     if (not isinstance(owner, (CatalogCollection, CatalogTitle))
         or object_session(owner) is not session or not inspect(owner).persistent
         or owner in session.deleted):
-        raise ValueError("Naming owner must be persisted in the caller's session.")
+        raise PhysicalNamingValidationError("Naming owner must be persisted in the caller's session.")
     with session.no_autoflush:
         return ("collection" if isinstance(owner, CatalogCollection) else "title", owner.id)
 
@@ -141,13 +149,13 @@ def confirm_physical_naming_choice(
 ) -> PhysicalNamingChoice:
     text = validate_physical_text(physical_text)
     if choice_kind not in PHYSICAL_NAMING_CHOICE_KINDS:
-        raise ValueError("Unknown physical naming choice kind.")
+        raise PhysicalNamingValidationError("Unknown physical naming choice kind.")
     scope, owner_id = _owner_key(session, owner)
     if choice_kind != "parent_prefix" and source_title_id is not None:
-        raise ValueError("Source title provenance is only valid for parent_prefix.")
+        raise PhysicalNamingValidationError("Source title provenance is only valid for parent_prefix.")
     timestamp = now or datetime.now(timezone.utc)
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-        raise ValueError("Naming confirmation timestamp must be timezone-aware.")
+        raise PhysicalNamingValidationError("Naming confirmation timestamp must be timezone-aware.")
     with session.no_autoflush:
         collections = [owner_id] if scope == "collection" else (
             [owner.catalog_collection_id] if owner.catalog_collection_id is not None else []
@@ -158,10 +166,10 @@ def confirm_physical_naming_choice(
         import json
         structure = json.loads(basis)["structure"]
         if structure is None or source_title_id not in structure["parent_title_ids"]:
-            raise ValueError("Choose a relevant parent title for this supplementary context.")
+            raise PhysicalNamingValidationError("Choose a relevant parent title for this supplementary context.")
         parent = resolve_physical_name(context, "title", source_title_id)
         if not parent.ready or parent.effective_text != text:
-            raise ValueError("parent_prefix must copy the currently resolved parent text.")
+            raise PhysicalNamingValidationError("parent_prefix must copy the currently resolved parent text.")
     choice = _find_choice(session, scope, owner_id)
     if choice is None:
         choice = PhysicalNamingChoice(**{
@@ -197,13 +205,13 @@ def reconfirm_physical_naming_choice(
     scope, owner_id = _owner_key(session, owner)
     choice = _find_choice(session, scope, owner_id)
     if choice is None:
-        raise ValueError("There is no physical naming choice to reconfirm.")
+        raise PhysicalNamingValidationError("There is no physical naming choice to reconfirm.")
     if choice.choice_kind != "parent_prefix":
         return confirm_physical_naming_choice(session, owner, choice.physical_text, choice.choice_kind, now=now)
     validate_physical_text(choice.physical_text)
     timestamp = now or datetime.now(timezone.utc)
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-        raise ValueError("Naming confirmation timestamp must be timezone-aware.")
+        raise PhysicalNamingValidationError("Naming confirmation timestamp must be timezone-aware.")
     try:
         source = json.loads(choice.basis_snapshot_json).get("source_title_id")
     except (ValueError, AttributeError):
