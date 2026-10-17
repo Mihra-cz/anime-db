@@ -276,6 +276,20 @@ class ScratchIdentitySession:
         """Internal allocation over a live minted root; never reopen a path."""
         if bound_index is not None and (type(bound_index) is not int or bound_index not in (0, 1)):
             raise IdentityEvidenceRejected('STOP: only pair action indices 0 and 1 are supported')
+        return cls._allocate_context(filesystem, owns_filesystem=owns_filesystem, bound_index=bound_index)
+
+    @classmethod
+    def _new_execution_context(cls, filesystem, owner, index):
+        if (type(index) is not int or index < 0 or filesystem is not owner._filesystem
+                or owner._closed or owner._manifest is None or not owner._mutex.locked()
+                or os.getpid() != owner._pid or not index < len(owner._manifest.payload.actions)):
+            raise IdentityEvidenceRejected('STOP: live sequential owner/index required')
+        context = cls._allocate_context(filesystem, owns_filesystem=False, bound_index=index)
+        context._execution_owner = owner
+        return context
+
+    @classmethod
+    def _allocate_context(cls, filesystem, *, owns_filesystem, bound_index):
         suffix = '.identity.json' if bound_index is None else f'.identity-{bound_index}.json'
         session = object.__new__(cls)
         session._filesystem = filesystem
@@ -284,6 +298,7 @@ class ScratchIdentitySession:
         if owns_filesystem:
             session._resources.enter_context(filesystem)
         session._bound_index = bound_index
+        session._execution_owner = None
         session._pid = os.getpid()
         session._mutex = threading.Lock()
         session._attempted = session._closed = session._poisoned = session._durable = False
@@ -313,7 +328,9 @@ class ScratchIdentitySession:
             self._filesystem._validate(manifest, action)
             if (type(index) is not int or (self._bound_index is not None and index != self._bound_index)
                     or not 0 <= index < len(manifest.payload.actions)
-                    or action != manifest.payload.actions[index] or action.action not in {'MOVE', 'QUARANTINE'}):
+                    or action != manifest.payload.actions[index] or (action.action not in {'MOVE', 'QUARANTINE'}
+                        and not (action.action == 'KEEP' and self._execution_owner is not None
+                            and self._execution_owner._identity_authorized(self, manifest, action, index)))):
                 raise IdentityEvidenceRejected('STOP: exact MOVE/QUARANTINE action/index required')
             return hashlib.sha256(manifest_to_json(manifest).encode('utf-8')).hexdigest()
         except (ValueError, TypeError, AttributeError) as exc:
@@ -401,7 +418,8 @@ class ScratchIdentitySession:
                         observation._check(self._filesystem, manifest, action)
                         fs._check_source(observation._source_fd, observation._source_parent,
                             fs._locator(action.source)[-1], action, observation._before)
-                        fs._absent(observation._target_parent, fs._locator(action.target)[-1])
+                        if action.action != 'KEEP':
+                            fs._absent(observation._target_parent, fs._locator(action.target)[-1])
                         if (before != _file_stat(os.fstat(observation._source_fd))
                                 or _file_stat(info) != _file_stat(self._check_artifact(fd, parent))
                                 or os.pread(fd, _MAX_RECORD_BYTES + 1, 0) != raw):
@@ -533,7 +551,8 @@ class ScratchIdentitySession:
                         raise IdentityEvidenceReconciliationRequired('STOP: evidence changed during comparison')
                 present = [item for item in (source, target) if item.presence == 'PRESENT']
                 outcome, diagnostics = 'UNKNOWN', ('STOP: no unique source/target state',)
-                if len(present) == 1:
+                if len(present) == 1 or (action.action == 'KEEP' and self._execution_owner is not None
+                        and source == target and source.presence == 'PRESENT'):
                     current = present[0]
                     metadata = ('size', 'mtime_ns', 'file_type', 'nlink', 'mode', 'uid', 'gid')
                     if (current.content_match == 'MISMATCH' or current.physical_identity_match == 'MISMATCH'

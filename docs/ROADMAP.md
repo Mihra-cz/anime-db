@@ -180,7 +180,7 @@ a produkční rollout v8→v9 je dokončený; shared Season persistence je podpo
 P2B pure canonical parser core je implementovaný. Read-only Target Planner
 foundation s D01–D06, post-state projection a řízený container locator contract
 jsou implementované. Immutable execution manifest, deterministic serialization,
-read-only dry-run/preflight a execution foundations E1–E6B jsou implementované
+read-only dry-run/preflight a execution foundations E1–E7A jsou implementované
 v povoleném izolovaném rozsahu. E3B vynucuje durable identity evidence pro jednu
 scratch action. E4A read-only restart inspekce existujícího scratch kontextu
 po zániku původního procesu vrací diagnostiku a STOP bez recovery authority;
@@ -202,6 +202,10 @@ PASS. Výchozí produkční writery nezapojuje a produkční readiness gates nes
 Úzký ručně schvalovaný rollback jedné přerušené scratch Video MOVE je HOTOVO
 po nezávislém review s výsledkem PASS; obecný/produkční ani automatický rollback
 neexistuje.
+E7A sekvenčně provádí celý sealed scratch manifest (PRIMARY Video MOVE a KEEP)
+pod výhradní E6B maintenance s prefixovými R0→Rn SQLite transakcemi; nejasný
+stav znamená STOP bez automatického retry, resume či rollbacku. Je HOTOVO
+po nezávislém review s výsledkem PASS.
 Produkční mount capability je neověřená; produkční globální lock/maintenance boundary,
 produkční executor/DB reconciliation, automatické resume, obecný/produkční
 a automatický rollback, crash recovery a NAS cleanup zůstávají samostatnou
@@ -285,8 +289,9 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 | E6A | [Dvě navazující scratch Video MOVE akce](V6_EXECUTION_MANIFEST.md#e6a-dvě-navazující-scratch-video-move-akce) | HOTOVO |
 | E6B | [Lokální spolupracující maintenance boundary](V6_EXECUTION_MANIFEST.md#e6b-lokální-spolupracující-maintenance-boundary) | HOTOVO |
 | Ruční scratch rollback | [Jedna přerušená Video MOVE](V6_EXECUTION_MANIFEST.md#ručně-schválený-rollback-jedné-scratch-video-move) | HOTOVO |
+| E7A | [Sekvenční jádro pro celý sealed manifest](V6_EXECUTION_MANIFEST.md#e7a-sekvenční-execution-jádro) | HOTOVO |
 
-HOTOVO u E1–E6B označuje pouze dokončený povolený izolovaný rozsah.
+HOTOVO u E1–E7A označuje pouze dokončený povolený izolovaný rozsah.
 E1 poskytuje append-only durable journal, writer lock, strict loading a validovaný
 lifecycle; načtená historie vyžaduje reconciliation, bez automatického resume.
 E2A používá `RENAME_NOREPLACE` bez overwrite/fallbacku a explicitní

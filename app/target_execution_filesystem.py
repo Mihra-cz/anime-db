@@ -157,13 +157,15 @@ class ScratchObservation:
                 source_parts, target_parts = _locator(action.source), _locator(action.target)
                 source_parent = session._parent(source_parts, stack)
                 target_parent = session._parent(target_parts, stack)
-                _absent(source_parent, source_parts[-1])
+                if action.action != 'KEEP':
+                    _absent(source_parent, source_parts[-1])
                 target_fd = os.open(target_parts[-1], _FILE, dir_fd=target_parent)
                 stack.enter_context(_held_evidence_fd(target_fd))
                 session._check_fd(target_fd)
                 current = _check_source(target_fd, target_parent, target_parts[-1], action, self._before)
                 self._check(session, self._manifest, action)
-                _absent(source_parent, source_parts[-1])
+                if action.action != 'KEEP':
+                    _absent(source_parent, source_parts[-1])
                 _check_source(target_fd, target_parent, target_parts[-1], action, self._before)
                 return ScratchVerification(self._manifest.manifest_id, action.action_id,
                     current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
@@ -418,6 +420,9 @@ class ScratchRenameSession:
     def _validate(self, manifest: ExecutionManifest, action: ManifestAction) -> None:
         _validate_scratch_action(manifest, action, self.root, self.mount_identity)
 
+    def _keep_observation_authorized(self, manifest, action):
+        return False  # Only the internal sequential owner can grant this scope.
+
     @contextmanager
     def observe(self, manifest: ExecutionManifest, action: ManifestAction):
         """Capture read-only evidence for this live scratch session only."""
@@ -429,7 +434,8 @@ class ScratchRenameSession:
                 if self._closed or self._poisoned:
                     raise RenameRejected('scratch session unavailable for observation')
                 self._validate(manifest, action)
-                if action.action not in {'MOVE', 'QUARANTINE'}:
+                if action.action not in {'MOVE', 'QUARANTINE'} and not (
+                        action.action == 'KEEP' and self._keep_observation_authorized(manifest, action)):
                     raise RenameRejected('observation requires MOVE or QUARANTINE')
                 self._check_root()
                 source_parts, target_parts = _locator(action.source), _locator(action.target)
@@ -439,7 +445,8 @@ class ScratchRenameSession:
                 stack.enter_context(_held_evidence_fd(source_fd))
                 self._check_fd(source_fd)
                 before = _check_source(source_fd, source_parent, source_parts[-1], action)
-                _absent(target_parent, target_parts[-1])
+                if action.action != 'KEEP':
+                    _absent(target_parent, target_parts[-1])
                 self._check_root()
                 self._parent_binding(source_parts, source_parent)
                 self._parent_binding(target_parts, target_parent)

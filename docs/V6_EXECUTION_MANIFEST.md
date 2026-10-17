@@ -1095,6 +1095,67 @@ produkční maintenance/executor ani NAS/RPi5. Obecný ani produkční rollback
 a automatický rollback/recovery nadále neexistují. Externí readiness gates zůstávají
 nesplněné. **NOT AUTHORIZED FOR NAS EXECUTION.**
 
+## E7A: sekvenční execution jádro
+
+**HOTOVO; nezávislé review dopadlo PASS. NOT AUTHORIZED FOR NAS EXECUTION.**
+[Sekvenční owner](../app/target_execution_sequence.py) sdílí lifecycle akce
+s původním E6A adaptérem; SQLite lane sdílí prefixové transakční operace.
+`ScratchManifestExecution.create(private_tmp_parent)` vytváří pouze nový
+E2A root. `execute(original_manifest, maintenance_owner=exclusive_lease)`
+explicitně přijímá celý schválený sealed manifest a živého výhradního E6B
+ownera pro přesný root a jeho původní sousední testovací SQLite. Lease vlastní
+volající a musí ji držet až do návratu/STOP a cleanupu. API nemá produkční
+přepínač, execution CLI, otevření existující session ani recovery oprávnění.
+
+Podporované jsou PRIMARY Video MOVE a PRIMARY KEEP nad regular scratch
+soubory. KEEP je rovněž svázaný s přesným záznamem celého fresh plánu;
+nenahrazuje se pouhým testem existence. Má vlastní E3 durable identity evidence,
+živý inode pin, ověření původního obsahu/metadata i DB beze změny. KEEP používá
+také shodu ctime, protože na rozdíl od MOVE neprovádí rename. Zápis s obnoveným
+obsahem a mtime je proto stále STOP. KEEP má
+stejný E1 lifecycle; FS_APPLIED u něj potvrzuje ověřený no-op, nikoli rename.
+Jeho commit boundary neprovádí DML a nezvyšuje počet DB změn.
+
+Před první execution evidence/journal/DML se validuje celý původní manifest,
+jeho úplnost proti fresh R0 plánu, přesné locator patches, criticality,
+všechny source/target preconditions, lokální scratch binding a maintenance.
+Všechny původní zdroje dostanou read-only pins bez oprávnění k rename.
+Nepodporované operace/criticality, chybějící akce, cizí patches, kolize,
+obsazené source chains a nevyřešené záznamy odmítnou celý plán před execution
+zápisem. Sealed manifest se nepřepisuje ani nerozděluje na nové submanifesty.
+
+E1 zachovává immutable manifest order. Pořadí proto musí být již topologické:
+každá unikátní dependency směřuje k dřívější akci. Neznámé, duplicitní,
+vlastní a dopředné/cyklické závislosti znamenají STOP před zápisem. Engine
+nepřečísluje akce ani nemění E1 indexy. Před novým oprávněním se znovu ověří
+durable COMPLETE prefix v jediném původním E1 writeru, Rn a fyzické důkazy
+dokončených akcí. Samotný in-memory příznak nevytváří execution authority.
+
+Každý MOVE používá existující E2A `RENAME_NOREPLACE` a durability pravidla,
+samostatnou indexovanou E3 evidence a lifecycle
+PENDING → FS_APPLIED → FS_VERIFIED → DB_RECONCILED → COMPLETE.
+Veřejné E2A/E3 jednoakční API ani přísný E6A dvouakční kontrakt se nerozšiřují;
+N indexů a KEEP observation jsou dostupné jen internímu živému ownerovi.
+
+Rn je úplná row/schema projekce původního R0 a přesně schváleného prefixu
+Video patches. KEEP opakuje stejný stav; žádný mezistav se znovu nebaselineuje.
+Každý commit se nezávisle načte přes read-only SQLite spojení, porovná se celý
+obsah známých tabulek a schema, data_version, fingerprint a držené path/mount
+bindings. Finální sealed expected_post_hash se kontroluje až po poslední akci.
+
+Selhání prostřední akce zachová předchozí COMPLETE, skutečný FS/DB stav a
+všechny vytvořené důkazy; další akce nezačne. Necommitnutá transakce se při
+close zruší, potvrzené commity se nevracejí. Nejasný rename, commit, append,
+fsync, ztráta maintenance nebo cleanup znamená STOP bez retry/resume/rollback.
+PID/thread a fd ownership zůstávají omezené na původního ownera. Jednoakční
+ruční rollback neumí převzít N-akční manifest ani indexované důkazy.
+
+Společné jádro je určeno k dalšímu využití budoucím executorem, ale jeho
+scratch adaptér nadále vyžaduje nově vytvořený izolovaný root, lokální mount
+allowlist a stávající malé scratch limity. Produkční capability, admission,
+externí writery, NAS/mount/backup/readiness a power-loss důkazy se tím neřeší
+ani neoznačují za splněné. Produkční executor a automatické recovery nevznikají.
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.

@@ -15,8 +15,9 @@ from . import target_execution_identity as identity
 from . import target_execution_journal as journal
 from .database import Base
 from .models import Video
-from .target_execution_manifest import DatabaseFingerprint, LocatorPatch, post_state_hash_from_manifest
-from .target_planner_filesystem import inventory_filesystem
+from .target_execution_manifest import (DatabaseFingerprint, LocatorPatch, post_state_hash_from_manifest,
+    criticality_for_records, _patches)
+from .target_planner_filesystem import inventory_filesystem, plan_library
 from .target_planner_service import load_planner_context, readonly_planner_session
 
 
@@ -194,7 +195,66 @@ class _ScratchVideoDatabase:
             self._resources.close()
 
 
-class _ScratchPairDatabase(_ScratchVideoDatabase):
+class _ScratchPrefixDatabase(_ScratchVideoDatabase):
+    """One R0-derived prefix transaction implementation for prefix and sequence."""
+
+    def _check_stage(self, index):
+        if (type(index) is not int or not 0 <= index < len(self._manifest.payload.actions) or self._closed
+                or self._committed_count != index or index in self._applied_indices
+                or not self._connection.in_transaction or self._connection.total_changes != self._change_counts[index]
+                or self._connection.execute('PRAGMA data_version').fetchone()[0] != self._version
+                or self._fingerprint() != self._ack_fingerprint
+                or _rows(self._connection) != self._states[index] or _schema(self._connection) != self._schema):
+            raise ValueError('SQLite differs from the original sealed R0/Rn projection')
+
+    def _apply(self, index):
+        self._check_stage(index)
+        self._applied_indices.add(index)
+        action = self._manifest.payload.actions[index]
+        changed = 0
+        if action.action == 'MOVE':
+            cursor = self._connection.execute(
+                'UPDATE videos SET relative_path=?,root_folder=? WHERE id=? AND relative_path=? AND root_folder=?',
+                (action.target, action.target.split('/')[0], action.object_id,
+                    action.source, self._originals[index]['root_folder']))
+            changed = cursor.rowcount
+        if (changed != int(action.action == 'MOVE') or self._connection.total_changes != self._change_counts[index + 1]
+                or _rows(self._connection) != self._states[index + 1]
+                or _schema(self._connection) != self._schema):
+            raise ValueError('prefix locator update conflict or unapproved side effect')
+        self._check_path()
+
+    def _commit(self, index):
+        if (self._closed or index not in self._applied_indices or index in self._commit_attempts
+                or self._committed_count != index):
+            raise ValueError('prefix commit unavailable; no retry')
+        self._commit_attempts.add(index)
+        self._connection.commit()
+        if self._connection.in_transaction:
+            raise ValueError('prefix commit not acknowledged')
+        self._connection.execute('BEGIN IMMEDIATE')
+        self._committed_count += 1
+        self._ack_fingerprint = self._fingerprint()
+
+    def _verify_stored(self, index):
+        if (type(index) is not int or not 0 <= index < len(self._manifest.payload.actions) or self._closed
+                or self._committed_count != index + 1 or not self._connection.in_transaction
+                or self._connection.total_changes != self._change_counts[index + 1]
+                or self._connection.execute('PRAGMA data_version').fetchone()[0] != self._version
+                or self._fingerprint() != self._ack_fingerprint
+                or _rows(self._connection) != self._states[index + 1] or _schema(self._connection) != self._schema):
+            raise ValueError('no unchanged acknowledged prefix commit')
+        with closing(sqlite3.connect(self._uri + '?mode=ro', uri=True, timeout=0)) as fresh:
+            fresh.execute('BEGIN')
+            if _rows(fresh) != self._states[index + 1] or _schema(fresh) != self._schema:
+                raise ValueError('stored rows/schema differ from sealed Rn projection')
+        # Intermediate prefixes deliberately have no final post-state hash.
+        if index == len(self._manifest.payload.actions) - 1:
+            self._verify_post_hash()
+        self._check_path()
+
+
+class _ScratchPairDatabase(_ScratchPrefixDatabase):
     """Exactly R0 -> R1 -> R2 on one held SQLite; never re-baseline after A."""
 
     def __init__(self, filesystem, path, manifest):
@@ -250,60 +310,95 @@ class _ScratchPairDatabase(_ScratchVideoDatabase):
                     or set(patches) != set(manifest.payload.locator_patches)):
                 raise ValueError('exact complete R0 locator patches for both Videos required')
             self._states = tuple(states)
+            self._change_counts = (0, 1, 2)
             self._ack_fingerprint = manifest.payload.db_fingerprint
             self._check_stage(0)
         except BaseException as exc:
             self._resources.__exit__(type(exc), exc, exc.__traceback__)
             raise
 
-    def _check_stage(self, index):
-        if (type(index) is not int or index not in (0, 1) or self._closed
-                or self._committed_count != index or index in self._applied_indices
-                or not self._connection.in_transaction or self._connection.total_changes != index
-                or self._connection.execute('PRAGMA data_version').fetchone()[0] != self._version
-                or self._fingerprint() != self._ack_fingerprint
-                or _rows(self._connection) != self._states[index] or _schema(self._connection) != self._schema):
-            raise ValueError('SQLite differs from the original sealed R0/R1 projection')
 
-    def _apply(self, index):
-        self._check_stage(index)
-        self._applied_indices.add(index)
-        action = self._manifest.payload.actions[index]
-        cursor = self._connection.execute(
-            'UPDATE videos SET relative_path=?,root_folder=? WHERE id=? AND relative_path=? AND root_folder=?',
-            (action.target, action.target.split('/')[0], action.object_id,
-                action.source, self._originals[index]['root_folder']))
-        if (cursor.rowcount != 1 or self._connection.total_changes != index + 1
-                or _rows(self._connection) != self._states[index + 1]
-                or _schema(self._connection) != self._schema):
-            raise ValueError('pair locator update conflict or unapproved side effect')
-        self._check_path()
+class _ScratchSequenceDatabase(_ScratchPrefixDatabase):
+    """All Rn derive from sealed R0 and the exact original action prefix."""
 
-    def _commit(self, index):
-        if (self._closed or index not in self._applied_indices or index in self._commit_attempts
-                or self._committed_count != index):
-            raise ValueError('pair commit unavailable; no retry')
-        self._commit_attempts.add(index)
-        self._connection.commit()
-        if self._connection.in_transaction:
-            raise ValueError('pair commit not acknowledged')
-        self._connection.execute('BEGIN IMMEDIATE')
-        self._committed_count += 1
-        self._ack_fingerprint = self._fingerprint()
+    def __init__(self, filesystem, path, manifest):
+        self._resources = ExitStack()
+        self._filesystem, self.path, self._manifest = filesystem, path, manifest
+        self._closed = False
+        self._applied_indices, self._commit_attempts = set(), set()
+        self._committed_count = 0
+        try:
+            if path != filesystem.root.parent / (filesystem.root.name + '.sqlite'):
+                raise ValueError('original adjacent scratch SQLite required')
+            self._open()
+            if {row[1] for row in self._schema[0] if row[0] == 'table'} != set(Base.metadata.tables):
+                raise ValueError('complete known scratch application schema required')
+            self._validate_complete_plan()
+            columns = list(Video.__table__.columns.keys())
+            states, patches, counts, originals = [self._before], [], [0], []
+            for action in manifest.payload.actions:
+                values = None
+                projected = states[-1]
+                if action.action == 'MOVE':
+                    selected = [dict(zip(columns, row)) for row in self._before['videos']
+                        if row[columns.index('id')] == action.object_id]
+                    if len(selected) != 1:
+                        raise ValueError('one original row per moved Video required')
+                    values = selected[0]
+                    if (values['relative_path'] != action.source
+                            or (values['size'], values['mtime_ns']) != (action.expected_size, action.expected_mtime_ns)):
+                        raise ValueError('original Video source/size/mtime mismatch')
+                    if any(row[columns.index('id')] != action.object_id
+                            and row[columns.index('relative_path')] == action.target for row in self._before['videos']):
+                        raise ValueError('target locator belongs to another Video')
+                    after = {'relative_path': action.target, 'root_folder': action.target.split('/')[0]}
+                    patches.extend(LocatorPatch('video', action.object_id, name, values[name], value)
+                        for name, value in after.items() if values[name] != value)
+                    rows = []
+                    for row in states[-1]['videos']:
+                        current = list(row)
+                        if row[columns.index('id')] == action.object_id:
+                            for name, value in after.items():
+                                current[columns.index(name)] = value
+                        rows.append(tuple(current))
+                    projected = {**states[-1], 'videos': tuple(rows)}
+                states.append(projected)
+                originals.append(values)
+                counts.append(counts[-1] + int(action.action == 'MOVE'))
+            if len(patches) != len(manifest.payload.locator_patches) or set(patches) != set(manifest.payload.locator_patches):
+                raise ValueError('exact complete Video locator patches required; KEEP has no patches')
+            self._originals, self._states, self._change_counts = originals, tuple(states), tuple(counts)
+            self._ack_fingerprint = manifest.payload.db_fingerprint
+            self._check_stage(0)
+        except BaseException as exc:
+            self._resources.__exit__(type(exc), exc, exc.__traceback__)
+            raise
 
-    def _verify_stored(self, index):
-        if (type(index) is not int or index not in (0, 1) or self._closed
-                or self._committed_count != index + 1 or not self._connection.in_transaction
-                or self._connection.total_changes != index + 1
-                or self._connection.execute('PRAGMA data_version').fetchone()[0] != self._version
-                or self._fingerprint() != self._ack_fingerprint
-                or _rows(self._connection) != self._states[index + 1] or _schema(self._connection) != self._schema):
-            raise ValueError('no unchanged acknowledged pair commit')
-        with closing(sqlite3.connect(self._uri + '?mode=ro', uri=True, timeout=0)) as fresh:
-            fresh.execute('BEGIN')
-            if _rows(fresh) != self._states[index + 1] or _schema(fresh) != self._schema:
-                raise ValueError('stored rows/schema differ from sealed R1/R2 projection')
-        # R1 deliberately has no final post-state hash: B is still at its source.
-        if index == 1:
-            self._verify_post_hash()
-        self._check_path()
+    def _validate_complete_plan(self):
+        # This comparison never replaces/reseals the approved manifest or checks
+        # its final hash early. It rejects silently omitted actions and patches.
+        with readonly_planner_session(self.path) as session:
+            context = load_planner_context(session)
+        snapshot = inventory_filesystem(self._filesystem.root)
+        fresh = plan_library(context, snapshot)
+        payload = self._manifest.payload
+        if fresh.plan_hash != payload.plan_hash or fresh.filesystem_hash != payload.filesystem_hash:
+            raise ValueError('original complete planner/FS baseline changed')
+        records = tuple(r for r in fresh.records if r.status != 'SYSTEM_EXCLUDED')
+        if any(r.status in {'BLOCKED', 'REVIEW'} or not r.target_relative_path for r in records):
+            raise ValueError('complete fresh plan contains unresolved records')
+        decisions = {(a.object_kind, a.object_id): (a.severity, a.reason, a.actor)
+            for a in payload.criticality_authorities}
+        severities = criticality_for_records(context, records, decisions)
+        expected = {(r.object_kind, r.object_id, r.source_relative_path, r.target_relative_path, r.action)
+            for r in records}
+        actual = {(a.object_kind, a.object_id, a.source, a.target, a.action) for a in payload.actions}
+        if (len(records) != len(payload.actions) or expected != actual
+                or any((a.criticality, a.criticality_reason) != severities[(a.object_kind, a.object_id, a.source)]
+                    for a in payload.actions)
+                or _patches(context, fresh) != payload.locator_patches):
+            raise ValueError('manifest omits/changes actions, criticality or exact complete locator patches')
+
+    def _check_path(self):
+        self._filesystem._sequence_owner._check_execution()
+        super()._check_path()
