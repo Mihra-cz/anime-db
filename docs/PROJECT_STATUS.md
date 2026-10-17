@@ -498,12 +498,25 @@ selhání B zůstává dokončená A i skutečné artefakty a částečný stav 
 SQLite transakce se při close zruší. Nevzniká N-action executor, adoption,
 restart/resume API ani dvouakční recovery podpora E4A/E5B.
 
-Dokončené E1–E6A foundations platí pouze pro povolený izolovaný rozsah.
+[E6B](V6_EXECUTION_MANIFEST.md#e6b-lokální-spolupracující-maintenance-boundary)
+je HOTOVO; nezávislé review dopadlo PASS. Explicitní opt-in scratch SQLite/root
+binding používá shared writer leases a exclusive maintenance flock na jednom
+hostiteli. Zapojuje SQLAlchemy transakce, mutující web requesty, scanner,
+startup/veřejné migrace a artwork writer; chrání skutečný commit/rollback.
+Read-only session lze při výluce používat s vynuceným SQLite `query_only`.
+Výchozí produkční konfigurace ji neaktivuje a chráněné jsou pouze deklarované
+spolupracující writery. Raw DBAPI, nezapojené CLI, jiné enginy, externí NAS
+klienty a privilegované zásahy výluka globálně nevylučuje; globální produkční
+writer exclusion není implementovaná a zůstává produkční blokující podmínkou.
+Uvolnění locku po pádu nedokládá bezpečný stav ani nepovoluje recovery/resume.
+Nevzniká produkční execution authority.
+
+Dokončené E1–E6B foundations platí pouze pro povolený izolovaný rozsah.
 Scratch testy nejsou důkazem produkční capability: ARM64/RPi5 není provozně
 ověřené, NAS filesystem rename capability ani power-loss durability produkčního
 úložiště nejsou potvrzené. Limit 8 MiB je scratch hranice, nikoli produkční limit;
 opakované plné hashování velkých videí vyžaduje samostatné výkonnostní posouzení.
-Produkční executor, globální execution lock, maintenance boundary,
+Produkční executor, globální execution lock, produkční maintenance boundary,
 produkční DB reconciliation, automatické resume, rollback, crash recovery a NAS physical
 execution nejsou implementované. **NOT AUTHORIZED FOR NAS EXECUTION.**
 

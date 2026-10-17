@@ -180,7 +180,7 @@ a produkční rollout v8→v9 je dokončený; shared Season persistence je podpo
 P2B pure canonical parser core je implementovaný. Read-only Target Planner
 foundation s D01–D06, post-state projection a řízený container locator contract
 jsou implementované. Immutable execution manifest, deterministic serialization,
-read-only dry-run/preflight a execution foundations E1–E6A jsou implementované
+read-only dry-run/preflight a execution foundations E1–E6B jsou implementované
 v povoleném izolovaném rozsahu. E3B vynucuje durable identity evidence pro jednu
 scratch action. E4A read-only restart inspekce existujícího scratch kontextu
 po zániku původního procesu vrací diagnostiku a STOP bez recovery authority;
@@ -196,7 +196,10 @@ rozhodnutí.
 E6A provádí přesně dvě navazující syntetické Video MOVE akce v jednom novém
 scratch kontextu, journalu a SQLite, s oddělenou identity evidence a ověřenými
 mezistavy R1/R2; je HOTOVO po nezávislém review s výsledkem PASS.
-Produkční mount capability je neověřená; globální lock/maintenance boundary,
+E6B přidává explicitně opt-in scratch writer/maintenance výluku pro společný
+SQLite/root binding na jednom hostiteli; je HOTOVO po nezávislém review s výsledkem
+PASS. Výchozí produkční writery nezapojuje a produkční readiness gates nesplňuje.
+Produkční mount capability je neověřená; produkční globální lock/maintenance boundary,
 produkční executor/DB reconciliation, automatické resume, rollback/crash recovery
 a NAS cleanup zůstávají samostatnou budoucí prací.
 P2C authoritative context resolution a scanner routing jsou
@@ -276,8 +279,9 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 | E5A | [Jeden scratch Video MOVE a testovací SQLite](V6_EXECUTION_MANIFEST.md#e5a-jeden-scratch-video-move-a-testovací-sqlite) | HOTOVO |
 | E5B | [Read-only FS/DB diagnostika po přerušení](V6_EXECUTION_MANIFEST.md#e5b-read-only-fsdb-diagnostika-po-přerušení) | HOTOVO |
 | E6A | [Dvě navazující scratch Video MOVE akce](V6_EXECUTION_MANIFEST.md#e6a-dvě-navazující-scratch-video-move-akce) | HOTOVO |
+| E6B | [Lokální spolupracující maintenance boundary](V6_EXECUTION_MANIFEST.md#e6b-lokální-spolupracující-maintenance-boundary) | HOTOVO |
 
-HOTOVO u E1–E6A označuje pouze dokončený povolený izolovaný rozsah.
+HOTOVO u E1–E6B označuje pouze dokončený povolený izolovaný rozsah.
 E1 poskytuje append-only durable journal, writer lock, strict loading a validovaný
 lifecycle; načtená historie vyžaduje reconciliation, bez automatického resume.
 E2A používá `RENAME_NOREPLACE` bez overwrite/fallbacku a explicitní

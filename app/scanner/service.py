@@ -10,6 +10,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
+from app.maintenance import maintenance_for, writer_admission
 
 from app.catalog import (
     classify_video, is_root_video, meaningful_root_collection, normalize_language, normalize_title,
@@ -752,17 +753,21 @@ def scan_library(
     library_access_timeout_seconds: float = 10,
     library_healthcheck_interval_files: int = 25,
 ) -> ScanResult:
-    try:
-        return _scan_library(
-            session,
-            root,
-            require_mount=require_mount,
-            confirm_deletions=confirm_deletions,
-            ffprobe_timeout_seconds=ffprobe_timeout_seconds,
-            library_access_timeout_seconds=library_access_timeout_seconds,
-            library_healthcheck_interval_files=library_healthcheck_interval_files,
-        )
-    except Exception:
-        session.rollback()
-        logger.exception("Sken byl vrácen zpět kvůli neočekávané chybě")
-        raise
+    with writer_admission(session):
+        gate = maintenance_for(session)
+        if gate is not None:
+            gate.validate_root(root)
+        try:
+            return _scan_library(
+                session,
+                root,
+                require_mount=require_mount,
+                confirm_deletions=confirm_deletions,
+                ffprobe_timeout_seconds=ffprobe_timeout_seconds,
+                library_access_timeout_seconds=library_access_timeout_seconds,
+                library_healthcheck_interval_files=library_healthcheck_interval_files,
+            )
+        except Exception:
+            session.rollback()
+            logger.exception("Sken byl vrácen zpět kvůli neočekávané chybě")
+            raise

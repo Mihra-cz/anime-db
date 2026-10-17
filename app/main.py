@@ -85,6 +85,7 @@ from .catalog_video_presentation import (
     video_variant_group_display,
 )
 from .database import Base, make_engine, make_session_factory
+from .maintenance import MaintenanceMiddleware, writer_admission
 from .title_identity import TitleLocatorIndex, title_locator_is_reserved
 from .external_subtitle_compatibility import (
     POSITIVE_COMPATIBILITY_STATUSES,
@@ -1095,27 +1096,36 @@ def _add_video(
     stats["unknown"] += status.has_unknown
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, *, maintenance=None) -> FastAPI:
     settings = settings or get_settings()
-    engine = make_engine(settings.database_url)
+    if maintenance is not None:
+        maintenance.validate_root(settings.anime_path)
+        maintenance.validate_artwork_root(settings.metadata_artwork_directory)
+    engine = make_engine(settings.database_url, maintenance=maintenance)
     sessions = make_session_factory(engine)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        migrate_schema_at_startup(engine)
-        Base.metadata.create_all(engine)
-        logger.info("AnimeDB spuštěno; knihovna=%s", settings.anime_path)
-        yield
-        engine.dispose()
+        try:
+            with writer_admission(engine):
+                migrate_schema_at_startup(engine)
+                Base.metadata.create_all(engine)
+            logger.info("AnimeDB spuštěno; knihovna=%s", settings.anime_path)
+            yield
+        finally:
+            engine.dispose()
 
     app = FastAPI(title="AnimeDB", version="0.1.0", lifespan=lifespan)
+    if maintenance is not None:
+        app.add_middleware(MaintenanceMiddleware, maintenance=maintenance)
     app.state.settings = settings
     app.state.sessions = sessions
     app.state.metadata_provider = AniListProvider(settings.metadata_request_timeout_seconds)
     install_naming_review_routes(app, templates, sessions, safe_local_redirect_target, local_redirect_response)
     install_layout_review_routes(app, templates, sessions, safe_local_redirect_target, local_redirect_response)
     app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
-    settings.metadata_artwork_directory.mkdir(parents=True, exist_ok=True)
+    with writer_admission(engine):
+        settings.metadata_artwork_directory.mkdir(parents=True, exist_ok=True)
     app.mount("/artwork", StaticFiles(directory=settings.metadata_artwork_directory, check_dir=False), name="artwork")
 
     def cache_title_artwork(catalog_title_id: int, *, force: bool = False) -> str | None:

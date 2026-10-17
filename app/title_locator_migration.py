@@ -7,6 +7,7 @@ import re
 from sqlalchemy import inspect, text
 
 from .models import GroupingDecisionTitle
+from .maintenance import protected_writer
 
 
 def _locator_unique_indexes(connection) -> set[str]:
@@ -172,6 +173,7 @@ def _check_sqlite_integrity(connection) -> None:
         raise RuntimeError(f'Title locator migration integrity failure: FK={violations[:3]}, integrity={integrity[:3]}')
 
 
+@protected_writer
 def migrate_title_locator_persistence(engine, *, mark_version: bool = False) -> None:
     """One transaction includes reconstruction, backfill, checks and v9 marker.
 

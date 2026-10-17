@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.hierarchy_types import MAIN_CONTENT_PART_TYPES
 from app.models import Artwork, CatalogTitle
+from app.maintenance import maintenance_for, protected_writer
 from app.title_order import catalog_title_sort_key
 from .link_lifecycle import confirmed_primary_external_link
 from .providers.base import metadata_http_timeout
@@ -142,6 +143,7 @@ def _make_single_primary_cover(session: Session, artwork: Artwork) -> None:
     session.flush()
 
 
+@protected_writer
 def cache_cover(
     session: Session, *, catalog_title_id: int, provider: str, external_id: str,
     remote_url: str, root: Path, max_bytes: int = 10_485_760,
@@ -149,6 +151,9 @@ def cache_cover(
     client: httpx.Client | None = None, force: bool = False,
 ) -> Artwork:
     """Download first, atomically publish both files, then update the database row."""
+    maintenance = maintenance_for(session)
+    if maintenance is not None:
+        maintenance.validate_artwork_root(root)
     _validate_url(remote_url)
     identity = _identity_path(provider, external_id)
     existing = session.scalar(select(Artwork).where(

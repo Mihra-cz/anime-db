@@ -963,6 +963,77 @@ dvouakční recovery. Žádný N-action executor, reopen/adoption, restart/resum
 automatic recovery/rollback, scanner/startup ani produkční executor nevzniká.
 **Produkční DB, NAS a RPi5 jsou mimo rozsah; NAS execution je NEAUTORIZOVANÁ.**
 
+## E6B: Lokální spolupracující maintenance boundary
+
+**HOTOVO; nezávislé review dopadlo PASS. NOT AUTHORIZED FOR NAS EXECUTION.**
+
+[ScratchMaintenance](../app/maintenance.py) je explicitně zapínaná hranice pro
+spolupracující procesy na jednom Linux hostiteli. Přijímá pouze absolutní,
+nofollow ověřené SQLite/root cesty v privátním lokálním scratch stromu pod
+`/tmp`; root musí ležet pod rodičem SQLite. Používá existující scratch mount
+allowlist, nikoli NAS capability probe. Běžná konfigurace ani environment
+maintenance nezapínají. Nevzniká CLI pro produkční aktivaci ani executor.
+
+Jediný namespace je `<database>.maintenance.lock` vedle konkrétní SQLite.
+Statický binding soubor obsahuje pouze verzi a přesnou SQLite/root dvojici,
+nikoli PID, aktivní maintenance stav nebo safe/recovery marker. Soubor se při
+release nemaže ani nepřejmenovává. Všichni účastníci musí použít totožný binding;
+konfliktní root, symlink/hardlink a pozorovaná výměna namespace znamenají STOP.
+Samotný lock nebrání úmyslné výměně souboru jiným neparticipujícím procesem.
+
+Normální writer drží shared `flock`, maintenance owner exclusive `flock`.
+Admission je neblokující: aktivní writer odmítne maintenance; aktivní
+maintenance odmítne nové writery i druhého ownera. Žádný automatický retry.
+SQLAlchemy admission začíná před DB BEGIN a končí až pool checkin po skutečném
+DBAPI commit/rollback nebo ukončení spojení. Core spojení držené přes více
+transakcí konzervativně drží lease až do close. Atomicita a SAVEPOINT chování
+se nemění. Webový mutující request, scanner a veřejné migrace navíc drží
+workflow lease včetně všech commit/rollback a fyzických side effectů.
+
+### Inventura writerů a skutečné pokrytí
+
+Následující ochrana platí **pouze při explicitním předání stejného scratch
+bindingu** do `make_engine(..., maintenance=gate)` / `create_app(...,
+maintenance=gate)`; výchozí produkční procesy tím chráněné nejsou.
+
+| Vstupní cesta | Pokrytí při opt-in |
+| --- | --- |
+| Web POST/PUT/PATCH/DELETE, včetně metadata/link/candidate, hierarchy, numbering, naming/layout, video/subtitle locators a ručních editací | Shared admission před vstupem do handleru až po dokončení requestu; odmítnutí 503. Žádný refaktor jednotlivých handlerů. |
+| `make_session_factory`, přímý `Session(engine)` a SQLAlchemy Core na opt-in enginu, včetně odvozených OptionEngine | Lease přes skutečnou DB transakci; chrání i přímé ORM/service volání. |
+| `scan_library` | Workflow lease před inventory/probe, kontrola stejného rootu, přes commit nebo rollback. Scanner fyzickou knihovnu čte, locators a evidence mění v SQLite. |
+| `create_app` / lifespan | Admission pro vytvoření artwork adresáře; samostatný lease přes migraci a `create_all`, aktivní maintenance startup odmítne. |
+| `migrate_schema`, `migrate_schema_at_startup`, `migrate_title_locator_persistence` | Celý veřejný workflow včetně přímého DBAPI/table rebuild a verze schema. |
+| `cache_cover` | Admission před download/mkdir/replace/unlink artworku, včetně přímého volání s read-only session; DB lease pokračuje do caller commit/rollback. |
+| Běžné GET/HEAD/OPTIONS | Session factory používá `query_only` bez write lease, odmítá DML a vypíná autoflush; stabilní katalog/review lze číst při maintenance. Fyzický rename by vyžadoval samostatné read-consistency řešení. |
+| Read-only planner/audit CLI | Existující SQLite `mode=ro`, žádná writer admission ani execution authority. |
+| `app.tools.rebuild_hierarchy --apply`, vlastní skripty bez opt-in, jiné enginy/SQLite klienti, raw DBAPI mimo chráněné migrační entry points | **Nepokryté. Produkční blokující podmínka:** zastavit nebo doložit jejich účast před budoucí execution. |
+| E1–E6A scratch execution/journal/identity a lokální manifest/evidence output | Původní samostatné kontrakty beze změny; E6B je neaktivuje ani na ně nenapojuje executor. |
+
+### Owner, ukončení a pád
+
+Scratch použití: `gate = ScratchMaintenance(database_path, library_root)`;
+`with gate.maintenance() as owner:` drží exclusive výluku. Běžný zápis tohoto
+procesu ji rovněž neobchází. Pouze explicitní `with owner.write_scope():` dovolí
+DB operaci přes daný opt-in engine na owner threadu bez získání druhého flocku.
+Borrowed admission drží původní exclusive fd: pokus ukončit ownera s aktivní DB
+transakcí znamená STOP a lock zůstává držený do ukončení této transakce.
+
+Lease/capability je vázaná na původní PID; DB write/commit/rollback a session
+cleanup v potomkovi jsou odmítnuté. At-fork child zavře zděděné lock fd bez
+`LOCK_UN`, takže neuvolní rodiče ani po jeho zániku nezachová falešný lock.
+Nový proces vytváří vlastní binding/engine, nepřebírá živou session. Release
+zavírá fd právě jednou; chyby propagují STOP, žádný nejistý close se neopakuje.
+SIGKILL/exit uvolní kernelový flock, statický binding soubor zůstává.
+**Volný lock není důkaz bezpečného FS/DB stavu, dokončení operace ani oprávnění
+k automatickému recovery/resume/rollback.** E6B takový mechanismus nemá.
+
+Advisory flock nebrání neparticipujícím programům, jinému NAS klientovi,
+privilegovaným zásahům, změně mountu ani ztrátě napájení. Zastavení či zapojení
+všech skutečných produkčních writerů, externí NAS/mount/capability kontroly,
+snapshot/backup a post-state verification zůstávají samostatnými nesplněnými
+produkčními readiness gates. Výsledek E6B neposkytuje production execution
+authority ani nedokládá hardware durability.
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.

@@ -10,6 +10,7 @@ from .catalog import (
     normalize_language, normalize_title,
 )
 from .database import Base
+from .maintenance import protected_writer
 from .external_subtitle_compatibility import (
     backfill_legacy_external_subtitle_compatibilities,
     consolidate_legacy_external_subtitle_assets,
@@ -299,6 +300,7 @@ def _migrate_internal_subtitle_manual_language(connection) -> None:
         ))
 
 
+@protected_writer
 def migrate_schema(engine) -> None:
     """Apply the small, idempotent SQLite schema migration needed by v0.2."""
     inspector = inspect(engine)
@@ -898,6 +900,7 @@ def migrate_schema(engine) -> None:
     _retire_external_subtitle_video_id(engine)
 
 
+@protected_writer
 def migrate_schema_at_startup(engine) -> bool:
     """Run compatibility reconstruction once, then keep stable startup read-only.
 
