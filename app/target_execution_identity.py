@@ -266,23 +266,33 @@ class ScratchIdentitySession:
     def create(cls, parent: Path) -> ScratchIdentitySession:
         filesystem = fs.ScratchRenameSession.create(parent)
         try:
-            session = object.__new__(cls)
-            session._filesystem = filesystem
-            session._evidence_path = filesystem.root.parent / (filesystem.root.name + '.identity.json')
-            session._resources = ExitStack()
-            session._resources.enter_context(filesystem)
-            session._pid = os.getpid()
-            session._mutex = threading.Lock()
-            session._attempted = session._closed = session._poisoned = session._durable = False
-            session._pin_fd = None
-            session._source_parent_fd = session._target_parent_fd = None
-            session._artifact_fd = session._artifact_parent_fd = None
-            session._captured_record = session._artifact_stat = None
-            session._mount = next(m for m in filesystem._mounts if m.mount_id == filesystem._mount_id)
-            return session
+            return cls._new_context(filesystem)
         except BaseException as exc:
             filesystem.__exit__(type(exc), exc, exc.__traceback__)
             raise
+
+    @classmethod
+    def _new_context(cls, filesystem, *, owns_filesystem=True, bound_index=None):
+        """Internal allocation over a live minted root; never reopen a path."""
+        if bound_index is not None and (type(bound_index) is not int or bound_index not in (0, 1)):
+            raise IdentityEvidenceRejected('STOP: only pair action indices 0 and 1 are supported')
+        suffix = '.identity.json' if bound_index is None else f'.identity-{bound_index}.json'
+        session = object.__new__(cls)
+        session._filesystem = filesystem
+        session._evidence_path = filesystem.root.parent / (filesystem.root.name + suffix)
+        session._resources = ExitStack()
+        if owns_filesystem:
+            session._resources.enter_context(filesystem)
+        session._bound_index = bound_index
+        session._pid = os.getpid()
+        session._mutex = threading.Lock()
+        session._attempted = session._closed = session._poisoned = session._durable = False
+        session._pin_fd = None
+        session._source_parent_fd = session._target_parent_fd = None
+        session._artifact_fd = session._artifact_parent_fd = None
+        session._captured_record = session._artifact_stat = None
+        session._mount = next(m for m in filesystem._mounts if m.mount_id == filesystem._mount_id)
+        return session
 
     @property
     def root(self) -> Path:
@@ -301,7 +311,8 @@ class ScratchIdentitySession:
             raise IdentityEvidenceRejected('STOP: inherited identity session')
         try:
             self._filesystem._validate(manifest, action)
-            if (type(index) is not int or not 0 <= index < len(manifest.payload.actions)
+            if (type(index) is not int or (self._bound_index is not None and index != self._bound_index)
+                    or not 0 <= index < len(manifest.payload.actions)
                     or action != manifest.payload.actions[index] or action.action not in {'MOVE', 'QUARANTINE'}):
                 raise IdentityEvidenceRejected('STOP: exact MOVE/QUARANTINE action/index required')
             return hashlib.sha256(manifest_to_json(manifest).encode('utf-8')).hexdigest()

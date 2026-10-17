@@ -180,7 +180,7 @@ a produkční rollout v8→v9 je dokončený; shared Season persistence je podpo
 P2B pure canonical parser core je implementovaný. Read-only Target Planner
 foundation s D01–D06, post-state projection a řízený container locator contract
 jsou implementované. Immutable execution manifest, deterministic serialization,
-read-only dry-run/preflight a execution foundations E1–E5B jsou implementované
+read-only dry-run/preflight a execution foundations E1–E6A jsou implementované
 v povoleném izolovaném rozsahu. E3B vynucuje durable identity evidence pro jednu
 scratch action. E4A read-only restart inspekce existujícího scratch kontextu
 po zániku původního procesu vrací diagnostiku a STOP bez recovery authority;
@@ -193,6 +193,9 @@ E5B read-only diagnostika přerušené scratch Video MOVE operace je HOTOVO
 po nezávislém review s výsledkem PASS. Spojuje E4A s inspekcí původní E5A
 SQLite, odmítá SQLite připojení při sidecarech a vždy vrací STOP k ručnímu
 rozhodnutí.
+E6A provádí přesně dvě navazující syntetické Video MOVE akce v jednom novém
+scratch kontextu, journalu a SQLite, s oddělenou identity evidence a ověřenými
+mezistavy R1/R2; je HOTOVO po nezávislém review s výsledkem PASS.
 Produkční mount capability je neověřená; globální lock/maintenance boundary,
 produkční executor/DB reconciliation, automatické resume, rollback/crash recovery
 a NAS cleanup zůstávají samostatnou budoucí prací.
@@ -272,8 +275,9 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 | E4A | [Read-only restart inspekce](V6_EXECUTION_MANIFEST.md#e4a-read-only-restart-inspekce) | HOTOVO |
 | E5A | [Jeden scratch Video MOVE a testovací SQLite](V6_EXECUTION_MANIFEST.md#e5a-jeden-scratch-video-move-a-testovací-sqlite) | HOTOVO |
 | E5B | [Read-only FS/DB diagnostika po přerušení](V6_EXECUTION_MANIFEST.md#e5b-read-only-fsdb-diagnostika-po-přerušení) | HOTOVO |
+| E6A | [Dvě navazující scratch Video MOVE akce](V6_EXECUTION_MANIFEST.md#e6a-dvě-navazující-scratch-video-move-akce) | HOTOVO |
 
-HOTOVO u E1–E5B označuje pouze dokončený povolený izolovaný rozsah.
+HOTOVO u E1–E6A označuje pouze dokončený povolený izolovaný rozsah.
 E1 poskytuje append-only durable journal, writer lock, strict loading a validovaný
 lifecycle; načtená historie vyžaduje reconciliation, bez automatického resume.
 E2A používá `RENAME_NOREPLACE` bez overwrite/fallbacku a explicitní
@@ -294,6 +298,11 @@ action. Po FS_VERIFIED atomicky uloží přesné Video locator patches do testov
 SQLite. DB_RECONCILED/COMPLETE vyžadují potvrzený commit a nezávislé ověření DB,
 fyzického stavu, journalu a schváleného post-state hashe. Původní `execute()`
 dál končí na FS_VERIFIED. Restart/resume ani produkční DB lane nevznikají.
+E6A má samostatného privátního ownera omezeného na dvě PRIMARY MOVE akce
+A → B. B vyžaduje durable COMPLETE A, nezávislé ověření R1 a původní fyzické
+identity. R1/R2 jsou úplné projekce z ověřeného R0 a sealed locator patches;
+finální expected_post_hash se vyžaduje až u R2. Selhání B nevrací dokončenou A.
+Veřejná jednoakční API ani E4A/E5B recovery rozsah se nerozšiřují.
 
 V6 zůstává **Probíhá**. Produkční executor, globální execution lock,
 maintenance boundary, produkční DB reconciliation, automatické resume, rollback,

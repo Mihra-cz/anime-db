@@ -477,7 +477,28 @@ neinspectovatelnou DB a UNKNOWN. Shoda locatorů neprokazuje plný DB post-state
 původní commit acknowledgement ani inode continuity. Výsledek je vždy STOP
 a ruční vyhodnocení, bez execution authority či recovery v originálu nebo kopii.
 
-Dokončené E1–E5B foundations platí pouze pro povolený izolovaný rozsah.
+[E6A](V6_EXECUTION_MANIFEST.md#e6a-dvě-navazující-scratch-video-move-akce) je
+HOTOVO; nezávislé review dopadlo PASS. Privátní dvouakční owner vlastní jeden nový
+scratch root, jeden nepřerušený E1 writer, jednu sousední testovací SQLite a dvě
+samostatné jednorázové identity evidence s živými pins. Přijímá pouze dvě různé
+PRIMARY Video MOVE akce v canonical manifest pořadí; B explicitně závisí na A.
+B dostane interní autorizaci až po ověření acknowledged durable COMPLETE A,
+E1 dependency gate, uloženého R1 a fyzické identity A. Původní veřejná E2A/E3A
+API nadále neautorizují dependencies a `execute()`/`execute_video_move()` si
+zachovávají jednoakční kontrakty.
+
+R0 odpovídá sealed fingerprintu. R1/R2 jsou deterministické úplné row/schema
+projekce původního R0 a přesných locator patches A/B; každý MOVE má vlastní
+atomickou transakci a mění pouze `Video.relative_path`/`Video.root_folder`.
+Nezávislé read-only čtení ověřuje každý commit; finální expected_post_hash se
+kontroluje až v R2. Držené DB/file/mount bindings, writer reservation a kontrola
+fingerprintu/data_version odmítají pozorované cizí změny. Nejasný commit, append
+či filesystem výsledek znamená STOP bez retry nebo fyzického rollbacku. Při
+selhání B zůstává dokončená A i skutečné artefakty a částečný stav B; necommitnutá
+SQLite transakce se při close zruší. Nevzniká N-action executor, adoption,
+restart/resume API ani dvouakční recovery podpora E4A/E5B.
+
+Dokončené E1–E6A foundations platí pouze pro povolený izolovaný rozsah.
 Scratch testy nejsou důkazem produkční capability: ARM64/RPi5 není provozně
 ověřené, NAS filesystem rename capability ani power-loss durability produkčního
 úložiště nejsou potvrzené. Limit 8 MiB je scratch hranice, nikoli produkční limit;

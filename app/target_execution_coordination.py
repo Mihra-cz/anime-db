@@ -70,7 +70,49 @@ class CompletedScratchVideoOutcome:
     outcome: str = 'COMPLETE'
 
 
-class ScratchActionSession:
+class _LiveIdentityChecks:
+    """Shared live capture checks; no execution or restart authority."""
+
+    def __init__(self, identity):
+        self._identity = identity
+        self._stop_class = ScratchCoordinationStopped
+        self._stop_phase = 'VALIDATION'
+
+    def _check_identity_anchor(self, manifest, action, captured, fd, parent, before, phase) -> None:
+        # The held artefact prevents inode reuse. Rehashed replacement records
+        # cannot supplant the immutable capture acknowledged by this live owner.
+        try:
+            if (self._identity.load(manifest, action, action_index=captured.action_index) != captured
+                    or _file_stat(self._identity._check_artifact(fd, parent)) != before):
+                raise ScratchFilesystemReconciliationRequired('STOP: acknowledged identity evidence changed', phase)
+        except (KeyboardInterrupt, SystemExit):
+            self._stop_class, self._stop_phase = ScratchFilesystemReconciliationRequired, phase
+            raise
+        except Exception as exc:
+            if isinstance(exc, ScratchCoordinationStopped):
+                raise
+            raise ScratchFilesystemReconciliationRequired('STOP: identity artefact untrusted', phase) from exc
+
+    def _require_identity(self, manifest, action, captured, fd, parent, before, phase, *, moved) -> None:
+        self._check_identity_anchor(manifest, action, captured, fd, parent, before, phase)
+        comparison = self._identity.compare(manifest, action, action_index=captured.action_index)
+        if (type(comparison) is not IdentityComparison or comparison.outcome != 'MATCH'
+                or comparison.source is None or comparison.target is None
+                or comparison.source.locator != action.source or comparison.target.locator != action.target
+                or comparison.source.presence != ('ABSENT' if moved else 'PRESENT')
+                or comparison.target.presence != ('PRESENT' if moved else 'ABSENT')):
+            raise ScratchFilesystemReconciliationRequired('STOP: no unique live identity MATCH', phase)
+        current = comparison.target if moved else comparison.source
+        attributes = ('st_dev', 'st_ino', 'size', 'mtime_ns', 'file_type', 'nlink', 'mode', 'uid', 'gid')
+        if (current.physical_identity_match != 'MATCH' or current.filesystem_match != 'MATCH'
+                or current.content_match != 'MATCH' or current.observed_file is None
+                or current.observed_content != captured.content
+                or any(getattr(current.observed_file, key) != getattr(captured.filesystem, key) for key in attributes)):
+            raise ScratchFilesystemReconciliationRequired('STOP: actual identity/content evidence mismatch', phase)
+        self._check_identity_anchor(manifest, action, captured, fd, parent, before, phase)
+
+
+class ScratchActionSession(_LiveIdentityChecks):
     """Factory-only new root, identity and journal; execute once, then close.
 
     Caller prepares isolated assets and a synthetic immutable single-action
@@ -119,39 +161,6 @@ class ScratchActionSession:
     def database_path(self) -> Path:
         """Caller-prepared test SQLite only; the session never creates its schema."""
         return self.root.parent / (self.root.name + '.sqlite')
-
-    def _check_identity_anchor(self, manifest, action, captured, fd, parent, before, phase) -> None:
-        # The held artefact prevents inode reuse. Rehashed replacement records
-        # cannot supplant the immutable capture acknowledged by this live owner.
-        try:
-            if (self._identity.load(manifest, action, action_index=0) != captured
-                    or _file_stat(self._identity._check_artifact(fd, parent)) != before):
-                raise ScratchFilesystemReconciliationRequired('STOP: acknowledged identity evidence changed', phase)
-        except (KeyboardInterrupt, SystemExit):
-            self._stop_class, self._stop_phase = ScratchFilesystemReconciliationRequired, phase
-            raise
-        except Exception as exc:
-            if isinstance(exc, ScratchCoordinationStopped):
-                raise
-            raise ScratchFilesystemReconciliationRequired('STOP: identity artefact untrusted', phase) from exc
-
-    def _require_identity(self, manifest, action, captured, fd, parent, before, phase, *, moved) -> None:
-        self._check_identity_anchor(manifest, action, captured, fd, parent, before, phase)
-        comparison = self._identity.compare(manifest, action, action_index=0)
-        if (type(comparison) is not IdentityComparison or comparison.outcome != 'MATCH'
-                or comparison.source is None or comparison.target is None
-                or comparison.source.locator != action.source or comparison.target.locator != action.target
-                or comparison.source.presence != ('ABSENT' if moved else 'PRESENT')
-                or comparison.target.presence != ('PRESENT' if moved else 'ABSENT')):
-            raise ScratchFilesystemReconciliationRequired('STOP: no unique live identity MATCH', phase)
-        current = comparison.target if moved else comparison.source
-        attributes = ('st_dev', 'st_ino', 'size', 'mtime_ns', 'file_type', 'nlink', 'mode', 'uid', 'gid')
-        if (current.physical_identity_match != 'MATCH' or current.filesystem_match != 'MATCH'
-                or current.content_match != 'MATCH' or current.observed_file is None
-                or current.observed_content != captured.content
-                or any(getattr(current.observed_file, key) != getattr(captured.filesystem, key) for key in attributes)):
-            raise ScratchFilesystemReconciliationRequired('STOP: actual identity/content evidence mismatch', phase)
-        self._check_identity_anchor(manifest, action, captured, fd, parent, before, phase)
 
     def execute(self, manifest: ExecutionManifest, action: ManifestAction, *,
                 action_index: int) -> VerifiedScratchOutcome:

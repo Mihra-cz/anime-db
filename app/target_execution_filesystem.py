@@ -256,7 +256,7 @@ def _absent(parent: int, name: str) -> None:
     raise RenameRejected('target already exists; STOP', errno.EEXIST)
 
 
-def _validate_scratch_action(manifest: ExecutionManifest, action: ManifestAction,
+def _validate_scratch_binding(manifest: ExecutionManifest, action: ManifestAction,
                              root: Path, mount_identity: str) -> None:
     """Shared strict binding for live execution and read-only restart inspection."""
     if type(manifest) is not ExecutionManifest or type(action) is not ManifestAction:
@@ -274,10 +274,18 @@ def _validate_scratch_action(manifest: ExecutionManifest, action: ManifestAction
         raise RenameRejected('action does not exactly match sealed manifest')
     if action.action not in {'KEEP', 'MOVE', 'QUARANTINE'} or action.criticality == 'REVIEW':
         raise RenameRejected('action requires review or is unsupported')
-    if manifest.payload.generation_diagnostics or action.depends_on:
+    if manifest.payload.generation_diagnostics:
         raise RenameRejected('primitive cannot authorize unresolved plan or dependencies')
     _locator(action.source)
     _locator(action.target)
+
+
+def _validate_scratch_action(manifest: ExecutionManifest, action: ManifestAction,
+                             root: Path, mount_identity: str) -> None:
+    """Public primitives and restart inspection never authorize dependencies."""
+    _validate_scratch_binding(manifest, action, root, mount_identity)
+    if action.depends_on:
+        raise RenameRejected('primitive cannot authorize unresolved plan or dependencies')
 
 
 class ScratchRenameSession:

@@ -873,6 +873,96 @@ PASS. Kontrolují bytes/hash/metadata před/po, nulové SQLite připojení při
 sidecarech, skutečné SQLite zamykání, změny během inspekce a FD/ResourceWarning.
 Produkční DB/NAS, RPi5 ani produkční startup/scanner/executor se nepoužívají.
 
+## E6A: Dvě navazující scratch Video MOVE akce
+
+**HOTOVO; nezávislé review dopadlo PASS. NOT AUTHORIZED FOR NAS EXECUTION.**
+
+Privátní [owner](../app/target_execution_pair.py)
+`_ScratchVideoMovePair.create(parent)` vytvoří jediný čerstvý privátní scratch
+root pod `/tmp`. Caller připraví pouze syntetické soubory, sousední testovací
+SQLite a sealed immutable manifest; jediné `execute(manifest)` smí provést
+přesně dvě PRIMARY Video MOVE akce. A má index 0 a žádné dependencies, B index 1
+a právě dependency na A. Dvě různá Video.id a čtyři odlišné source/target
+locators jsou povinné; pořadí se nepřeskupuje. Další akce, LOW, QUARANTINE,
+neúplné/cizí patches nebo neplatný binding znamenají STOP před execution.
+
+### Výhradní owner a autorizace B
+
+Owner drží jeden nový E1 writer od prvního PENDING až po finální COMPLETE,
+jednu konkrétní SQLite, původní filesystem context a obě živé observations.
+Každá akce má vlastní E3A context, pevný action/index binding, vlastní capture
+a sousední `<root>.identity-0.json` / `<root>.identity-1.json`. Evidence vzniká
+přes O_EXCL, nofollow, file/parent fsync a původní plné content/inode kontroly;
+žádná evidence se nepřepisuje. Identity contexts sdílený root pouze vypůjčují;
+jediným vlastníkem filesystem lifecycle zůstává pair owner. Žádná jednorázová
+session se neresetuje a žádný existující root/writer se nepřebírá.
+
+Veřejné E2A/E3A dependency guards zůstávají zachované. Pouze privátní
+filesystem context pair ownera rozumí jeho interní autorizaci B, vázané na
+přesný manifest, aktivní jednorázové volání a původní proces/thread. Autorizaci
+owner vydá až po novém `inspect_live` nad pěti acknowledged stavy A, nezměněném
+E1 dependency validatoru, nezávislém ověření uloženého R1 a živém FS/identity
+ověření A. Před PENDING B se tyto kontroly opakují. In-memory flag ani parseable
+COMPLETE po ztrátě append acknowledgement nestačí.
+Context exit i close čekají na stejný owner mutex jako execution; neuzavřou
+živé SQLite prostředky z jiného threadu. Zděděný owner v jiném procesu odmítá
+execution i SQLite cleanup, který by mohl zasáhnout transakci původního procesu.
+
+E1 formát ani pravidla lifecycle se nemění. Jediná historie je:
+
+```text
+A: PENDING → FS_APPLIED → FS_VERIFIED → DB_RECONCILED → COMPLETE
+B: PENDING → FS_APPLIED → FS_VERIFIED → DB_RECONCILED → COMPLETE
+```
+
+### Dvě transakce, tři ověřené stavy
+
+Privátní DB lane sdílí původní bezpečné otevření, nofollow pins, private regular
+file, mount/header/sidecar checks, DELETE journal mode a synchronous FULL.
+Přijímá pouze odvozenou `<root>.sqlite`; nezakládá schema ani databázi. R0 musí
+odpovídat původnímu sealed fingerprintu a úplnému známému aplikačnímu schema.
+Patches všech ostatních objektů i fields jsou odmítnuté.
+
+Z celého ověřeného R0 a přesných sealed patches se před rename připraví R1
+(změněné locators A, původní B) a R2 (změněné locators A i B). Každý stav
+obsahuje všechny aplikační rows a celé schema/user_version. Jednotlivá
+podmíněná UPDATE mění jen `Video.relative_path` a `Video.root_folder` a kontrolují
+rowcount, celkový počet změn, všechny rows a schema, včetně trigger side effects.
+Filename, metadata, hierarchy, numbering a manual authority zůstávají nedotčené.
+
+Každá akce má vlastní commit. Po něm se znovu získá BEGIN IMMEDIATE rezervace
+a nezávislá read-only connection ověří uložené rows/schema proti původní
+projekci. Nově pozorovaný fingerprint pouze hlídá stabilitu téhož souboru;
+nenahrazuje schválený očekávaný obsah. Data-version kontrola odhalí cizí commit
+v reservation gap. File/parent/mount pins zůstávají držené přes obě transakce.
+Finální `expected_post_hash` přes běžný planner loader a scratch inventory je
+podmínkou až pro R2. R1 se neporovnává s finálním stavem, ale nezávisle musí
+přesně odpovídat projekci A bez změny B.
+
+Před DB_RECONCILED a COMPLETE se kontroluje uložený DB stav, živý journal,
+obě již přesunuté fyzické identity i původní evidence anchors. A zůstává pod
+živou kontrolou během celé B. Platí původní exclusive scratch ownership;
+nejde o produkční maintenance boundary proti cizím same-UID/privilegovaným
+změnám ani o důkaz NAS power-loss durability.
+
+### STOP a zachování částečného stavu
+
+Při selhání A se B vůbec nezačne. Po acknowledged COMPLETE A se její přesun,
+DB commit ani historie při selhání B nevrací. Zachová se skutečný FS/DB stav,
+obě vzniklé identity evidence a všechny journal bytes; STOP uvádí action index,
+fázi a příčinu. Necommitnutá SQLite transakce se při close zruší, potvrzený nebo
+nejistý commit ani fyzický rename se neopakuje a automaticky nevrací.
+Nejasný fsync, rename, commit či journal append neposkytuje continuation
+authority ani tehdy, pokud zůstaly úplné parseable bytes. Owner se spotřebuje
+po úspěchu i chybě a zavře všechny držené prostředky bez opakování nejistého
+close. Artefakty se nemažou ani neopravují.
+
+Původní `ScratchActionSession.execute()` a `execute_video_move()` zůstávají
+jednoakční. E4A/E5B zůstávají read-only a E6A nedeklaruje jejich podporu pro
+dvouakční recovery. Žádný N-action executor, reopen/adoption, restart/resume,
+automatic recovery/rollback, scanner/startup ani produkční executor nevzniká.
+**Produkční DB, NAS a RPi5 jsou mimo rozsah; NAS execution je NEAUTORIZOVANÁ.**
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.
