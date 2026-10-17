@@ -199,9 +199,13 @@ mezistavy R1/R2; je HOTOVO po nezávislém review s výsledkem PASS.
 E6B přidává explicitně opt-in scratch writer/maintenance výluku pro společný
 SQLite/root binding na jednom hostiteli; je HOTOVO po nezávislém review s výsledkem
 PASS. Výchozí produkční writery nezapojuje a produkční readiness gates nesplňuje.
+Úzký ručně schvalovaný rollback jedné přerušené scratch Video MOVE je HOTOVO
+po nezávislém review s výsledkem PASS; obecný/produkční ani automatický rollback
+neexistuje.
 Produkční mount capability je neověřená; produkční globální lock/maintenance boundary,
-produkční executor/DB reconciliation, automatické resume, rollback/crash recovery
-a NAS cleanup zůstávají samostatnou budoucí prací.
+produkční executor/DB reconciliation, automatické resume, obecný/produkční
+a automatický rollback, crash recovery a NAS cleanup zůstávají samostatnou
+budoucí prací.
 P2C authoritative context resolution a scanner routing jsou
 odložené. Fyzický rename
 ani move na NAS zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
@@ -280,6 +284,7 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 | E5B | [Read-only FS/DB diagnostika po přerušení](V6_EXECUTION_MANIFEST.md#e5b-read-only-fsdb-diagnostika-po-přerušení) | HOTOVO |
 | E6A | [Dvě navazující scratch Video MOVE akce](V6_EXECUTION_MANIFEST.md#e6a-dvě-navazující-scratch-video-move-akce) | HOTOVO |
 | E6B | [Lokální spolupracující maintenance boundary](V6_EXECUTION_MANIFEST.md#e6b-lokální-spolupracující-maintenance-boundary) | HOTOVO |
+| Ruční scratch rollback | [Jedna přerušená Video MOVE](V6_EXECUTION_MANIFEST.md#ručně-schválený-rollback-jedné-scratch-video-move) | HOTOVO |
 
 HOTOVO u E1–E6B označuje pouze dokončený povolený izolovaný rozsah.
 E1 poskytuje append-only durable journal, writer lock, strict loading a validovaný
@@ -309,8 +314,8 @@ finální expected_post_hash se vyžaduje až u R2. Selhání B nevrací dokonč
 Veřejná jednoakční API ani E4A/E5B recovery rozsah se nerozšiřují.
 
 V6 zůstává **Probíhá**. Produkční executor, globální execution lock,
-maintenance boundary, produkční DB reconciliation, automatické resume, rollback,
-crash recovery a NAS physical execution nejsou implementované.
+maintenance boundary, produkční DB reconciliation, automatické resume, obecný/produkční
+a automatický rollback, crash recovery a NAS physical execution nejsou implementované.
 Scratch testy nejsou důkazem produkční capability: ARM64/RPi5 není provozně
 ověřené, NAS filesystem rename capability není ověřená a power-loss durability
 produkčního úložiště není potvrzená. Scratch limit 8 MiB není produkční limit;

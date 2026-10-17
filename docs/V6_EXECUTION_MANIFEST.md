@@ -2,7 +2,7 @@
 
 [Manifest foundation](../app/target_execution_manifest.py) zachycuje jeden fresh
 Target Planner result. Workflow končí `GENERATE → REVIEW → PREFLIGHT →
-READY_FOR_EXECUTION`. Skutečný filesystem executor, DB reconciliation,
+READY_FOR_EXECUTION`. Produkční filesystem executor, DB reconciliation,
 rollback/recovery ani purge nejsou implementované.
 
 ## Immutable approval boundary
@@ -1033,6 +1033,67 @@ všech skutečných produkčních writerů, externí NAS/mount/capability kontro
 snapshot/backup a post-state verification zůstávají samostatnými nesplněnými
 produkčními readiness gates. Výsledek E6B neposkytuje production execution
 authority ani nedokládá hardware durability.
+
+## Ručně schválený rollback jedné scratch Video MOVE
+
+**HOTOVO; nezávislé review dopadlo PASS. NOT AUTHORIZED FOR NAS EXECUTION.**
+[Samostatné API](../app/target_execution_rollback.py) dovoluje jediný návrat
+`target → source` v původním syntetickém E5A kontextu pod `/tmp`. Neotevírá
+původní execution session ani E1 journal pro zápis a nemění SQLite. Podporuje
+jen jeden sealed Video MOVE na indexu 0, chybějící source, očekávaný target,
+platnou E3 evidence a neukončenou historii PENDING/FS_APPLIED/FS_VERIFIED.
+DB musí mít OLD_VALUES a přesný původní sealed fingerprint; žádný SQLite
+sidecar není přípustný. Jiné či nejasné stavy znamenají STOP.
+
+`propose_scratch_video_rollback(...)` je pouze read-only návrh. Obsahuje hash
+celého sealed manifestu, action ID/index, oba směry cest, úplnou E5B diagnózu
+včetně DB fingerprintu a současných FS/artefaktových metadata/content důkazů.
+`identity_continuity` zůstává **UNKNOWN**: shoda SHA-256 ani číselného inode po
+restartu neprokazuje historickou fyzickou identitu. Návrh tento limit výslovně
+zobrazuje v `identity_limitation`.
+
+Volající musí odděleně předat `RollbackApproval(proposal,
+'RETURN_TARGET_TO_SOURCE', IDENTITY_LIMITATION, approved_by)` po ručním
+schválení konkrétního návrhu. Diagnostika schválení nikdy nevytváří. Chybějící
+schválení, jiný návrh nebo nepotvrzený limit identity znamenají STOP.
+`rollback_scratch_video_move(...)` navíc vyžaduje živého výhradního ownera
+z `ScratchMaintenance(original_sqlite, original_root).maintenance()`; lease
+zůstává v majetku volajícího. Shared, cizí, uzavřený či zděděný owner neplatí.
+Jde o E6B spolupracující výluku na jednom hostiteli, nikoli globální ochranu.
+
+Před zápisem se návrh znovu vypočte a musí přesně odpovídat schválení. Po celý
+pokus jsou drženy read-only fd a sdílené artefaktové locks původního journalu,
+identity a DB a nově zachycený živý target inode pin. SQLite read transaction
+(`mode=ro`, `query_only`) trvá přes APPROVED, ATTEMPT, rename, durability
+a ověření a končí před zápisem VERIFIED; následné kontroly hashů DB, journalu
+a identity evidence i nepřítomnosti sidecarů zůstávají až do konce pokusu.
+Sdílené E2A/E3/E4/E5 kontroly znovu ověřují root,
+mount, parent bindings, kolize, hash, metadata, DB i sidecary. Fyzický návrat
+použije existující `renameat2(RENAME_NOREPLACE)` bez copy/delete fallbacku.
+Následuje nezávislé ověření a E2A durability pořadí: file fsync, cílový parent
+fsync, původní parent fsync, další ověření. Obsah videa se nezapisuje.
+
+Samostatný `<root>.rollback.jsonl` vedle původních artefaktů vzniká pouze
+`O_EXCL`. Obsahuje kontrolované checksumem propojené záznamy APPROVED, ATTEMPT
+a při potvrzeném výsledku VERIFIED. APPROVED i jeho directory entry jsou
+fsyncnuté před durable ATTEMPT; ATTEMPT předchází jedinému rename syscallu.
+APPROVED obsahuje celé schválení; ATTEMPT výslovně označuje výsledek jako
+UNKNOWN_UNTIL_VERIFIED bez oprávnění k automatickému retry. Toto API soubor
+nikdy znovu neotevírá pro append ani nemaže; i prázdný či částečný soubor
+zablokuje další pokus. E1 formát ani původní historie se nemění, žádné zpětné
+COMPLETE nevzniká.
+
+Přerušení, nejasný rename/fsync nebo selhání ověření ponechá skutečné soubory
+a dostupné důkazy. Bez potvrzené finální evidence se nevrací úspěch. Platný
+prefix ani uvolnění maintenance po SIGKILL neprokazují dokončení nebo bezpečný
+FS/DB stav a neautorizují resume; vyžadují novou ruční diagnostiku. Ani
+parseovatelný finální frame sám neprokazuje, že původní proces obdržel fsync
+acknowledgement. Neexistuje API pro pokračování v přerušeném rollbacku.
+
+Rozsah nezahrnuje dvě akce E6A, jiné operace, celý plán, DB reconciliation,
+produkční maintenance/executor ani NAS/RPi5. Obecný ani produkční rollback
+a automatický rollback/recovery nadále neexistují. Externí readiness gates zůstávají
+nesplněné. **NOT AUTHORIZED FOR NAS EXECUTION.**
 
 ## Externí pre-execution gates
 
