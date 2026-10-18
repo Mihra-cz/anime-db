@@ -1,4 +1,4 @@
-"""E5A private, single-video SQLite transaction for a fresh scratch coordinator.
+"""Private scratch SQLite transactions, including sealed R0 locator prefixes.
 
 Only the coordinator calls this lane, while retaining its live identity pins and
 sole E1 writer. No schema/startup, arbitrary DB path, restart or retry support.
@@ -14,9 +14,9 @@ from . import target_execution_filesystem as fs
 from . import target_execution_identity as identity
 from . import target_execution_journal as journal
 from .database import Base
-from .models import Video
+from .models import Video, ExternalSubtitle, UnresolvedExternalSubtitle, CatalogCollection, CatalogTitle
 from .target_execution_manifest import (DatabaseFingerprint, LocatorPatch, post_state_hash_from_manifest,
-    criticality_for_records, _patches)
+    criticality_for_records, manifest_to_json, _patches)
 from .target_planner_filesystem import inventory_filesystem, plan_library
 from .target_planner_service import load_planner_context, readonly_planner_session
 
@@ -33,6 +33,117 @@ def _rows(connection):
 def _schema(connection):
     return (tuple(connection.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')),
         connection.execute('PRAGMA user_version').fetchone()[0])
+
+
+_LOCATORS = {
+    'video': (Video.__table__, frozenset({'relative_path', 'root_folder'})),
+    'subtitle': (ExternalSubtitle.__table__, frozenset({'relative_path'})),
+    'unmatched_subtitle': (UnresolvedExternalSubtitle.__table__, frozenset({'relative_path'})),
+    'collection': (CatalogCollection.__table__, frozenset({'relative_root_path'})),
+    'title': (CatalogTitle.__table__, frozenset({'relative_root_path'})),
+}
+
+
+def _locator_prefixes(before, manifest):
+    """Project sealed patches from R0; this grants no physical execution authority.
+
+    File patches belong to their exact action. All container patches belong to
+    the final action's transaction, after the coordinator verifies every file.
+    No locator is inferred for writing and no filesystem-only row is created.
+    """
+    manifest_to_json(manifest)
+    actions = manifest.payload.actions
+    if not actions:
+        raise ValueError('a final verified file-action transaction is required')
+    groups = {}
+    for patch in manifest.payload.locator_patches:
+        if (type(patch.object_id) is not int or patch.object_id <= 0
+                or patch.object_kind not in _LOCATORS
+                or patch.field not in _LOCATORS[patch.object_kind][1] or patch.before == patch.after):
+            raise ValueError('exact supported locator patch ID/field/change required')
+        table, _ = _LOCATORS[patch.object_kind]
+        names = list(table.columns.keys())
+        rows = [dict(zip(names, row)) for row in before[table.name]
+            if row[names.index('id')] == patch.object_id]
+        if len(rows) != 1 or rows[0][patch.field] != patch.before:
+            raise ValueError('locator patch ID/before differs from original R0')
+        # Titles may intentionally share a container (for example Season Parts).
+        if patch.field != 'root_folder' and patch.object_kind != 'title' and any(
+                row[names.index('id')] != patch.object_id and row[names.index(patch.field)] == patch.after
+                for row in before[table.name]):
+            raise ValueError('target locator belongs to another original DB row')
+        key = patch.object_kind, patch.object_id
+        groups.setdefault(key, []).append(patch)
+
+    stages, consumed = [], set()
+    for action in actions:
+        kind = 'unmatched_subtitle' if action.object_kind in {'confirmed_no_match', 'unresolved_subtitle'} else action.object_kind
+        key = kind, action.object_id
+        updates = ()
+        if kind in {'video', 'subtitle', 'unmatched_subtitle'}:
+            if type(action.object_id) is not int or action.object_id <= 0 or key in consumed:
+                raise ValueError('one exact action per persisted file row required')
+            table, _ = _LOCATORS[kind]
+            names = list(table.columns.keys())
+            rows = [dict(zip(names, row)) for row in before[table.name]
+                if row[names.index('id')] == action.object_id]
+            if len(rows) != 1 or rows[0]['relative_path'] != action.source:
+                raise ValueError('original file row ID/source mismatch')
+            original = rows[0]
+            if kind == 'video' and (original['size'], original['mtime_ns']) != (action.expected_size, action.expected_mtime_ns):
+                raise ValueError('original Video size/mtime mismatch')
+            desired = {'relative_path': action.target}
+            if kind == 'video':
+                desired['root_folder'] = action.target.split('/')[0]
+            expected = {(field, original[field], value) for field, value in desired.items() if original[field] != value}
+            patches = tuple(sorted(groups.get(key, ()), key=lambda p: p.field))
+            if (expected != {(p.field, p.before, p.after) for p in patches}
+                    or (action.action == 'KEEP' and patches)):
+                raise ValueError('exact sealed file locator changes required; KEEP has no file patches')
+            if patches:
+                updates = (patches,)
+            consumed.add(key)
+        stages.append(updates)
+    containers = tuple(tuple(sorted(patches, key=lambda p: p.field)) for key, patches in sorted(groups.items())
+        if key[0] in {'collection', 'title'})
+    if any(key not in consumed and key[0] not in {'collection', 'title'} for key in groups):
+        raise ValueError('locator patch has no exact physical file action')
+    stages[-1] += containers
+
+    states, counts, applied = [before], [0], {}
+    for updates in stages:
+        for patches in updates:
+            for patch in patches:
+                applied[(patch.object_kind, patch.object_id, patch.field)] = patch.after
+        projected = dict(before)
+        for kind, (table, _) in _LOCATORS.items():
+            names = list(table.columns.keys())
+            projected[table.name] = tuple(tuple(applied.get((kind, row[names.index('id')], field), value)
+                for field, value in zip(names, row)) for row in before[table.name])
+            # Catch two new targets colliding even when neither was occupied in R0.
+            if kind != 'title':
+                field = 'relative_root_path' if kind == 'collection' else 'relative_path'
+                locators = [row[names.index(field)] for row in projected[table.name]]
+                if len(set(locators)) != len(locators):
+                    raise ValueError('projected DB locator collision')
+        states.append(projected)
+        counts.append(counts[-1] + len(updates))
+    return tuple(states), tuple(stages), tuple(counts)
+
+
+def _apply_locator_updates(connection, updates):
+    """Only parameterized locator UPDATEs; transaction and verification stay in E7A."""
+    for patches in updates:
+        first = patches[0]
+        table, fields = _LOCATORS[first.object_kind]
+        if any(p.object_kind != first.object_kind or p.object_id != first.object_id or p.field not in fields for p in patches):
+            raise ValueError('invalid grouped locator update')
+        cursor = connection.execute('UPDATE "' + table.name + '" SET ' +
+            ','.join('"' + p.field + '"=?' for p in patches) + ' WHERE id=? AND ' +
+            ' AND '.join('"' + p.field + '"=?' for p in patches),
+            tuple(p.after for p in patches) + (first.object_id,) + tuple(p.before for p in patches))
+        if cursor.rowcount != 1:
+            raise ValueError('locator update ID/before conflict')
 
 
 class _ScratchVideoDatabase:
@@ -334,45 +445,22 @@ class _ScratchSequenceDatabase(_ScratchPrefixDatabase):
             if {row[1] for row in self._schema[0] if row[0] == 'table'} != set(Base.metadata.tables):
                 raise ValueError('complete known scratch application schema required')
             self._validate_complete_plan()
-            columns = list(Video.__table__.columns.keys())
-            states, patches, counts, originals = [self._before], [], [0], []
-            for action in manifest.payload.actions:
-                values = None
-                projected = states[-1]
-                if action.action == 'MOVE':
-                    selected = [dict(zip(columns, row)) for row in self._before['videos']
-                        if row[columns.index('id')] == action.object_id]
-                    if len(selected) != 1:
-                        raise ValueError('one original row per moved Video required')
-                    values = selected[0]
-                    if (values['relative_path'] != action.source
-                            or (values['size'], values['mtime_ns']) != (action.expected_size, action.expected_mtime_ns)):
-                        raise ValueError('original Video source/size/mtime mismatch')
-                    if any(row[columns.index('id')] != action.object_id
-                            and row[columns.index('relative_path')] == action.target for row in self._before['videos']):
-                        raise ValueError('target locator belongs to another Video')
-                    after = {'relative_path': action.target, 'root_folder': action.target.split('/')[0]}
-                    patches.extend(LocatorPatch('video', action.object_id, name, values[name], value)
-                        for name, value in after.items() if values[name] != value)
-                    rows = []
-                    for row in states[-1]['videos']:
-                        current = list(row)
-                        if row[columns.index('id')] == action.object_id:
-                            for name, value in after.items():
-                                current[columns.index(name)] = value
-                        rows.append(tuple(current))
-                    projected = {**states[-1], 'videos': tuple(rows)}
-                states.append(projected)
-                originals.append(values)
-                counts.append(counts[-1] + int(action.action == 'MOVE'))
-            if len(patches) != len(manifest.payload.locator_patches) or set(patches) != set(manifest.payload.locator_patches):
-                raise ValueError('exact complete Video locator patches required; KEEP has no patches')
-            self._originals, self._states, self._change_counts = originals, tuple(states), tuple(counts)
+            self._states, self._updates, self._change_counts = _locator_prefixes(self._before, manifest)
             self._ack_fingerprint = manifest.payload.db_fingerprint
             self._check_stage(0)
         except BaseException as exc:
             self._resources.__exit__(type(exc), exc, exc.__traceback__)
             raise
+
+    def _apply(self, index):
+        self._check_stage(index)
+        self._applied_indices.add(index)
+        _apply_locator_updates(self._connection, self._updates[index])
+        if (self._connection.total_changes != self._change_counts[index + 1]
+                or _rows(self._connection) != self._states[index + 1]
+                or _schema(self._connection) != self._schema):
+            raise ValueError('prefix locator update conflict or unapproved side effect')
+        self._check_path()
 
     def _validate_complete_plan(self):
         # This comparison never replaces/reseals the approved manifest or checks

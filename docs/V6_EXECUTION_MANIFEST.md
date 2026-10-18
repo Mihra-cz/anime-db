@@ -1156,6 +1156,41 @@ allowlist a stávající malé scratch limity. Produkční capability, admission
 externí writery, NAS/mount/backup/readiness a power-loss důkazy se tím neřeší
 ani neoznačují za splněné. Produkční executor a automatické recovery nevznikají.
 
+## E7D: úplná locator-only DB projekce
+
+**HOTOVO, nezávislé review PASS. NOT AUTHORIZED FOR NAS EXECUTION.**
+Existující E7A SQLite větev používá sealed patches pro `video` → `videos`
+(`relative_path`, `root_folder`), `subtitle` → `external_subtitles` a
+`unmatched_subtitle` → `unresolved_external_subtitles` (`relative_path`),
+`collection` → `catalog_collections` a `title` → `catalog_titles`
+(`relative_root_path`). Action kinds `confirmed_no_match` a `unresolved_subtitle`
+se mapují na patch kind `unmatched_subtitle`. Filesystem-only akce nevytvářejí DB
+rows. Filename evidence, timestamps a všechna ostatní doménová pole se zachovávají.
+
+Každé Rn vzniká z ověřeného R0 a přesného prefixu schválených patches; ID, pole
+a before musí odpovídat R0. Změny polí jednoho řádku tvoří jeden parametrizovaný
+UPDATE s before predicates. KEEP nemá vlastní file UPDATE. Všechny collection/title
+patches se aplikují atomicky s DB krokem poslední akce, i když jde o KEEP:
+existující coordinator před ním znovu ověřuje všechny fyzické operace. Při
+necommitnutém selhání se vrátí celá poslední transakce včetně file i container
+patches; předchozí potvrzené prefixy zůstávají. Nejasný commit znamená STOP bez
+retry. Prázdný manifest nemá tuto transakční hranici a zůstává nepodporovaný.
+
+Celé rows/schema, user_version, data_version, total_changes, fingerprint a
+nezávislé read-only ověření commitů zůstávají povinné. Finální expected_post_hash
+se kontroluje až po posledním commitu se všemi container patches. E6A a jeho
+dvouakční DB větev se nemění; E7A physical admission nadále přijímá pouze PRIMARY
+Video MOVE a PRIMARY KEEP. Subtitle MOVE a QUARANTINE DB projekce je ověřena
+izolovaně, bez rozšíření fyzické execution authority.
+
+Windows kontext zůstává produkční překážkou: sealed v1 payload neukládá konkrétní
+Windows root. Dva různé rooty se stejnými výsledky budget checks mohou mít totožný
+payload. E7A fresh i finální verifier nadále používají `None`; manifest vytvořený
+s Windows kontrolou se odmítne již při fresh R0 parity. Nejmenší budoucí řešení
+je verzované sealed pole pro explicitní Windows root, jeho shoda s runtime
+evidence a předání stejné hodnoty generation/fresh/final plannerům. E7D formát
+manifestu/journalu ani externí autoritu nemění.
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.
