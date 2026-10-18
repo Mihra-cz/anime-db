@@ -150,11 +150,12 @@ def test_cli_exit_status_distinguishes_clean_from_blocked_plan(tmp_path,session,
         source=root/v.relative_path;source.parent.mkdir(parents=True,exist_ok=True);source.write_bytes(b'video')
         source.with_suffix('.ass').write_text('subtitle')
     args=['--db',str(path),'--library-root',str(root),'--repeat','1']
-    assert cli.main(args)==0
+    assert cli.main(args)==2  # Files are covered; Source still needs directory cleanup review.
     (root/videos[0].relative_path).unlink()
     assert cli.main(args)==2
     capsys.readouterr()
-    clean=dict(deterministic=True,production_db_unchanged=True,plan=dict(status_counts=[('BLOCKED',0),('REVIEW',0)]))
+    clean=dict(deterministic=True,production_db_unchanged=True,coverage_deterministic=True,
+        coverage=dict(complete=True),plan=dict(status_counts=[('BLOCKED',0),('REVIEW',0)]))
     assert cli.exit_status(clean)==0
     assert cli.exit_status(dict(clean,deterministic=False))==1
     assert cli.exit_status(dict(clean,production_db_unchanged=False))==1
@@ -185,7 +186,8 @@ def test_cli_post_state_projection_is_readonly_and_settled(tmp_path, session):
     assert result['sql_select_counts']==[11,11]
     assert result['session_states']==[[0,0,0],[0,0,0]]
     assert result['production_db_unchanged'] is True
-    assert cli.exit_status(result)==0
+    assert result['coverage']['files_complete'] and not result['coverage']['complete']
+    assert cli.exit_status(result)==2  # Theoretical convergence does not resolve source directories.
     broken=dict(result,post_state=dict(result['post_state'],converged=False))
     assert cli.exit_status(broken)==2
 

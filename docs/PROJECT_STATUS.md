@@ -290,8 +290,12 @@ PRE_EXECUTION_REQUIRED). Side assets se přiřazují jen vlastnímu secondary;
 secondary v library rootu ani adresář s nepřiřaditelným souborem nejsou accounted.
 
 [CLI](../app/tools/target_plan.py) vypíše JSON bez uloženého manifestu a umí dva
-fresh běhy s porovnáním records/counts/statuses/collisions/hash a DB fingerprintu;
-exit status odliší čistý plán (0), BLOCKED/REVIEW (2) a selhání evidence (1).
+fresh běhy s porovnáním records/counts/statuses/collisions/hash a DB fingerprintu.
+Exit status 0 vyžaduje úplné coverage souborů i adresářů a žádné BLOCKED/REVIEW
+records; neúplné coverage (včetně nevyřešených adresářů) nebo BLOCKED/REVIEW
+vrací 2. Selhání determinismu plánu/coverage nebo DB fingerprint evidence vrací 1.
+S `--post-state` navíc nekonvergující projekce vrací 2 a její nedeterminismus 1;
+konvergence samotná neznamená úplné coverage ani fyzicky ověřenou execution.
 Source archives se zachovávají flat v Subs jako READY s info diagnostikou
 neklasifikovaného obsahu; auxiliary v root Extras se skutečným subtree; root TXT
 zůstává KEEP. confirmed_no_match je subtitle present/video missing,

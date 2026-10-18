@@ -1,7 +1,9 @@
 """Print a read-only V6 target plan as JSON; no execution or saved manifest.
 
-Exit status: 0 clean plan, 2 plan with BLOCKED/REVIEW records, 1 failed
-determinism or DB fingerprint evidence (or an unexpected error).
+Exit status: 0 complete planning coverage with no BLOCKED/REVIEW records and a
+converged projection when --post-state is requested; 2 incomplete coverage,
+BLOCKED/REVIEW records or a nonconverged projection; 1 failed determinism or DB
+fingerprint evidence (or an unexpected error).
 
 Example:
     python -m app.tools.target_plan --db data/anime.db --library-root /mnt/nas-anime --repeat 2
@@ -21,6 +23,7 @@ from sqlalchemy import event
 from ..target_planner_filesystem import inventory_filesystem, plan_library
 from ..target_planner_service import load_planner_context, readonly_planner_session
 from ..target_planner_post_state import simulate_post_state
+from ..target_planner_coverage import report_coverage
 
 
 def database_fingerprint(path: Path) -> dict:
@@ -43,6 +46,7 @@ def simulate_readonly(database_path: Path, library_root: Path, *, repeat: int = 
     select_counts = []
     session_states = []
     projections = []
+    coverage_reports = []
     for _ in range(repeat):
         with readonly_planner_session(database_path) as session:
             statements = []
@@ -57,6 +61,7 @@ def simulate_readonly(database_path: Path, library_root: Path, *, repeat: int = 
         snapshot = inventory_filesystem(Path(library_root))
         plan = plan_library(context, snapshot, windows_root=windows_root)
         plans.append(plan)
+        coverage_reports.append(report_coverage(snapshot, plan))
         if post_state:
             try:
                 projected = simulate_post_state(context, snapshot, plan, windows_root=windows_root)
@@ -71,6 +76,8 @@ def simulate_readonly(database_path: Path, library_root: Path, *, repeat: int = 
         plan_hashes=[p.plan_hash for p in plans], filesystem_hashes=[p.filesystem_hash for p in plans],
         sql_select_counts=select_counts, session_states=session_states,
         production_db_before=before, production_db_after=after, production_db_unchanged=before == after,
+        coverage=asdict(coverage_reports[0]),
+        coverage_deterministic=all(report == coverage_reports[0] for report in coverage_reports),
         nas_write_operations=0)
     if post_state:
         result.update(post_state=projections[0], post_state_deterministic=all(p == projections[0] for p in projections),
@@ -81,11 +88,15 @@ def simulate_readonly(database_path: Path, library_root: Path, *, repeat: int = 
 def exit_status(result: dict) -> int:
     if not (result['deterministic'] and result['production_db_unchanged']):
         return 1
+    if not result.get('coverage_deterministic', False):
+        return 1
     if 'post_state' in result:
         if not result['post_state_deterministic']:
             return 1
         if not result['post_state']['converged']:
             return 2
+    if not result.get('coverage', {}).get('complete', False):
+        return 2
     states = dict(result['plan']['status_counts'])
     return 2 if states.get('BLOCKED') or states.get('REVIEW') else 0
 

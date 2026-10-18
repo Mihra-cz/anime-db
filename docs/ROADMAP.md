@@ -290,6 +290,7 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 | E6B | [Lokální spolupracující maintenance boundary](V6_EXECUTION_MANIFEST.md#e6b-lokální-spolupracující-maintenance-boundary) | HOTOVO |
 | Ruční scratch rollback | [Jedna přerušená Video MOVE](V6_EXECUTION_MANIFEST.md#ručně-schválený-rollback-jedné-scratch-video-move) | HOTOVO |
 | E7A | [Sekvenční jádro pro celý sealed manifest](V6_EXECUTION_MANIFEST.md#e7a-sekvenční-execution-jádro) | HOTOVO |
+| E7C | [Read-only vyúčtování souborů a adresářů Target Planneru](../app/target_planner_coverage.py) | HOTOVO, nezávislé review PASS |
 
 HOTOVO u E1–E7A označuje pouze dokončený povolený izolovaný rozsah.
 E1 poskytuje append-only durable journal, writer lock, strict loading a validovaný

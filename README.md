@@ -77,8 +77,15 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.tools.target_plan \
 
 Volitelné `--windows-root` přijímá pouze skutečnou absolutní klientskou cestu.
 Bez ní Windows budget zůstává NOT_CHECKED / PRE_EXECUTION_REQUIRED.
-Exit status je 0 pro čistý plán, 2 pro plán s BLOCKED/REVIEW records a 1 při
-selhání determinismu nebo DB fingerprintu. Plán je pouze návrh: execution
+Výstup obsahuje read-only `coverage`: počty, cesty a důvody neúplnosti pro
+soubory i adresáře. `files_complete` rozlišuje pokrytí souborů od celkového
+`complete`; cleanup review a nerozhodnuté prázdné adresáře blokují úplnost.
+Chybějící schválené target parents jsou pouze plán, `#recycle` je vykázán
+odděleně bez inventarizace obsahu. Report nepotvrzuje execution readiness ani
+fyzický post-state (`execution_verified=false`).
+Exit status je 0 pro úplné plánovací vyúčtování, 2 pro neúplné coverage nebo
+BLOCKED/REVIEW records a 1 při selhání determinismu nebo DB fingerprintu.
+Plán je pouze návrh: execution
 (rename/move/quarantine/purge), P2C scanner routing a Completeness UI jsou pending.
 
 `--post-state` navíc čistě v paměti promítne intended paths a container locators,
