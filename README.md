@@ -121,8 +121,12 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.tools.execution_manifest \
 
 Output musí být explicitní lokální cesta mimo repo a library/NAS; runtime manifesty
 nepatří do repozitáře. Produkční DB se otevírá `mode=ro`, NAS se pouze čte.
-Generation i dry-run používají stejný skutečný Windows root; DSM port 5000 není
-součást SMB/UNC cesty. Official ingress pro externí preflight evidence je volitelný
+Generation ukládá přesný Windows root do sealed v2 payloadu. Dry-run plánuje se
+sealed hodnotou a vyžaduje shodný `--windows-root` jako runtime důkaz; jiná hodnota
+znamená NOT_READY. Vynechání při generation ukládá explicitní null bez produkční
+readiness. Historický v1 zůstává čitelný bez nové execution authority; automatický
+upgrade neexistuje. DSM port 5000 není součást SMB/UNC cesty.
+Official ingress pro externí preflight evidence je volitelný
 dry-run argument `--runtime-evidence <local-json-path>`. Jeho strict JSON obsahuje
 [přesně 14 externích polí](docs/V6_EXECUTION_MANIFEST.md#runtime-evidence-cli-composition);
 Windows root dodá CLI a mount identity/RO state/free bytes vždy fresh runtime.

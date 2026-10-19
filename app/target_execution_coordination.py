@@ -18,7 +18,7 @@ from .target_execution_identity import (
     IdentityEvidenceReconciliationRequired, _file_stat,
 )
 from .target_execution_journal import DurableJournal, ReconciliationRequired
-from .target_execution_manifest import ExecutionManifest, ManifestAction, JournalEntry
+from .target_execution_manifest import ExecutionManifest, ManifestAction, JournalEntry, manifest_windows_root
 from .target_execution_database import _ScratchVideoDatabase
 
 
@@ -190,6 +190,10 @@ class ScratchActionSession(_LiveIdentityChecks):
                 if reconcile_video:
                     phase = 'DB_VALIDATION'
                     self._filesystem._validate(manifest, action)
+                    phase = 'VALIDATION'
+                    # Legacy v1 has no sealed final-verification root: STOP before DB, evidence or journal.
+                    manifest_windows_root(manifest)
+                    phase = 'DB_VALIDATION'
                     self._database = _ScratchVideoDatabase(self._filesystem, self.database_path, manifest, action)
                     phase = 'VALIDATION'
                 with self._filesystem.observe(manifest, action) as observation:

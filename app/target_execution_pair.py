@@ -20,7 +20,7 @@ from .target_execution_sequence import _ExecutionSequence
 from .target_execution_identity import (
     ScratchIdentitySession,
 )
-from .target_execution_manifest import ExecutionManifest, JournalEntry, manifest_to_json
+from .target_execution_manifest import ExecutionManifest, JournalEntry, manifest_to_json, manifest_windows_root
 
 
 class _PairFilesystem(fs.ScratchRenameSession):
@@ -109,6 +109,8 @@ class _ScratchVideoMovePair(_ExecutionSequence):
         # Structural validation does not issue observation or rename authority for B.
         for action in (a, b):
             fs._validate_scratch_binding(manifest, action, self.root, self.mount_identity)
+        # Legacy v1 has no sealed final-verification root: STOP before DB, evidence or journal.
+        manifest_windows_root(manifest)
         self._manifest_bytes = manifest_to_json(manifest)
 
     def _require_predecessor(self):

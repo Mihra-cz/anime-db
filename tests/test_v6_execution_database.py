@@ -1,8 +1,11 @@
 """E5A integrates only a single scratch MOVE and two exact SQLite locators."""
 from dataclasses import replace
+import builtins
 import errno
 import gc
+import io
 import os
+from pathlib import Path
 import sqlite3
 
 import pytest
@@ -10,13 +13,14 @@ import pytest
 from app import target_execution_coordination as coordination
 from app import target_execution_database as database_api
 from app import target_execution_filesystem as fs
+from app import target_execution_identity as identity
 from app import target_execution_journal as journal
 from app.target_execution_coordination import ScratchActionSession
 from app.target_execution_journal import load_journal
 from app.target_execution_manifest import LocatorPatch, manifest_to_json, post_state_hash_from_manifest
 from app.target_planner_filesystem import inventory_filesystem
 from app.target_planner_service import load_planner_context, readonly_planner_session
-from v6_database_case import prepare_database, database_rows
+from v6_database_case import prepare_database, database_rows, legacy_v1
 from test_v6_execution_filesystem import seal, changed_action
 from app.tools.target_plan import database_fingerprint
 
@@ -105,6 +109,87 @@ def test_one_writer_owns_the_entire_lifecycle_and_commit_precedes_db_ack(case, m
     assert execute(session, manifest).outcome == 'COMPLETE'
     assert len(created) == 1 and created[0]._closed
     assert appended == ['PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE']
+
+
+def test_historical_v1_stops_before_db_evidence_journal_or_rename(case, monkeypatch):
+    session, manifest, source, target, path = case
+    legacy = legacy_v1(manifest)
+    before, rows = path.read_bytes(), database_rows(path)
+    calls = []
+    open_db, capture = database_api._ScratchVideoDatabase._open, identity.ScratchIdentitySession.capture
+    create, rename = journal.DurableJournal.create, fs._rename_noreplace
+    monkeypatch.setattr(database_api._ScratchVideoDatabase, '_open', lambda db: calls.append('db') or open_db(db))
+    monkeypatch.setattr(identity.ScratchIdentitySession, 'capture',
+        lambda owner, *args, **kwargs: calls.append('evidence') or capture(owner, *args, **kwargs))
+    monkeypatch.setattr(journal.DurableJournal, 'create',
+        classmethod(lambda cls, *args, **kwargs: calls.append('journal') or create(*args, **kwargs)))
+    monkeypatch.setattr(fs, '_rename_noreplace', lambda *args: calls.append('rename') or rename(*args))
+    with pytest.raises(coordination.ScratchCoordinationStopped) as error:
+        execute(session, legacy)
+    assert calls == []
+    assert source.exists() and not target.exists()
+    assert path.read_bytes() == before and database_rows(path) == rows
+    assert not session.journal_path.exists() and not session.evidence_path.exists()
+    assert type(error.value) is coordination.ScratchCoordinationStopped
+    assert error.value.phase == 'VALIDATION' and not error.value.reconciliation_required
+    assert 'legacy manifest has no sealed Windows root' in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize('version', [1, 2])
+def test_foreign_library_root_is_rejected_without_foreign_path_io(case, tmp_path, monkeypatch, version):
+    session, manifest, source, target, path = case
+    if version == 1:
+        manifest = legacy_v1(manifest)
+    foreign = tmp_path / 'foreign-library'
+    foreign.mkdir()
+    manifest = seal(manifest, library_root=str(foreign))
+    before = path.read_bytes()
+    foreign_io = []
+
+    def watch(original, operation):
+        def observed(value, *args, **kwargs):
+            if not isinstance(value, int):
+                candidate = Path(os.fsdecode(value))
+                if not candidate.is_absolute() and kwargs.get('dir_fd') is not None:
+                    candidate = Path(os.readlink(f'/proc/self/fd/{kwargs["dir_fd"]}')) / candidate
+                candidate = Path(os.path.abspath(candidate))
+                if candidate == foreign or foreign in candidate.parents:
+                    foreign_io.append((operation, str(candidate)))
+            return original(value, *args, **kwargs)
+        return observed
+
+    # Start observing only after the synthetic manifest and fixture are ready.
+    with monkeypatch.context() as execution:
+        for module, operation in ((os, 'lstat'), (os, 'stat'), (os, 'open'),
+                (builtins, 'open'), (io, 'open')):
+            execution.setattr(module, operation, watch(getattr(module, operation), operation))
+        with pytest.raises(coordination.ScratchCoordinationStopped) as error:
+            execute(session, manifest)
+
+    assert foreign_io == []
+    assert type(error.value) is coordination.ScratchDatabaseReconciliationRequired
+    assert error.value.phase == 'DB_VALIDATION' and error.value.reconciliation_required
+    assert isinstance(error.value.__cause__, fs.RenameRejected)
+    assert 'root/mount binding mismatch' in str(error.value.__cause__)
+    assert source.exists() and not target.exists() and path.read_bytes() == before
+    assert not session.journal_path.exists() and not session.evidence_path.exists()
+
+
+def test_bound_v2_root_reaches_e5a_final_verification(tmp_path):
+    with ScratchActionSession.create(tmp_path) as session:
+        manifest, source, target, path = prepare_database(session, windows_root=r'C:\Anime')
+        assert manifest.payload.version == 2 and manifest.payload.windows_root == r'C:\Anime'
+        before = database_rows(path)
+        result = execute(session, manifest)
+        assert result.outcome == 'COMPLETE'
+        assert not source.exists() and target.read_bytes() == b'original scratch video'
+        assert states(session, manifest) == ['PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE']
+        from app.models import Video
+        action, fields = manifest.payload.actions[0], list(Video.__table__.columns.keys())
+        changed = {'relative_path': action.target, 'root_folder': action.target.split('/')[0]}
+        expected = tuple(tuple(changed.get(name, value) if row[fields.index('id')] == 100 else value
+            for name, value in zip(fields, row)) for row in before['videos'])
+        assert database_rows(path) == {**before, 'videos': expected}
 
 
 def test_known_rename_rejection_leaves_db_bytes_unchanged(case, monkeypatch):

@@ -1,4 +1,5 @@
 """Small real SQLite/library fixture for the single-video E5A contract."""
+import json
 from pathlib import Path
 import sqlite3
 
@@ -6,7 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.database import Base, make_engine
 from app.models import Video, ExternalSubtitle, ExternalSubtitleCompatibility
-from app.target_execution_manifest import build_execution_manifest
+from app.target_execution_manifest import (
+    build_execution_manifest, manifest_from_json, manifest_to_json, _canonical, _digest,
+)
 from app.target_planner import project_targets
 from app.target_planner_filesystem import inventory_filesystem, plan_library
 from app.target_planner_service import load_planner_context, readonly_planner_session
@@ -27,7 +30,18 @@ def database_rows(path):
         connection.close()
 
 
-def prepare_database(session):
+def legacy_v1(manifest):
+    """Valid historical v1 shape, synthesized only for negative scratch authority tests."""
+    encoded = json.loads(manifest_to_json(manifest))
+    del encoded['payload']['windows_root']
+    encoded['payload']['version'] = 1
+    encoded['manifest_id'] = _digest(encoded['payload'])
+    legacy = manifest_from_json(_canonical(encoded))
+    assert legacy.payload.version == 1 and manifest_to_json(legacy) == _canonical(encoded)
+    return legacy
+
+
+def prepare_database(session, windows_root=None):
     path = session.root.parent / (session.root.name + '.sqlite')
     source = session.root / 'old/source.mkv'
     source.parent.mkdir(mode=0o700)
@@ -87,9 +101,10 @@ def prepare_database(session):
         if directory.is_dir():
             directory.chmod(0o700)
     snapshot = inventory_filesystem(session.root)
-    plan = plan_library(context, snapshot)
+    plan = plan_library(context, snapshot, windows_root=windows_root)
     manifest = build_execution_manifest(context, snapshot, plan, database_fingerprint(path),
-        created_at='2026-10-14T12:00:00Z', mount_identity=session.mount_identity)
+        created_at='2026-10-14T12:00:00Z', mount_identity=session.mount_identity,
+        windows_root=windows_root)
     assert not manifest.payload.generation_diagnostics, manifest.payload.generation_diagnostics
     assert manifest.payload.expected_post_hash is not None
     actions = tuple(a for a in manifest.payload.actions if a.action == 'MOVE')

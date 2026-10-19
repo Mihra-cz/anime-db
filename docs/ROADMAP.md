@@ -206,6 +206,12 @@ E7A sekvenčně provádí celý sealed scratch manifest (PRIMARY Video MOVE a KE
 pod výhradní E6B maintenance s prefixovými R0→Rn SQLite transakcemi; nejasný
 stav znamená STOP bez automatického retry, resume či rollbacku. Je HOTOVO
 po nezávislém review s výsledkem PASS.
+E7E verzovaný Windows root binding je HOTOVO po nezávislém review s výsledkem PASS.
+Nové v2 manifesty pečetí explicitní Windows root do identity; generation,
+fresh parity a final verification používají stejný sealed kontext. V1 zůstává
+historicky čitelný bez nové execution authority; v1 ani nesvázaný v2 kontext
+nemohou získat produkční readiness. Nexus je připravené cílové prostředí,
+nikoli automaticky autorizovaný executor.
 Produkční mount capability je neověřená; produkční globální lock/maintenance boundary,
 produkční executor/DB reconciliation, automatické resume, obecný/produkční
 a automatický rollback, crash recovery a NAS cleanup zůstávají samostatnou
@@ -292,6 +298,7 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 | E7A | [Sekvenční jádro pro celý sealed manifest](V6_EXECUTION_MANIFEST.md#e7a-sekvenční-execution-jádro) | HOTOVO |
 | E7C | [Read-only vyúčtování souborů a adresářů Target Planneru](../app/target_planner_coverage.py) | HOTOVO, nezávislé review PASS |
 | E7D | [Úplná locator-only DB projekce R0→Rn](V6_EXECUTION_MANIFEST.md#e7d-úplná-locator-only-db-projekce) | HOTOVO, nezávislé review PASS |
+| E7E | [Verzovaný Windows root binding](V6_EXECUTION_MANIFEST.md#e7e-verzovaný-windows-root-binding) | HOTOVO, nezávislé review PASS |
 
 HOTOVO u E1–E7A označuje pouze dokončený povolený izolovaný rozsah.
 E1 poskytuje append-only durable journal, writer lock, strict loading a validovaný

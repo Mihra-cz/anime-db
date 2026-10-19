@@ -23,7 +23,7 @@ from .target_planner_types import (
 from .physical_naming_components import evaluate_windows_path_budget
 from .tools.target_plan import database_fingerprint
 
-VERSION = 1
+VERSION = 2
 POLICY_ID = 'v6-execution-preflight-1'
 PLANNER_ID = 'target-planner-post-state-1'
 _ACTIONS = frozenset({'KEEP', 'MOVE', 'QUARANTINE'})
@@ -34,6 +34,40 @@ _REQUIREMENTS = (
     'actual_windows_root_checked', 'mount_read_write_checked',
     'safe_write_capability_proven', 'rename_noreplace_capability_proven',
 )
+_UNSET_WINDOWS_ROOT = object()
+
+
+def validate_windows_root(root: str | None) -> None:
+    """Validate an ordinary drive/UNC client root lexically, on any host OS.
+
+    Preserve the exact supplied spelling in the seal. No case, separator or
+    dot-segment normalization may silently change the approved budget context.
+    """
+    if root is None:
+        return
+    try:
+        if type(root) is not str:
+            raise ValueError('string required')
+        evaluate_windows_path_budget(root)
+        path = root.replace('/', '\\')
+        if re.match(r'^[A-Za-z]:\\', path):
+            components = path[3:].split('\\') if path[3:] else []
+        elif path.startswith('\\\\'):
+            components = path[2:].split('\\')
+            if len(components) < 2 or not components[0] or not components[1]:
+                raise ValueError('UNC server and share required')
+        else:
+            raise ValueError('drive or UNC absolute path required')
+        if components and components[-1] == '':
+            components.pop()  # An ordinary trailing separator is allowed.
+        for component in components:
+            if (not component or component in {'.', '..'} or component[-1] in ' .'
+                    or any(char in '<>:"|?*' for char in component)
+                    or re.fullmatch(r'(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])',
+                        component.split('.', 1)[0].rstrip(' .'), re.IGNORECASE)):
+                raise ValueError('invalid Windows path component')
+    except (ValueError, TypeError) as exc:
+        raise ValueError('invalid Windows root: ' + str(exc)) from exc
 
 
 def _canonical(value) -> str:
@@ -152,7 +186,8 @@ class GraphReport:
 
 
 @dataclass(frozen=True)
-class ManifestPayload:
+class LegacyManifestPayload:
+    """Exact v1 shape for historical integrity; never add fields here."""
     version: int
     policy_id: str
     planner_id: str
@@ -194,14 +229,23 @@ class ManifestPayload:
 
 
 @dataclass(frozen=True)
+class ManifestPayload(LegacyManifestPayload):
+    windows_root: str | None
+
+    def __post_init__(self):
+        super().__post_init__()
+        validate_windows_root(self.windows_root)
+
+
+@dataclass(frozen=True)
 class ExecutionManifest:
-    payload: ManifestPayload
+    payload: ManifestPayload | LegacyManifestPayload
     manifest_id: str
     created_at: str
     acknowledgements: tuple[WarningAcknowledgement, ...] = ()
 
     def __post_init__(self):
-        if (type(self.payload) is not ManifestPayload or type(self.acknowledgements) is not tuple
+        if (type(self.payload) not in (ManifestPayload, LegacyManifestPayload) or type(self.acknowledgements) is not tuple
                 or not all(type(item) is WarningAcknowledgement for item in self.acknowledgements)):
             raise TypeError('manifest envelope nested values must be immutable')
 
@@ -436,6 +480,7 @@ def build_execution_manifest(
     windows_root: str | None = None,
 ) -> ExecutionManifest:
     """Seal exactly one approved plan. Never replace it during a later preflight."""
+    validate_windows_root(windows_root)
     if plan_library(context, snapshot, windows_root=windows_root) != plan:
         raise ValueError('stale or mismatched plan')
     if plan.filesystem_hash is None:
@@ -495,7 +540,7 @@ def build_execution_manifest(
         _patches(context, plan), tuple(sorted(warnings, key=lambda w: w.warning_id)), authorities,
         evidence, _REQUIREMENTS, plan.counts,
         sum(a.expected_size for a in actions if a.action != 'KEEP'),
-        expected_post_hash, tuple(sorted(diagnostics)))
+        expected_post_hash, tuple(sorted(diagnostics)), windows_root)
     manifest_id = _digest(asdict(payload))
     manifest = ExecutionManifest(payload, manifest_id,
         _iso(created_at or datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')),
@@ -511,8 +556,12 @@ def manifest_to_json(manifest: ExecutionManifest) -> str:
 
 def _validate_manifest(manifest: ExecutionManifest) -> None:
     p = manifest.payload
-    if p.version != VERSION or p.policy_id != POLICY_ID or p.planner_id != PLANNER_ID:
+    payload_types = {1: LegacyManifestPayload, VERSION: ManifestPayload}
+    if (type(p.version) is not int or type(p) is not payload_types.get(p.version)
+            or p.policy_id != POLICY_ID or p.planner_id != PLANNER_ID):
         raise ValueError('unknown manifest version or policy')
+    if p.version == VERSION:
+        validate_windows_root(p.windows_root)
     if not Path(p.library_root).is_absolute():
         raise ValueError('library root must be absolute')
     validate_inventory_root(Path(p.library_root))
@@ -651,6 +700,21 @@ def manifest_from_json(raw: str) -> ExecutionManifest:
     return manifest
 
 
+def manifest_windows_root(manifest: ExecutionManifest) -> str | None:
+    """Return only sealed v2 context; v1 has no recoverable execution binding."""
+    _validate_manifest(manifest)
+    if manifest.payload.version != VERSION:
+        raise ValueError('legacy manifest has no sealed Windows root')
+    return manifest.payload.windows_root
+
+
+def _resolve_windows_root(manifest: ExecutionManifest, supplied) -> str | None:
+    root = manifest_windows_root(manifest)
+    if supplied is not _UNSET_WINDOWS_ROOT and supplied != root:
+        raise ValueError('Windows root mismatch with sealed manifest')
+    return root
+
+
 def duplicate_execution_evidence(manifest: ExecutionManifest) -> tuple[DuplicateExecutionEvidence, ...]:
     """Rehydrate carried scalar proof after JSON and a fresh read-only DB reload."""
     _validate_manifest(manifest)
@@ -677,9 +741,11 @@ def _semantic_post_hash(context: PlannerContext, snapshot: FilesystemSnapshot,
 
 
 def post_state_hash_from_manifest(manifest: ExecutionManifest, context: PlannerContext,
-                                  snapshot: FilesystemSnapshot, *, windows_root: str | None = None) -> str:
+                                  snapshot: FilesystemSnapshot, *,
+                                  windows_root: str | None | object = _UNSET_WINDOWS_ROOT) -> str:
     """Compute the comparable hash after fresh DB reload and filesystem inventory."""
-    return _semantic_post_hash(context, snapshot, duplicate_execution_evidence(manifest), windows_root)
+    root = _resolve_windows_root(manifest, windows_root)
+    return _semantic_post_hash(context, snapshot, duplicate_execution_evidence(manifest), root)
 
 
 def _runtime_checks(manifest: ExecutionManifest, runtime: RuntimeEvidence) -> list[str]:
@@ -726,17 +792,22 @@ def _runtime_checks(manifest: ExecutionManifest, runtime: RuntimeEvidence) -> li
                     missing.append('db_backup_bytes_mismatch')
             except (OSError, sqlite3.Error):
                 missing.append('db_backup_unreadable')
-    if not runtime.actual_windows_root:
+    if p.windows_root is None:
+        missing.append('sealed_windows_root_not_bound')
+    if runtime.actual_windows_root is None:
         missing.append('actual_windows_root_not_proven')
     else:
         try:
-            evaluate_windows_path_budget(runtime.actual_windows_root)
-            for action in p.actions:
-                absolute = str(PureWindowsPath(runtime.actual_windows_root).joinpath(*PurePosixPath(action.target).parts))
-                if not evaluate_windows_path_budget(absolute).within_target:
-                    missing.append('windows_path_budget:' + action.target)
+            validate_windows_root(runtime.actual_windows_root)
+            if runtime.actual_windows_root != p.windows_root:
+                missing.append('windows_root_mismatch')
         except (ValueError, TypeError):
             missing.append('actual_windows_root_invalid')
+    if p.windows_root is not None:
+        for action in p.actions:
+            absolute = str(PureWindowsPath(p.windows_root).joinpath(*PurePosixPath(action.target).parts))
+            if not evaluate_windows_path_budget(absolute).within_target:
+                missing.append('windows_path_budget:' + action.target)
     if not runtime.mount_read_write_checked:
         missing.append('mount_read_write_not_proven')
     if runtime.mount_read_only_now is True:
@@ -757,7 +828,7 @@ def _runtime_checks(manifest: ExecutionManifest, runtime: RuntimeEvidence) -> li
 def preflight_execution_manifest(
     manifest: ExecutionManifest, context: PlannerContext, snapshot: FilesystemSnapshot,
     db_fingerprint: dict, *, runtime: RuntimeEvidence | None = None,
-    windows_root: str | None = None,
+    windows_root: str | None | object = _UNSET_WINDOWS_ROOT,
 ) -> PreflightResult:
     """Compare fresh read models to sealed proposal; never mutate the proposal."""
     diagnostics = []
@@ -767,6 +838,13 @@ def preflight_execution_manifest(
         _validate_manifest(manifest)
     except ValueError as exc:
         return PreflightResult('ERROR', ('invalid_manifest:' + str(exc),), (), manifest.manifest_id, None, None, p.logical_move_bytes)
+    if p.version != VERSION:
+        return PreflightResult('NOT_READY', ('legacy_windows_binding_unavailable',), (),
+            manifest.manifest_id, None, None, p.logical_move_bytes)
+    if windows_root is not _UNSET_WINDOWS_ROOT and windows_root != p.windows_root:
+        return PreflightResult('NOT_READY', ('windows_root_mismatch',), (),
+            manifest.manifest_id, None, None, p.logical_move_bytes)
+    windows_root = p.windows_root
     if DatabaseFingerprint(**db_fingerprint) != p.db_fingerprint:
         diagnostics.append('database_fingerprint_changed')
     if snapshot.root != p.library_root:

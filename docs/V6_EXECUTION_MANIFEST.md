@@ -12,8 +12,8 @@ a konkrétní warning acknowledgements jsou envelope evidence mimo semantic hash
 Změna envelope nevytváří nové targets. Datový model obsahuje immutable scalar
 values a tuples; JSON loader odmítá neznámé verze, neznámá pole a chybný hash.
 
-Manifest nese planner/policy identifiers, DB fingerprint, filesystem baseline,
-library/mount identity, ordered actions, target directory set, locator patches,
+Nově generovaný manifest v2 nese planner/policy identifiers, DB fingerprint, filesystem baseline,
+library/mount identity, explicitní `windows_root`, ordered actions, target directory set, locator patches,
 warnings, duplicate evidence, preconditions a expected post-state hash.
 Dry-run manifest nemění. Fresh planner používá pouze pro stale/parity comparison;
 nenahrazuje schválené targets novým plánem. Relevantní změna DB, source inventory
@@ -1183,13 +1183,57 @@ dvouakční DB větev se nemění; E7A physical admission nadále přijímá pou
 Video MOVE a PRIMARY KEEP. Subtitle MOVE a QUARANTINE DB projekce je ověřena
 izolovaně, bez rozšíření fyzické execution authority.
 
-Windows kontext zůstává produkční překážkou: sealed v1 payload neukládá konkrétní
-Windows root. Dva různé rooty se stejnými výsledky budget checks mohou mít totožný
-payload. E7A fresh i finální verifier nadále používají `None`; manifest vytvořený
-s Windows kontrolou se odmítne již při fresh R0 parity. Nejmenší budoucí řešení
-je verzované sealed pole pro explicitní Windows root, jeho shoda s runtime
-evidence a předání stejné hodnoty generation/fresh/final plannerům. E7D formát
-manifestu/journalu ani externí autoritu nemění.
+Původní v1 neukládal Windows root, přestože ovlivňoval planner a post-state hash.
+Tuto mezeru uzavírá [E7E](#e7e-verzovaný-windows-root-binding); E7D locator projekce
+a její transakční hranice zůstávají beze změny.
+
+## E7E: verzovaný Windows root binding
+
+**HOTOVO, nezávislé review PASS. NOT AUTHORIZED FOR NAS EXECUTION.**
+Nová generation vytváří pouze sealed manifest **v2**. Povinné payload pole
+`windows_root` je string nebo explicitní JSON `null`; podléhá immutable boundary
+a canonical SHA-256 stejně jako ostatní payload. `C:\Anime` a `D:\Anime` tedy
+mají rozdílné `manifest_id`, i když mají stejné targets, budget result a post-state
+hash. Čas vytvoření a warning acknowledgements zůstávají mimo payload hash.
+
+Lexikální validace bez Windows runtime rozlišuje drive absolute root (`C:\Anime`,
+případně `C:\`) a úplný UNC root (`\\server\share`, případně s podadresářem).
+Odmítá relativní/drive-relative cesty, UNC bez serveru/share, device namespaces,
+dot segments, prázdné vnitřní komponenty, nepovolené znaky, trailing dot/space
+a reserved device names. Forward slash se při validaci připouští; přesný původní
+zápis včetně case a separators je součástí sealed identity. Při runtime porovnání
+se aliasy ani jiné zápisy automaticky nenormalizují.
+
+Generation používá stejný root pro planner, post-state simulaci i expected hash.
+Read-only preflight, E7A fresh R0 parity a finální post-state verifier jej berou
+ze sealed payloadu. API argument `windows_root`, pokud je explicitně předaný,
+musí přesně odpovídat payloadu, včetně `None`; nesoulad je `NOT_READY` v preflight
+nebo STOP/exception při final verification. Vynechaný API argument používá sealed
+kontext. `RuntimeEvidence.actual_windows_root` musí pro readiness doložit přesně
+tuto hodnotu. Mismatch má diagnostiku `windows_root_mismatch`, bez resealingu
+nebo přepočtu schváleného kontextu. Windows 240 UTF-16 budget se stále kontroluje.
+
+`null` výslovně značí nesvázaný kontext: izolovaný scratch zůstává podporovaný,
+ale preflight vrací `sealed_windows_root_not_bound` a nikdy produkční readiness.
+Dodatečný CLI argument ani runtime evidence nemohou chybějící sealed binding doplnit.
+Windows client budget je oddělený od skutečného Linux `library_root` a od
+`mount_identity`, aktuálního RO stavu i write/no-replace capabilities.
+
+Strict verzovaný dekodér nadále načítá **v1** v přesném historickém tvaru;
+canonical JSON, původní hash i journal binding zůstávají zachované. Do jeho
+reprezentace se nepřidává ani `windows_root: null`. V1 se automaticky neupgraduje
+ani nepřesealuje. Preflight vrací `NOT_READY` s
+`legacy_windows_binding_unavailable`; nová E7A execution a finální execution
+hash binding odmítnou. E5A a E6A odmítají v1 již při admission, po kontrole
+root/mount bindingu bez I/O na cizí root a před DB, evidence, journalem či rename.
+Pro nové schválení je nutná nová v2 generation a review.
+
+E7E nemění DB ani E1 journal schema, R0→Rn patches, nezávislé DB kontroly,
+finální hash až po posledním commitu, scratch action admission ani dependency
+gate. Nepřidává execution lifecycle ani produkční executor. Nexus (Raspberry Pi 5,
+Debian 13 ARM64, plánovaný library root `/mnt/nas-anime` a SQLite na lokálním SSD)
+je připravené cílové prostředí, nikoli automaticky autorizovaný executor;
+aktuální read-only CIFS mount nesplňuje write capability gate.
 
 ## Externí pre-execution gates
 
@@ -1199,7 +1243,7 @@ externí prerequisites:
 
 | Gate | Required evidence před první execution |
 | --- | --- |
-| Windows | Skutečný UNC nebo mapped-drive absolute client root; fresh 240 UTF-16 units budget. NAS path limit je samostatný. |
+| Windows | Sealed v2 UNC nebo drive absolute client root, přesná shoda s runtime evidence a fresh 240 UTF-16 units budget. V1/null readiness nezískají. NAS path limit je samostatný. |
 | Synology snapshot | Snapshot-capable anime shared folder a již vytvořený snapshot ID/time navázaný na manifest baseline. DSM, volume a Snapshot Replication configuration nejsou odhadované. |
 | DB backup | Byte-copy DB mimo repo, SHA-256/size/user_version shodné s baseline a vazba na manifest. |
 | Maintenance | Scanner i ordinary inventory writer zastavené po celou execution až do dokončení post-state verification. |
@@ -1253,7 +1297,7 @@ Tyto čtyři live/current fields jsou v JSON zakázané:
 
 | Live field | Autorita |
 | --- | --- |
-| `actual_windows_root` | Explicitní `--windows-root`, stejný při generation i dry-run. |
+| `actual_windows_root` | Explicitní `--windows-root` při dry-run, přesně shodný s v2 sealed rootem z generation. Bez argumentu zůstává neprokázaný. |
 | `mount_identity` | Fresh `observe_runtime()` nad skutečným library mountem. |
 | `mount_read_only_now` | Fresh `observe_runtime()` nad skutečným library mountem. |
 | `free_bytes` | Fresh `observe_runtime()` nad skutečným library mountem. |
@@ -1264,6 +1308,12 @@ binding, maintenance, capability assertions, mount identity, Windows budget
 a manifest freshness. Capability assertion nepřebije fresh RO state. Evidence
 není součást manifest payloadu, ID/hash, targets, actions, locator patches,
 criticality, warning acknowledgements ani duplicate evidence.
+
+Generation `--windows-root` pečetí do v2 payloadu. Dry-run plánuje vždy se sealed
+hodnotou; jeho argument dodává pouze runtime důkaz, nikdy nový planning root.
+Jiný validní root vrací `NOT_READY/windows_root_mismatch`, vynechaný argument
+`actual_windows_root_not_proven`. Generation bez argumentu ukládá explicitní null.
+CLI report uvádí sealed `windows_root`; manifest se při dry-run nemění.
 
 Tento ingress nevytváří production artifacts, snapshot ani backup a neprovádí
 remount nebo probes. Executor stále neexistuje; NAS execution není autorizovaná.

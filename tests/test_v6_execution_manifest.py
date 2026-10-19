@@ -33,7 +33,8 @@ DB = {'sha256': 'a'*64, 'size': 100, 'mtime_ns': 10, 'user_version': 9}
 def make(ctx=None, snap=None, **kwargs):
     if ctx is None:
         ctx, snap = fixture()
-    return build_execution_manifest(ctx, snap, plan_library(ctx, snap), DB, created_at='2026-10-07T00:00:00Z', **kwargs)
+    return build_execution_manifest(ctx, snap, plan_library(ctx, snap, windows_root=kwargs.get('windows_root')),
+        DB, created_at='2026-10-07T00:00:00Z', **kwargs)
 
 
 def test_manifest_hash_is_deterministic_and_timestamp_outside_hash():
@@ -611,8 +612,9 @@ def test_explicit_bonus_criticality_actor_survives_preflight(tmp_path):
     backup = tmp_path / 'backup.db'
     shutil.copyfile(source_db, backup)
     actual_db = database_fingerprint(source_db)
-    manifest = build_execution_manifest(ctx, snap, plan_library(ctx, snap), actual_db,
-        created_at='2026-10-07T00:00:00Z', criticality_decisions=decision, mount_identity='42:1')
+    manifest = build_execution_manifest(ctx, snap, plan_library(ctx, snap, windows_root=r'Z:\Anime'), actual_db,
+        windows_root=r'Z:\Anime', created_at='2026-10-07T00:00:00Z',
+        criticality_decisions=decision, mount_identity='42:1')
     loaded = manifest_from_json(manifest_to_json(manifest))
     assert loaded.payload.criticality_authorities[0].actor == 'human_operator'
     runtime = RuntimeEvidence(scanner_paused_through_verification=True,
@@ -711,8 +713,8 @@ def test_unresolved_criticality_blocks_even_when_every_external_gate_is_proven(t
     choices[('title', 10)] = NamingChoice(2, 'Show', 'custom', NOW, create_basis_snapshot(naming, 'title', 10))
     ctx = replace(ctx, naming=replace(naming, choices=choices))
     db = actual_db(tmp_path)
-    manifest = build_execution_manifest(ctx, snap, plan_library(ctx, snap), db,
-        created_at='2026-10-07T00:00:00Z', mount_identity='42:1')
+    manifest = build_execution_manifest(ctx, snap, plan_library(ctx, snap, windows_root=r'Z:\Anime'), db,
+        windows_root=r'Z:\Anime', created_at='2026-10-07T00:00:00Z', mount_identity='42:1')
     result = preflight_execution_manifest(manifest, ctx, snap, db, runtime=ready_runtime(tmp_path, manifest.manifest_id, db))
     assert result.outcome == 'NOT_READY' and result.diagnostics == ('criticality_review_required',)
 
@@ -726,8 +728,8 @@ def test_acknowledging_one_warning_never_covers_another_of_the_same_class(tmp_pa
                                                    LocatorBaseline('unmatched_subtitle', 6, 'relative_path', 'old/b.ass')))
     snap = replace(snap, entries=snap.entries + (FilesystemEntry('old/a.ass', 'regular', 3, 4), FilesystemEntry('old/b.ass', 'regular', 3, 4)))
     db = actual_db(tmp_path)
-    manifest = build_execution_manifest(ctx, snap, plan_library(ctx, snap), db,
-        created_at='2026-10-07T00:00:00Z', mount_identity='42:1')
+    manifest = build_execution_manifest(ctx, snap, plan_library(ctx, snap, windows_root=r'Z:\Anime'), db,
+        windows_root=r'Z:\Anime', created_at='2026-10-07T00:00:00Z', mount_identity='42:1')
     first, second = sorted(manifest.payload.warnings, key=lambda w: w.object_id)
     assert first.warning_class == second.warning_class
     ack = WarningAcknowledgement(first.warning_id, first.warning_class, first.object_kind, first.object_id,

@@ -16,7 +16,7 @@ from . import target_execution_journal as journal
 from .database import Base
 from .models import Video, ExternalSubtitle, UnresolvedExternalSubtitle, CatalogCollection, CatalogTitle
 from .target_execution_manifest import (DatabaseFingerprint, LocatorPatch, post_state_hash_from_manifest,
-    criticality_for_records, manifest_to_json, _patches)
+    criticality_for_records, manifest_to_json, manifest_windows_root, _patches)
 from .target_planner_filesystem import inventory_filesystem, plan_library
 from .target_planner_service import load_planner_context, readonly_planner_session
 
@@ -468,7 +468,7 @@ class _ScratchSequenceDatabase(_ScratchPrefixDatabase):
         with readonly_planner_session(self.path) as session:
             context = load_planner_context(session)
         snapshot = inventory_filesystem(self._filesystem.root)
-        fresh = plan_library(context, snapshot)
+        fresh = plan_library(context, snapshot, windows_root=manifest_windows_root(self._manifest))
         payload = self._manifest.payload
         if fresh.plan_hash != payload.plan_hash or fresh.filesystem_hash != payload.filesystem_hash:
             raise ValueError('original complete planner/FS baseline changed')

@@ -137,6 +137,37 @@ def test_official_cli_composes_all_fields_and_reaches_ready_without_manifest_cha
     assert inventory_filesystem(library) == fs_before
 
 
+@pytest.mark.parametrize('actual_root', [r'\\192.168.11.148\Anime', r'D:\Anime'])
+def test_cli_root_mismatch_cannot_replace_sealed_planning_context(case, monkeypatch, actual_root):
+    common, db, library, manifest_path = case[:4]
+    before = manifest_path.read_bytes()
+    manifest = manifest_from_json(before.decode())
+    db_before, fs_before = database_fingerprint(db), inventory_filesystem(library)
+    read, roots = cli._read_current, []
+    def current(path, root, windows_root):
+        roots.append(windows_root)
+        return read(path, root, windows_root)
+    monkeypatch.setattr(cli, '_read_current', current)
+    status, report = run(([*common[:-1], actual_root], *case[1:]))
+    assert (status, report['outcome'], report['diagnostics']) == (2, 'NOT_READY', ['windows_root_mismatch'])
+    assert roots == [WINDOWS_ROOT]
+    assert report['windows_root'] == WINDOWS_ROOT
+    assert report['plan_hash'] == manifest.payload.plan_hash
+    assert dict(report['checks'])['manifest_projection'] == 'MATCH'
+    assert manifest_path.read_bytes() == before and report['manifest_id'] == manifest.manifest_id
+    assert database_fingerprint(db) == db_before and inventory_filesystem(library) == fs_before
+
+
+@pytest.mark.parametrize('root', ['C:Anime', '\\\\server', r'\\?\C:\Anime'])
+def test_generation_rejects_invalid_binding_before_loading_db_or_library(tmp_path, monkeypatch, root):
+    monkeypatch.setattr(cli, '_read_current', lambda *args: pytest.fail('unexpected read'))
+    with pytest.raises(ValueError, match='Windows root'):
+        cli.main(['generate-manifest', '--db', str(tmp_path / 'unused.db'),
+            '--library-root', str(tmp_path / 'unused-library'), '--windows-root', root,
+            '--output', str(tmp_path / 'manifest.json')])
+    assert not (tmp_path / 'manifest.json').exists()
+
+
 def test_no_runtime_file_keeps_external_assertions_unproven(case):
     status, report = run(case, evidence=False)
     assert status == 2 and report['outcome'] == 'NOT_READY'
@@ -284,8 +315,8 @@ def test_each_external_fact_fails_closed_alone(case, field, value, expected):
 @pytest.mark.parametrize('change,outcome,expected', [
     ('mount_identity', 'NOT_READY', ('mount_identity_not_proven',)),
     ('free_bytes', 'NOT_READY', ('free_bytes_not_reported',)),
-    ('no_windows_root', 'STALE', ('plan_hash_changed',)),
-    ('over_budget_root', 'STALE', ('plan_hash_changed',)),
+    ('no_windows_root', 'NOT_READY', ('actual_windows_root_not_proven',)),
+    ('over_budget_root', 'NOT_READY', ('windows_root_mismatch',)),
     ('source_changed', 'STALE', ('source_changed:Show/release.mkv',)),
     ('database_changed', 'STALE', ('database_fingerprint_changed',)),
 ])

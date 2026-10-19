@@ -21,7 +21,7 @@ from app.target_planner_filesystem import inventory_filesystem, plan_library
 from app.target_planner_service import load_planner_context, readonly_planner_session
 from app.tools.target_plan import database_fingerprint
 from test_v6_execution_filesystem import seal, changed_action
-from v6_database_case import prepare_database, database_rows
+from v6_database_case import prepare_database, database_rows, legacy_v1
 
 
 STATES = ['PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE']
@@ -32,7 +32,7 @@ def api():
     return importlib.import_module('app.target_execution_pair')
 
 
-def prepare_pair(owner):
+def prepare_pair(owner, windows_root=None):
     _, source_a, target_a, path = prepare_database(owner)
     with closing(sqlite3.connect(path)) as db:
         current = db.execute('SELECT relative_path FROM videos WHERE id=200').fetchone()[0]
@@ -44,8 +44,9 @@ def prepare_pair(owner):
     with readonly_planner_session(path) as db:
         context = load_planner_context(db)
     snapshot = inventory_filesystem(owner.root)
-    manifest = build_execution_manifest(context, snapshot, plan_library(context, snapshot),
-        database_fingerprint(path), created_at='2026-10-16T12:00:00Z', mount_identity=owner.mount_identity)
+    manifest = build_execution_manifest(context, snapshot, plan_library(context, snapshot, windows_root=windows_root),
+        database_fingerprint(path), windows_root=windows_root,
+        created_at='2026-10-16T12:00:00Z', mount_identity=owner.mount_identity)
     assert not manifest.payload.generation_diagnostics
     actions = tuple(a for a in manifest.payload.actions if a.action == 'MOVE')
     assert [a.object_id for a in actions] == [100, 200]
@@ -165,6 +166,42 @@ def test_two_moves_have_one_writer_independent_evidence_and_exact_r1_r2(tmp_path
     with pytest.raises(coordination.ScratchCoordinationStopped):
         owner.execute(manifest)
     assert (owner.journal_path.read_bytes(), path.read_bytes()) == before
+
+
+def test_historical_v1_stops_before_db_evidence_journal_or_rename(case, monkeypatch):
+    owner, manifest, sources, targets, path = case
+    legacy = legacy_v1(manifest)
+    before, rows = path.read_bytes(), database_rows(path)
+    calls = []
+    open_db, capture = database_api._ScratchVideoDatabase._open, identity.ScratchIdentitySession.capture
+    create, rename = journal.DurableJournal.create, fs._rename_noreplace
+    monkeypatch.setattr(database_api._ScratchVideoDatabase, '_open', lambda db: calls.append('db') or open_db(db))
+    monkeypatch.setattr(identity.ScratchIdentitySession, 'capture',
+        lambda session, *args, **kwargs: calls.append('evidence') or capture(session, *args, **kwargs))
+    monkeypatch.setattr(journal.DurableJournal, 'create',
+        classmethod(lambda cls, *args, **kwargs: calls.append('journal') or create(*args, **kwargs)))
+    monkeypatch.setattr(fs, '_rename_noreplace', lambda *args: calls.append('rename') or rename(*args))
+    with pytest.raises(coordination.ScratchCoordinationStopped) as error:
+        owner.execute(legacy)
+    assert calls == []
+    assert all(p.exists() for p in sources) and not any(p.exists() for p in targets)
+    assert path.read_bytes() == before and database_rows(path) == rows
+    assert not owner.journal_path.exists() and not any(p.exists() for p in owner.evidence_paths)
+    assert type(error.value) is coordination.ScratchCoordinationStopped
+    assert error.value.phase == 'VALIDATION' and not error.value.reconciliation_required
+    assert 'legacy manifest has no sealed Windows root' in str(error.value.__cause__)
+
+
+def test_bound_v2_root_reaches_e6a_final_verification(tmp_path):
+    with api()._ScratchVideoMovePair.create(tmp_path) as owner:
+        manifest, sources, targets, path = prepare_pair(owner, windows_root=r'\\server\Anime')
+        assert manifest.payload.version == 2 and manifest.payload.windows_root == r'\\server\Anime'
+        original = database_rows(path)
+        result = owner.execute(manifest)
+        assert [r.outcome for r in result] == ['COMPLETE', 'COMPLETE']
+        assert history(owner, manifest) == [(i, state) for i in (0, 1) for state in STATES]
+        assert database_rows(path) == project(original, manifest, 2)
+        assert not any(p.exists() for p in sources) and all(p.exists() for p in targets)
 
 
 @pytest.mark.parametrize('change', ['missing_dependency', 'reverse_dependency', 'duplicate_dependency', 'one', 'three', 'low', 'same_id'])

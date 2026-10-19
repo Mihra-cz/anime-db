@@ -10,7 +10,7 @@ from app import target_execution_database as database
 from app.database import make_engine
 from app.maintenance import ScratchMaintenance
 from app.models import CatalogCollection, CatalogTitle, ExternalSubtitle, UnresolvedExternalSubtitle, Video
-from app.target_execution_manifest import LocatorPatch, build_execution_manifest, manifest_to_json
+from app.target_execution_manifest import LocatorPatch, build_execution_manifest, manifest_to_json, manifest_from_json
 from app.target_execution_sequence import ScratchManifestExecution
 from app.target_planner_filesystem import inventory_filesystem, plan_library
 from app.target_planner_service import load_planner_context, readonly_planner_session
@@ -378,21 +378,55 @@ def test_container_trigger_failure_or_extra_write_aborts_the_whole_last_transact
     assert database_rows(path) == expected_rows(original, patches)
 
 
-def test_windows_root_is_not_sealed_and_checked_manifest_stops_before_execution(container_case):
+@pytest.mark.parametrize('windows_root', [r'C:\Anime', r'\\server\Anime'])
+def test_sealed_windows_root_survives_fresh_parity_and_final_locator_verification(container_case, windows_root):
     owner, unchecked, path = container_case
-    from app.target_execution_coordination import ScratchDatabaseReconciliationRequired
-    left = fresh_manifest(owner, path, windows_root='C:\\Anime')
-    right = fresh_manifest(owner, path, windows_root='D:\\Anime')
-    assert left.payload == right.payload  # Same budgets do not bind the root identity.
+    from app.target_execution_journal import load_journal
+    from test_v6_execution_pair import STATES
+    left = fresh_manifest(owner, path, windows_root=windows_root)
+    right = fresh_manifest(owner, path, windows_root=r'D:\Anime')
+    assert left.manifest_id != right.manifest_id
+    assert left.payload.windows_root == windows_root and left.payload.version == 2
     assert left.payload.plan_hash != unchecked.payload.plan_hash
     assert left.payload.expected_post_hash != unchecked.payload.expected_post_hash
     original = database_rows(path)
+    with sqlite3.connect(path) as connection:
+        schema = database._schema(connection)
     gc.collect()
     with ScratchMaintenance(path, owner.root).maintenance() as lease:
-        with pytest.raises(ScratchDatabaseReconciliationRequired, match='baseline changed'):
-            owner.execute(left, maintenance_owner=lease)
+        outcomes = owner.execute(left, maintenance_owner=lease)
+    assert all(outcome.outcome == 'COMPLETE' for outcome in outcomes)
+    assert database_rows(path) == expected_rows(original, left.payload.locator_patches)
+    with sqlite3.connect(path) as connection:
+        assert database._schema(connection) == schema
+    entries = load_journal(owner.journal_path, left).entries
+    assert [(entry.action_index, entry.state) for entry in entries] == [
+        (index, state) for index in range(len(left.payload.actions)) for state in STATES]
+    import json
+    header = json.loads(owner.journal_path.read_text().splitlines()[0])
+    assert header['schema'] == 'animedb-v6-execution-journal' and header['version'] == 1
+    assert set(header) == {'schema', 'version', 'sequence', 'manifest_id', 'manifest_sha256', 'sha256'}
+
+
+def test_legacy_manifest_cannot_start_a_new_e7a_execution(container_case):
+    owner, manifest, path = container_case
+    from app.target_execution_coordination import ScratchCoordinationStopped
+    from app.target_execution_manifest import _canonical, _digest
+    import json
+    encoded = json.loads(manifest_to_json(manifest))
+    # Synthesize the old shape only for this negative scratch authority test.
+    del encoded['payload']['windows_root']
+    encoded['payload']['version'] = 1
+    encoded['manifest_id'] = _digest(encoded['payload'])
+    legacy = manifest_from_json(_canonical(encoded))
+    original = database_rows(path)
+    gc.collect()
+    with ScratchMaintenance(path, owner.root).maintenance() as lease:
+        with pytest.raises(ScratchCoordinationStopped, match='legacy manifest'):
+            owner.execute(legacy, maintenance_owner=lease)
     assert database_rows(path) == original and not owner.journal_path.exists()
     assert not owner.evidence_paths
+    assert all((owner.root / action.source).is_file() for action in legacy.payload.actions)
 
 
 @pytest.mark.parametrize('effect', ['schema', 'user_version'])

@@ -20,7 +20,7 @@ from sqlalchemy import event
 
 from ..target_execution_manifest import (
     build_execution_manifest, manifest_from_json, manifest_to_json,
-    preflight_execution_manifest, RuntimeEvidence, _strict_json_load,
+    preflight_execution_manifest, RuntimeEvidence, validate_windows_root, _strict_json_load,
 )
 from ..target_planner_filesystem import inventory_filesystem, plan_library, validate_inventory_root
 from ..target_planner_service import load_planner_context, readonly_planner_session
@@ -245,7 +245,8 @@ def main(argv=None) -> int:
         p = sub.add_parser(command)
         p.add_argument('--db', type=Path, required=True)
         p.add_argument('--library-root', type=Path, required=True)
-        p.add_argument('--windows-root', help='Actual mapped or UNC absolute Windows root')
+        p.add_argument('--windows-root', help='Exact drive/UNC absolute client root; sealed at generation, '
+            'must match at dry-run; omission cannot prove execution readiness')
         if command == 'generate-manifest':
             p.add_argument('--output', type=Path, required=True)
         else:
@@ -256,9 +257,13 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     validate_inventory_root(args.library_root)
     if args.command == 'generate-manifest':
+        validate_windows_root(args.windows_root)
+        planning_windows_root = args.windows_root
         path = validate_local_output(args.output, args.library_root, forbidden_files=(args.db,))
     else:
         manifest = manifest_from_json(args.manifest.read_text(encoding='utf-8'))
+        # CLI evidence can prove the binding, never replace the approved context.
+        planning_windows_root = getattr(manifest.payload, 'windows_root', None)
         external_evidence = {}
         if args.runtime_evidence is not None:
             try:
@@ -269,7 +274,7 @@ def main(argv=None) -> int:
         inputs = (args.db, args.manifest) + ((args.runtime_evidence,) if args.runtime_evidence is not None else ())
         path = validate_local_output(args.output, args.library_root, Path(manifest.payload.library_root),
             forbidden_files=inputs)
-    context, snapshot, plan, db, metrics = _read_current(args.db, args.library_root, args.windows_root)
+    context, snapshot, plan, db, metrics = _read_current(args.db, args.library_root, planning_windows_root)
     if args.command == 'generate-manifest':
         observations = observe_runtime(args.library_root)
         mount_identity = observations['mount_identity']
@@ -278,6 +283,7 @@ def main(argv=None) -> int:
             criticality_decisions=_approved_criticality_decisions(context, plan))
         _atomic_local_write(path, manifest_to_json(manifest))
         print(json.dumps({'manifest_id': manifest.manifest_id, 'output': str(path), **metrics,
+            'windows_root': manifest.payload.windows_root,
             'actions': len(manifest.payload.actions), 'counts': manifest.payload.counts,
             'graph': asdict(manifest.payload.graph), 'runtime_observations': observations,
             'generation_diagnostics': manifest.payload.generation_diagnostics},
@@ -288,9 +294,10 @@ def main(argv=None) -> int:
         runtime=RuntimeEvidence(**external_evidence, actual_windows_root=args.windows_root,
             mount_identity=observations['mount_identity'],
             mount_read_only_now=observations['mount_read_only_now'],
-            free_bytes=observations['free_bytes']), windows_root=args.windows_root)
+            free_bytes=observations['free_bytes']), windows_root=planning_windows_root)
     report = asdict(result)
     report.update(graph=asdict(manifest.payload.graph), counts=manifest.payload.counts,
+        windows_root=planning_windows_root,
         runtime_observations=observations, **metrics)
     _atomic_local_write(path, json.dumps(report, ensure_ascii=True, indent=2))
     print(json.dumps({'outcome': result.outcome, 'manifest_id': result.manifest_id, 'output': str(path)}, ensure_ascii=True))

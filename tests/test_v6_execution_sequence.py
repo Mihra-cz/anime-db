@@ -37,7 +37,7 @@ def api():
     return importlib.import_module('app.target_execution_sequence')
 
 
-def prepare_sequence(owner, count=3, dependencies='chain'):
+def prepare_sequence(owner, count=3, dependencies='chain', windows_root=None):
     _, _, _, path = prepare_database(owner)
     engine = make_engine(f'sqlite:///{path}')
     try:
@@ -62,7 +62,8 @@ def prepare_sequence(owner, count=3, dependencies='chain'):
     with readonly_planner_session(path) as db:
         context = load_planner_context(db)
     snapshot = inventory_filesystem(owner.root)
-    manifest = build_execution_manifest(context, snapshot, plan_library(context, snapshot), database_fingerprint(path),
+    manifest = build_execution_manifest(context, snapshot, plan_library(context, snapshot, windows_root=windows_root),
+        database_fingerprint(path), windows_root=windows_root,
         created_at='2026-10-17T12:00:00Z', mount_identity=owner.mount_identity)
     assert not manifest.payload.generation_diagnostics
     previous, actions = [], []
@@ -109,10 +110,11 @@ def project(original, actions, patches):
     return {**original, 'videos': tuple(rows)}
 
 
-@pytest.mark.parametrize(('count', 'dependencies'), [(3, 'chain'), (5, 'all'), (3, 'none')])
-def test_complete_manifest_keeps_one_writer_and_exact_prefix_states(tmp_path, monkeypatch, count, dependencies):
+@pytest.mark.parametrize(('count', 'dependencies', 'windows_root'), [
+    (3, 'chain', r'C:\Anime'), (5, 'all', r'\\server\Anime'), (3, 'none', None)])
+def test_complete_manifest_keeps_one_writer_and_exact_prefix_states(tmp_path, monkeypatch, count, dependencies, windows_root):
     with api().ScratchManifestExecution.create(tmp_path) as owner:
-        manifest, path = prepare_sequence(owner, count, dependencies)
+        manifest, path = prepare_sequence(owner, count, dependencies, windows_root)
         original, immutable = database_rows(path), manifest_to_json(manifest)
         states, writers, captures, hashes = [], [], [], []
         create, append = journal.DurableJournal.create, journal.DurableJournal.append
