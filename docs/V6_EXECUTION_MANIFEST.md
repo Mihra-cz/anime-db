@@ -1241,7 +1241,8 @@ aktuální read-only CIFS mount nesplňuje write capability gate.
 Existující scratch-only E7A owner připravuje chybějící parents výhradně z
 původního `ManifestPayload.directories`, v jeho sealed parent-before-child
 pořadí. Nevzniká další executor ani veřejná mkdir/recovery authority. Admission
-zůstává PRIMARY Video MOVE a PRIMARY KEEP; E5A/E6A a veřejná E2A/E3A API
+v rozsahu E7F zůstává PRIMARY Video MOVE a PRIMARY KEEP (rozšíření viz E7G);
+E5A/E6A a veřejná E2A/E3A API
 přípravu adresářů nezískávají. Manifest v2, Windows binding, E1 journal formát
 a E7D locator-only projekce zůstávají beze změny.
 
@@ -1293,6 +1294,56 @@ adresářů, LOW continuation a QUARANTINE execution se nepřidávají.
 Platí dosavadní výhradní scratch ownership a omezení E2A/E6B: privilegovaní či
 nespolupracující same-UID writeři nejsou globálně vyloučení. Scratch testy včetně
 SIGKILL nejsou důkazem NAS/power-loss durability ani produkční readiness.
+
+## E7G: úplné scratch fyzické file actions
+
+**HOTOVO, nezávislé review PASS. NOT AUTHORIZED FOR NAS EXECUTION.**
+Existující `ScratchManifestExecution` přijímá úplný fresh sealed manifest
+následujících kombinací skutečně generovaných Target Plannerem:
+
+| object_kind | action | DB file locator |
+| --- | --- | --- |
+| `video` | MOVE, KEEP, QUARANTINE | Video relative_path/root_folder |
+| `subtitle` | MOVE, KEEP, QUARANTINE | ExternalSubtitle relative_path |
+| `confirmed_no_match` | MOVE, KEEP | UnresolvedExternalSubtitle relative_path |
+| `subtitle_archive` | MOVE, KEEP | žádný |
+| `auxiliary` | MOVE, KEEP | žádný |
+| `duplicate_side_asset` | QUARANTINE, KEEP | žádný |
+| `keep_root` | KEEP | žádný |
+
+Aktuální generátor ponechává `unresolved_subtitle` bez rozhodnutí v REVIEW,
+stejně jako unknown assets a neprokázané duplicate candidates. E7G jim execution
+autoritu nedává. Platné potvrzené duplicity mohou být přesunuté do quarantine
+i při INCOMPLETE/UNKNOWN side accounting; nejde o oprávnění k purge.
+QUARANTINE používá stejný `RENAME_NOREPLACE`, fsync, content/identity evidence
+a E1 lifecycle jako MOVE. KEEP ověřuje původní soubor bez změny file locatoru.
+Žádná akce soubor nemaže.
+
+Před první directory evidencí, mkdir či file action musí projít původní R0
+fingerprint, rows/schema, filesystem/plan hash, úplnost všech původních akcí a
+patchů a přesná criticality včetně důvodu a sealed lidské authority. Carried
+duplicate evidence se navíc přesně porovnává s projekcí původního fresh plánu:
+vazby, side assets, jejich stat/hash/provenance a COMPLETE/INCOMPLETE/UNKNOWN
+se nesmějí doplnit odhadem z cílové cesty. Unsafe source/target chains včetně
+QUARANTINE, nekanonické dependencies a kolize se odmítají před execution efektem.
+
+Přesně schválené PRIMARY i LOW procházejí stejným sekvenčním lifecycle
+PENDING → FS_APPLIED → FS_VERIFIED → DB_RECONCILED → COMPLETE.
+LOW failure policy v manifestu a E1 dependency gate se nemění. E7G při každém
+selhání zastaví celou sekvenci; nedovoluje LOW continuation ani přeskočení akce.
+Nejistý rename, fsync, DB commit či journal append zachovává skutečný stav a
+důkazy a vyžaduje reconciliation. Dřívější potvrzený COMPLETE prefix zůstává
+zachovaný; neprovedené akce se neoznačí COMPLETE. Retry/resume/rollback se
+nepřidávají.
+
+E7F připravuje pouze původní sealed directory set. E7D nadále odvozuje každý
+Rn z původního R0 a přesných sealed patches; filesystem-only akce nevytvářejí
+DB rows ani další locator patches. Collection/Title patches se aplikují až
+v poslední transakci. Po každém commitu probíhá nezávislé ověření a původní
+`expected_post_hash` se kontroluje až na konci s carried duplicate evidence.
+Manifest, jeho hashes ani Windows binding se nepřesealují. E5A/E6A a veřejná
+E2A/E3A autorita, E1 formát, manifest v2, schema i E7C coverage zůstávají beze
+změny. Produkční executor, recovery, purge ani cleanup adresářů nevznikají.
 
 ## Externí pre-execution gates
 

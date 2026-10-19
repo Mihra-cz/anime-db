@@ -372,12 +372,25 @@ class ScratchManifestExecution(_ExecutionSequence):
                 or manifest.payload.expected_post_hash is None):
             raise ValueError('nonempty sealed manifest and final post-state hash required')
         seen, objects, sources, targets = set(), set(), set(), set()
+        # Only executable kinds emitted by the current planner. Full fresh-plan
+        # parity below supplies the authority for each exact disposition/ID.
+        file_actions = {
+            'video': {'MOVE', 'KEEP', 'QUARANTINE'},
+            'subtitle': {'MOVE', 'KEEP', 'QUARANTINE'},
+            'confirmed_no_match': {'MOVE', 'KEEP'},
+            'subtitle_archive': {'MOVE', 'KEEP'},
+            'auxiliary': {'MOVE', 'KEEP'},
+            'duplicate_side_asset': {'QUARANTINE', 'KEEP'},
+            'keep_root': {'KEEP'},
+        }
         for action in manifest.payload.actions:
             fs._validate_scratch_binding(manifest, action, self.root, self.mount_identity)
             key = action.object_kind, action.object_id
-            if (action.criticality != 'PRIMARY' or action.action not in {'MOVE', 'KEEP'}
-                    or (action.action == 'MOVE' and (action.object_kind != 'video'
-                        or type(action.object_id) is not int or action.object_id <= 0))
+            database_object = action.object_kind in {'video', 'subtitle', 'confirmed_no_match'}
+            valid_id = (type(action.object_id) is int and action.object_id > 0) if database_object else (
+                type(action.object_id) is str and action.object_id == action.source)
+            if (action.criticality not in {'PRIMARY', 'LOW'}
+                    or action.action not in file_actions.get(action.object_kind, ()) or not valid_id
                     or key in objects or action.source in sources or action.target in targets
                     or len(set(action.depends_on)) != len(action.depends_on)
                     or any(dependency not in seen for dependency in action.depends_on)):
@@ -386,7 +399,7 @@ class ScratchManifestExecution(_ExecutionSequence):
             objects.add(key)
             sources.add(action.source)
             targets.add(action.target)
-        if any(a.action == 'MOVE' and a.target in sources for a in manifest.payload.actions):
+        if any(a.action != 'KEEP' and a.target in sources for a in manifest.payload.actions):
             raise ValueError('occupied-source chains require unsupported staging')
         self._manifest, self._manifest_bytes = manifest, manifest_to_json(manifest)
         self._phase = 'DB_VALIDATION'

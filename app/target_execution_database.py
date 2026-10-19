@@ -16,8 +16,9 @@ from . import target_execution_journal as journal
 from .database import Base
 from .models import Video, ExternalSubtitle, UnresolvedExternalSubtitle, CatalogCollection, CatalogTitle
 from .target_execution_manifest import (DatabaseFingerprint, LocatorPatch, post_state_hash_from_manifest,
-    criticality_for_records, manifest_to_json, manifest_windows_root, _patches)
+    criticality_for_records, duplicate_execution_evidence, manifest_to_json, manifest_windows_root, _patches)
 from .target_planner_filesystem import inventory_filesystem, plan_library
+from .target_planner_post_state import _project_execution_evidence
 from .target_planner_service import load_planner_context, readonly_planner_session
 
 
@@ -486,6 +487,11 @@ class _ScratchSequenceDatabase(_ScratchPrefixDatabase):
                     for a in payload.actions)
                 or _patches(context, fresh) != payload.locator_patches):
             raise ValueError('manifest omits/changes actions, criticality or exact complete locator patches')
+        # Compare the generator's carried proof with the original R0 facts,
+        # before mkdir or any file action. A quarantine path grants no provenance
+        # and cannot upgrade INCOMPLETE/UNKNOWN source accounting.
+        if duplicate_execution_evidence(self._manifest) != _project_execution_evidence(context, snapshot, fresh):
+            raise ValueError('sealed duplicate evidence differs from original complete plan')
         # E7F consumes this exact admitted R0 snapshot; it never refreshes the
         # sealed baseline after its own directory writes.
         self._initial_snapshot = snapshot
