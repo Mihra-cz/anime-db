@@ -15,6 +15,7 @@ from .target_execution_coordination import (
     ScratchJournalReconciliationRequired,
 )
 from .target_execution_database import _ScratchSequenceDatabase
+from .target_execution_directories import _DirectoryPreparation
 from .target_execution_identity import (
     ScratchIdentitySession, FileIdentityEvidence, IdentityEvidenceReconciliationRequired, _file_stat, _hash_file,
 )
@@ -297,6 +298,7 @@ class ScratchManifestExecution(_ExecutionSequence):
             owner._identities, owner._guards = (), ()
             owner._history, owner._captures, owner._observations, owner._verifications = [], {}, {}, {}
             owner._prepared = {}
+            owner._directories = None
             owner._active_index, owner._phase = 0, 'VALIDATION'
             owner._stop_class = ScratchCoordinationStopped
             filesystem._sequence_owner = owner
@@ -325,6 +327,10 @@ class ScratchManifestExecution(_ExecutionSequence):
     def evidence_paths(self):
         return tuple(context.evidence_path for context in self._identities)
 
+    @property
+    def directory_evidence_path(self):
+        return self.root.parent / (self.root.name + '.directories.jsonl')
+
     def execute(self, manifest: ExecutionManifest, *, maintenance_owner=None):
         return self._execute_once(manifest, maintenance_owner=maintenance_owner)
 
@@ -339,6 +345,8 @@ class ScratchManifestExecution(_ExecutionSequence):
         # Reuse only the rollback's ownership validation, never its approval,
         # existing-root adoption or physical-return authority.
         _require_scratch_maintenance_owner(self._maintenance_owner, self.root)
+        if self._directories is not None:
+            self._directories.check_bindings()
 
     def _authorize(self, manifest, action):
         self._check_execution()
@@ -385,23 +393,24 @@ class ScratchManifestExecution(_ExecutionSequence):
         self._database = self._resources.enter_context(closing(
             _ScratchSequenceDatabase(self._filesystem, self.database_path, manifest)))
         self._phase = 'PREFLIGHT'
+        self._directories = _DirectoryPreparation(self, self._database._initial_snapshot)
         # Read-only pins of all initial sources, without granting observation or
         # rename authority to actions whose dependencies are not yet COMPLETE.
         for index, action in enumerate(manifest.payload.actions):
             with ExitStack() as paths:
                 source_parent = self._filesystem._parent(fs._locator(action.source), paths)
-                target_parent = self._filesystem._parent(fs._locator(action.target), paths)
                 fd = os.open(fs._locator(action.source)[-1], fs._FILE, dir_fd=source_parent)
                 self._resources.enter_context(fs._held_evidence_fd(fd))
                 self._filesystem._check_fd(fd)
                 before = fs._check_source(fd, source_parent, fs._locator(action.source)[-1], action)
                 observed, content = _hash_file(fd)
                 if action.action != 'KEEP':
-                    fs._absent(target_parent, fs._locator(action.target)[-1])
+                    self._directories.target_absent(action)
                 self._prepared[index] = fd, before, observed, content
         self._check_execution()
         for index, action in enumerate(manifest.payload.actions):
             self._verify_prepared(index)
+        self._directories.prepare()
         self._identities = tuple(self._resources.enter_context(
             ScratchIdentitySession._new_execution_context(self._filesystem, self, index))
             for index in range(len(manifest.payload.actions)))
@@ -413,12 +422,11 @@ class ScratchManifestExecution(_ExecutionSequence):
         self._filesystem._check_root()
         with ExitStack() as paths:
             parent = self._filesystem._parent(fs._locator(action.source), paths)
-            target_parent = self._filesystem._parent(fs._locator(action.target), paths)
             fs._check_source(fd, parent, fs._locator(action.source)[-1], action, before)
             if _hash_file(fd) != (observed, content):
                 raise fs.RenameRejected('STOP: preflight source changed')
             if action.action != 'KEEP':
-                fs._absent(target_parent, fs._locator(action.target)[-1])
+                self._directories.target_absent(action)
 
     def _check_prepared(self, index, observation):
         self._verify_prepared(index)

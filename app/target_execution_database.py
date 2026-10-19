@@ -486,6 +486,9 @@ class _ScratchSequenceDatabase(_ScratchPrefixDatabase):
                     for a in payload.actions)
                 or _patches(context, fresh) != payload.locator_patches):
             raise ValueError('manifest omits/changes actions, criticality or exact complete locator patches')
+        # E7F consumes this exact admitted R0 snapshot; it never refreshes the
+        # sealed baseline after its own directory writes.
+        self._initial_snapshot = snapshot
 
     def _check_path(self):
         self._filesystem._sequence_owner._check_execution()

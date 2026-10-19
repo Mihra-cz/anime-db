@@ -1235,6 +1235,65 @@ Debian 13 ARM64, plánovaný library root `/mnt/nas-anime` a SQLite na lokální
 je připravené cílové prostředí, nikoli automaticky autorizovaný executor;
 aktuální read-only CIFS mount nesplňuje write capability gate.
 
+## E7F: bezpečná příprava cílových adresářů
+
+**HOTOVO, nezávislé review PASS. NOT AUTHORIZED FOR NAS EXECUTION.**
+Existující scratch-only E7A owner připravuje chybějící parents výhradně z
+původního `ManifestPayload.directories`, v jeho sealed parent-before-child
+pořadí. Nevzniká další executor ani veřejná mkdir/recovery authority. Admission
+zůstává PRIMARY Video MOVE a PRIMARY KEEP; E5A/E6A a veřejná E2A/E3A API
+přípravu adresářů nezískávají. Manifest v2, Windows binding, E1 journal formát
+a E7D locator-only projekce zůstávají beze změny.
+
+Nejprve musí projít původní kompletní E7A R0 parity: sealed manifest, fresh
+planner a filesystem hash, původní DB fingerprint/rows/schema, přesné patches,
+všechny akce, criticality, dependencies a kolize. Všechny původní zdroje dostanou
+živé read-only pins a plný content hash. Existující adresáře mají držené dirfd;
+jejich numerická identita, nofollow path binding, vlastnictví/permissions a
+root/mount podmínky se znovu ověřují. Symlink, soubor místo adresáře, cizí root,
+mount crossing či neplánovaná cesta znamenají STOP. Existující adresáře se
+nepřejmenovávají ani neupravují přes chmod/chown.
+
+Příprava zachovává přesný přijatý R0 filesystem snapshot. Pro každý vlastní
+úspěšný `mkdir(..., 0700, dir_fd=held_parent)` eviduje pouze novou directory
+entry a změnu timestampu jejího přímého parentu, zachycenou před fsync bariérami.
+Root timestamp se během přípravy kontroluje samostatně. Ostatní entries,
+directory timestamps a file stats musí zůstat shodné; source pins/content a
+původní DB R0 se opakovaně ověřují před i po každém mkdir. Child i parent
+vyžadují fsync a nezávislé znovuotevření cesty musí odpovídat drženému dirfd.
+Vlastní přírůstek tak nezneplatňuje R0 ani neumožňuje přijmout obecný nový
+baseline. Původní manifest, `plan_hash`, `filesystem_hash` a
+`expected_post_hash` se nikdy nepřepisují, nenormalizují ani nepřesealují.
+Po přípravě se directory bindings kontrolují i během původního action lifecycle;
+finální hash nad skutečným mkdir + MOVE stavem zůstává původním E7A/E7D gate.
+
+Lokální sousední `<scratch-root>.directories.jsonl` vzniká přes exclusive
+nofollow create mimo scratch root, v jeho původním privátním lokálním parentu.
+Jde o oddělenou minimální evidenci s canonical SHA-256 chain, nikoli nový E1
+lifecycle. `BOUND` váže celý původní manifest, filesystem hash, directory set,
+root dev/inode, mount a existující directory identities. `INTENT` pro konkrétní
+schválenou cestu a parent identity musí mít potvrzený file i evidence-parent
+fsync před mkdir. `VERIFIED` se zapisuje až po child/parent fsync, nezávislém
+ověření directory bindingu a přesném ověření přírůstku vůči původnímu R0.
+Teprve po všech adresářích a dalších kontrolách se zapíše a potvrdí `READY`.
+Živý owner ověřuje i nezměněné bytes a binding evidence souboru.
+
+Samotný `INTENT` bez navazujícího `VERIFIED` znamená nejasný výsledek: adresář
+nemusel vzniknout, mohl vzniknout bez potvrzené durability nebo proces zanikl
+před zaznamenáním ověření. Zachovaný `VERIFIED` popisuje ověřený jednotlivý
+adresář, nikoli dokončenou přípravu. Po přerušení ani celý poslední frame či
+`READY` neprokazují původní fsync acknowledgement, současný stav nebo kontinuitu
+živých pins; prefix slouží jen ručnímu vyhodnocení a nikdy neopravňuje k resume.
+Zápis, fsync, mkdir, změna identity/snapshotu/zdroje/DB, ztráta maintenance nebo
+jakkoli nejasný výsledek znamenají STOP. Vytvořené adresáře a skutečné důkazy
+zůstanou zachované. Neúplná příprava nezahájí žádnou E1 action, MOVE ani DB
+UPDATE/commit a nevrací COMPLETE. Retry, rollback, resume, mazání starých
+adresářů, LOW continuation a QUARANTINE execution se nepřidávají.
+
+Platí dosavadní výhradní scratch ownership a omezení E2A/E6B: privilegovaní či
+nespolupracující same-UID writeři nejsou globálně vyloučení. Scratch testy včetně
+SIGKILL nejsou důkazem NAS/power-loss durability ani produkční readiness.
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.
