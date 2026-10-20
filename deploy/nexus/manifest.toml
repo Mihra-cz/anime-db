@@ -1,0 +1,55 @@
+schema_version = 1
+
+[project]
+id = "anime-db"
+name = "AnimeDB"
+description = "Dve izolovane instance pro porovnani pracovni DB A a cisteho scanu B"
+created = "2026-10-20"
+last_reviewed = "2026-10-20"
+owner = "mirek"
+status = "planned"
+
+[platform]
+hostname = "nexus"
+architecture = "arm64"
+os_family = "Debian 13"
+deployment = "not-deployed"
+
+[paths]
+project = "/srv/nexus/projects/anime-db"
+stack = "/srv/nexus/stacks/anime-db"
+appdata = "/srv/nexus/appdata/anime-db"
+external_data = ["/mnt/nas-anime", "/mnt/nas-backup"]
+
+[services]
+systemd = []
+docker = ["app-a", "app-b"] # Planned Compose services, not running containers.
+ports = ["127.0.0.1:8000:8000/tcp", "127.0.0.1:8001:8000/tcp"]
+healthcheck = "not-configured"
+
+[security]
+internet_exposure = false
+cloud_required = false
+nas_write_access = false
+secrets_location = "not-applicable"
+
+[backup]
+job = "nexus-restic-backup.service"
+project_files_included = "unverified"
+runtime_data_policy = "SQLite Online Backup API; reference and A/B snapshots; verify Restic exclusions before first start"
+live_database_excluded = "unverified"
+consistent_database_snapshot = "not-created"
+restore_tested = false
+last_restore_test = "not-tested"
+
+[integrations]
+pironman5 = "not-applicable"
+oled = "not-applicable"
+rgb = "not-applicable"
+animedb = "not-applicable"
+
+[documentation]
+readme = "README.md"
+architecture = "docs/ARCHITECTURE.md"
+operations = "docs/OPERATIONS.md"
+changelog = "docs/CHANGELOG.md"

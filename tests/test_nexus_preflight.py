@@ -1,0 +1,275 @@
+"""Deployment guards only: no application import, SQLite connection or NAS access."""
+
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Nexus guard uses Linux procfs and file flags")
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "deploy/nexus/preflight.py"
+
+
+def load_preflight():
+    assert SCRIPT.is_file(), "Nexus preflight must run before importing the application"
+    spec = importlib.util.spec_from_file_location("nexus_preflight", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_accepts_readonly_cifs_bind():
+    preflight = load_preflight()
+    preflight.require_readonly_cifs(
+        "40 20 0:44 / /media/anime ro,relatime - cifs //nas/Anime ro,vers=3.0\n",
+        "/media/anime",
+    )
+
+
+@pytest.mark.parametrize("mountinfo", [
+    "20 1 259:2 / / ro,relatime - ext4 /dev/nvme0n1p2 ro\n",
+    "40 20 259:2 /mnt/nas-anime /media/anime ro - ext4 /dev/nvme0n1p2 ro\n",
+    "40 20 0:44 / /media/anime ro - autofs systemd-1 ro\n",
+    "40 20 0:44 / /media/anime rw - cifs //nas/Anime ro\n",
+    "40 20 0:44 / /media/anime ro - cifs //nas/Anime rw\n",
+    "40 20 0:44 / /media/anime-other ro - cifs //nas/Anime ro\n",
+    "40 20 0:44 / /media/anime ro - cifs //nas/Anime ro\n"
+    "41 20 259:2 / /media/anime ro - ext4 /dev/nvme0n1p2 ro\n",
+    "malformed mountinfo\n",
+])
+def test_rejects_missing_automount_local_or_writable_library(mountinfo):
+    preflight = load_preflight()
+    with pytest.raises(preflight.PreflightError):
+        preflight.require_readonly_cifs(mountinfo, "/media/anime")
+
+
+def sqlite_header(version=9):
+    # A header fixture, not a database: no SQLite initialization is performed.
+    header = bytearray(100)
+    header[:16] = b"SQLite format 3\x00"
+    header[60:64] = version.to_bytes(4, "big")
+    return header
+
+
+def test_accepts_prepared_working_database_without_writing(tmp_path):
+    preflight = load_preflight()
+    database = tmp_path / "anime.db"
+    database.write_bytes(sqlite_header())
+    before = database.read_bytes(), database.stat().st_mtime_ns
+    preflight.require_prepared_database(database)
+    assert (database.read_bytes(), database.stat().st_mtime_ns) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["anime.db"]
+
+
+@pytest.mark.parametrize("contents", [None, b"", b"not sqlite", sqlite_header(0)])
+def test_refuses_to_initialize_missing_empty_or_unversioned_database(tmp_path, contents):
+    preflight = load_preflight()
+    database = tmp_path / "anime.db"
+    if contents is not None:
+        database.write_bytes(contents)
+    before = sorted(p.name for p in tmp_path.iterdir())
+    with pytest.raises(preflight.PreflightError):
+        preflight.require_prepared_database(database)
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+    if contents is not None:
+        assert database.read_bytes() == contents
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_refuses_linked_database_that_could_modify_a_reference(tmp_path, kind):
+    preflight = load_preflight()
+    reference = tmp_path / "reference.db"
+    reference.write_bytes(sqlite_header())
+    database = tmp_path / "anime.db"
+    if kind == "symlink":
+        database.symlink_to(reference)
+    else:
+        os.link(reference, database)
+    with pytest.raises(preflight.PreflightError):
+        preflight.require_prepared_database(database)
+    assert reference.read_bytes() == sqlite_header()
+
+
+def test_cli_stops_before_command_when_deployment_environment_is_wrong():
+    assert SCRIPT.is_file(), "Nexus preflight script is missing"
+    environment = {
+        "DATABASE_URL": "sqlite:///wrong.db",
+        "ANIME_PATH": "/media/anime",
+        "REQUIRE_MOUNT": "true",
+        "METADATA_ARTWORK_DIRECTORY": "/artwork",
+    }
+    result = subprocess.run(
+        [sys.executable, "-B", str(SCRIPT), sys.executable, "-c", "print('command executed')"],
+        env=environment, capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 1
+    assert "STOP" in result.stderr
+    assert "Unexpected DATABASE_URL" in result.stderr
+    assert "command executed" not in result.stdout
+
+
+@pytest.fixture
+def main_runtime(tmp_path, monkeypatch, capsys):
+    preflight = load_preflight()
+    database = tmp_path / "db" / "anime.db"
+    database.parent.mkdir()
+    database.write_bytes(sqlite_header())
+    artwork = tmp_path / "artwork"
+    artwork.mkdir()
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        "40 20 0:44 / /media/anime ro,relatime - cifs //nas/Anime ro,vers=3.0\n"
+    )
+    paths = {
+        "/proc/self/mountinfo": mountinfo,
+        "/data/anime.db": database,
+        "/artwork": artwork,
+    }
+    # Redirect every guard path; an unexpected path fails instead of touching
+    # the host. File/header/permission checks otherwise use the real helpers.
+    monkeypatch.setattr(preflight, "Path", paths.__getitem__)
+    runtime_os = SimpleNamespace(**vars(os))
+    runtime_os.environ = {
+        "DATABASE_URL": "sqlite:////data/anime.db",
+        "ANIME_PATH": "/media/anime",
+        "REQUIRE_MOUNT": "true",
+        "METADATA_ARTWORK_DIRECTORY": "/artwork",
+    }
+    runtime_os.geteuid = lambda: 1000
+    runtime_os.getegid = lambda: 1000
+    exec_calls = []
+
+    class ExecReached(Exception):
+        pass
+
+    def capture_exec(program, arguments):
+        exec_calls.append((program, list(arguments)))
+        raise ExecReached
+
+    runtime_os.execvp = capture_exec
+    monkeypatch.setattr(preflight, "os", runtime_os)
+    monkeypatch.setattr(preflight.sys, "argv", [str(SCRIPT), "uvicorn", "app.main:app"])
+    return SimpleNamespace(
+        module=preflight, root=tmp_path, database=database, artwork=artwork,
+        mountinfo=mountinfo, os=runtime_os, sys=preflight.sys,
+        exec_calls=exec_calls, ExecReached=ExecReached,
+    )
+
+
+def assert_main_stops(runtime, capsys, reason):
+    def snapshot():
+        return {
+            str(p.relative_to(runtime.root)): (p.read_bytes(), p.stat().st_mtime_ns)
+            for p in runtime.root.rglob("*") if p.is_file()
+        }
+
+    before = snapshot()
+    assert runtime.module.main() == 1
+    output = capsys.readouterr()
+    assert output.err.startswith("STOP: ")
+    assert reason in output.err
+    assert output.out == ""
+    assert runtime.exec_calls == []
+    assert snapshot() == before
+
+
+@pytest.mark.parametrize("command", [
+    ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"],
+    ["python", "-c", "print('argument with spaces')"],
+], ids=["uvicorn", "overridden-command"])
+def test_main_executes_requested_command(main_runtime, capsys, command):
+    runtime = main_runtime
+    runtime.sys.argv[1:] = command
+    before = runtime.database.read_bytes(), runtime.database.stat().st_mtime_ns
+    with pytest.raises(runtime.ExecReached):
+        runtime.module.main()
+    assert runtime.exec_calls == [(command[0], command)]
+    assert capsys.readouterr() == ("", "")
+    assert (runtime.database.read_bytes(), runtime.database.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("mountinfo,reason", [
+    pytest.param(
+        "20 1 259:2 / / ro - ext4 /dev/nvme0n1p2 ro\n",
+        "one unambiguous CIFS mount", id="missing-cifs",
+    ),
+    pytest.param(
+        "40 20 259:2 /mnt/nas-anime /media/anime ro - ext4 /dev/nvme0n1p2 ro\n",
+        "active CIFS mount", id="readonly-ext4",
+    ),
+    pytest.param(
+        "40 20 0:44 / /media/anime ro - autofs systemd-1 ro\n",
+        "active CIFS mount", id="readonly-autofs",
+    ),
+])
+def test_main_stops_for_missing_or_non_cifs_mount(main_runtime, capsys, mountinfo, reason):
+    main_runtime.mountinfo.write_text(mountinfo)
+    assert_main_stops(main_runtime, capsys, reason)
+
+
+@pytest.mark.parametrize("mountinfo", [
+    "40 20 0:44 / /media/anime rw - cifs //nas/Anime ro\n",
+    "40 20 0:44 / /media/anime ro - cifs //nas/Anime rw\n",
+], ids=["vfs-rw", "filesystem-rw"])
+def test_main_stops_for_writable_cifs(main_runtime, capsys, mountinfo):
+    main_runtime.mountinfo.write_text(mountinfo)
+    assert_main_stops(main_runtime, capsys, "host and container read-only")
+
+
+@pytest.mark.parametrize("contents,reason", [
+    pytest.param(None, "Prepared working DB is missing or unreadable", id="missing"),
+    pytest.param(b"", "must already have a versioned SQLite schema", id="empty"),
+    pytest.param(b"not sqlite", "must already have a versioned SQLite schema", id="invalid"),
+    pytest.param(sqlite_header(0), "must already have a versioned SQLite schema", id="unversioned"),
+])
+def test_main_stops_for_missing_or_unprepared_database(main_runtime, capsys, contents, reason):
+    if contents is None:
+        main_runtime.database.unlink()
+    else:
+        main_runtime.database.write_bytes(contents)
+    assert_main_stops(main_runtime, capsys, reason)
+
+
+@pytest.mark.parametrize("denied", ["database", "database-directory", "artwork"])
+def test_main_stops_for_denied_permissions(main_runtime, capsys, denied):
+    runtime = main_runtime
+    target = {
+        "database": runtime.database,
+        "database-directory": runtime.database.parent,
+        "artwork": runtime.artwork,
+    }[denied]
+    real_access = runtime.os.access
+    runtime.os.access = lambda path, mode: False if path == target else real_access(path, mode)
+    reason = "Artwork bind directory" if denied == "artwork" else "Working DB and its directory"
+    assert_main_stops(runtime, capsys, reason)
+
+
+def test_main_stops_for_missing_artwork(main_runtime, capsys):
+    main_runtime.artwork.rmdir()
+    assert_main_stops(main_runtime, capsys, "Artwork bind directory")
+
+
+@pytest.mark.parametrize("uid,gid", [(0, 1000), (1000, 0), (0, 0)])
+def test_main_stops_for_root_runtime(main_runtime, capsys, uid, gid):
+    main_runtime.os.geteuid = lambda: uid
+    main_runtime.os.getegid = lambda: gid
+    assert_main_stops(main_runtime, capsys, "non-root UID and GID")
+
+
+def test_main_stops_for_missing_command(main_runtime, capsys):
+    main_runtime.sys.argv[1:] = []
+    assert_main_stops(main_runtime, capsys, "Missing application command")
+
+
+@pytest.mark.parametrize("name", [
+    "DATABASE_URL", "ANIME_PATH", "REQUIRE_MOUNT", "METADATA_ARTWORK_DIRECTORY",
+])
+def test_main_stops_for_wrong_environment(main_runtime, capsys, name):
+    main_runtime.os.environ[name] = "unexpected"
+    assert_main_stops(main_runtime, capsys, f"Unexpected {name}")

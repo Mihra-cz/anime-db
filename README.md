@@ -57,6 +57,15 @@ docker compose up --build
 
 Pokud je knihovna na hostiteli jinde, změňte levou stranu volume v `compose.yaml`. Aplikace poběží na <http://localhost:8000>.
 
+Image běží jako non-root UID/GID `1000:1000`; připojený `./data` musí být pro
+tohoto uživatele zapisovatelný. Jiný UID/GID lze určit build argumenty `APP_UID`
+a `APP_GID`. SQLite i artwork jsou v Dockeru ve výchozím stavu pod `/data`.
+Nativní Uvicorn a jeho konfigurace se nemění.
+
+Pro připravovaný izolovaný A/B provoz na Nexusu použijte samostatné
+[instalační podklady](deploy/nexus/README.md), nikoli tento vývojový Compose.
+Podklady zatím nejsou nasazené a vyžadují schválenou přípravu pracovních DB.
+
 ## Testy
 
 ```bash

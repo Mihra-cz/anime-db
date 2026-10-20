@@ -1,0 +1,103 @@
+name: anime-db
+
+x-app: &app
+  image: anime-db:nexus
+  platform: linux/arm64
+  build:
+    context: /srv/nexus/projects/anime-db/src
+    dockerfile: Dockerfile
+    args:
+      APP_UID: ${ANIMEDB_UID:-1000}
+      APP_GID: ${ANIMEDB_GID:-1000}
+  user: "${ANIMEDB_UID:-1000}:${ANIMEDB_GID:-1000}"
+  working_dir: /app
+  entrypoint:
+    - python
+    - /usr/local/libexec/anime-db/nexus_preflight.py
+  command:
+    - uvicorn
+    - app.main:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8000"
+  environment:
+    DATABASE_URL: sqlite:////data/anime.db
+    ANIME_PATH: /media/anime
+    REQUIRE_MOUNT: "true"
+    METADATA_ARTWORK_DIRECTORY: /artwork
+    METADATA_ENABLED: "false"
+    ANILIST_ENABLED: "false"
+    METADATA_DOWNLOAD_ARTWORK: "false"
+    METADATA_ALLOW_REMOTE_IMAGES: "false"
+    METADATA_AUTO_CONFIRM: "false"
+  restart: "no"
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: local
+    options:
+      max-size: 10m
+      max-file: "3"
+
+x-library: &library
+  type: bind
+  source: /mnt/nas-anime
+  target: /media/anime
+  read_only: true
+  bind:
+    create_host_path: false
+    propagation: rprivate
+
+services:
+  app-a:
+    <<: *app
+    profiles: [a]
+    ports:
+      - "127.0.0.1:${ANIMEDB_A_PORT:-8000}:8000"
+    networks: [a]
+    volumes:
+      - *library
+      - type: bind
+        source: /srv/nexus/appdata/anime-db/A/db
+        target: /data
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/nexus/appdata/anime-db/A/artwork
+        target: /artwork
+        read_only: false
+        bind:
+          create_host_path: false
+
+  app-b:
+    <<: *app
+    profiles: [b]
+    ports:
+      - "127.0.0.1:${ANIMEDB_B_PORT:-8001}:8000"
+    networks: [b]
+    volumes:
+      - *library
+      - type: bind
+        source: /srv/nexus/appdata/anime-db/B/db
+        target: /data
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/nexus/appdata/anime-db/B/artwork
+        target: /artwork
+        read_only: false
+        bind:
+          create_host_path: false
+
+networks:
+  a: {}
+  b: {}
