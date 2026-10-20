@@ -301,6 +301,7 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 | E7E | [Verzovaný Windows root binding](V6_EXECUTION_MANIFEST.md#e7e-verzovaný-windows-root-binding) | HOTOVO, nezávislé review PASS |
 | E7F | [Bezpečná příprava cílových adresářů](V6_EXECUTION_MANIFEST.md#e7f-bezpečná-příprava-cílových-adresářů) | HOTOVO, nezávislé review PASS |
 | E7G | [Úplné scratch fyzické file actions](V6_EXECUTION_MANIFEST.md#e7g-úplné-scratch-fyzické-file-actions) | HOTOVO, nezávislé review PASS |
+| E7H | [Schválený úklid prázdných původních adresářů](V6_EXECUTION_MANIFEST.md#e7h-schválený-úklid-prázdných-původních-adresářů) | HOTOVO, nezávislé review PASS |
 
 HOTOVO u E1–E7A označuje pouze dokončený povolený izolovaný rozsah.
 E1 poskytuje append-only durable journal, writer lock, strict loading a validovaný

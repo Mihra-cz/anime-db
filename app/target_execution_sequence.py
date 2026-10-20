@@ -299,6 +299,7 @@ class ScratchManifestExecution(_ExecutionSequence):
             owner._history, owner._captures, owner._observations, owner._verifications = [], {}, {}, {}
             owner._prepared = {}
             owner._directories = None
+            owner._cleanup_decision = owner.cleanup_outcome = None
             owner._active_index, owner._phase = 0, 'VALIDATION'
             owner._stop_class = ScratchCoordinationStopped
             filesystem._sequence_owner = owner
@@ -331,10 +332,17 @@ class ScratchManifestExecution(_ExecutionSequence):
     def directory_evidence_path(self):
         return self.root.parent / (self.root.name + '.directories.jsonl')
 
-    def execute(self, manifest: ExecutionManifest, *, maintenance_owner=None):
-        return self._execute_once(manifest, maintenance_owner=maintenance_owner)
+    @property
+    def cleanup_evidence_path(self):
+        return self.root.parent / (self.root.name + '.cleanup.jsonl')
 
-    def _accept_scope(self, *, maintenance_owner):
+    def execute(self, manifest: ExecutionManifest, *, maintenance_owner=None, cleanup_decision=None):
+        return self._execute_once(manifest, maintenance_owner=maintenance_owner, cleanup_decision=cleanup_decision)
+
+    def _accept_scope(self, *, maintenance_owner, cleanup_decision=None):
+        if cleanup_decision is not None and not callable(cleanup_decision):
+            raise ValueError('cleanup_decision must explicitly decide a verified cleanup proposal')
+        self._cleanup_decision = cleanup_decision
         self._maintenance_owner = maintenance_owner
         self._check_execution()
 
@@ -473,6 +481,9 @@ class ScratchManifestExecution(_ExecutionSequence):
                 self._require_predecessor()
             self._authorized_index = index
             result.append(self._run_move(index))
+        if self._cleanup_decision is not None:
+            from .target_execution_cleanup import _run_cleanup
+            self.cleanup_outcome = _run_cleanup(self, self._cleanup_decision)
         return tuple(result)
 
     def _identity_check(self, index, *, moved=None):

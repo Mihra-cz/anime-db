@@ -1345,6 +1345,65 @@ Manifest, jeho hashes ani Windows binding se nepřesealují. E5A/E6A a veřejná
 E2A/E3A autorita, E1 formát, manifest v2, schema i E7C coverage zůstávají beze
 změny. Produkční executor, recovery, purge ani cleanup adresářů nevznikají.
 
+## E7H: schválený úklid prázdných původních adresářů
+
+**HOTOVO, nezávislé review PASS. NOT AUTHORIZED FOR NAS EXECUTION.**
+Volitelný `cleanup_decision` v existujícím `ScratchManifestExecution.execute`
+je samostatný rozhodovací krok po dokončení celého E7G manifestu, ještě uvnitř
+původního živého owneru a E6B exclusive maintenance. Bez callbacku zůstává
+dosavadní execution beze změny. Callback může vrátit `None` (PRESERVE), nebo
+výslovné `approve_cleanup(proposal, ("old/child", "old"), actor=..., reason=...)`.
+Není přidané adopt/reopen API, CLI, produkční executor ani automatický cleanup.
+
+Admission znovu ověří durable COMPLETE všech E1 akcí, původní E7D finální Rn
+projekci a původní `expected_post_hash`, všechny fyzické soubory a živé bindings.
+`simulate_post_state` zachovává původní directory entries; odstranění adresáře
+proto stojí **až za** původním hash gate. Manifest v2, jeho seal/hashes, E1 formát
+ani E7F evidence se nemění a nepřesealují. Původní `expected_post_hash` nepopisuje
+nový post-cleanup stav a po `rmdir` se jako jeho hash nepoužívá.
+
+R0 coverage vzniká ze stejného přijatého snapshotu a fresh plánu jako E7D.
+`CLEANUP_REVIEW` a `UNRESOLVED_EMPTY` jsou pouze kandidáti, nikoli delete authority.
+Proposal váže celý původní sealed manifest přes ID a SHA-256, konkrétní úplný
+E1 journal přes path/dev/inode/bytes hash, scratch root dev/inode a mount binding,
+původní filesystem hash, očekávaný původní post hash, finální DB bytes hash,
+R0 directory coverage a nový ověřený snapshot včetně identities a content hashes.
+Schválení váže SHA-256 tohoto návrhu, jednotlivé přesné cesty, actor a reason.
+Platí jen v témže nepřerušeném owneru; cizí či změněný návrh/schválení znamená STOP.
+Schválení parentu nezahrnuje jeho children: každý odstraňovaný adresář musí být
+vyjmenovaný. Neschválený prázdný adresář zůstává zachovaný.
+
+Odstranitelné jsou jen původní plně inventarizované adresáře uvedených dvou
+dispozic, mimo target/KEEP parents a technické namespaces. Library root,
+`Subs`, `Duplicates` a jejich podstromy, system-excluded oblasti a jejich
+parents nejsou oprávněné. Živá kontrola používá držené dirfd, nofollow traversal,
+numerické identity a původní root/mount binding. Unknown entries, symlinky,
+mount crossing, změna identity nebo neprázdný adresář zastaví cleanup.
+Použije se pouze `rmdir(leaf, dir_fd=held_parent)`, od nejhlubších cest,
+bez unlink, rekurzivního mazání nebo chmod/chown. Po syscallu se zachytí pouze
+zmizení dané položky a okamžitý stat delta jejího přímého parentu; následuje
+parent fsync, ověření nulového link count drženého inode, nezávislé znovuotevření
+parentu a ověření absence a celého snapshotu.
+Všechny ostatní directory entries a všechny soubory včetně identity a obsahu
+musejí zůstat shodné. DB se jen read-only ověřuje proti původnímu finálnímu Rn,
+schema i DB bytes zůstávají zachované, E1 journal se jen kontroluje.
+
+Samostatná sousední `<scratch-root>.cleanup.jsonl` vzniká přes exclusive nofollow
+create a používá canonical SHA-256 chain. `BOUND` ukládá návrh a schválení;
+`INTENT` s identitou adresáře a parentu musí mít potvrzený file i evidence-parent
+fsync **před** `rmdir`. `VERIFIED` následuje až po parent fsync a nezávislém
+ověření přesného rozdílu. `COMPLETE` ukládá vlastní výsledný filesystem snapshot,
+jeho samostatný hash a vyúčtování removed/preserved adresářů; úspěšný návrat
+vyžaduje i potvrzenou durability evidence a poslední kontrolu.
+
+Jakékoli přerušení, nejistý syscall, write/fsync failure nebo ztráta maintenance
+znamenají STOP se zachováním všech bytes a skutečného dosaženého filesystem stavu.
+E1 COMPLETE zůstává dokončením file actions, nikoli cleanupu. Dřívější ověřené
+odstranění se nevrací; další adresáře se nepokusí odstranit. Samotný poslední
+frame po pádu neprokazuje fsync acknowledgement a nikdy neopravňuje k retry,
+resume či rollbacku. Dál platí scratch omezení vůči nespolupracujícím same-UID
+a privilegovaným writerům; testy se SIGKILL nedokládají NAS/power-loss durability.
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.

@@ -18,6 +18,7 @@ from .models import Video, ExternalSubtitle, UnresolvedExternalSubtitle, Catalog
 from .target_execution_manifest import (DatabaseFingerprint, LocatorPatch, post_state_hash_from_manifest,
     criticality_for_records, duplicate_execution_evidence, manifest_to_json, manifest_windows_root, _patches)
 from .target_planner_filesystem import inventory_filesystem, plan_library
+from .target_planner_coverage import report_coverage
 from .target_planner_post_state import _project_execution_evidence
 from .target_planner_service import load_planner_context, readonly_planner_session
 
@@ -495,6 +496,7 @@ class _ScratchSequenceDatabase(_ScratchPrefixDatabase):
         # E7F consumes this exact admitted R0 snapshot; it never refreshes the
         # sealed baseline after its own directory writes.
         self._initial_snapshot = snapshot
+        self._initial_coverage = report_coverage(snapshot, fresh)
 
     def _check_path(self):
         self._filesystem._sequence_owner._check_execution()
