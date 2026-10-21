@@ -1,8 +1,10 @@
-# AnimeDB na Nexusu — podklady N2, N4A a N4B1
+# AnimeDB na Nexusu — podklady N2, N4A, N4B1 a kompatibilita N4B2
 
 Stav: **planned / not-deployed**. Soubory jsou připravené pouze v lokálním
-repozitáři. Build, ARM64 runtime, aktivní CIFS mount, obnova DB ani začlenění
-do záloh nejsou tímto podkladem ověřené. Aplikační startup se nemění a může
+repozitáři. Build, běh aplikace na ARM64, obnova DB ani začlenění
+do záloh nejsou tímto podkladem ověřené. N4B2A zjistil Landlock ENOSYS
+a CIFS VFS=ro/FS=rw; N4B2 opravuje lokální web preflight, nikoli kernel.
+Aplikační startup se nemění a může
 zapisovat do pracovní databáze.
 
 Podklad vychází ze skutečného Nexus Project Cookbook v1.0,
@@ -27,6 +29,13 @@ oba Compose soubory se **neslučují**.
 - [Stav přípravy](docs/CHANGELOG.md)
 - [N4A SQLite snapshoty: rozhraní, validace a omezení](docs/SQLITE_BACKUP.md)
 - [N4B1 adaptér existujícího Resticu a instalační prerequisites](docs/SQLITE_RESTIC.md)
+- [N4B2: fáze NAS RO/RW, oddělená write authority a SQLite návrh](docs/N4B2_COMPATIBILITY.md)
+
+Běžné A/B mají NAS bind trvale RO, i po budoucím trvalém přechodu NAS účtu
+a host mountu na RW. V6/V7 zápis patří pouze samostatně schválené operaci
+mimo web. NAS Zálohy zůstává samostatné RW úložiště stávajícího Resticu.
+N4A na současném Nexusu bezpečně STOPne kvůli chybějícímu Landlocku;
+bezpečná alternativa je zatím jen návrh, nikoli implementovaný fallback.
 
 `scripts/sqlite_backup.py` je samostatný lokálně testovaný helper pro budoucí
 snapshoty explicitně očekávaných instancí (`--instances A`, později `A B`).

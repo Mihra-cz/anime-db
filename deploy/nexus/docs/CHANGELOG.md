@@ -1,5 +1,18 @@
 # Změny instalačních podkladů
 
+## 2026-10-21 — N4B2, lokální CIFS kompatibilita a write hranice
+
+- Web preflight přijímá RO VFS nad RO i RW CIFS superblockem, ověřuje přesný
+  NAS source/root a odmítá RW aliasy, nested mounts a neověřitelnou tabulku.
+- Doplněny izolované regrese a daemon-free kontrola rozbaleného Compose:
+  library bind A/B zůstává trvale RO, bez dalších host bindů.
+- Popsány tři fáze účtu/host mountu, nezávislý RW NAS Backup a oddělené
+  konkrétně autorizované V6/V7 write joby; produkční executor ani import
+  nevznikly. Host RW nepředává write authority webu.
+- N4A/N4B1 kód zůstal beze změny. Návrh namespace SQLite copieru řeší
+  Landlock ENOSYS bez změny kernelu, ale není implementovaný ani prokázaný.
+  Projekt zůstává `planned / not-deployed`, bez zásahu do Nexusu/produkce.
+
 ## 2026-10-21 — N4B1, lokální Restic integrační adaptér
 
 - Připraven úzký obal existujícího Restic příkazu s explicitní A-only/A+B

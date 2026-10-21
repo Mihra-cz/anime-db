@@ -2,8 +2,17 @@
 
 Stav: **planned / not-deployed**. Implementace je pouze v repozitáři a testy
 používají dočasné SQLite DB a simulovaný Restic. Na Nexus nebylo nic instalováno;
-skutečný Restic backup/restore ani ARM64 runtime nejsou ověřené.
+Produkční Restic backup/restore ani ARM64 běh adaptéru nejsou ověřené.
 [N4A kontrakt](SQLITE_BACKUP.md) se nemění.
+
+**N4B2 doplnění:** N4B2A izolovaně potvrdil CLI/JSON kontrakt skutečného
+Resticu 0.18.0 nad novým lokálním testovacím repo. Privilegované čtení původních
+skriptů zůstalo nedokončené, produkční integrace není ověřená. Současný N4A
+helper na RPi5 bezpečně STOPne kvůli Landlock ENOSYS. Kernel se kvůli aplikaci
+měnit nebude; [alternativní copier](N4B2_COMPATIBILITY.md) je teprve návrh,
+nikoli dostupný fallback. N4B1 runtime kód se nemění. I při úspěchu původní
+systémové zálohy nemůže neúspěšná očekávaná instance získat potvrzení AnimeDB
+a agregovaný výsledek adaptéru zůstane nenulový.
 
 ## Nejmenší budoucí zásah
 
@@ -206,11 +215,15 @@ Na Nexusu doložit tyto kontroly, runtime část až v pozdějším schváleném
 
 - `uname -m = aarch64`, Python se sqlite3, `fork`, procfs a dostupné libc
   `prctl`/`renameat2`. Zkontrolovat syscall mapping 444/445/446 pro aarch64.
-- Čtecí dotaz Landlock ABI přes `landlock_create_ruleset(..., VERSION)` musí
+- Pro **stávající N4A backend** musí čtecí Landlock ABI dotaz přes `landlock_create_ruleset(..., VERSION)`
   vrátit alespoň 3. Samotný ABI dotaz **neprokazuje** povolení `restrict_self`.
   Stav LSM, seccomp a service sandboxu musí dovolovat `no_new_privs`, vytvoření
   rulesetu, add_rule a `landlock_restrict_self`. Skutečné vynucení vyzkoušet
   v odděleném schváleném procesu nad dočasnými soubory pod účtem služby.
+  N4B2A zjistil ENOSYS: tento požadavek se neřeší změnou kernelu ani vypnutím
+  ochrany. Před instalací je nutný samostatně implementovaný, revidovaný
+  a provozně prokázaný alternativní backend podle N4B2; případná změna worker
+  protokolu/confinement evidence vyžaduje nové N4A/N4B1 review.
 - Ověřit na skutečném appdata FS `RENAME_NOREPLACE`: úspěšný přesun i kolize
   bez overwrite, fsync souborů i adresářů. To vyžaduje pozdější povolený zápis;
   existence symbolu libc nebo architektura nejsou provozním důkazem.

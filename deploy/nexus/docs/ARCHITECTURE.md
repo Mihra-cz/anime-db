@@ -17,7 +17,7 @@ není bezpečnostní zámek. Obě služby používají samostatnou bridge síť.
 
 | Hostitelská cesta | Kontejner | Přístup |
 | --- | --- | --- |
-| `/mnt/nas-anime` | `/media/anime` v A i B | read-only CIFS |
+| `/mnt/nas-anime` | `/media/anime` v A i B | vždy read-only CIFS bind, i nad budoucím RW host mountem |
 | `/srv/nexus/appdata/anime-db/A/db/` | `/data` pouze v A | read-write |
 | `/srv/nexus/appdata/anime-db/A/artwork/` | `/artwork` pouze v A | read-write |
 | `/srv/nexus/appdata/anime-db/B/db/` | `/data` pouze v B | read-write |
@@ -30,6 +30,13 @@ není bezpečnostní zámek. Obě služby používají samostatnou bridge síť.
 Obě pracovní DB mají uvnitř vlastní instance cestu `/data/anime.db`.
 Není připojen společný appdata rodič, kód hostitele, originální DB, reference
 ani Docker socket. Všechny bindy mají `create_host_path: false`.
+
+NAS účet a host mount jsou nyní RO/RO. Při samostatně schválené V6 reorganizaci
+přejdou trvale na RW/RW a zůstanou tak i po V6; běžný webový A/B bind zůstává
+RO ve všech fázích. V6 a pozdější V7 import smí mít pouze oddělený krátkodobý
+write proces pro konkrétní schválenou operaci, bez změny běžných služeb.
+[N4B2 kontrakt](N4B2_COMPATIBILITY.md) odděluje host/container oprávnění,
+NAS Backup a dosud neimplementovanou produkční write authority.
 
 Runtime používá UID/GID `1000:1000` podle N1, případně explicitně upravené
 hodnoty z instalační šablony. Image root filesystem je read-only;
@@ -52,6 +59,9 @@ počáteční A-only provoz nevyžaduje B. Worker s procesovým timeoutem vytvo�
 ověřenou samostatnou kopii a atomicky publikuje celou generaci bez overwrite.
 Helper není v Compose ani image a na serveru není instalovaný. Neexistuje
 instalované napojení do Resticu ani automatická lokální retence.
+Současný Nexus kernel Landlock nepodporuje; N4A proto bezpečně STOPne.
+N4B2 neoslabuje helper a navrhuje izolovaný namespace copier bez změny kernelu,
+jehož WAL/TOCTOU/timeout kontrakt je ještě nutné prokázat.
 
 N4B1 připravuje [adaptér původního Restic příkazu](SQLITE_RESTIC.md): správce
 deklaruje očekávané instance v chráněném projektovém JSON configu, N4A vytváří

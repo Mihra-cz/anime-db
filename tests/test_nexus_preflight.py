@@ -1,8 +1,10 @@
 """Deployment guards only: no application import, SQLite connection or NAS access."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -24,10 +26,11 @@ def load_preflight():
     return module
 
 
-def test_accepts_readonly_cifs_bind():
+@pytest.mark.parametrize("super_options", ["ro,vers=3.0", "rw,vers=3.0"])
+def test_accepts_readonly_cifs_bind(super_options):
     preflight = load_preflight()
     preflight.require_readonly_cifs(
-        "40 20 0:44 / /media/anime ro,relatime - cifs //nas/Anime ro,vers=3.0\n",
+        f"40 20 0:44 / /media/anime ro,relatime - cifs //192.168.11.149/Anime {super_options}\n",
         "/media/anime",
     )
 
@@ -36,10 +39,12 @@ def test_accepts_readonly_cifs_bind():
     "20 1 259:2 / / ro,relatime - ext4 /dev/nvme0n1p2 ro\n",
     "40 20 259:2 /mnt/nas-anime /media/anime ro - ext4 /dev/nvme0n1p2 ro\n",
     "40 20 0:44 / /media/anime ro - autofs systemd-1 ro\n",
-    "40 20 0:44 / /media/anime rw - cifs //nas/Anime ro\n",
-    "40 20 0:44 / /media/anime ro - cifs //nas/Anime rw\n",
-    "40 20 0:44 / /media/anime-other ro - cifs //nas/Anime ro\n",
-    "40 20 0:44 / /media/anime ro - cifs //nas/Anime ro\n"
+    "40 20 0:44 / /media/anime rw - cifs //192.168.11.149/Anime ro\n",
+    "40 20 0:44 / /media/anime rw - cifs //192.168.11.149/Anime rw\n",
+    "40 20 0:44 / /media/anime ro,rw - cifs //192.168.11.149/Anime rw\n",
+    "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime ro,rw\n",
+    "40 20 0:44 / /media/anime-other ro - cifs //192.168.11.149/Anime ro\n",
+    "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime ro\n"
     "41 20 259:2 / /media/anime ro - ext4 /dev/nvme0n1p2 ro\n",
     "malformed mountinfo\n",
 ])
@@ -47,6 +52,186 @@ def test_rejects_missing_automount_local_or_writable_library(mountinfo):
     preflight = load_preflight()
     with pytest.raises(preflight.PreflightError):
         preflight.require_readonly_cifs(mountinfo, "/media/anime")
+
+
+@pytest.mark.parametrize("library", [
+    "40 20 0:44 / /media/anime ro - cifs //192.168.11.150/Anime ro",
+    "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Other ro",
+    "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime/subdir ro",
+    "40 20 0:44 /subdir /media/anime ro - cifs //192.168.11.149/Anime ro",
+    "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime ro,addr=192.168.11.150",
+    "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime ro,prefixpath=Season",
+], ids=["wrong-server", "wrong-share", "source-subtree", "root-subtree", "wrong-address", "prefix-subtree"])
+def test_rejects_unapproved_library_identity(library):
+    preflight = load_preflight()
+    with pytest.raises(preflight.PreflightError):
+        preflight.require_readonly_cifs(library + "\n", "/media/anime")
+
+
+@pytest.mark.parametrize("alias", [
+    "41 20 0:44 / /writable rw - cifs //192.168.11.149/Anime rw",
+    "41 20 0:44 /Season /writable rw - cifs //192.168.11.149/Anime rw",
+    "41 20 0:45 / /writable rw - cifs //192.168.11.149/Anime rw",
+    "41 20 0:44 / /writable rw - cifs //nas/Anime rw",
+    "41 20 0:44 / /writable rw - ext4 /dev/alias rw",
+    "41 20 0:45 / /backup rw - cifs //192.168.11.149/Nexus-Backups rw",
+    "41 20 0:45 / /writable rw - smb3 //nas/Anime rw",
+    "41 20 0:45 / /writable rw - nfs nas:/Anime rw",
+    "41 20 0:44 / /writable\\040alias rw - cifs //nas/Anime rw",
+], ids=["whole-share", "subtree", "other-superblock", "server-alias", "same-device",
+        "backup-share", "smb3", "nfs", "escaped-target"])
+def test_rejects_writable_network_mount_or_library_alias(alias):
+    preflight = load_preflight()
+    with pytest.raises(preflight.PreflightError):
+        preflight.require_readonly_cifs(
+            "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime ro\n" + alias + "\n",
+            "/media/anime",
+        )
+
+
+@pytest.mark.parametrize("filesystem", [
+    "smbfs", "9p", "virtiofs", "cephfs", "ceph", "glusterfs", "afs",
+    "fuse.sshfs", "fuse.rclone", "fuse.glusterfs", "fuse.custom",
+])
+def test_rejects_additional_writable_network_filesystems(filesystem):
+    preflight = load_preflight()
+    with pytest.raises(preflight.PreflightError):
+        preflight.require_readonly_cifs(
+            "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime rw\n"
+            f"41 20 0:45 / /remote rw - {filesystem} remote rw\n",
+            "/media/anime",
+        )
+
+
+def test_allows_readonly_alias_and_local_writable_data_mounts():
+    load_preflight().require_readonly_cifs(
+        "20 1 0:30 / / ro - overlay overlay rw\n"
+        "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime rw\n"
+        "41 20 0:44 /Season /readonly\\040alias ro - cifs //192.168.11.149/Anime rw\n"
+        "42 20 259:2 /db /data rw - ext4 /dev/nvme0n1p2 rw\n",
+        "/media/anime",
+    )
+
+
+@pytest.mark.parametrize("extra", [
+    "41 40 0:45 / /media/anime/nested rw - tmpfs tmpfs rw",
+    "41 40 0:45 / /media/anime/nested ro - cifs //192.168.11.149/Other ro",
+    "41 20 0:44 / /media/anime rw - cifs //192.168.11.149/Anime rw",
+    "40 20 0:45 / /other ro - tmpfs tmpfs ro",
+    "41 20 0:45 / /other ro - cifs",
+    "malformed record hiding an alias",
+    "41 20 0:45 / /other\\057alias rw - cifs //nas/Anime rw",
+], ids=["nested-rw", "nested-other-share", "stacked-library", "duplicate-id",
+        "truncated-record", "malformed-record", "unknown-escape"])
+def test_stops_when_mount_table_cannot_prove_library_boundary(extra):
+    preflight = load_preflight()
+    with pytest.raises(preflight.PreflightError):
+        preflight.require_readonly_cifs(
+            "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime ro\n" + extra + "\n",
+            "/media/anime",
+        )
+
+
+@pytest.mark.parametrize("overmount", [
+    "41 20 0:45 / /media rw - tmpfs tmpfs rw",
+    "41 20 0:45 / /media ro - tmpfs tmpfs rw",
+    "41 20 0:45 / / ro - tmpfs tmpfs rw",
+], ids=["rw-ancestor", "ro-ancestor", "stacked-root"])
+def test_rejects_cifs_hidden_by_ancestor_overmount(overmount):
+    preflight = load_preflight()
+    with pytest.raises(preflight.PreflightError):
+        preflight.require_readonly_cifs(
+            "20 1 0:30 / / ro - overlay overlay rw\n"
+            "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime rw\n"
+            + overmount + "\n", "/media/anime",
+        )
+
+
+def test_allows_cifs_attached_to_visible_parent_mount():
+    load_preflight().require_readonly_cifs(
+        "20 1 0:30 / / ro - overlay overlay rw\n"
+        "30 20 0:45 / /media ro - tmpfs tmpfs rw\n"
+        "40 30 0:44 / /media/anime ro - cifs //192.168.11.149/Anime rw\n",
+        "/media/anime",
+    )
+
+
+def test_rejects_parent_mount_with_unrelated_path():
+    preflight = load_preflight()
+    with pytest.raises(preflight.PreflightError):
+        preflight.require_readonly_cifs(
+            "20 1 0:30 / / ro - overlay overlay rw\n"
+            "30 20 0:45 / /unrelated ro - tmpfs tmpfs rw\n"
+            "40 30 0:44 / /media/anime ro - cifs //192.168.11.149/Anime rw\n",
+            "/media/anime",
+        )
+
+
+@pytest.mark.parametrize("escape", [r"\057", r"\z"])
+def test_rejects_unknown_escape_in_unrelated_readonly_mount(escape):
+    preflight = load_preflight()
+    with pytest.raises(preflight.PreflightError):
+        preflight.require_readonly_cifs(
+            "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime rw\n"
+            f"41 20 0:45 / /readonly{escape}alias ro - tmpfs tmpfs rw\n",
+            "/media/anime",
+        )
+
+
+@pytest.mark.parametrize("escape", [r"\040", r"\011", r"\012", r"\134"])
+def test_accepts_legitimate_mountinfo_escapes(escape):
+    load_preflight().require_readonly_cifs(
+        "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime rw\n"
+        f"41 20 0:45 / /readonly{escape}alias ro - tmpfs tmpfs rw\n",
+        "/media/anime",
+    )
+
+
+def test_rejects_cyclic_library_mount_ancestry():
+    preflight = load_preflight()
+    with pytest.raises(preflight.PreflightError):
+        preflight.require_readonly_cifs(
+            "30 40 0:45 / /media ro - tmpfs tmpfs rw\n"
+            "40 30 0:44 / /media/anime ro - cifs //192.168.11.149/Anime rw\n",
+            "/media/anime",
+        )
+
+
+@pytest.fixture(scope="module")
+def rendered_nexus_compose():
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose CLI is required for daemon-free config validation")
+    repo = SCRIPT.parents[2]
+    result = subprocess.run(
+        ["docker", "compose", "--env-file", str(repo / "deploy/nexus/.env.example"),
+         "-f", str(repo / "deploy/nexus/compose.yaml"), "--profile", "a", "--profile", "b",
+         "config", "--format", "json"],
+        cwd=repo, capture_output=True, text=True, timeout=20,
+        env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("service,instance", [("app-a", "A"), ("app-b", "B")])
+def test_compose_keeps_web_library_readonly_and_without_extra_host_binds(rendered_nexus_compose, service, instance):
+    app = rendered_nexus_compose["services"][service]
+    mounts = app["volumes"]
+    assert len(mounts) == 3
+    library = next(m for m in mounts if m["target"] == "/media/anime")
+    assert library["type"] == "bind"
+    assert library["source"] == "/mnt/nas-anime"
+    assert library["read_only"] is True
+    assert library["bind"]["create_host_path"] is False
+    assert library["bind"]["propagation"] == "rprivate"
+    assert {(m["source"], m["target"]) for m in mounts if m is not library} == {
+        (f"/srv/nexus/appdata/anime-db/{instance}/db", "/data"),
+        (f"/srv/nexus/appdata/anime-db/{instance}/artwork", "/artwork"),
+    }
+    assert app["read_only"] is True
+    assert app["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in app["security_opt"]
+    assert app.get("privileged", False) is False
 
 
 def sqlite_header(version=9):
@@ -124,7 +309,7 @@ def main_runtime(tmp_path, monkeypatch, capsys):
     artwork.mkdir()
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text(
-        "40 20 0:44 / /media/anime ro,relatime - cifs //nas/Anime ro,vers=3.0\n"
+        "40 20 0:44 / /media/anime ro,relatime - cifs //192.168.11.149/Anime ro,vers=3.0\n"
     )
     paths = {
         "/proc/self/mountinfo": mountinfo,
@@ -194,6 +379,29 @@ def test_main_executes_requested_command(main_runtime, capsys, command):
     assert (runtime.database.read_bytes(), runtime.database.stat().st_mtime_ns) == before
 
 
+def test_main_accepts_readonly_container_over_rw_cifs_superblock(main_runtime, capsys):
+    main_runtime.mountinfo.write_text(
+        "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime rw\n"
+    )
+    with pytest.raises(main_runtime.ExecReached):
+        main_runtime.module.main()
+    assert main_runtime.exec_calls == [("uvicorn", ["uvicorn", "app.main:app"])]
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("fault", ["identity", "rw-alias"])
+def test_main_stops_before_database_and_exec_for_unsafe_library(main_runtime, capsys, fault):
+    mountinfo = "40 20 0:44 / /media/anime ro - cifs //192.168.11.149/Anime ro\n"
+    if fault == "identity":
+        mountinfo = mountinfo.replace("/Anime", "/Other")
+    else:
+        mountinfo += "41 20 0:44 / /alias rw - cifs //192.168.11.149/Anime rw\n"
+    main_runtime.mountinfo.write_text(mountinfo)
+    # A missing DB proves the mount error wins before DB validation or execution.
+    main_runtime.database.unlink()
+    assert_main_stops(main_runtime, capsys, "identity" if fault == "identity" else "writable")
+
+
 @pytest.mark.parametrize("mountinfo,reason", [
     pytest.param(
         "20 1 259:2 / / ro - ext4 /dev/nvme0n1p2 ro\n",
@@ -214,12 +422,11 @@ def test_main_stops_for_missing_or_non_cifs_mount(main_runtime, capsys, mountinf
 
 
 @pytest.mark.parametrize("mountinfo", [
-    "40 20 0:44 / /media/anime rw - cifs //nas/Anime ro\n",
-    "40 20 0:44 / /media/anime ro - cifs //nas/Anime rw\n",
-], ids=["vfs-rw", "filesystem-rw"])
+    "40 20 0:44 / /media/anime rw - cifs //192.168.11.149/Anime ro\n",
+], ids=["vfs-rw"])
 def test_main_stops_for_writable_cifs(main_runtime, capsys, mountinfo):
     main_runtime.mountinfo.write_text(mountinfo)
-    assert_main_stops(main_runtime, capsys, "host and container read-only")
+    assert_main_stops(main_runtime, capsys, "container read-only")
 
 
 @pytest.mark.parametrize("contents,reason", [

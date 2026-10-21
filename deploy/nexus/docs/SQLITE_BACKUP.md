@@ -5,6 +5,15 @@ nikoli instalovaná služba. Používá pouze standardní Python knihovnu; neimp
 AnimeDB, nevytváří aplikační schema a nespouští migrace, scanner ani Restic.
 N4A nemění Docker, systemd, mounty, firewall ani serverové skripty.
 
+**N4B2 kompatibilita:** cílový RPi5 kernel podle N4B2A vrací Landlock ENOSYS.
+Současný helper na něm bezpečně končí `SANDBOX_UNAVAILABLE`; kernel ani Linux
+kvůli aplikaci neměníme. [N4B2 návrh](N4B2_COMPATIBILITY.md#sqlite-bez-landlocku--konkrétní-neimplementovaný-návrh)
+popisuje alternativu čerstvého copieru v private namespace s připnutými RO
+zdrojovými inody a jediným RW cílem na SSD. Není implementovaná ani prokázaná;
+Landlock kontrola, WAL/SHM ochrana, timeout a publikace zůstávají beze změny.
+Samotné `mode=ro` nebo vypnutí sandboxu není náhrada. NAS Anime ani NAS Backup
+nejsou pracovními SQLite databázemi.
+
 ## Rozhraní a očekávané instance
 
 Budoucí ruční/spouštěcí rozhraní po samostatně schválené instalaci:
@@ -50,7 +59,7 @@ se odmítají jiné mount IDs včetně bind aliasů. Povolené lokální filesys
 ext4, XFS, Btrfs, tmpfs a overlay; CIFS, NFS, autofs a neznámé typy jsou STOP.
 Na Linuxu jsou nutné procfs, `fork`, `prctl`, `renameat2(RENAME_NOREPLACE)`
 a zapnutý Landlock ABI alespoň 3. Syscall rozhraní je připravené pouze pro
-x86_64 a aarch64; skutečný ARM64 běh zůstává neověřený.
+x86_64 a aarch64; provoz helperu na Nexusu blokuje zjištěný chybějící Landlock.
 Neexistuje fallback na přepisující rename. Správce/root a instalační artefakt
 jsou důvěryhodní; nejde o ochranu před souběžným škodlivým root procesem.
 
@@ -155,10 +164,11 @@ dočasnou záměnu zdrojové DB, souborové mount aliasy a signál během zaklá
 supervisoru. Samostatný subprocess test zkouší skutečné kernelové zamítnutí
 zápisů do zdroje a čtení cizích souborů, zatímco zápis do generace je povolený.
 
-ARM64 runtime, chování skutečného NVMe/filesystemu Nexusu, instalace/oprávnění
-serverových cest, dostupnost Landlocku v cílovém kernelu, Restic integrace,
-vzdálená retence a skutečná obnova nejsou
-těmito lokálními testy prokázané. Do dokončení příslušných provozních testů
+N4B2A izolovaně ověřil rename/fsync na skutečném lokálním ext4 a zjistil
+Landlock ENOSYS. ARM64 běh celého helperu, instalace/oprávnění budoucích
+serverových cest, bezpečný alternativní copier, Restic integrace, vzdálená
+retence a skutečná obnova nejsou těmito lokálními testy prokázané.
+Do dokončení příslušných provozních testů
 ponechat projekt `planned / not-deployed` a restore údaje neověřené.
 
 ## Podklady pro nezávislý review Claude Opus 5.5

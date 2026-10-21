@@ -34,24 +34,43 @@ read-only NAS a `REQUIRE_MOUNT=true` jsou explicitní v Compose. Pro první
 ověření jsou AniList, metadata download, vzdálené obaly a auto-confirm vypnuté.
 Šablona neobsahuje tajemství a `.env` nevstupuje do image.
 
+Současný N4A helper není na cílovém kernelu provozuschopný: Landlock vrací
+ENOSYS. Před jeho aktivací je nutné prokázat alternativní copier popsaný
+v [N4B2](N4B2_COMPATIBILITY.md), bez změny kernelu a bez vypnutí ochrany.
+Tato CIFS oprava neuzavírá SQLite backup ani privilegovaný Restic gate.
+
 ## Read-only ověření mountu a konfigurace
 
-Na hostiteli musí být skutečný zdroj `//192.168.11.149/Anime` připojený jako
-CIFS read-only. Samotné `autofs`, existence adresáře, `os.path.ismount` ani
-`REQUIRE_MOUNT=true` skutečný CIFS nedokazují. Nepokračovat při chybějícím
-CIFS, nesprávném zdroji nebo chybějícím `ro`:
+V současné fázi musí být NAS Anime účet i host mount read-only. Po samostatně
+schváleném přechodu V6 zůstanou účet i host mount trvale RW; běžné A/B budou
+nadále používat jen RO bind. Přesný zdroj je `//192.168.11.149/Anime`.
+Samotné `autofs`, existence adresáře, `os.path.ismount` ani
+`REQUIRE_MOUNT=true` skutečný CIFS nedokazují. Kontrola tabulky nesmí aktivovat
+autofs; nepokračovat při chybějícím CIFS nebo nesprávném zdroji:
 
 ```bash
-findmnt -n -M /mnt/nas-anime -t cifs -o TARGET,SOURCE,FSTYPE,VFS-OPTIONS,FS-OPTIONS
+findmnt --kernel --nocanonicalize -rn -t cifs -o TARGET,SOURCE,FSTYPE,VFS-OPTIONS,FS-OPTIONS
 docker compose --env-file /srv/nexus/stacks/anime-db/.env \
   -f /srv/nexus/stacks/anime-db/compose.yaml --profile a --profile b config -q
 ```
 
-Tyto příkazy neprovádějí scan NAS ani nespojují aplikaci s DB.
-`ro` musí být v **obou** sloupcích `VFS-OPTIONS` i `FS-OPTIONS`; guard kontroluje
-oba údaje, nestačí read-only bind nad zapisovatelným podkladovým filesystemem.
-`config -q` neověřuje existenci bindů, oprávnění, image ani dostupnost NAS.
-Automount se tímto návodem nekonfiguruje ani ručně neaktivuje.
+Z výpisu vybrat přesný target `/mnt/nas-anime` a očekávaný source.
+Aktuální fáze požaduje host VFS `ro`, budoucí schválené fáze dovolují host `rw`.
+FS/superblock `rw` není samo blocker; SMB účet/ACL z tabulky odvodit nelze.
+Ve **webovém kontejneru** musí být VFS vždy `ro`, bez RW NAS aliasu; FS může
+být `ro` i `rw`. Podrobnosti a tři provozní fáze jsou v
+[N4B2 kontraktu](N4B2_COMPATIBILITY.md).
+
+Tyto příkazy neprovádějí scan NAS ani nespojují aplikaci s DB. `config -q`
+neověřuje existenci bindů, oprávnění, image ani dostupnost NAS. Rozbalený
+Compose musí mít pro obě služby library `read_only: true` a žádný další NAS
+nebo host-root bind. Před budoucím startem kontrola Docker `Mounts` vytvořeného,
+dosud nespouštěného kontejneru musí potvrdit přesný source/destination
+a `RW=false`; nepublikovat celý inspect ani prostředí. Guard z mountinfo
+neumí zpětně dokázat původní Docker parametr, kontroluje skutečný VFS režim.
+Docker socket do aplikace nepřidávat. Automount se tímto návodem nekonfiguruje
+ani ručně neaktivuje. Pokud CIFS není aktivní, STOP; další lookup pod autofs
+vyžaduje samostatné schválení.
 
 ## Read-only kontrola zdrojových host cest
 
@@ -63,7 +82,7 @@ v [architektuře](ARCHITECTURE.md). Nestačí podobný název nebo správný pre
 Pouze čtením ověřit každý komponent zdrojových cest, včetně jejich rodičů:
 
 ```bash
-namei -l -- /srv/nexus/projects/anime-db/src /mnt/nas-anime \
+namei -l -- /srv/nexus/projects/anime-db/src \
   /srv/nexus/appdata/anime-db/A/db /srv/nexus/appdata/anime-db/A/artwork \
   /srv/nexus/appdata/anime-db/B/db /srv/nexus/appdata/anime-db/B/artwork
 stat -Lc '%F %d:%i %n' -- \
@@ -93,7 +112,8 @@ a hlavičku už připraveného pracovního souboru. Odmítne:
 
 - jinou než předepsanou DB/artwork/library konfiguraci nebo root UID/GID;
 - chybějící či nejednoznačný mount, autofs nebo lokální náhradní filesystem;
-- CIFS bez `ro` v kontejnerovém mountu i podkladovém filesystemu;
+- jiný CIFS source/root, nesouhlasící addr/prefixpath nebo VFS bez `ro`;
+- RW NAS alias, další mount uvnitř library nebo neověřitelnou mount tabulku;
 - chybějící DB, neplatnou hlavičku, schema marker 0 nebo symlink/hardlink DB;
 - nedostatečná práva pracovní DB, jejího rodiče nebo artwork adresáře.
 
