@@ -1,4 +1,4 @@
-# AnimeDB na Nexusu — instalační podklady N2
+# AnimeDB na Nexusu — instalační podklady N2 a lokální N4A helper
 
 Stav: **planned / not-deployed**. Soubory jsou připravené pouze v lokálním
 repozitáři. Build, ARM64 runtime, aktivní CIFS mount, obnova DB ani začlenění
@@ -25,6 +25,12 @@ oba Compose soubory se **neslučují**.
 - [Architektura a přesné cesty](docs/ARCHITECTURE.md)
 - [Instalační podmínky a provoz](docs/OPERATIONS.md)
 - [Stav přípravy](docs/CHANGELOG.md)
+- [N4A SQLite snapshoty: rozhraní, validace a omezení](docs/SQLITE_BACKUP.md)
+
+`scripts/sqlite_backup.py` je samostatný lokálně testovaný helper pro budoucí
+snapshoty explicitně očekávaných instancí (`--instances A`, později `A B`).
+Na server nebyl instalován ani zapojen do Resticu. Nemá volbu libovolných cest,
+neinicializuje B, neprovádí retenci a nepotvrzuje vzdálené uložení.
 
 Lokální validace bez Docker daemonu a bez spuštění aplikace:
 

@@ -141,6 +141,24 @@ aplikační `ok`, nikoli důkaz zdraví DB nebo NAS.
 
 ## Ověření a návratový postup
 
+### Lokální N4A helper
+
+Podrobný [SQLite backup kontrakt](SQLITE_BACKUP.md) popisuje připravený helper,
+jeho pevné cesty, explicitní výběr A/B, procesový timeout, validační kontroly,
+durable publication a JSON výsledky. Lokální regresní testy:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/pytest -p no:cacheprovider tests/test_nexus_sqlite_backup.py
+```
+
+Testy nepoužívají produkční DB ani NAS. N4A neinstaluje helper, nezapojuje jej
+do `nexus-restic-backup.service`, neprovádí skutečný backup/restore a nespouští
+N4B. Potvrzení lokálního snapshotu není potvrzení jeho uložení do Resticu.
+Při budoucím A-only provozu deklarovat pouze A; teprve po samostatné přípravě B
+rozšířit očekávaný seznam. Neaktivní B není chyba; očekávaná chybějící B je STOP.
+
+### Budoucí provozní ověření
+
 Po budoucím schváleném nasazení ověřit skutečné mounty kontejnerů bez výpisu
 celého prostředí: NAS musí mít `RW=false`, DB/artwork patřit pouze vlastní
 instanci; reference, originál ani společný appdata rodič nesmějí být připojené.
