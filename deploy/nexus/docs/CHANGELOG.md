@@ -1,5 +1,17 @@
 # Změny instalačních podkladů
 
+## 2026-10-21 — N4B1, lokální Restic integrační adaptér
+
+- Připraven úzký obal existujícího Restic příkazu s explicitní A-only/A+B
+  konfigurací, kontrolou N4A JSON a bundle, výjimkami živých DB a `.partial`.
+- Chyba AnimeDB zachová neúspěch a umožní původní systémový/InfluxDB backup;
+  nejisté publikace jsou vyloučené. Restic nenulový kód včetně 3 je neúspěch.
+- Přesné ID skutečného běhu, repository ID, listing a vzdálené bytes všech
+  souborů jsou nutné pro lokální content doklad. Bez automatické retence.
+- Izolované regrese používají dočasné SQLite DB a simulovaný Restic. Popsán
+  minimální instalační patch, zachování lock/OnFailure a neověřené ARM64/FS
+  podmínky. Stav `planned / not-deployed`, bez změn Nexusu nebo skutečné obnovy.
+
 ## 2026-10-21 — N4A, izolovaný lokální SQLite helper
 
 - Přidán standard-library helper s explicitními očekávanými instancemi A/B,

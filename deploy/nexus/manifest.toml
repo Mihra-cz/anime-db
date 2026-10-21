@@ -43,7 +43,8 @@ restore_tested = false
 last_restore_test = "not-tested"
 local_snapshot_helper = "N4A local regression tests; scripts/sqlite_backup.py; not installed"
 expected_instances_policy = "explicit A first; B only after separate initialization; never discover from directories"
-restic_integration = "not-implemented; N4B not started"
+restic_integration = "N4B1 local adapter and simulated Restic tests; not installed; server integration unverified"
+restic_content_evidence = "planned backups/.restic-confirmations; exact repository/snapshot/generation hashes; not a restore test"
 local_retention = "not-implemented; requires proof of exact generation stored in Restic"
 
 [integrations]

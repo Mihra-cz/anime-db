@@ -1,4 +1,4 @@
-# AnimeDB na Nexusu — instalační podklady N2 a lokální N4A helper
+# AnimeDB na Nexusu — podklady N2, N4A a N4B1
 
 Stav: **planned / not-deployed**. Soubory jsou připravené pouze v lokálním
 repozitáři. Build, ARM64 runtime, aktivní CIFS mount, obnova DB ani začlenění
@@ -26,11 +26,18 @@ oba Compose soubory se **neslučují**.
 - [Instalační podmínky a provoz](docs/OPERATIONS.md)
 - [Stav přípravy](docs/CHANGELOG.md)
 - [N4A SQLite snapshoty: rozhraní, validace a omezení](docs/SQLITE_BACKUP.md)
+- [N4B1 adaptér existujícího Resticu a instalační prerequisites](docs/SQLITE_RESTIC.md)
 
 `scripts/sqlite_backup.py` je samostatný lokálně testovaný helper pro budoucí
 snapshoty explicitně očekávaných instancí (`--instances A`, později `A B`).
 Na server nebyl instalován ani zapojen do Resticu. Nemá volbu libovolných cest,
 neinicializuje B, neprovádí retenci a nepotvrzuje vzdálené uložení.
+
+`scripts/sqlite_restic.py` je lokálně testovaný obal jednoho existujícího
+Restic příkazu. Připraví explicitní instance, přidá výjimky a ověří konkrétní
+snapshot ID i vzdálené bytes. Serverová integrace není instalovaná; původní
+Nexus lock, OnFailure, InfluxDB a retence musí zůstat zachovány. Konkrétní
+budoucí soubory a minimální patch jsou v N4B1 kontraktu, nikoli v nové službě.
 
 Lokální validace bez Docker daemonu a bez spuštění aplikace:
 

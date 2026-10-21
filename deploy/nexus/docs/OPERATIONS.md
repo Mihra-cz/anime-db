@@ -159,6 +159,21 @@ rozšířit očekávaný seznam. Neaktivní B není chyba; očekávaná chyběj�
 
 ### Budoucí provozní ověření
 
+Lokální N4B1 integrační adaptér, minimální změnu jediného Restic příkazu,
+chráněný A-only config, strojové výsledky, vzdálené content doklady, selhání,
+retenci pouze jako návrh a konkrétní ARM64 prerequisites popisuje
+[SQLITE_RESTIC.md](SQLITE_RESTIC.md). Testuje se se simulovaným Resticem:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/pytest -p no:cacheprovider tests/test_nexus_sqlite_restic.py
+```
+
+N4B1 nic neinstaluje a nespouští skutečný backup/restore. Před budoucí instalací
+nově přečíst serverový backup/maintenance skript i systemd drop-iny. Zachovat
+společný flock, všechny současné zdroje/výjimky, InfluxDB, nenulový výsledný
+status a existující OnFailure. Instalace ani zkouška Landlock/renameat2 na
+Nexusu nejsou oprávněné samotnou existencí těchto lokálních podkladů.
+
 Po budoucím schváleném nasazení ověřit skutečné mounty kontejnerů bez výpisu
 celého prostředí: NAS musí mít `RW=false`, DB/artwork patřit pouze vlastní
 instanci; reference, originál ani společný appdata rodič nesmějí být připojené.

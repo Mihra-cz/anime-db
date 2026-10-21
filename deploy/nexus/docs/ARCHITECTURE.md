@@ -51,4 +51,13 @@ N4A přidává pouze samostatný standard-library SQLite helper; jeho
 počáteční A-only provoz nevyžaduje B. Worker s procesovým timeoutem vytvoří
 ověřenou samostatnou kopii a atomicky publikuje celou generaci bez overwrite.
 Helper není v Compose ani image a na serveru není instalovaný. Neexistuje
-napojení do Resticu ani automatická lokální retence.
+instalované napojení do Resticu ani automatická lokální retence.
+
+N4B1 připravuje [adaptér původního Restic příkazu](SQLITE_RESTIC.md): správce
+deklaruje očekávané instance v chráněném projektovém JSON configu, N4A vytváří
+generace a původní systémový backup je archivuje s výjimkami živých DB
+a `.partial`. Po ověření přesného snapshot ID a obsahu vzniká oddělený doklad
+v `backups/.restic-confirmations/`; immutable N4A manifest se nemění.
+Outer Nexus lock, NAS preflight, InfluxDB a systemd OnFailure patří nadále
+stávajícímu serverovému skriptu/službě. Vzdálená kontrola je zatím simulovaná,
+obnova není otestovaná a žádné lokální mazání není implementované.

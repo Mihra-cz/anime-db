@@ -125,6 +125,10 @@ selhala, `2` neplatné CLI argumenty, `130` přerušení. Příklady STOP kódů
 
 ## Retence a budoucí N4B
 
+Lokální N4B1 [integrační kontrakt a adaptér](SQLITE_RESTIC.md) jsou připravené
+odděleně; na serveru nejsou instalované. Následující hranice N4A zůstávají
+zachovány, včetně zákazu lokální automatické retence.
+
 N4A nemaže žádné generace ani zbytky `.partial`. Návrh lokální retence je
 ponechat dvě poslední vzdáleně potvrzené generace každé instance a všechny
 dosud neodeslané. Implementace potřebuje důkaz vazby přesné generace a checksumů
