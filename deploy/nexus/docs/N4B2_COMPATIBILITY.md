@@ -1,5 +1,10 @@
 # N4B2 — kompatibilita RPi5 a oddělená write authority
 
+> **Historický podklad N4B2 — neaktivní.**
+> Zachovaný návrh původního srovnávacího deploymentu, nikoli aktuální návod.
+> CIFS RO kontrola se dále využívá, budoucí write/backup návrhy se neaktivují.
+> Aktuální provoz: [OPERATIONS](OPERATIONS.md), [FIRST_RUN](FIRST_RUN.md).
+
 Stav: **planned / not-deployed**. Lokálně je opravený CIFS preflight a jeho
 regrese. SQLite alternativa a produkční V6/V7 write procesy níže jsou pouze
 návrh. Nexus se přizpůsobuje aplikací, nikoli změnou Linuxu či kernelu.

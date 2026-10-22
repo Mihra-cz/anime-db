@@ -3,9 +3,9 @@ schema_version = 1
 [project]
 id = "anime-db"
 name = "AnimeDB"
-description = "Dve izolovane instance pro porovnani pracovni DB A a cisteho scanu B"
+description = "Jedina instalace AnimeDB s novou SQLite v9, oddelenym artworkem a RO NAS"
 created = "2026-10-20"
-last_reviewed = "2026-10-21"
+last_reviewed = "2026-10-22"
 owner = "mirek"
 status = "planned"
 
@@ -19,12 +19,16 @@ deployment = "not-deployed"
 project = "/srv/nexus/projects/anime-db"
 stack = "/srv/nexus/stacks/anime-db"
 appdata = "/srv/nexus/appdata/anime-db"
+database = "/srv/nexus/appdata/anime-db/db/anime.db"
+artwork = "/srv/nexus/appdata/anime-db/artwork"
+installation_state = "/srv/nexus/appdata/anime-db/state"
+snapshots = ["/srv/nexus/appdata/anime-db/backups/daily", "/srv/nexus/appdata/anime-db/backups/pre-change"]
 external_data = ["/mnt/nas-anime", "/mnt/nas-backup"]
 
 [services]
 systemd = []
-docker = ["app-a", "app-b"] # Planned Compose services, not running containers.
-ports = ["127.0.0.1:8000:8000/tcp", "127.0.0.1:8001:8000/tcp"]
+docker = ["app"] # Planned Compose service; no running container confirmed.
+ports = ["192.168.11.238:8000:8000/tcp"]
 healthcheck = "not-configured"
 
 [security]
@@ -32,19 +36,21 @@ internet_exposure = false
 cloud_required = false
 nas_write_access = false
 secrets_location = "not-applicable"
+lan_forward_firewall = "unverified; must restrict Docker forwarding to home LAN before start"
 
 [backup]
 job = "nexus-restic-backup.service"
 project_files_included = "unverified"
-runtime_data_policy = "SQLite Online Backup API; reference and A/B snapshots; verify Restic exclusions before first start"
+runtime_data_policy = "planned consistent snapshots in backups/daily and backups/pre-change; not implemented"
 live_database_excluded = "unverified"
 consistent_database_snapshot = "not-created"
 restore_tested = false
 last_restore_test = "not-tested"
-local_snapshot_helper = "N4A local regression tests; scripts/sqlite_backup.py; not installed"
-expected_instances_policy = "explicit A first; B only after separate initialization; never discover from directories"
-restic_integration = "N4B1 local adapter and simulated Restic tests; not installed; server integration unverified"
-restic_content_evidence = "planned backups/.restic-confirmations; exact repository/snapshot/generation hashes; not a restore test"
+local_snapshot_helper = "none active; historical N4A helper must not be used on current paths"
+daily_schedule = "planned 02:00; not installed"
+pre_change_policy = "planned before significant DB changes; not implemented"
+restic_integration = "planned handoff of completed snapshots around 03:30; not installed"
+restic_content_evidence = "unverified; no current snapshot or restore evidence"
 local_retention = "not-implemented; requires proof of exact generation stored in Restic"
 
 [integrations]

@@ -1,5 +1,10 @@
 # N4A — izolovaný SQLite backup helper
 
+> **Historický podklad N4A — neaktivní.**
+> Původní návrh pro srovnávací instance. Není aktuální instalační návod.
+> Helper zůstává neaktivní; nepoužívat na nové datové cesty. Aktuální provoz:
+> [OPERATIONS](OPERATIONS.md), [FIRST_RUN](FIRST_RUN.md).
+
 Stav: **planned / not-deployed**. Helper je lokální podklad pro budoucí Nexus,
 nikoli instalovaná služba. Používá pouze standardní Python knihovnu; neimportuje
 AnimeDB, nevytváří aplikační schema a nespouští migrace, scanner ani Restic.

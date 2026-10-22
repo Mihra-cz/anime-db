@@ -21,6 +21,7 @@ COPY pyproject.toml README.md LICENSE ./
 COPY app ./app
 RUN pip install --no-cache-dir .
 COPY deploy/nexus/preflight.py /usr/local/libexec/anime-db/nexus_preflight.py
+COPY deploy/nexus/first_run.py /usr/local/libexec/anime-db/nexus_first_run.py
 
 USER animedb
 EXPOSE 8000

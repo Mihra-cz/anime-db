@@ -1,5 +1,22 @@
 # Změny instalačních podkladů
 
+## 2026-10-22 — Nexus First Run, jediná instalace
+
+- Aktivní návrh používá jedinou službu `app`, pracovní DB, artwork a backup
+  root bez srovnávacích datových větví. Compose nemá profily ani druhou síť;
+  publikuje pouze `192.168.11.238:8000:8000` po ověření LAN forward firewallu.
+- První čistý start automaticky vytvoří schema v9 existujícími migracemi.
+  Trvalá instalační evidence a SQLite existing-only URL brání nahrazení
+  ztracené DB; přerušený bootstrap znamená STOP bez automatického retry.
+- Manifest a aktuální návody odpovídají Cookbook v1.0. Snapshoty `daily/`
+  a `pre-change/` nejsou v runtime; plán 02:00 / Restic kolem 03:30 zůstává
+  neimplementovaný. Historické helpery jsou neaktivní, N5B/N5C beze změny.
+- Lokální cílené testy a daemon-free Compose validace neověřují ARM64 běh,
+  skutečné host mounty, LAN firewall nebo obnovu. Stav `planned / not-deployed`;
+  bez kontaktu s Nexusem/NAS, commitů, pushe, Docker startu či scanu.
+
+Následující N2/N4 záznamy jsou historie, nikoli současný instalační návod.
+
 ## 2026-10-21 — N4B2, lokální CIFS kompatibilita a write hranice
 
 - Web preflight přijímá RO VFS nad RO i RW CIFS superblockem, ověřuje přesný

@@ -1,207 +1,108 @@
-# Instalační podmínky a provoz
+# Provoz jediné instalace AnimeDB
 
-## Rozsah N2
+Stav: **planned / not-deployed**. Aktivní služba se jmenuje `app`; celý stack
+má jeden kontejner a jednu pracovní DB. Instalační příkazy jsou v
+[FIRST_RUN](FIRST_RUN.md). Neprovádět je před samostatným schválením a LAN
+firewall gate níže. Kořenový vývojový Compose není deployment Compose.
 
-Pouze lokální podklady a statická validace. Žádný build, pull, spuštění,
-kopírování DB, inicializace B, migrace, scanner ani změna Nexusu/NAS.
-Následující kroky popisují budoucí instalaci po samostatném schválení.
+## Podmínky před instalací
 
-## Příprava instalace
+- Přečíst skutečný Cookbook v1.0, registr `/srv/nexus/PROJECTS.md` a ověřit
+  projektový slug, nové prázdné cesty a schválený source tree.
+- Ověřit ARM64, Docker oprávnění, lokální NVMe pro DB/artwork/state,
+  non-root UID/GID a volnou adresu `192.168.11.238:8000`.
+- Ověřit mount table bez aktivace NAS/autofs: skutečný CIFS
+  `/mnt/nas-anime` ze zdroje `//192.168.11.149/Anime`, v nynější fázi host RO.
+- Ověřit, že běžný kontejner obsahuje jen library RO a vlastní DB/state/artwork
+  bindy. Všechny musí existovat předem, bez symlinků či aliasů.
+- Pro běžný provoz s hodnotnými daty splnit Cookbook backup/restore podmínky:
+  konzistentní snapshot, výjimky živé DB, ověřený Restic obsah a test obnovy.
+  První schválený čistý smoke se za takovou produkční připravenost nevydává.
 
-1. Znovu přečíst skutečný Cookbook a registr. Ověřit volné projektové cesty,
-   Docker oprávnění správce, ARM64 a dostupnost zamýšlených localhost portů.
-2. Umístit zdrojový repozitář do `/srv/nexus/projects/anime-db/src/` a ověřit
-   schválenou revizi; základ N2 je `4ae510ce94aa2e7922fc8b449ae460224518d165`.
-   Instalační revize musí obsahovat také zkontrolované změny N2. Nezahrnovat
-   lokální runtime data ani originální DB z notebooku.
-3. Umístit podklady podle tabulky v projektovém README a doplnit položku
-   `/srv/nexus/PROJECTS.md`. Manifest ponechat `planned / not-deployed`.
-4. Připravit pouze potřebné adresáře z architektury. DB i její rodič potřebují
-   zápis kvůli SQLite journal/WAL; artwork potřebuje zápis kvůli importnímu
-   `mkdir` a pozdějšímu cache workflow. Ověřit vlastníka a přístup pro runtime
-   UID/GID; nepoužívat plošné `chmod 777` ani rekurzivní změny práv jiných dat.
-5. Připravit pracovní A a referenci samostatným schváleným DB krokem. B zatím
-   nepřipravovat ani nespouštět; čisté schema dostane až při samostatně
-   schválené inicializaci. Prázdný soubor není připravená DB. Spolu s referenční
-   DB inventarizovat existující artwork na notebooku podle pravidel níže.
-6. Před prvním startup zápisem ověřit aktuální Restic výjimky a způsob obnovy.
-   Celý `/srv/nexus` je podle Cookbooku zálohovaný, ale prostá záloha živých
-   SQLite není zárukou konzistence. Živé A/B a sidecary se mají vyloučit a
-   nahrazovat konzistentními snapshoty.
+## Povinný LAN firewall gate
 
-Instalační `.env` obsahuje pouze UID/GID a localhost porty. Aplikační cesty,
-read-only NAS a `REQUIRE_MOUNT=true` jsou explicitní v Compose. Pro první
-ověření jsou AniList, metadata download, vzdálené obaly a auto-confirm vypnuté.
-Šablona neobsahuje tajemství a `.env` nevstupuje do image.
+**NEOVĚŘENO — před LAN startem STOP.** Aktuální pravidla se nyní nečetla
+z Nexusu a žádná se neměnila. Soukromá host IP ani existující UFW INPUT
+allowlist nejsou důkazem omezení publikovaného Docker portu.
 
-Současný N4A helper není na cílovém kernelu provozuschopný: Landlock vrací
-ENOSYS. Před jeho aktivací je nutné prokázat alternativní copier popsaný
-v [N4B2](N4B2_COMPATIBILITY.md), bez změny kernelu a bez vypnutí ochrany.
-Tato CIFS oprava neuzavírá SQLite backup ani privilegovaný Restic gate.
-
-## Read-only ověření mountu a konfigurace
-
-V současné fázi musí být NAS Anime účet i host mount read-only. Po samostatně
-schváleném přechodu V6 zůstanou účet i host mount trvale RW; běžné A/B budou
-nadále používat jen RO bind. Přesný zdroj je `//192.168.11.149/Anime`.
-Samotné `autofs`, existence adresáře, `os.path.ismount` ani
-`REQUIRE_MOUNT=true` skutečný CIFS nedokazují. Kontrola tabulky nesmí aktivovat
-autofs; nepokračovat při chybějícím CIFS nebo nesprávném zdroji:
+Po samostatném schválení pouze read-only inventura hostu:
 
 ```bash
-findmnt --kernel --nocanonicalize -rn -t cifs -o TARGET,SOURCE,FSTYPE,VFS-OPTIONS,FS-OPTIONS
-docker compose --env-file /srv/nexus/stacks/anime-db/.env \
-  -f /srv/nexus/stacks/anime-db/compose.yaml --profile a --profile b config -q
+ip -4 address show
+ip -4 route show
+sudo nft -a list ruleset
+sudo iptables-save
+ss -ltn '( sport = :8000 )'
 ```
 
-Z výpisu vybrat přesný target `/mnt/nas-anime` a očekávaný source.
-Aktuální fáze požaduje host VFS `ro`, budoucí schválené fáze dovolují host `rw`.
-FS/superblock `rw` není samo blocker; SMB účet/ACL z tabulky odvodit nelze.
-Ve **webovém kontejneru** musí být VFS vždy `ro`, bez RW NAS aliasu; FS může
-být `ro` i `rw`. Podrobnosti a tři provozní fáze jsou v
-[N4B2 kontraktu](N4B2_COMPATIBILITY.md).
+Podle skutečného Docker firewall backendu ověřit cestu FORWARD a pravidla
+zpracovaná před Docker ACCEPT: u iptables typicky `DOCKER-USER`, u nftables
+odpovídající forward hook/priority. Zkontrolovat skutečný domácí subnet
+(poslední Cookbook uvádí `192.168.11.0/24`), ingress rozhraní, povolení domácí
+LAN k publikované službě a zákaz ostatních zdrojů. Při posuzování cíle pravidel
+zohlednit DNAT. Ověřit i absenci internetového port forwardu/tunelu a
+nepublikování dalšího/IPv6 portu. Chybějící nástroj nebo nejasné pořadí pravidel
+znamená neověřeno, nikoli souhlas ke startu.
 
-Tyto příkazy neprovádějí scan NAS ani nespojují aplikaci s DB. `config -q`
-neověřuje existenci bindů, oprávnění, image ani dostupnost NAS. Rozbalený
-Compose musí mít pro obě služby library `read_only: true` a žádný další NAS
-nebo host-root bind. Před budoucím startem kontrola Docker `Mounts` vytvořeného,
-dosud nespouštěného kontejneru musí potvrdit přesný source/destination
-a `RW=false`; nepublikovat celý inspect ani prostředí. Guard z mountinfo
-neumí zpětně dokázat původní Docker parametr, kontroluje skutečný VFS režim.
-Docker socket do aplikace nepřidávat. Automount se tímto návodem nekonfiguruje
-ani ručně neaktivuje. Pokud CIFS není aktivní, STOP; další lookup pod autofs
-vyžaduje samostatné schválení.
+Cílené omezení pro `192.168.11.238:8000` musí povolit pouze domácí LAN
+`192.168.11.0/24`, přežít reboot a neovlivnit ostatní Docker služby.
+Před LAN provozem doložit způsob trvalého načtení pravidla a po samostatně
+schváleném rebootu znovu ověřit jeho přítomnost i účinnost ve forward cestě.
+Dočasné pravidlo pouze v paměti nesplňuje gate. Žádné veřejné vystavení,
+další port nebo změna firewallu se tímto dokumentem neprovádí.
 
-## Read-only kontrola zdrojových host cest
+Po spuštění v již omezené síti potvrdit dostupnost z povoleného LAN klienta
+alespoň GET `/health` a podle možností odmítnutí z nepovolené sítě. Pokud
+současná pravidla omezení nezajišťují, nejprve připravit konkrétní firewall
+patch k samostatnému schválení; tento návod žádná pravidla nemění.
 
-Před budoucím startem porovnat rozbalený Compose s aktuálním Cookbookem:
-build context musí být `/srv/nexus/projects/anime-db/src/`, NAS bind
-`/mnt/nas-anime` a pracovní bindy přesně čtyři adresáře A/B uvedené
-v [architektuře](ARCHITECTURE.md). Nestačí podobný název nebo správný prefix.
+Technická opora: [Docker packet filtering](https://docs.docker.com/engine/network/packet-filtering-firewalls/)
+a [Docker s iptables](https://docs.docker.com/engine/network/firewall-iptables/).
+Dokumentace Dockeru výslovně rozlišuje forwarding publikovaných portů od
+INPUT/OUTPUT filtrů hostitelského firewallu.
 
-Pouze čtením ověřit každý komponent zdrojových cest, včetně jejich rodičů:
+## Běžné příkazy po schválené instalaci
+
+Přesná konfigurace je v `/srv/nexus/stacks/anime-db/compose.yaml` a `.env`.
+Příkazy nevyžadují žádný profil:
 
 ```bash
-namei -l -- /srv/nexus/projects/anime-db/src \
-  /srv/nexus/appdata/anime-db/A/db /srv/nexus/appdata/anime-db/A/artwork \
-  /srv/nexus/appdata/anime-db/B/db /srv/nexus/appdata/anime-db/B/artwork
-stat -Lc '%F %d:%i %n' -- \
-  /srv/nexus/appdata/anime-db/A/db /srv/nexus/appdata/anime-db/A/artwork \
-  /srv/nexus/appdata/anime-db/B/db /srv/nexus/appdata/anime-db/B/artwork
+cd /srv/nexus/stacks/anime-db
+dc=(docker compose --env-file .env -f compose.yaml)
+"${dc[@]}" config -q
+"${dc[@]}" up -d --no-build app
+"${dc[@]}" ps -a
+"${dc[@]}" logs --tail 80 app
+curl --fail --silent --show-error --max-time 5 http://192.168.11.238:8000/health
+"${dc[@]}" stop app
 ```
 
-Žádný komponent nesmí být symlink. Všechny čtyři pracovní cesty musí být
-adresáře s navzájem různými dvojicemi device/inode (`%d:%i`); shodné dvojice
-odhalí také alias přes bind mount, který samotná kontrola symlinků neodhalí.
-DB ani artwork A/B nesmějí sdílet týž adresář. Nezávislost samotných DB souborů
-navíc vyžaduje oddělené soubory bez symlinků a hardlinků, jak kontroluje guard.
+První start má navíc jednorázový instalační provision podle FIRST_RUN.
+`up -d` ani samotné `/health` nepotvrzují integritu DB či dostupnost NAS.
+Preflight při chybě STOPne a `restart: no` zabraňuje opakování v chybové smyčce.
+Scanner se nespouští při startupu; explicitní scan workflow tím není schválené.
+Metadata, AniList, remote images a download artworku zůstávají vypnuté.
 
-Chybějící cesta, nedostatečné oprávnění, symlink, alias nebo nesoulad s Cookbookem
-znamená STOP. Tyto kontroly nic nevytvářejí ani neopravují; adresáře v tomto
-kroku nezakládat, nepřesměrovávat, nepřesouvat ani neměnit jejich oprávnění.
+## Zálohy, změny a obnova
 
-## Kontrola před Uvicornem
+Cíl je jeden backup root `/srv/nexus/appdata/anime-db/backups/` s `daily/` a
+`pre-change/`. Plánováno: snapshot ve 02:00, před významnou změnou DB a
+převzetí hotových snapshotů stávajícím Resticem kolem 03:30. Žádný nový timer,
+snapshot writer ani Restic patch nyní nevzniká. Běžný web tyto adresáře nemountuje.
+Neexistuje ověřená obnova ani automatická retence.
 
-Nexus Compose používá `preflight.py` jako povinný `entrypoint`; `command`
-obsahuje původní Uvicorn a jeho argumenty. Běžné `docker compose run` s jiným
-command proto stále projde guardem. Po úspěšné kontrole guard předá celé argv
-do `os.execvp` bez shellu. Explicitní administrátorské `--entrypoint` je mimo
-tuto ochranu; další ochranný framework se nezavádí.
-Guard neimportuje aplikaci a neotvírá SQLite connection. Čte mount tabulku
-a hlavičku už připraveného pracovního souboru. Odmítne:
+Staré `scripts/sqlite_backup.py`, `scripts/sqlite_restic.py` a
+`config/sqlite-backup.json.example` jsou **historické a neaktivní**. Nespouštět
+je pro nové cesty a nenapojovat na existující Restic. Odpovídající
+[SQLITE_BACKUP](SQLITE_BACKUP.md), [SQLITE_RESTIC](SQLITE_RESTIC.md) a
+[N4B2](N4B2_COMPATIBILITY.md) nejsou současný instalační postup.
 
-- jinou než předepsanou DB/artwork/library konfiguraci nebo root UID/GID;
-- chybějící či nejednoznačný mount, autofs nebo lokální náhradní filesystem;
-- jiný CIFS source/root, nesouhlasící addr/prefixpath nebo VFS bez `ro`;
-- RW NAS alias, další mount uvnitř library nebo neověřitelnou mount tabulku;
-- chybějící DB, neplatnou hlavičku, schema marker 0 nebo symlink/hardlink DB;
-- nedostatečná práva pracovní DB, jejího rodiče nebo artwork adresáře.
+Před budoucí významnou změnou připravit konkrétní schválený snapshot a
+návratový postup. Při chybě zastavit `app`, zachovat DB, všechny sidecary,
+instalační state i logy a diagnostikovat nezávislou kopii. Žádné mazání markerů,
+přepsání starou DB, opakování provision, reset volumes ani automatický recovery.
+Ztracená DB po READY se nikdy nepovažuje za novou instalaci.
 
-Kontrola hlavičky není integrity check ani důkaz úplnosti schema. Guard
-nevytváří DB, adresáře ani sidecary; jakákoli chyba znamená STOP před importem
-aplikace. `restart: "no"` zabrání automatickému opakování chyby.
-Po pozdějším výpadku NAS působí existující scanner safety/timeout lifecycle;
-guard není průběžný dohled nad mountem.
-
-## DB a první start
-
-Originální DB nikdy neotevírat aplikací. Při samostatně schválené přípravě DB
-použít SQLite Online Backup API s read-only zdrojem, evidencí WAL/SHM/journalu
-a bez checkpointu či recovery zápisu do originálu. Kopii ověřit pomocí
-`PRAGMA integrity_check` a `PRAGMA foreign_key_check`, zaznamenat SHA-256,
-velikost, čas a původ. Referenci chránit proti zápisu aplikačním účtem;
-pracovní A musí být nezávislý soubor, nikoli link. B vzniká bez kopie A.
-
-Spolu s referenční DB při schválené přípravě inventarizovat existující artwork
-na notebooku: doložit skutečnou konfiguraci `METADATA_ARTWORK_DIRECTORY`,
-pracovní adresář pro relativní cesty, umístění existujících cache a platnost
-DB odkazů na originály a thumbnails. Nepředpokládat jedinou zdrojovou cestu
-ani automaticky použít výchozí `data/artwork`. Evidovat původ, relativní cesty,
-velikosti a kontrolní součty; chybějící nebo nejednoznačné soubory vyjasnit
-před přenosem.
-
-Při pozdějším samostatně schváleném přenosu znovu ověřit skutečné zdrojové
-umístění a zkopírovat ověřený artwork do
-`/srv/nexus/appdata/anime-db/A/artwork/`, se zachováním relativních cest
-očekávaných DB. B začne s vlastním prázdným
-`/srv/nexus/appdata/anime-db/B/artwork/`, bez převzetí cache A. N2 artwork
-neinventarizuje na produkci ani nic nekopíruje.
-
-První start se schvaluje zvlášť a volí konkrétní službu. B je zablokovaná
-chybějící/neinicializovanou pracovní DB i při explicitním výběru `app-b`.
-Bez nové autorizace neobcházet guard přes `--entrypoint` a nespouštět oba profily.
-Aktivace profilu ani úspěšný guard neopravňuje ke scanneru.
-
-`create_app` může vytvořit adresáře, lifespan spouští migrace a `create_all`.
-Na aktuálním schema markeru 9 migrační rekonstrukci přeskočí, stále ale může
-doplnit chybějící tabulky. Pracovní A/B jsou záměrně zapisovatelné; žádný
-aplikační přepínač zde neslibuje read-only web. Žádný scanner při startupu
-neběží, ale explicitní `POST /scan` zůstává dostupný. `/health` vrací pouze
-aplikační `ok`, nikoli důkaz zdraví DB nebo NAS.
-
-## Ověření a návratový postup
-
-### Lokální N4A helper
-
-Podrobný [SQLite backup kontrakt](SQLITE_BACKUP.md) popisuje připravený helper,
-jeho pevné cesty, explicitní výběr A/B, procesový timeout, validační kontroly,
-durable publication a JSON výsledky. Lokální regresní testy:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/pytest -p no:cacheprovider tests/test_nexus_sqlite_backup.py
-```
-
-Testy nepoužívají produkční DB ani NAS. N4A neinstaluje helper, nezapojuje jej
-do `nexus-restic-backup.service`, neprovádí skutečný backup/restore a nespouští
-N4B. Potvrzení lokálního snapshotu není potvrzení jeho uložení do Resticu.
-Při budoucím A-only provozu deklarovat pouze A; teprve po samostatné přípravě B
-rozšířit očekávaný seznam. Neaktivní B není chyba; očekávaná chybějící B je STOP.
-
-### Budoucí provozní ověření
-
-Lokální N4B1 integrační adaptér, minimální změnu jediného Restic příkazu,
-chráněný A-only config, strojové výsledky, vzdálené content doklady, selhání,
-retenci pouze jako návrh a konkrétní ARM64 prerequisites popisuje
-[SQLITE_RESTIC.md](SQLITE_RESTIC.md). Testuje se se simulovaným Resticem:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/pytest -p no:cacheprovider tests/test_nexus_sqlite_restic.py
-```
-
-N4B1 nic neinstaluje a nespouští skutečný backup/restore. Před budoucí instalací
-nově přečíst serverový backup/maintenance skript i systemd drop-iny. Zachovat
-společný flock, všechny současné zdroje/výjimky, InfluxDB, nenulový výsledný
-status a existující OnFailure. Instalace ani zkouška Landlock/renameat2 na
-Nexusu nejsou oprávněné samotnou existencí těchto lokálních podkladů.
-
-Po budoucím schváleném nasazení ověřit skutečné mounty kontejnerů bez výpisu
-celého prostředí: NAS musí mít `RW=false`, DB/artwork patřit pouze vlastní
-instanci; reference, originál ani společný appdata rodič nesmějí být připojené.
-Ověřit UID/GID, localhost porty, logy a funkčnost po kontrolovaném restartu.
-ARM64 build/runtime, obnovu a Restic snapshot doložit před změnou manifestu
-na `deployed`; údaje neodhadovat ze staticky validního Compose.
-
-V N2 není co vracet na serveru. Při budoucí chybě prvního startu zastavit pouze
-dotčenou AnimeDB instanci a zachovat její pracovní DB i logy pro diagnostiku.
-Originál a reference zůstávají stranou. Nepřepisovat pracovní ani originální
-DB starou zálohou a nepoužívat mazání volumes jako automatický rollback.
+Manifest i registr upravit na skutečně nasazený stav až po doložení buildu,
+startu/restartu, LAN omezení a požadované provozní připravenosti. Změny Linuxu,
+firewallu, backupu, NAS a nasazení jsou samostatně schvalované operace.

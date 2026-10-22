@@ -1,59 +1,57 @@
-# AnimeDB na Nexusu — podklady N2, N4A, N4B1 a kompatibilita N4B2
+# AnimeDB na Nexusu — jedna instalace
 
-Stav: **planned / not-deployed**. Soubory jsou připravené pouze v lokálním
-repozitáři. Build, běh aplikace na ARM64, obnova DB ani začlenění
-do záloh nejsou tímto podkladem ověřené. N4B2A zjistil Landlock ENOSYS
-a CIFS VFS=ro/FS=rw; N4B2 opravuje lokální web preflight, nikoli kernel.
-Aplikační startup se nemění a může
-zapisovat do pracovní databáze.
+Stav: **planned / not-deployed**. Aktuální cíl je jedna služba `app`, jeden
+Docker kontejner, jedna nová SQLite v9 a jeden artwork adresář. Přístup bude
+`http://192.168.11.238:8000` až po ověření Docker forward firewallu pro domácí
+LAN. ARM64 build, host bindy, firewall a skutečný start zatím nejsou ověřené.
 
-Podklad vychází ze skutečného Nexus Project Cookbook v1.0,
-`/srv/nexus/docs/PROJECT-STANDARD.md`, registru `/srv/nexus/PROJECTS.md`
-a šablony `/srv/nexus/docs/templates/manifest.toml`, přečtených při N1.
-Tento adresář není novým serverovým standardem. Před budoucí instalací
-ověřit, zda se Cookbook nebo registr mezitím nezměnily.
+Struktura navazuje na Nexus Project Cookbook v1.0. Lokální kopie
+`PROJECT-STANDARD.md` byla přečtena; skutečný serverový standard a registr
+`/srv/nexus/PROJECTS.md` se před schválenou instalací musí znovu ověřit.
+Manifest zůstává `planned`; žádný podklad není povolení k nasazení.
 
-| Lokální podklad | Budoucí umístění |
+| Lokální podklad | Cíl na Nexusu |
 | --- | --- |
-| Celý zdrojový repozitář | `/srv/nexus/projects/anime-db/src/` |
-| `compose.yaml` | `/srv/nexus/stacks/anime-db/compose.yaml` |
-| `.env.example` | šablona `/srv/nexus/stacks/anime-db/.env` |
+| Schválené zdroje | `/srv/nexus/projects/anime-db/src/` |
 | `manifest.toml`, tento `README.md`, `docs/` | `/srv/nexus/projects/anime-db/` |
+| `compose.yaml` | `/srv/nexus/stacks/anime-db/compose.yaml` |
+| `.env.example` | `/srv/nexus/stacks/anime-db/.env` |
 
-`preflight.py` se při budoucím buildu vloží do image; na server se samostatně
-neinstaluje. Kořenový `compose.yaml` slouží nadále původnímu lokálnímu provozu;
-oba Compose soubory se **neslučují**.
+`first_run.py` a dosavadní `preflight.py` se vkládají do image. Kořenový
+vývojový Compose se s tímto deploymentem neslučuje.
 
-- [Architektura a přesné cesty](docs/ARCHITECTURE.md)
-- [Instalační podmínky a provoz](docs/OPERATIONS.md)
-- [Stav přípravy](docs/CHANGELOG.md)
-- [N4A SQLite snapshoty: rozhraní, validace a omezení](docs/SQLITE_BACKUP.md)
-- [N4B1 adaptér existujícího Resticu a instalační prerequisites](docs/SQLITE_RESTIC.md)
-- [N4B2: fáze NAS RO/RW, oddělená write authority a SQLite návrh](docs/N4B2_COMPATIBILITY.md)
+- [Architektura, datové cesty a hranice](docs/ARCHITECTURE.md)
+- [Provoz a neověřené podmínky](docs/OPERATIONS.md)
+- [Přesné instalační příkazy a první spuštění](docs/FIRST_RUN.md)
+- [Podklady pro cílené review Claude Opus 5.5](docs/FIRST_RUN_REVIEW.md)
+- [Changelog](docs/CHANGELOG.md)
 
-Běžné A/B mají NAS bind trvale RO, i po budoucím trvalém přechodu NAS účtu
-a host mountu na RW. V6/V7 zápis patří pouze samostatně schválené operaci
-mimo web. NAS Zálohy zůstává samostatné RW úložiště stávajícího Resticu.
-N4A na současném Nexusu bezpečně STOPne kvůli chybějícímu Landlocku;
-bezpečná alternativa je zatím jen návrh, nikoli implementovaný fallback.
-
-`scripts/sqlite_backup.py` je samostatný lokálně testovaný helper pro budoucí
-snapshoty explicitně očekávaných instancí (`--instances A`, později `A B`).
-Na server nebyl instalován ani zapojen do Resticu. Nemá volbu libovolných cest,
-neinicializuje B, neprovádí retenci a nepotvrzuje vzdálené uložení.
-
-`scripts/sqlite_restic.py` je lokálně testovaný obal jednoho existujícího
-Restic příkazu. Připraví explicitní instance, přidá výjimky a ověří konkrétní
-snapshot ID i vzdálené bytes. Serverová integrace není instalovaná; původní
-Nexus lock, OnFailure, InfluxDB a retence musí zůstat zachovány. Konkrétní
-budoucí soubory a minimální patch jsou v N4B1 kontraktu, nikoli v nové službě.
-
-Lokální validace bez Docker daemonu a bez spuštění aplikace:
+Lokální statická validace bez Docker daemonu:
 
 ```bash
 docker compose --env-file deploy/nexus/.env.example \
-  -f deploy/nexus/compose.yaml --profile a --profile b config -q
+  -f deploy/nexus/compose.yaml config -q
+docker compose --env-file deploy/nexus/.env.example \
+  -f deploy/nexus/compose.yaml config --services
 ```
 
-Instalace, registrace projektu na Nexusu, příprava DB i první start vyžadují
-samostatný schválený krok. N2 žádný z nich neprovádí.
+Výsledkem seznamu služeb musí být pouze `app`. Profily, druhá služba, druhý
+port ani datové větve pro porovnávání databází nejsou součástí nasazení.
+První instalaci registruje instalační příkaz; DB automaticky vytvoří první
+start přes existující migrace. Pozdější ztráta DB znamená STOP.
+
+## Historické a rozpracované podklady
+
+Následující dokumenty **nejsou aktuální instalační návod**:
+
+- [N4A SQLite helper](docs/SQLITE_BACKUP.md)
+- [N4B1 Restic adaptér](docs/SQLITE_RESTIC.md)
+- [N4B2 historický návrh](docs/N4B2_COMPATIBILITY.md)
+- N5B_OFFLINE_DB.md — rozpracovaný podklad mimo First Run commit.
+- N5C_STARTUP_DESIGN.md — rozpracovaný návrh mimo First Run commit.
+
+`scripts/sqlite_backup.py`, `scripts/sqlite_restic.py` a
+`config/sqlite-backup.json.example` se zachovávají jako historický kód/config.
+Nepoužívat je pro nové datové cesty ani je nenapojovat na Restic bez samostatně
+schválené úpravy. Aktuální deployment na nich nezávisí. N5B/N5C rozpracované
+soubory se nemění; další řešení historických migrací není součástí First Run.

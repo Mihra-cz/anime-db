@@ -1,5 +1,10 @@
 # N4B1 — lokální adaptér existujícího Restic běhu
 
+> **Historický podklad N4B1 — neaktivní.**
+> Původní integrační návrh pro srovnávací instance. Není aktuální instalační
+> návod. Adaptér zůstává neaktivní; nezapojovat do Resticu na nových cestách.
+> Aktuální provoz: [OPERATIONS](OPERATIONS.md), [FIRST_RUN](FIRST_RUN.md).
+
 Stav: **planned / not-deployed**. Implementace je pouze v repozitáři a testy
 používají dočasné SQLite DB a simulovaný Restic. Na Nexus nebylo nic instalováno;
 Produkční Restic backup/restore ani ARM64 běh adaptéru nejsou ověřené.

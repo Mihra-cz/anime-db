@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
@@ -14,7 +15,8 @@ class Base(DeclarativeBase):
 def make_engine(database_url: str, *, maintenance=None):
     if maintenance is not None:
         maintenance.validate_engine_url(database_url)
-    if database_url.startswith("sqlite:///") and ":memory:" not in database_url:
+    if (database_url.startswith("sqlite:///") and ":memory:" not in database_url
+            and make_url(database_url).query.get("uri") != "true"):
         db_path = database_url.removeprefix("sqlite:///")
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(

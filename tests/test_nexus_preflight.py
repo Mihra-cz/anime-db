@@ -204,7 +204,7 @@ def rendered_nexus_compose():
     repo = SCRIPT.parents[2]
     result = subprocess.run(
         ["docker", "compose", "--env-file", str(repo / "deploy/nexus/.env.example"),
-         "-f", str(repo / "deploy/nexus/compose.yaml"), "--profile", "a", "--profile", "b",
+         "-f", str(repo / "deploy/nexus/compose.yaml"),
          "config", "--format", "json"],
         cwd=repo, capture_output=True, text=True, timeout=20,
         env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
@@ -213,11 +213,11 @@ def rendered_nexus_compose():
     return json.loads(result.stdout)
 
 
-@pytest.mark.parametrize("service,instance", [("app-a", "A"), ("app-b", "B")])
-def test_compose_keeps_web_library_readonly_and_without_extra_host_binds(rendered_nexus_compose, service, instance):
-    app = rendered_nexus_compose["services"][service]
+def test_compose_keeps_web_library_readonly_and_without_extra_host_binds(rendered_nexus_compose):
+    assert set(rendered_nexus_compose["services"]) == {"app"}
+    app = rendered_nexus_compose["services"]["app"]
     mounts = app["volumes"]
-    assert len(mounts) == 3
+    assert len(mounts) == 4
     library = next(m for m in mounts if m["target"] == "/media/anime")
     assert library["type"] == "bind"
     assert library["source"] == "/mnt/nas-anime"
@@ -225,8 +225,9 @@ def test_compose_keeps_web_library_readonly_and_without_extra_host_binds(rendere
     assert library["bind"]["create_host_path"] is False
     assert library["bind"]["propagation"] == "rprivate"
     assert {(m["source"], m["target"]) for m in mounts if m is not library} == {
-        (f"/srv/nexus/appdata/anime-db/{instance}/db", "/data"),
-        (f"/srv/nexus/appdata/anime-db/{instance}/artwork", "/artwork"),
+        ("/srv/nexus/appdata/anime-db/db", "/data"),
+        ("/srv/nexus/appdata/anime-db/state", "/state"),
+        ("/srv/nexus/appdata/anime-db/artwork", "/artwork"),
     }
     assert app["read_only"] is True
     assert app["cap_drop"] == ["ALL"]

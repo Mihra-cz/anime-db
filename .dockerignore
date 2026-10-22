@@ -10,6 +10,7 @@ deploy/**
 !deploy/nexus/
 deploy/nexus/**
 !deploy/nexus/preflight.py
+!deploy/nexus/first_run.py
 
 # Keep runtime data excluded even if it appears inside the package tree.
 **/.env

@@ -1,73 +1,84 @@
-# Architektura plánovaného A/B provozu
+# Architektura jediné instalace AnimeDB
 
-Jeden image s Pythonem 3.12, FFmpeg/FFprobe a dependencies z `pyproject.toml`
-obsluhuje dva nezávislé procesy Uvicornu. Nexus Compose cílí na `linux/arm64`;
-Dockerfile umožňuje také nativní build pro lokální vývojovou platformu.
-MediaInfo není součástí scanner pipeline ani povinnou závislostí image.
+Stav: **planned / not-deployed**. Jeden ARM64 image `anime-db:nexus` s Pythonem
+3.12 a FFmpeg/FFprobe obslouží jedinou Compose službu `app`, jeden Uvicorn
+proces a jednu pracovní SQLite DB. Metadata enrichment i AniList jsou vypnuté.
+Běžný web nepoužívá žádný backup helper, executor ani importní službu.
 
-| Instance | Profil / služba | Přístup z hostitele |
+| Hostitelská cesta | Kontejner / účel | Přístup |
 | --- | --- | --- |
-| A: pracovní kopie současné DB | `a` / `app-a` | `127.0.0.1:8000` |
-| B: samostatně inicializovaná čistá DB | `b` / `app-b` | `127.0.0.1:8001` |
+| `/srv/nexus/projects/anime-db/src/` | zdroje a build context | bez runtime bindu |
+| `/srv/nexus/projects/anime-db/manifest.toml` | Cookbook manifest | bez runtime bindu |
+| `/srv/nexus/stacks/anime-db/compose.yaml` | jediný deployment Compose | bez runtime bindu |
+| `/srv/nexus/stacks/anime-db/.env` | non-secret UID/GID | bez runtime bindu |
+| `/srv/nexus/appdata/anime-db/db/` | `/data`, soubor `anime.db` | RW, lokální NVMe |
+| `/srv/nexus/appdata/anime-db/artwork/` | `/artwork` | RW, oddělené NVMe |
+| `/srv/nexus/appdata/anime-db/state/` | `/state`, instalační evidence a runtime lock | RW, oddělené NVMe |
+| `/srv/nexus/appdata/anime-db/backups/daily/` | budoucí denní snapshoty | bez runtime bindu |
+| `/srv/nexus/appdata/anime-db/backups/pre-change/` | budoucí snapshoty před změnou | bez runtime bindu |
+| `/mnt/nas-anime` | `/media/anime` | vždy RO CIFS |
+| `/mnt/nas-backup` | stávající Restic infrastruktura | bez runtime bindu |
 
-Porty lze změnit v instalačním `.env`; aktualizovat podle nich i manifest.
-Bez zvoleného profilu nebo explicitní služby neběží žádná instance.
-Explicitní volba služby v Compose aktivuje i její profil, takže profil sám
-není bezpečnostní zámek. Obě služby používají samostatnou bridge síť.
+`state/` je malá trvalá evidence již připravovaného First Run: umožňuje
+rozlišit doloženou první instalaci od pozdější ztráty DB. Není v DB adresáři,
+aby ztráta tohoto adresáře neztratila současně i historii inicializace.
+Nepřidává další databázi, instanci, coordinator ani backup framework.
 
-| Hostitelská cesta | Kontejner | Přístup |
-| --- | --- | --- |
-| `/mnt/nas-anime` | `/media/anime` v A i B | vždy read-only CIFS bind, i nad budoucím RW host mountem |
-| `/srv/nexus/appdata/anime-db/A/db/` | `/data` pouze v A | read-write |
-| `/srv/nexus/appdata/anime-db/A/artwork/` | `/artwork` pouze v A | read-write |
-| `/srv/nexus/appdata/anime-db/B/db/` | `/data` pouze v B | read-write |
-| `/srv/nexus/appdata/anime-db/B/artwork/` | `/artwork` pouze v B | read-write |
-| `/srv/nexus/appdata/anime-db/reference/<UTC>/anime.db` | žádný mount | archiv mimo dosah aplikace |
-| `/srv/nexus/appdata/anime-db/backups/{A,B}/` | žádný mount | konzistentní snapshoty mimo aplikaci |
-| `/srv/nexus/appdata/anime-db/backups/.partial/` | žádný mount | nepublikované generace, budoucí Restic exclude |
-| `/mnt/nas-backup` | žádný mount | existující zálohovací infrastruktura |
+Všechny čtyři datové bindy vyžadují `create_host_path: false`. Není připojen
+společný appdata rodič, zdrojový kód, notebooková DB, snapshoty ani Docker
+socket. Žádné srovnávací datové větve nebo další služby/sítě se nezakládají;
+Compose používá jednu vlastní default bridge síť.
 
-Obě pracovní DB mají uvnitř vlastní instance cestu `/data/anime.db`.
-Není připojen společný appdata rodič, kód hostitele, originální DB, reference
-ani Docker socket. Všechny bindy mají `create_host_path: false`.
+## První instalace a další starty
 
-NAS účet a host mount jsou nyní RO/RO. Při samostatně schválené V6 reorganizaci
-přejdou trvale na RW/RW a zůstanou tak i po V6; běžný webový A/B bind zůstává
-RO ve všech fázích. V6 a pozdější V7 import smí mít pouze oddělený krátkodobý
-write proces pro konkrétní schválenou operaci, bez změny běžných služeb.
-[N4B2 kontrakt](N4B2_COMPATIBILITY.md) odděluje host/container oprávnění,
-NAS Backup a dosud neimplementovanou produkční write authority.
+Samostatný instalační příkaz vytvoří `provisioned.json` v prázdném `state/`,
+bez SQLite. První runtime nejprve ověří konfiguraci, non-root, dosavadní CIFS
+RO preflight a skutečné lokální NVMe bindy. Pod výhradním flockem zapíše
+fsyncnutý `initializing.json`, automaticky vytvoří DB a zavolá existující
+`migrate_schema_at_startup`. Po kontrole v9, integrity, FK a tabulek uloží
+`ready.json` a předá řízení jedinému Uvicornu. Scanner při startu neběží.
 
-Runtime používá UID/GID `1000:1000` podle N1, případně explicitně upravené
-hodnoty z instalační šablony. Image root filesystem je read-only;
-zapisovat lze do vlastní DB, artworku a dočasného `/tmp` v RAM. Artwork/cache
-je persistentní i při vypnutém stahování. Logy zapisuje Docker driver `local`
-odděleně podle kontejneru, s rotací 3 × 10 MB; nejsou součástí NAS anime.
+READY restart validuje existující DB; přerušená inicializace, chybějící
+nebo neplatná evidence/DB znamenají STOP, bez retry, resetu či automatické
+obnovy. `DATABASE_URL` už v Compose vyžaduje SQLite `mode=rw&uri=true` pro
+každé připojení včetně pozdějšího otevření poolu. Evidence používá stabilní
+project ID `anime-db` a náhodné installation ID. Úplné administrátorské
+smazání/rollback DB i veškeré evidence není tímto minimálním mechanismem
+rozpoznatelné. Restore/adoption a storage UUID attestation nejsou implementované.
 
-Build context je vždy `/srv/nexus/projects/anime-db/src`, nezávisle na cestě
-Compose. `.dockerignore` propouští pouze balíček `app`, jeho build metadata,
-README, licenci a guard. Runtime data, DB i sidecary, cache, `.env`, zálohy
-a lokální pracovní soubory jsou z contextu vyloučené.
+## Síť a izolace
 
-Dockerfile neurčuje konkrétní digest a Python dependencies používají současné
-verzové rozsahy projektu. Úspěch budoucího ARM64 buildu a runtime zůstává
-**UNVERIFIED**; lokální prostředí není jeho náhradou.
+Jediné publikování na hostiteli je **`192.168.11.238:8000:8000`**.
+Cílová URL je `http://192.168.11.238:8000`. Uvicorn uvnitř kontejneru
+poslouchá na `0.0.0.0:8000`; hostitelský bind je pouze konkrétní LAN adresa.
+Žádný internetový endpoint, reverse proxy ani další publikovaný port nevzniká.
 
-N4A přidává pouze samostatný standard-library SQLite helper; jeho
-[kontrakt](SQLITE_BACKUP.md) vyžaduje explicitní očekávané instance, proto
-počáteční A-only provoz nevyžaduje B. Worker s procesovým timeoutem vytvoří
-ověřenou samostatnou kopii a atomicky publikuje celou generaci bez overwrite.
-Helper není v Compose ani image a na serveru není instalovaný. Neexistuje
-instalované napojení do Resticu ani automatická lokální retence.
-Současný Nexus kernel Landlock nepodporuje; N4A proto bezpečně STOPne.
-N4B2 neoslabuje helper a navrhuje izolovaný namespace copier bez změny kernelu,
-jehož WAL/TOCTOU/timeout kontrakt je ještě nutné prokázat.
+Před LAN startem musí být prokázané omezení na domácí LAN v Docker forward
+firewall cestě, včetně správného pořadí vůči Docker ACCEPT pravidlům. Pouhá
+INPUT/UFW konfigurace ani bind na privátní IP to nedokazují. Kontrolní postup
+je v [OPERATIONS](OPERATIONS.md); současný firewall se bez dalšího schválení
+nemění. Síťová ani aplikační autentizace není tímto nově implementována.
 
-N4B1 připravuje [adaptér původního Restic příkazu](SQLITE_RESTIC.md): správce
-deklaruje očekávané instance v chráněném projektovém JSON configu, N4A vytváří
-generace a původní systémový backup je archivuje s výjimkami živých DB
-a `.partial`. Po ověření přesného snapshot ID a obsahu vzniká oddělený doklad
-v `backups/.restic-confirmations/`; immutable N4A manifest se nemění.
-Outer Nexus lock, NAS preflight, InfluxDB a systemd OnFailure patří nadále
-stávajícímu serverovému skriptu/službě. Vzdálená kontrola je zatím simulovaná,
-obnova není otestovaná a žádné lokální mazání není implementované.
+Image zůstává non-root UID/GID `1000:1000` (konfigurovatelné při buildu),
+root FS RO, `/tmp` tmpfs 64 MiB, `cap_drop: ALL`, `no-new-privileges`,
+`init: true`, `restart: no`. Docker `local` log driver rotuje 3 × 10 MB.
+NAS bind zůstává RO i při CIFS superblocku RW; dosavadní preflight odmítá
+nesprávný share, RW aliasy a nejednoznačnou mount tabulku. Artwork je oddělený,
+persistentní a zapisovatelný, i když jsou download a remote images vypnuté.
+
+## Zálohy a historické podklady
+
+Jediný backup root má `daily/` a `pre-change/`. Budoucí záměr: denní snapshot
+ve 02:00, snapshot před významnou DB změnou a převzetí hotových snapshotů
+existujícím Resticem kolem 03:30. Časování, snapshot writer, výjimky živé DB,
+retence a obnova **nejsou instalované ani ověřené**. Snapshot adresáře nejsou
+přístupné webovému kontejneru.
+
+Historické N4A/N4B1 helpery, jejich config a N2/N4 dokumenty používají původní
+srovnávací model. Zůstávají neaktivní a nejsou závislostí této instalace;
+nepřesměrovávat je na nové cesty bez samostatného zadání. Podrobnosti jsou
+zachované v [historickém N4A dokumentu](SQLITE_BACKUP.md) a
+[historickém N4B1 dokumentu](SQLITE_RESTIC.md).
+
+Skutečný ARM64 build/runtime, host oprávnění/mounty a firewall zůstávají
+neověřené. `planned` se nesmí změnit na `deployed` jen na základě lokálních testů.
