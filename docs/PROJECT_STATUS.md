@@ -390,8 +390,8 @@ Nesouhlas znamená `LibrarySafetyError`/STOP, bez fallbacku do ordinary scanneru
 ani produkčního execution lifecycle. Nové/změněné/chybějící soubory nebo změněné
 kontrolované container/planner projekce vyžadují další routing kontrakt; API je
 konzervativně odmítá. E7H cleanup mění directory namespace za původním expected post hash,
-proto původní manifest po cleanupu nestačí. Chybí durable completion/post-cleanup
-admission navázaná na původní manifest a fresh DB/FS stav; samotný manifest není
+proto původní manifest po cleanupu nestačí. Obecný durable completion/post-cleanup
+ingress navázaný na původní manifest a fresh DB/FS stav chybí; samotný manifest není
 journal COMPLETE ani NAS execution oprávnění. Bez execution evidence nelze
 rozpoznat všechny nepatchované přesuny od běžných změn legacy knihovny.
 Neexistuje automatická detekce podle canonical filename.
@@ -402,6 +402,36 @@ nové Video na cílové cestě. Filename/locator divergence guard zde ještě ne
 existovat, protože DB stále ukazuje na původní cestu. Ordinary scanner během ani
 po neuzavřené execution není autorizovaný; writery musí zůstat zastavené až do
 samostatně ověřeného uzavření. Tento řez nedokládá production readiness.
+
+Scratch-only P2C-R2 nabízí volitelné
+`ScratchManifestExecution.execute(..., completion_rescan=True)`. Po dokončení
+všech původních E7G actions, ještě v původním PID/thread owneru pod výhradní E6B
+lease a před close, interní bridge ověří přesný sealed envelope, živého E1 writera
+s úplnou acknowledged historií všech PENDING → FS_APPLIED → FS_VERIFIED →
+DB_RECONCILED → COMPLETE, finální committed Rn včetně rows/schema a původního
+expected post hash, všechny původní identity/content pins a carried evidence.
+Nezávislá SQLite `mode=ro` Session provede původní P2C-R1 rescan. Stejné živé
+kontroly se opakují po čtení, před přijetím výsledku. Není přidán nový journal
+ani execution lifecycle. Výsledek `completion_rescan_result` je jen diagnostika
+volání, nikoli přenositelná completion capability.
+
+Selhání completion kontroly po E7 efektech vyžaduje reconciliation, nikoli
+bezpečné pre-execution odmítnutí. Původní E7 reconciliation výjimka a její fáze
+se zachovávají; jiné pozdní selhání se povýší stávajícím filesystem reconciliation
+mechanismem s fází `P2C_COMPLETION` a původní příčinou. Spotřebovaný owner uchová
+tuto klasifikaci i při odmítnutí dalšího pokusu. Nic se neopakuje ani nevrací.
+
+Bridge odmítá rozpracovanou či nepotvrzenou execution a nelze jej kombinovat
+s E7H `cleanup_decision`. Po close, přerušení procesu či restartu je STOP;
+načtený poslední COMPLETE frame, receipt ani shoda JSON/hashů nejsou oprávnění.
+R1 zůstává samostatný nízkoúrovňový verifier projekce; samotné jeho úspěšné
+volání nedokládá dokončení execution. R2 nepřidává obecný/webový ingress,
+post-cleanup admission, resume ani recovery a nechrání nezávisle spuštěný
+ordinary scanner po pádu. Popsané crash window zůstává otevřené, dokud nebude
+samostatně ověřená durable maintenance/startup ochrana všech write-capable cest.
+Produkční executor ani NAS execution nejsou autorizované. R2 poskytuje pouze
+diagnostickou completion admission v původním živém scratch owneru; celé P2C
+zůstává otevřené.
 
 `UnresolvedExternalSubtitle.filename` má stejný source/parser contract; V6
 patchuje pouze `relative_path`. Audit reads/writes rozlišuje:

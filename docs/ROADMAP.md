@@ -273,6 +273,14 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   nejsou commit evidence. Known filename/locator divergence blokuje ordinary scan
   bez evidence. Nezávislé closure review potvrdilo uzavření všech původních nálezů.
   Celé P2C zůstává otevřené.
+  Scratch-only R2 přidává volitelný completion rescan uvnitř původního živého
+  E7G owneru před close, s úplným acknowledged E1 journalem, finálním committed
+  Rn, identity pins a E6B výlukou před/po nezávislém R1 čtení. Bez nového journalu,
+  restart authority nebo kombinace s E7H cleanupem; receipt je pouze diagnostika.
+  R2 neposkytuje restart authority a neřeší ordinary scanner crash window.
+  Post-completion selhání vyžaduje reconciliation se zachováním původní silnější
+  klasifikace; jiná pozdní chyba má fázi P2C_COMPLETION. Pre-execution odmítnutí
+  zůstává oddělené; žádný retry, rollback ani resume nevzniká.
   Durable completion ingress, crash recovery, post-cleanup admission, incremental
   routing, webový ingress a produkční executor nadále nejsou implementované.
   NAS execution není autorizovaná; tento řez neopravňuje ordinary write-capable

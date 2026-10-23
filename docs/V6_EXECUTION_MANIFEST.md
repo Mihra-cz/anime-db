@@ -1404,6 +1404,53 @@ frame po pádu neprokazuje fsync acknowledgement a nikdy neopravňuje k retry,
 resume či rollbacku. Dál platí scratch omezení vůči nespolupracujícím same-UID
 a privilegovaným writerům; testy se SIGKILL nedokládají NAS/power-loss durability.
 
+## P2C-R2: completion rescan pouze v živém scratch owneru
+
+Volitelné `ScratchManifestExecution.execute(..., completion_rescan=True)` žádá
+read-only P2C-R1 rescan po všech původních E7G file actions, před uzavřením
+původních pins/writera a při nepřerušené exclusive E6B maintenance. `True` je
+požadavek na kontrolu, nikoli tvrzení, že execution skončila. Kombinace s E7H
+`cleanup_decision` je odmítnutá před execution efekty; post-cleanup admission
+není přidaná. Bez argumentu zůstává dosavadní execution beze změny.
+
+Interní bridge přijímá jen původního živého ownera v určené závěrečné fázi,
+přesný původní manifest envelope a writer/path binding. `inspect_live` a celá
+acknowledged historie musí obsahovat všechny původní action IDs/indexy a všech
+pět stavů v sealed pořadí, včetně DB_RECONCILED a COMPLETE. Nestačí poslední
+COMPLETE ani caller assertion. E7D nezávisle ověří skutečně commitnuté finální
+Rn rows/schema, commit acknowledgement/fingerprint a původní expected post hash;
+E3/E7G ověří původní capture artefakty, živé identity/content pins, MOVE i KEEP.
+Původní carried duplicate evidence zůstává v sealed manifestu a post-hash gate.
+
+Následuje nezávislá SQLite `mode=ro` Session s konzistentní read transakcí a
+původní `scan_library(..., execution_manifest=...)` P2C-R1 kontrolou. Potom se
+opakuje celá kontrola živého owneru, maintenance, journalu, DB a identity. Jakákoli
+nejistota znamená STOP a žádný přijatý completion rescan výsledek. Výsledek
+`completion_rescan_result` je diagnostika, ne znovupoužitelná authority; při
+execution/close chybě se nepublikuje. Nevzniká další journal ani lifecycle.
+
+Pokud completion kontrola selže po provedených E7 akcích, výsledek je
+reconciliation-required STOP. Původní `Scratch*ReconciliationRequired` se
+nepřebaluje na slabší typ: zachová instanci, fázi a původní exception chaining.
+Jiná pozdní chyba se povýší na existující
+`ScratchFilesystemReconciliationRequired` ve fázi `P2C_COMPLETION`, s původní
+výjimkou jako příčinou. Stejná hranice platí v sequence vrstvě i pro přímou
+pozdní výjimku mimo bridge. Owner uchová výsledný typ a fázi pro odmítnutí
+následného pokusu. Bezpečné odmítnutí před execution efekty zůstává oddělené.
+Dosažený DB/FS/journal stav se nemění, COMPLETE se nepřeznačuje a nevzniká retry,
+recovery, fyzický rollback ani oprávnění k další akci.
+
+Načtený journal po close/restartu má nadále `reconciliation_required=True`.
+Restart, interrupted owner, neúplné či neacknowledged frames, nejasný DB commit
+nebo ztráta maintenance nepovolují auto-admission. R2 neprovádí recovery ani
+resume. R1 samotný zůstává verifier projekce, nikoli completion authority.
+Odmítnutí bridge nechrání ordinary scanner spuštěný nezávisle po pádu: MOVE před
+commitem DB patchů může stále vést k nové Video identitě. Durable production
+maintenance/startup ochrana všech write-capable scanner cest zůstává samostatný
+prerequisite. Incremental routing, web/production ingress a NAS executor nejsou
+implementované; NAS execution není autorizovaná. R2 poskytuje jen diagnostiku
+v původním živém scratch owneru a celé P2C zůstává otevřené.
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.

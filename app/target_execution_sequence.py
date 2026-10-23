@@ -220,9 +220,14 @@ class _ExecutionSequence:
             except BaseException as exc:
                 primary = exc
                 if isinstance(exc, ScratchCoordinationStopped):
-                    error = exc
+                    if self._phase == 'P2C_COMPLETION' and not exc.reconciliation_required:
+                        error = ScratchFilesystemReconciliationRequired('STOP: ' + str(exc), self._phase)
+                    else:
+                        error = exc
                 elif isinstance(exc, Exception):
-                    if self._phase.startswith('DB_'):
+                    if self._phase == 'P2C_COMPLETION':
+                        category = ScratchFilesystemReconciliationRequired
+                    elif self._phase.startswith('DB_'):
                         category = ScratchDatabaseReconciliationRequired
                     elif isinstance(exc, IdentityEvidenceReconciliationRequired):
                         category = ScratchFilesystemReconciliationRequired
@@ -300,6 +305,8 @@ class ScratchManifestExecution(_ExecutionSequence):
             owner._prepared = {}
             owner._directories = None
             owner._cleanup_decision = owner.cleanup_outcome = None
+            owner._completion_rescan_requested = False
+            owner.completion_rescan_result = None
             owner._active_index, owner._phase = 0, 'VALIDATION'
             owner._stop_class = ScratchCoordinationStopped
             filesystem._sequence_owner = owner
@@ -336,10 +343,19 @@ class ScratchManifestExecution(_ExecutionSequence):
     def cleanup_evidence_path(self):
         return self.root.parent / (self.root.name + '.cleanup.jsonl')
 
-    def execute(self, manifest: ExecutionManifest, *, maintenance_owner=None, cleanup_decision=None):
-        return self._execute_once(manifest, maintenance_owner=maintenance_owner, cleanup_decision=cleanup_decision)
+    def execute(self, manifest: ExecutionManifest, *, maintenance_owner=None, cleanup_decision=None,
+                completion_rescan=False):
+        try:
+            return self._execute_once(manifest, maintenance_owner=maintenance_owner,
+                cleanup_decision=cleanup_decision, completion_rescan=completion_rescan)
+        except BaseException:
+            self.completion_rescan_result = None
+            raise
 
-    def _accept_scope(self, *, maintenance_owner, cleanup_decision=None):
+    def _accept_scope(self, *, maintenance_owner, cleanup_decision=None, completion_rescan=False):
+        if type(completion_rescan) is not bool or (completion_rescan and cleanup_decision is not None):
+            raise ValueError('completion rescan requires an explicit bool and no cleanup decision')
+        self._completion_rescan_requested = completion_rescan
         if cleanup_decision is not None and not callable(cleanup_decision):
             raise ValueError('cleanup_decision must explicitly decide a verified cleanup proposal')
         self._cleanup_decision = cleanup_decision
@@ -481,6 +497,10 @@ class ScratchManifestExecution(_ExecutionSequence):
                 self._require_predecessor()
             self._authorized_index = index
             result.append(self._run_move(index))
+        if self._completion_rescan_requested:
+            from .scanner.execution_completion import run_completed_scratch_rescan
+            self._phase = 'P2C_COMPLETION'
+            self.completion_rescan_result = run_completed_scratch_rescan(self)
         if self._cleanup_decision is not None:
             from .target_execution_cleanup import _run_cleanup
             self.cleanup_outcome = _run_cleanup(self, self._cleanup_decision)
