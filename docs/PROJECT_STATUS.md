@@ -356,9 +356,52 @@ ale je required před ordinary write-capable rescanem reorganizovaného canonica
 tree. Verifier používá persisted paths a DB-known identity, bez owner inference.
 Budoucí execution vyžaduje zastavený scanner/inventory writer nebo explicitní
 maintenance boundary; její mechanismus zde není implementovaný.
-Dnešní scanner při create používá physical basename a při changed-file update
-jej zapisuje zpět do `Video.filename`; zároveň klasifikuje podle current path.
-Zachování historical evidence při canonical rescanu patří do P2C, není zde změněné.
+Scanner při create používá physical basename jako počáteční source evidence.
+Update existujícího Video ani unresolved subtitle již filename nepřepisuje.
+Ordinary scanner odmítne známou row s odlišným basename locatoru a source filename,
+i při `confirm_deletions=True`: samotný rozdíl není routing authority.
+
+První vertikální řez P2C přidává explicitní
+`scan_library(session, root, execution_manifest=manifest)`. Jde o uzavřený rescan
+již commitnuté schválené planner/execution projekce. Neověřuje celý nezměněný
+DB post-state ani dokončení execution journalu. Vyžaduje Session bez otevřené
+transakce (včetně SELECT autobegin); otevřenou transakci na bind Connection rovněž
+odmítá ještě před DB operací. Volající musí vlastní transakci explicitně dokončit;
+STOP ji necommitne ani nerollbackne. Clean ORM flags samy o sobě neprokazují commit:
+flush a Core UPDATE mohou nechat tyto flags prázdné. Vyžaduje dále validní v2
+immutable manifest, přesné warning acknowledgements, shodný library root,
+jednoznačnou úplnou množinu DB-known Video/subtitle IDs a target locators,
+aplikované locator patches a přesnou vazbu MOVE/QUARANTINE na file patch.
+Fresh nofollow inventory ověří target regular-file/stat parity a absenci původních
+MOVE sources. Stávající `post_state_hash_from_manifest` s carried duplicate
+evidence musí odpovídat sealed expected post hash. Size/mtime nejsou matching
+heuristika ani důkaz identity obsahu. Přijatá větev pouze čte a svou nově zahájenou read transakci ukončí
+rollbackem; nevolá probe, subtitle rematching, hierarchy inference ani numbering
+reconciliation. Vrací existující videa jako unchanged, bez create/update/delete.
+Absence zápisů zachovává existující owners, source filenames, manual/verified
+rozhodnutí, metadata, confirmed duplicate i M:N compatibility a jejich timestampy.
+Jde o preservation při rescanu, nikoli porovnání všech těchto polí s původním DB
+snapshotem. Gate pokrývá jen schválenou planner/execution projekci a explicitně
+kontrolovanou evidence. Změna source filename, metadat či overrides mimo tuto
+projekci nemusí sama o sobě způsobit STOP; některé změny ovlivňující projekci ano.
+Nesouhlas znamená `LibrarySafetyError`/STOP, bez fallbacku do ordinary scanneru.
+
+Úplné P2C zůstává otevřené. Toto API zatím není zapojené do webového scan jobu
+ani produkčního execution lifecycle. Nové/změněné/chybějící soubory nebo změněné
+kontrolované container/planner projekce vyžadují další routing kontrakt; API je
+konzervativně odmítá. E7H cleanup mění directory namespace za původním expected post hash,
+proto původní manifest po cleanupu nestačí. Chybí durable completion/post-cleanup
+admission navázaná na původní manifest a fresh DB/FS stav; samotný manifest není
+journal COMPLETE ani NAS execution oprávnění. Bez execution evidence nelze
+rozpoznat všechny nepatchované přesuny od běžných změn legacy knihovny.
+Neexistuje automatická detekce podle canonical filename.
+
+Crash window mezi fyzickým MOVE a commitem locator-only DB patchů není touto
+etapou vyřešené: ordinary scanner může původní row považovat za zmizelou a založit
+nové Video na cílové cestě. Filename/locator divergence guard zde ještě nemusí
+existovat, protože DB stále ukazuje na původní cestu. Ordinary scanner během ani
+po neuzavřené execution není autorizovaný; writery musí zůstat zastavené až do
+samostatně ověřeného uzavření. Tento řez nedokládá production readiness.
 
 `UnresolvedExternalSubtitle.filename` má stejný source/parser contract; V6
 patchuje pouze `relative_path`. Audit reads/writes rozlišuje:
@@ -369,7 +412,7 @@ patchuje pouze `relative_path`. Audit reads/writes rozlišuje:
 | `subtitle_review._rank_candidate` | B: podobnost current basenames z `relative_path`, stejně jako u Video. |
 | `templates/media_check.html` | B: fyzický label z current locatoru; source evidence se nepřepisuje. |
 | `target_planner_service` | A: detached `source_evidence_filename`; fyzické umístění z `relative_path`. |
-| `scanner.service._sync_external_subtitles` | C / P2C debt: create bere basename; oba update branches (včetně confirmed_no_match) dnes přepisují filename current basename. Lifecycle zatím beze změny. |
+| `scanner.service._sync_external_subtitles` | Create bere basename; oba update branches (včetně confirmed_no_match) zachovávají historical filename. Manifestový rescan rematching nespouští. |
 | `subtitle_review.reopen_manual_subtitle_link` | C: vytváří novou unresolved row s basename při reopen; ExternalSubtitle původní source filename nenese. Zachování evidence přes převody rows je lifecycle debt, bez nového schema nyní. |
 
 Manual assign převede unresolved row na owner-less ExternalSubtitle; rozhodnutí,
@@ -610,8 +653,9 @@ non-injective: výsledek `unique/ambiguous/not_canonical` uchovává všechny pl
 lexical alternatives v deterministic pořadí bez precedence. Schválený inverse
 proto vyžaduje následné authoritative context resolution. Parser žádného
 ownera neřeší ani nevytváří.
-Scanner routing P2C není implementovaný; produkční chování scanneru i tolerantní
-legacy parser zůstávají beze změny. Existing membership/explicit selectors zachovávají owners;
+Inkrementální scanner routing P2C není implementovaný; explicitní uzavřený
+manifestový rescan popisuje sekce source filename výše. Tolerantní legacy parser
+zůstává beze změny. Existing membership/explicit selectors zachovávají owners;
 nový soubor `... - S02P02E03.mkv` při ambiguous locatoru zůstává unresolved/review.
 Naming/Layout choices zůstávají owner-ID based a čistá změna locatoru nemění
 jejich basis. Read-only Target Planner D01–D06 foundation je implementovaný;

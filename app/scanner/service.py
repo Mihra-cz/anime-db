@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
 from collections import defaultdict
 import logging
@@ -53,6 +54,8 @@ from app.video_variants import (
     assign_video_catalog_title,
     reconcile_video_catalog_title,
 )
+if TYPE_CHECKING:
+    from app.target_execution_manifest import ExecutionManifest
 
 logger = logging.getLogger(__name__)
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi"}
@@ -249,7 +252,6 @@ def _sync_external_subtitles(
             continue
 
         if unresolved is not None and unresolved.status == "confirmed_no_match":
-            unresolved.filename = data["filename"]
             unresolved.extension = data["extension"]
             unresolved.language = data["language"]
             unresolved.normalized_language = data["normalized_language"]
@@ -331,7 +333,6 @@ def _sync_external_subtitles(
         transfer_rejected_video_ids(linked, unresolved)
         for row in linked:
             session.delete(row)
-        unresolved.filename = data["filename"]
         unresolved.extension = data["extension"]
         unresolved.language = data["language"]
         unresolved.normalized_language = data["normalized_language"]
@@ -406,6 +407,15 @@ def _scan_library(
         exc.result = result
         raise
     existing = {v.relative_path: v for v in session.scalars(select(Video)).all()}
+    # A locator-only execution deliberately separates physical basename from
+    # source evidence. Ordinary path inference cannot safely route those rows.
+    if any(Path(v.relative_path).name != v.filename for v in existing.values()):
+        raise LibrarySafetyError(
+            "Source filename differs from its locator; explicit execution evidence is required."
+        )
+    for subtitle in session.scalars(select(UnresolvedExternalSubtitle)).all():
+        if Path(subtitle.relative_path).name != subtitle.filename:
+            raise LibrarySafetyError("Subtitle locator requires explicit execution evidence.")
     seen: set[str] = set()
     for path in iter_videos(root):
         if result.found and result.found % max(1, library_healthcheck_interval_files) == 0:
@@ -442,7 +452,7 @@ def _scan_library(
 
             if changed:
                 metadata = probe_video(path, timeout_seconds=ffprobe_timeout_seconds)
-                video.filename, video.root_folder = path.name, _root_folder(relative)
+                video.root_folder = _root_folder(relative)
                 video.file_type = classify_video(key)
                 video.size, video.mtime_ns = stat.st_size, stat.st_mtime_ns
                 video.duration, video.video_codec = metadata["duration"], metadata["video_codec"]
@@ -752,12 +762,31 @@ def scan_library(
     ffprobe_timeout_seconds: float = 60,
     library_access_timeout_seconds: float = 10,
     library_healthcheck_interval_files: int = 25,
+    execution_manifest: ExecutionManifest | None = None,
 ) -> ScanResult:
+    if execution_manifest is not None:
+        from .execution_rescan import require_unstarted_execution_session
+        try:
+            require_unstarted_execution_session(session)
+        except ValueError as exc:
+            # This transaction belongs to the caller. In particular, do not
+            # let the ordinary scan error handler roll it back.
+            raise LibrarySafetyError(f"Execution rescan STOP: {exc}") from exc
     with writer_admission(session):
         gate = maintenance_for(session)
         if gate is not None:
             gate.validate_root(root)
         try:
+            if execution_manifest is not None:
+                from .execution_rescan import verify_execution_rescan
+                try:
+                    if require_mount and not is_on_mounted_source(root):
+                        raise ValueError("execution library is not on a mounted source")
+                    count = verify_execution_rescan(session, root, execution_manifest)
+                except (ValueError, TypeError, OSError) as exc:
+                    raise LibrarySafetyError(f"Execution rescan STOP: {exc}") from exc
+                session.rollback()  # End the read transaction without a write lifecycle.
+                return ScanResult(found=count, unchanged=count)
             return _scan_library(
                 session,
                 root,

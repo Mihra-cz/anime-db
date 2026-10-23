@@ -216,8 +216,8 @@ Produkční mount capability je neověřená; produkční globální lock/mainte
 produkční executor/DB reconciliation, automatické resume, obecný/produkční
 a automatický rollback, crash recovery a NAS cleanup zůstávají samostatnou
 budoucí prací.
-P2C authoritative context resolution a scanner routing jsou
-odložené. Fyzický rename
+P2C authoritative context resolution a inkrementální scanner routing jsou
+odložené; první omezený řez P2C je implementovaný. Fyzický rename
 ani move na NAS zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
 v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 
@@ -261,9 +261,25 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   po cleanupu a P2C zůstávají pending.
   P2C není prerequisite reorganizace ani read-only post-state verification,
   je však required před ordinary write-capable scanner rescanem canonical tree.
-  P2C musí upravit scanner lifecycle tak, aby physical basename nezničil původní
-  source/parser evidence existujícího Video ani unresolved subtitle;
-  tento write lifecycle zatím změněný není.
+  První omezený řez P2C podporuje read-only rescan kompletního nezměněného post-state
+  v rozsahu commitnuté schválené planner/execution projekce, ordinary guard
+  a zachování source filename; bez zápisů, owner inference nebo rematchingu.
+  Přesná IDs/locator patches, fresh inventory,
+  warning approvals a původní expected post hash s carried evidence jsou povinné;
+  odchylka v kontrolované projekci/evidenci znamená STOP. Gate neporovnává celý
+  DB snapshot: source filename, metadata nebo overrides mimo tuto projekci nemusejí
+  být pokryté. Session s otevřenou transakcí včetně SELECT autobegin i bind Connection
+  transakce se odmítá před DB operací, bez ukončení práce volajícího; flush/Core UPDATE
+  nejsou commit evidence. Known filename/locator divergence blokuje ordinary scan
+  bez evidence. Nezávislé closure review potvrdilo uzavření všech původních nálezů.
+  Celé P2C zůstává otevřené.
+  Durable completion ingress, crash recovery, post-cleanup admission, incremental
+  routing, webový ingress a produkční executor nadále nejsou implementované.
+  NAS execution není autorizovaná; tento řez neopravňuje ordinary write-capable
+  rescan canonical stromu.
+  Crash window MOVE → dosud necommitnuté locator patches není vyřešené: ordinary
+  scan může vytvořit nové Video a odstranit staré. Během ani po neuzavřené execution
+  není ordinary scan autorizovaný. Production readiness se netvrdí.
   Execution musí probíhat se zastaveným scanner/inventory writerem nebo za
   explicitní maintenance boundary. Manifest/preflight tuto externí podmínku
   vyžadují; persisted maintenance mechanismus zatím neexistuje.
