@@ -772,31 +772,42 @@ def scan_library(
             # This transaction belongs to the caller. In particular, do not
             # let the ordinary scan error handler roll it back.
             raise LibrarySafetyError(f"Execution rescan STOP: {exc}") from exc
-    with writer_admission(session):
-        gate = maintenance_for(session)
-        if gate is not None:
-            gate.validate_root(root)
-        try:
-            if execution_manifest is not None:
-                from .execution_rescan import verify_execution_rescan
-                try:
-                    if require_mount and not is_on_mounted_source(root):
-                        raise ValueError("execution library is not on a mounted source")
-                    count = verify_execution_rescan(session, root, execution_manifest)
-                except (ValueError, TypeError, OSError) as exc:
-                    raise LibrarySafetyError(f"Execution rescan STOP: {exc}") from exc
-                session.rollback()  # End the read transaction without a write lifecycle.
-                return ScanResult(found=count, unchanged=count)
-            return _scan_library(
-                session,
-                root,
-                require_mount=require_mount,
-                confirm_deletions=confirm_deletions,
-                ffprobe_timeout_seconds=ffprobe_timeout_seconds,
-                library_access_timeout_seconds=library_access_timeout_seconds,
-                library_healthcheck_interval_files=library_healthcheck_interval_files,
-            )
-        except Exception:
-            session.rollback()
-            logger.exception("Sken byl vrácen zpět kvůli neočekávané chybě")
-            raise
+    from contextlib import ExitStack
+    from app.maintenance import MaintenanceBusy, MaintenanceStopped
+    from app.target_execution_guard import ordinary_scan_admission
+    with ExitStack() as admissions:
+        if execution_manifest is None:
+            try:
+                admissions.enter_context(ordinary_scan_admission(session, root))
+            except MaintenanceBusy:
+                raise
+            except MaintenanceStopped as exc:
+                raise LibrarySafetyError(f"Reorganization requires review: {exc}") from exc
+        with writer_admission(session):
+            gate = maintenance_for(session)
+            if gate is not None:
+                gate.validate_root(root)
+            try:
+                if execution_manifest is not None:
+                    from .execution_rescan import verify_execution_rescan
+                    try:
+                        if require_mount and not is_on_mounted_source(root):
+                            raise ValueError("execution library is not on a mounted source")
+                        count = verify_execution_rescan(session, root, execution_manifest)
+                    except (ValueError, TypeError, OSError) as exc:
+                        raise LibrarySafetyError(f"Execution rescan STOP: {exc}") from exc
+                    session.rollback()  # End the read transaction without a write lifecycle.
+                    return ScanResult(found=count, unchanged=count)
+                return _scan_library(
+                    session,
+                    root,
+                    require_mount=require_mount,
+                    confirm_deletions=confirm_deletions,
+                    ffprobe_timeout_seconds=ffprobe_timeout_seconds,
+                    library_access_timeout_seconds=library_access_timeout_seconds,
+                    library_healthcheck_interval_files=library_healthcheck_interval_files,
+                )
+            except Exception:
+                session.rollback()
+                logger.exception("Sken byl vrácen zpět kvůli neočekávané chybě")
+                raise

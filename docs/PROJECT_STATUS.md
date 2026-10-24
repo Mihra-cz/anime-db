@@ -396,12 +396,11 @@ journal COMPLETE ani NAS execution oprávnění. Bez execution evidence nelze
 rozpoznat všechny nepatchované přesuny od běžných změn legacy knihovny.
 Neexistuje automatická detekce podle canonical filename.
 
-Crash window mezi fyzickým MOVE a commitem locator-only DB patchů není touto
-etapou vyřešené: ordinary scanner může původní row považovat za zmizelou a založit
-nové Video na cílové cestě. Filename/locator divergence guard zde ještě nemusí
-existovat, protože DB stále ukazuje na původní cestu. Ordinary scanner během ani
-po neuzavřené execution není autorizovaný; writery musí zůstat zastavené až do
-samostatně ověřeného uzavření. Tento řez nedokládá production readiness.
+Crash window MOVE → dosud necommitnuté locator patches vyžaduje persistentní
+výluku ordinary scanneru; basename divergence samotná nestačí. Scratch E7 je
+chráněný [P2C-R3 guardem](V6_EXECUTION_MANIFEST.md#p2c-r3-persistentní-stop-pro-ordinary-scanner).
+Produkční executor a jeho durable admission/storage napojení stále neexistují;
+produkční writery musí zůstat zastavené až do samostatně ověřeného uzavření.
 
 Scratch-only P2C-R2 nabízí volitelné
 `ScratchManifestExecution.execute(..., completion_rescan=True)`. Po dokončení
@@ -427,8 +426,25 @@ načtený poslední COMPLETE frame, receipt ani shoda JSON/hashů nejsou oprávn
 R1 zůstává samostatný nízkoúrovňový verifier projekce; samotné jeho úspěšné
 volání nedokládá dokončení execution. R2 nepřidává obecný/webový ingress,
 post-cleanup admission, resume ani recovery a nechrání nezávisle spuštěný
-ordinary scanner po pádu. Popsané crash window zůstává otevřené, dokud nebude
-samostatně ověřená durable maintenance/startup ochrana všech write-capable cest.
+ordinary scanner po pádu. R3 tuto mezeru uzavírá pouze v původním scratch E7
+kontraktu: immutable DB-adjacent marker se durable zapíše před přípravou adresářů
+a MOVE. Ordinary `scan_library` (včetně webového POST a potvrzených deletionů)
+a `create_app`/lifespan odmítají známou nebo poškozenou execution evidenci i bez
+předané maintenance konfigurace. První scan přesné E7 scratch dvojice vytvoří
+E6B namespace a drží shared lease přes celý scan. Chybějící marker se zbylou
+původní E1/E7 evidencí je STOP. Marker se neuvolňuje ani po R2 úspěchu; načtený
+COMPLETE, volný flock ani receipt nejsou restart authority. F1 admission používá
+caller library root jen lexikálně; NAS přístup ordinary scanneru dál patří do
+odděleného healthcheck procesu s timeoutem. E7 root i maintenance se odvozují
+jednotně z kanonické DB identity pod `/tmp`; wrong-root je STOP. Existující
+lokální E6B binding se načítá z lock namespace, ne z caller rootu. Marker se
+kontroluje také po získání lease. Běžné DB bez execution evidence nepřebírají
+scratch file-type/nlink policy a produkční `.maintenance.lock` mimo `/tmp`
+scratch režim neaktivuje; nedostupný rezervovaný guard namespace zůstává STOP.
+R1 read-only větev
+a nezávislé DB operace se tím nepovolují ani nezakazují. Budoucí ruční
+reconciliation/release kontrakt, production startup/admission a noncooperating
+writery zůstávají otevřené.
 Produkční executor ani NAS execution nejsou autorizované. R2 poskytuje pouze
 diagnostickou completion admission v původním živém scratch owneru; celé P2C
 zůstává otevřené.

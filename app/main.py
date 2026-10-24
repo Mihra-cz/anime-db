@@ -86,6 +86,7 @@ from .catalog_video_presentation import (
 )
 from .database import Base, make_engine, make_session_factory
 from .maintenance import MaintenanceMiddleware, writer_admission
+from .target_execution_guard import ordinary_scan_admission
 from .title_identity import TitleLocatorIndex, title_locator_is_reserved
 from .external_subtitle_compatibility import (
     POSITIVE_COMPATIBILITY_STATUSES,
@@ -1107,7 +1108,7 @@ def create_app(settings: Settings | None = None, *, maintenance=None) -> FastAPI
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         try:
-            with writer_admission(engine):
+            with ordinary_scan_admission(engine, settings.anime_path), writer_admission(engine):
                 migrate_schema_at_startup(engine)
                 Base.metadata.create_all(engine)
             logger.info("AnimeDB spuštěno; knihovna=%s", settings.anime_path)
@@ -1124,7 +1125,7 @@ def create_app(settings: Settings | None = None, *, maintenance=None) -> FastAPI
     install_naming_review_routes(app, templates, sessions, safe_local_redirect_target, local_redirect_response)
     install_layout_review_routes(app, templates, sessions, safe_local_redirect_target, local_redirect_response)
     app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
-    with writer_admission(engine):
+    with ordinary_scan_admission(engine, settings.anime_path), writer_admission(engine):
         settings.metadata_artwork_directory.mkdir(parents=True, exist_ok=True)
     app.mount("/artwork", StaticFiles(directory=settings.metadata_artwork_directory, check_dir=False), name="artwork")
 

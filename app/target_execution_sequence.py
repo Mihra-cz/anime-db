@@ -304,6 +304,7 @@ class ScratchManifestExecution(_ExecutionSequence):
             owner._history, owner._captures, owner._observations, owner._verifications = [], {}, {}, {}
             owner._prepared = {}
             owner._directories = None
+            owner._persistent_guard = None
             owner._cleanup_decision = owner.cleanup_outcome = None
             owner._completion_rescan_requested = False
             owner.completion_rescan_result = None
@@ -369,6 +370,8 @@ class ScratchManifestExecution(_ExecutionSequence):
         # Reuse only the rollback's ownership validation, never its approval,
         # existing-root adoption or physical-return authority.
         _require_scratch_maintenance_owner(self._maintenance_owner, self.root)
+        if self._persistent_guard is not None:
+            self._persistent_guard.check()
         if self._directories is not None:
             self._directories.check_bindings()
 
@@ -447,6 +450,10 @@ class ScratchManifestExecution(_ExecutionSequence):
         self._check_execution()
         for index, action in enumerate(manifest.payload.actions):
             self._verify_prepared(index)
+        from .target_execution_guard import _ScratchExecutionGuard
+        self._phase = 'EXECUTION_GUARD'
+        self._persistent_guard = self._resources.enter_context(closing(
+            _ScratchExecutionGuard.create(self.database_path, self.root, manifest, self._maintenance_owner)))
         self._directories.prepare()
         self._identities = tuple(self._resources.enter_context(
             ScratchIdentitySession._new_execution_context(self._filesystem, self, index))

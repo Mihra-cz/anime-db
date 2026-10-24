@@ -285,12 +285,20 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   routing, webový ingress a produkční executor nadále nejsou implementované.
   NAS execution není autorizovaná; tento řez neopravňuje ordinary write-capable
   rescan canonical stromu.
-  Crash window MOVE → dosud necommitnuté locator patches není vyřešené: ordinary
-  scan může vytvořit nové Video a odstranit staré. Během ani po neuzavřené execution
-  není ordinary scan autorizovaný. Production readiness se netvrdí.
-  Execution musí probíhat se zastaveným scanner/inventory writerem nebo za
-  explicitní maintenance boundary. Manifest/preflight tuto externí podmínku
-  vyžadují; persisted maintenance mechanismus zatím neexistuje.
+  Scratch-only R3 přidává persistentní scanner STOP před první E7 filesystem
+  operací, nezávislý na PID/flocku; ordinary přímý i webový scan a startup
+  kontrolují známou execution evidenci. Marker zůstává i po R2 úspěchu, bez
+  automatického release/recovery. Chybějící marker se zbylou E1/E7 evidencí je
+  STOP. [Kontrakt a omezení](V6_EXECUTION_MANIFEST.md#p2c-r3-persistentní-stop-pro-ordinary-scanner)
+  nerozšiřují scope na NAS/produkční executor. F1 opravuje synchronní library-root
+  lookup na lexikální admission, sjednocuje DB-derived scratch binding a doplňuje
+  dvouprocesové race/discovery regrese i produkční SQLite kompatibilitu.
+  První scratch-only řez P2C-R3 prošel nezávislým review a F1 closure review.
+  Durable execution guard chrání ordinary scanner a startup při známé nedokončené
+  execution. Release/reconciliation, produkční integrace a ostatní otevřené hranice
+  P2C zůstávají nedokončené. Produkční NAS execution není autorizovaná.
+  Production crash window a napojení všech skutečných writerů na durable
+  admission/storage zůstávají readiness blocker. Production readiness se netvrdí.
 - [Immutable execution manifest a read-only preflight](V6_EXECUTION_MANIFEST.md)
   zachycují jeden fresh plán, exact warning acknowledgements, locator-only
   patches a carried duplicate evidence. Versioned canonical payload má stabilní

@@ -995,6 +995,8 @@ workflow lease včetně všech commit/rollback a fyzických side effectů.
 Následující ochrana platí **pouze při explicitním předání stejného scratch
 bindingu** do `make_engine(..., maintenance=gate)` / `create_app(...,
 maintenance=gate)`; výchozí produkční procesy tím chráněné nejsou.
+R3 níže navíc přidává objevování známé scratch execution evidence do ordinary
+scanneru a aplikačního startupu; nepřevádí všechny DB služby na production výluku.
 
 | Vstupní cesta | Pokrytí při opt-in |
 | --- | --- |
@@ -1411,7 +1413,8 @@ read-only P2C-R1 rescan po všech původních E7G file actions, před uzavření
 původních pins/writera a při nepřerušené exclusive E6B maintenance. `True` je
 požadavek na kontrolu, nikoli tvrzení, že execution skončila. Kombinace s E7H
 `cleanup_decision` je odmítnutá před execution efekty; post-cleanup admission
-není přidaná. Bez argumentu zůstává dosavadní execution beze změny.
+není přidaná. R2 argument nemění ostatní execution lifecycle; R3 níže ukládá
+persistentní guard i bez požadavku na completion rescan.
 
 Interní bridge přijímá jen původního živého ownera v určené závěrečné fázi,
 přesný původní manifest envelope a writer/path binding. `inspect_live` a celá
@@ -1450,6 +1453,99 @@ maintenance/startup ochrana všech write-capable scanner cest zůstává samosta
 prerequisite. Incremental routing, web/production ingress a NAS executor nejsou
 implementované; NAS execution není autorizovaná. R2 poskytuje jen diagnostiku
 v původním živém scratch owneru a celé P2C zůstává otevřené.
+
+## P2C-R3: persistentní STOP pro ordinary scanner
+
+[Guard](../app/target_execution_guard.py) přidává pouze denial latch pro původní
+`ScratchManifestExecution`, nikoli recovery framework nebo production executor.
+Po ověření celého sealed R0 plánu a zdrojů, před E7F přípravou adresářů a první
+file action, živý exclusive E6B owner vytvoří
+`<database>.execution-guard.json`. Původní E1 pořadí a R2 bridge se nemění.
+
+Marker obsahuje verzi/schema, přesné DB/library cesty a jejich device/inode,
+manifest ID, SHA-256 celého validovaného envelope, původní DB fingerprint,
+přesnou E1 journal cestu a canonical checksum. Reuse E1 nofollow parent/file
+kontrol, `O_CREAT|O_EXCL`, `0600`, úplného zápisu, file `fsync` a parent directory
+`fsync` poskytuje kontrolovanou durable hranici. Původní owner drží descriptors
+a ověřuje stejné bytes, file/parent binding a DB/root identity při dalších
+execution kontrolách. Chyba vytvoření/zápisu/fsync/check znamená STOP před mkdir
+či MOVE; partial evidence se neodstraňuje ani nepřepisuje. Kolize se odmítá.
+
+Ordinary `scan_library`, včetně `confirm_deletions=True` a `POST /scan`,
+kontroluje fixed DB namespace před SQL/autoflush, inventory, probe a write
+lifecycle. Existující marker vždy znamená STOP s důvodem, že reorganizace vyžaduje
+kontrolu; poškozený či konfliktní marker nemůže udělit povolení. Přítomnost
+libovolného JSON ani samotný název souboru nejsou autorita k pokračování.
+Kontrola nepotřebuje a záměrně nepřijímá loaded COMPLETE jako autoritu.
+DB cesta se kanonizuje nezávisle na `ANIME_PATH`; relativní, symlink a podporované
+SQLite URI varianty najdou tentýž označený DB namespace. Samotné `st_nlink != 1`
+ani neobvyklý název či nonregular DB path nejsou globální R3 zákaz: bez relevantní
+evidence zůstává běžná SQLite DB, včetně hardlinků, pod původním kontraktem driveru.
+Původní E7 scratch binding nadále vyžaduje jedinečnou regular DB přes E6B.
+U hardlinku pod `/tmp` se ve stejném DB adresáři porovná přesný device/inode
+s původním E7 DB namespace. Pouze shoda identity spolu s existující guard/E1/E7
+nebo E6B evidencí odkáže alias na původní namespace a zachová STOP. Samotné jméno
+kandidáta ani evidence jiné DB nesmí aktivovat scratch režim. Nejde o Video
+matching ani globální mapování inode aliasů; změny DB jména/přesuny mimo původní
+binding stále nejsou podporované recovery/adoption workflow.
+
+Library root admission zpracuje pouze lexikálně (`absolute()`), odmítá parent
+traversal, NUL, backslash a nejednoznačnou dvojitou root kotvu. Nevolá nad caller
+rootem `resolve`, `stat`, `lstat`, mount probe ani directory walk. Nedostupný CIFS
+tím nezablokuje webový proces před původním `check_library_access`; fyzický přístup
+ordinary scanneru dál ověřuje samostatný proces s timeoutem. Kanonickou caller
+cestu scratch bindingu je nutné dodat přímo; alias library rootu se nerozlišuje
+synchronním filesystem lookupem.
+
+Původní E7 root se odvozuje jen z kanonické DB cesty
+`/tmp/.../v6-e2a-<32 lowercase hex>.sqlite`, nikdy z caller rootu. Stejný odvozený
+namespace řídí známé E1/E7 journal/directory/identity artefakty i automatickou
+maintenance. Zbytky evidence bez markeru jsou STOP i při chybném caller rootu.
+První scanner tohoto bindingu založí E6B i před executorem; nesouhlas rootu je STOP
+ještě před vstupem do scanner workflow a nemůže vytvořit cizí lock binding.
+Jméno vybere kandidáta výluky, nikoli execution authority: E6B ověří přesné DB/root
+cesty, file identity/type/nlink, soukromé permissions, mounty a lock.
+
+Plain engine také objeví již existující `.maintenance.lock` u lokální DB pod
+`/tmp`: omezené nofollow čtení získá pouze kandidátní původní E6B root; canonical
+bytes a celý binding nezávisle ověří `ScratchMaintenance`. Ani zde se root
+nebere od scanneru. Neplatná/poškozená relevantní lokální evidence je STOP.
+Obdobný lock mimo `/tmp` se nepokouší aktivovat scratch maintenance; ani název
+DB připomínající E7 mimo `/tmp` nezapíná scratch heuristiku. Původní explicitní
+E6B opt-in enginy nadále používají svůj ověřený binding.
+
+Kontrola markeru se opakuje **po získání shared lease**, takže executor, který
+v mezeře získal exclusive lease, vytvořil durable marker, provedl MOVE a havaroval,
+nemůže skeneru nechat staré povolení. Shared lease pokrývá celý ordinary scan
+přes commit/rollback a návrat. Běžné legacy knihovny bez tohoto scratch
+kontraktu/evidence se na E6B automaticky nepřevádějí.
+
+Globálním fail-closed pravidlem zůstává přítomnost pevného DB guard namespace
+nebo nemožnost ověřit jeho identitu/čitelnost: guard nesmí při I/O či neplatném
+DB URI nepozorovaně minout případnou execution evidenci. Nejde o novou kontrolu
+kvality běžných DB dat. Výjimky `OSError`/`ValueError` vzniklé až uvnitř přijatého
+scanner workflow se na execution chyby nepřekládají. Žádná evidence se při čtení
+nemění a SQLite se v admission neotevírá.
+`create_app` kontroluje stejné podmínky před artwork mkdir a lifespan před
+startup migracemi/`create_all`. Známá evidence zastaví nový startup. Již běžící
+aplikace může dál číst katalog a `/health`; R3 nezavádí webové recovery UI.
+
+R1 `execution_manifest=` zůstává samostatná read-only větev bez ordinary fallbacku.
+R3 neblokuje jiné nezávislé DB služby; ty stále vyžadují E6B opt-in pro výluku
+během execution. Přímé migrační CLI ani neparticipující raw SQL nejsou globálně
+chráněné markerem. Starší jedno/dvouakční scratch primitives nemění svůj kontrakt.
+
+**Marker se nikdy automaticky neuvolňuje.** Zůstává po close, SIGKILL, restartu,
+uvolnění flocku, plném COMPLETE, úspěšném R2 rescanu i E7H cleanupu. Ani ověřený
+R2 výsledek nepovoluje ordinary incremental routing. Obecný release boundary
+není schválený; je nutná budoucí explicitní ruční reconciliation. R3 neposkytuje
+unlink/reset příkaz, resume, rollback, locator repair ani post-cleanup admission.
+
+Persistentní storage/retention, production DB/library identity, globální zapojení
+produkčních writerů a chybějící production executor jsou nadále otevřené.
+Úmyslné odstranění všech artefaktů, neparticipující klienti, změny mount namespace
+a hardware power-loss nejsou prokázané. Scratch test SIGKILL dokládá process-crash
+hranici, nikoli NAS durability. **NOT AUTHORIZED FOR NAS EXECUTION.**
 
 ## Externí pre-execution gates
 
