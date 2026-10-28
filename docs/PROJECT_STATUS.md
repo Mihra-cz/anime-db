@@ -432,8 +432,8 @@ a MOVE. Ordinary `scan_library` (včetně webového POST a potvrzených deletion
 a `create_app`/lifespan odmítají známou nebo poškozenou execution evidenci i bez
 předané maintenance konfigurace. První scan přesné E7 scratch dvojice vytvoří
 E6B namespace a drží shared lease přes celý scan. Chybějící marker se zbylou
-původní E1/E7 evidencí je STOP. Marker se neuvolňuje ani po R2 úspěchu; načtený
-COMPLETE, volný flock ani receipt nejsou restart authority. F1 admission používá
+původní E1/E7 evidencí je STOP. Samotný R2 úspěch marker neuvolňuje; načtený COMPLETE ani volný flock
+nejsou restart authority. Explicitní přechod pro scanner je popsán níže. F1 admission používá
 caller library root jen lexikálně; NAS přístup ordinary scanneru dál patří do
 odděleného healthcheck procesu s timeoutem. E7 root i maintenance se odvozují
 jednotně z kanonické DB identity pod `/tmp`; wrong-root je STOP. Existující
@@ -442,12 +442,31 @@ kontroluje také po získání lease. Běžné DB bez execution evidence nepřeb
 scratch file-type/nlink policy a produkční `.maintenance.lock` mimo `/tmp`
 scratch režim neaktivuje; nedostupný rezervovaný guard namespace zůstává STOP.
 R1 read-only větev
-a nezávislé DB operace se tím nepovolují ani nezakazují. Budoucí ruční
-reconciliation/release kontrakt, production startup/admission a noncooperating
-writery zůstávají otevřené.
+a nezávislé DB operace se tím nepovolují ani nezakazují. Obecný ruční reconciliation/release kontrakt, production startup/admission
+a noncooperating writery zůstávají otevřené.
 Produkční executor ani NAS execution nejsou autorizované. R2 poskytuje pouze
 diagnostickou completion admission v původním živém scratch owneru; celé P2C
 zůstává otevřené.
+
+První funkční integrace běžného scanneru používá explicitní scratch-only
+`ScratchManifestExecution.execute(..., resume_scanning=True)`. Před přechodem
+provede původní živé E7/R2 kontroly včetně acknowledged COMPLETE journalu,
+committed DB projekce a fyzických identity/content pins. Do stávajícího guardu
+připojí stav SCANNING s immutable manifestem a přesnými target inode vazbami;
+původní STOP záznam ani journal nemaže. Volba se nekombinuje s cleanupem.
+Neúplný/poškozený přechod, chybějící či nahrazený známý target, obnovený SOURCE
+nebo neaplikovaný DB locator znamenají STOP i při potvrzeném mazání.
+
+Následující `scan_library(session, root)` používá původní write-capable scanner,
+nikoli R1 verifier. Manifestové object IDs a persisted locators chrání známá
+Video/subtitle IDs, owner membership, source filename, typ a M:N compatibility.
+Technický re-probe zachovává ruční track overrides. Collection obsahující jen
+známá videa se znovu pathově nefinalizuje. Nové soubory zpracuje stávající scanner;
+nejednoznačné title locators dál znamenají Review, nikoli odhad podle velikosti
+nebo canonical názvu. Před commitem se znovu kontroluje fyzická guard evidence.
+Scan vyžaduje vlastní čistou transakční hranici. Záznam SCANNING platí pouze pro
+scanner, nepovoluje startup migrations/reconstruction. Produkční ingress,
+post-cleanup přechod a obecné recovery zůstávají mimo tento řez.
 
 `UnresolvedExternalSubtitle.filename` má stejný source/parser contract; V6
 patchuje pouze `relative_path`. Audit reads/writes rozlišuje:
@@ -699,8 +718,9 @@ non-injective: výsledek `unique/ambiguous/not_canonical` uchovává všechny pl
 lexical alternatives v deterministic pořadí bez precedence. Schválený inverse
 proto vyžaduje následné authoritative context resolution. Parser žádného
 ownera neřeší ani nevytváří.
-Inkrementální scanner routing P2C není implementovaný; explicitní uzavřený
-manifestový rescan popisuje sekce source filename výše. Tolerantní legacy parser
+Běžný scanner má omezený scratch-only přechod po explicitně dokončené execution;
+uzavřený read-only manifestový rescan zůstává samostatný. Oba kontrakty
+popisuje sekce source filename výše. Obecný canonical context routing zůstává otevřený. Tolerantní legacy parser
 zůstává beze změny. Existing membership/explicit selectors zachovávají owners;
 nový soubor `... - S02P02E03.mkv` při ambiguous locatoru zůstává unresolved/review.
 Naming/Layout choices zůstávají owner-ID based a čistá změna locatoru nemění

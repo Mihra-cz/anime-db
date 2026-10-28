@@ -1,7 +1,7 @@
 """Closed-world rescan of a manifest's persisted planner/execution projection.
 
-This admission never assigns an owner or updates a locator. Incremental scanning
-of a changed canonical library needs a separate routing contract.
+The read-only verifier never assigns an owner or updates a locator. The locator
+check below also supports the ordinary scanner after explicit guard completion.
 """
 from pathlib import Path
 
@@ -13,6 +13,31 @@ from app.target_execution_manifest import (
 )
 from app.target_planner_filesystem import inventory_filesystem
 from app.target_planner_service import load_planner_context
+
+
+def verify_scanning_locators(session: Session, manifest: ExecutionManifest) -> None:
+    """Check ID-keyed committed locators before the ordinary scanner can write.
+
+    Admission comes from the explicit completed guard, not from this comparison.
+    Extra DB/filesystem objects are allowed; lost or reverted known IDs are not.
+    """
+    from sqlalchemy import select
+    from app.models import (Video, CatalogTitle, CatalogCollection,
+        ExternalSubtitle, UnresolvedExternalSubtitle)
+    models = {'video': Video, 'title': CatalogTitle, 'collection': CatalogCollection,
+        'subtitle': ExternalSubtitle, 'unmatched_subtitle': UnresolvedExternalSubtitle}
+    # Core rows leave ORM relationship loader state untouched for the scanner.
+    rows = {kind: {row.id: row._mapping for row in session.execute(select(model.__table__))}
+        for kind, model in models.items()}
+    for patch in manifest.payload.locator_patches:
+        if rows[patch.object_kind].get(patch.object_id, {}).get(patch.field) != patch.after:
+            raise ValueError('completed execution locator missing or stale')
+    for action in manifest.payload.actions:
+        kind = ('unmatched_subtitle' if action.object_kind in
+            {'confirmed_no_match', 'unresolved_subtitle'} else action.object_kind)
+        if kind in {'video', 'subtitle', 'unmatched_subtitle'}:
+            if rows[kind].get(action.object_id, {}).get('relative_path') != action.target:
+                raise ValueError('completed execution object ID/target differs')
 
 
 def require_unstarted_execution_session(session: Session) -> None:

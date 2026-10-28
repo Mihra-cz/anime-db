@@ -159,6 +159,9 @@ class _ExecutionSequence:
             action.target.split('/')[0], verification)
 
     def _finish(self, primary):
+        guard = getattr(self, '_persistent_guard', None)
+        if primary is not None and guard is not None:
+            guard.stop_scanning(primary)
         self._closed = True
         self._authorized_b = None
         self._authorized_index = None
@@ -166,6 +169,8 @@ class _ExecutionSequence:
             self._resources.__exit__(type(primary) if primary else None,
                 primary, primary.__traceback__ if primary else None)
         except BaseException as exc:
+            if guard is not None:
+                guard.stop_scanning(exc)
             if primary is not None and (isinstance(primary, (KeyboardInterrupt, SystemExit))
                     or not isinstance(exc, (KeyboardInterrupt, SystemExit))):
                 primary.add_note(f'Execution STOP: cleanup failed: {type(exc).__name__}: {exc}')
@@ -307,6 +312,7 @@ class ScratchManifestExecution(_ExecutionSequence):
             owner._persistent_guard = None
             owner._cleanup_decision = owner.cleanup_outcome = None
             owner._completion_rescan_requested = False
+            owner._resume_scanning_requested = False
             owner.completion_rescan_result = None
             owner._active_index, owner._phase = 0, 'VALIDATION'
             owner._stop_class = ScratchCoordinationStopped
@@ -345,18 +351,23 @@ class ScratchManifestExecution(_ExecutionSequence):
         return self.root.parent / (self.root.name + '.cleanup.jsonl')
 
     def execute(self, manifest: ExecutionManifest, *, maintenance_owner=None, cleanup_decision=None,
-                completion_rescan=False):
+                completion_rescan=False, resume_scanning=False):
         try:
             return self._execute_once(manifest, maintenance_owner=maintenance_owner,
-                cleanup_decision=cleanup_decision, completion_rescan=completion_rescan)
+                cleanup_decision=cleanup_decision, completion_rescan=completion_rescan,
+                resume_scanning=resume_scanning)
         except BaseException:
             self.completion_rescan_result = None
             raise
 
-    def _accept_scope(self, *, maintenance_owner, cleanup_decision=None, completion_rescan=False):
+    def _accept_scope(self, *, maintenance_owner, cleanup_decision=None, completion_rescan=False,
+                      resume_scanning=False):
+        if type(resume_scanning) is not bool or (resume_scanning and cleanup_decision is not None):
+            raise ValueError('resume_scanning requires an explicit bool and no cleanup decision')
+        self._resume_scanning_requested = resume_scanning
         if type(completion_rescan) is not bool or (completion_rescan and cleanup_decision is not None):
             raise ValueError('completion rescan requires an explicit bool and no cleanup decision')
-        self._completion_rescan_requested = completion_rescan
+        self._completion_rescan_requested = completion_rescan or resume_scanning
         if cleanup_decision is not None and not callable(cleanup_decision):
             raise ValueError('cleanup_decision must explicitly decide a verified cleanup proposal')
         self._cleanup_decision = cleanup_decision
@@ -508,6 +519,8 @@ class ScratchManifestExecution(_ExecutionSequence):
             from .scanner.execution_completion import run_completed_scratch_rescan
             self._phase = 'P2C_COMPLETION'
             self.completion_rescan_result = run_completed_scratch_rescan(self)
+            if self._resume_scanning_requested:
+                self._persistent_guard.enable_scanning(self)
         if self._cleanup_decision is not None:
             from .target_execution_cleanup import _run_cleanup
             self.cleanup_outcome = _run_cleanup(self, self._cleanup_decision)

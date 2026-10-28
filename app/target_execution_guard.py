@@ -1,7 +1,7 @@
 """R3 persistent STOP latch for the original scratch E7 owner.
 
-No completion/release/recovery API. Valid or damaged evidence denies ordinary
-scanning; neither a free lock nor a loaded COMPLETE journal admits a scan.
+The STOP record is retained. An explicit live-verified completion may append
+normal scanning authority; a free lock or loaded COMPLETE journal alone cannot.
 """
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict
@@ -16,7 +16,7 @@ from sqlalchemy.util import asbool
 
 from . import target_execution_journal as journal
 from .maintenance import MaintenanceStopped, ScratchMaintenance, maintenance_for
-from .target_execution_manifest import manifest_to_json
+from .target_execution_manifest import manifest_to_json, manifest_from_json, JournalEntry
 
 
 class ExecutionGuardStopped(MaintenanceStopped):
@@ -66,10 +66,10 @@ def _scratch_evidence_present(database):
 
 
 def _require_no_evidence(database):
-    # This fixed DB namespace is a denial latch, never permission based on JSON
-    # contents. Keeping it after success avoids inventing restart authority.
+    # Keep the original STOP namespace. Only its explicit live-verified terminal
+    # transition may supply the manifest for ordinary scanner routing.
     if _present(_guard_path(database)):
-        raise _stop('persistent execution guard is present (possibly incomplete or damaged)')
+        return _scanning_manifest(database)
     # Original scratch owners use these exact adjacent names. Missing R3 bytes
     # must not admit scans of a known E1/E7 operation, including older executions.
     if _scratch_evidence_present(database):
@@ -77,7 +77,7 @@ def _require_no_evidence(database):
 
 
 class _ScratchExecutionGuard:
-    """Pinned immutable marker; only the live exclusive owner may create it."""
+    """Pinned STOP prefix; only its live exclusive owner may append a transition."""
 
     @classmethod
     def create(cls, database, root, manifest, maintenance_owner):
@@ -110,6 +110,8 @@ class _ScratchExecutionGuard:
             guard = cls()
             guard.path, guard._fd, guard._parent, guard._raw = path, fd, parent, raw
             guard._database, guard._root, guard._body = database, root, body
+            guard._identity = journal._identity(os.fstat(fd))
+            guard._transition_attempted = False
             guard.check()
             gate._check_binding(maintenance_owner)
             return guard
@@ -129,6 +131,132 @@ class _ScratchExecutionGuard:
 
     def close(self):
         journal._close_fds((self._fd, self._parent))
+
+    def enable_scanning(self, owner):
+        """Explicit transition, only while original COMPLETE evidence is live.
+
+        Append to the existing guard, retaining the original STOP bytes. A torn
+        append remains STOP; no deletion, journal replay or recovery is involved.
+        """
+        from .scanner.execution_completion import _check_live_completion
+        if owner._persistent_guard is not self:
+            raise _stop('original execution guard required')
+        _check_live_completion(owner)
+        self.check()
+        targets = []
+        for action in owner._manifest.payload.actions:
+            info = (owner.root / action.target).lstat()
+            targets.append([action.target, *journal._identity(info)])
+        body = {'state': 'SCANNING', 'manifest': manifest_to_json(owner._manifest),
+            'targets': targets}
+        raw = (journal._canonical({**body, 'sha256': journal._digest(body)}) + '\n').encode()
+        if len(self._raw) + len(raw) > _MAX_GUARD_BYTES:
+            raise _stop('completed guard exceeds supported size')
+        _check_live_completion(owner)
+        self._transition_attempted = True
+        os.lseek(self._fd, 0, os.SEEK_END)
+        journal._write_all(self._fd, raw)
+        os.fsync(self._fd)
+        os.fsync(self._parent)
+        self._raw += raw
+        self.check()
+
+    def stop_scanning(self, primary):
+        """Retain STOP on any reported execution/finalization failure.
+
+        Resources may already be closed. Reopen only this original guard under
+        the caller's still-held exclusive maintenance lease; retain all bytes.
+        """
+        if not self._transition_attempted:
+            return
+        from .target_execution_filesystem import _open_absolute
+        parent = fd = None
+        try:
+            parent = _open_absolute(self.path.parent)
+            fd = os.open(self.path.name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW
+                | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+            info = journal._check_file(fd, parent, self.path.name)
+            if journal._identity(info) != self._identity:
+                raise _stop('original guard replaced during failure handling')
+            journal._write_all(fd, b'STOP: execution finalization failed\n')
+            os.fsync(fd)
+            os.fsync(parent)
+        except Exception as exc:
+            primary.add_note(f'Execution STOP: guard revocation unconfirmed: {exc}')
+        finally:
+            journal._close_fds((fd, parent), primary)
+
+
+_MAX_GUARD_BYTES = 16 * 1024 * 1024
+
+
+def _scanning_manifest(database):
+    """Read the explicit terminal guard state; corrupt/old STOP records fail closed."""
+    from .target_execution_filesystem import _open_absolute
+    path = _guard_path(database)
+    parent = _open_absolute(path.parent)
+    fd = None
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            dir_fd=parent)
+        before = journal._check_file(fd, parent, path.name)
+        if before.st_size > _MAX_GUARD_BYTES:
+            raise _stop('guard too large')
+        raw = os.pread(fd, _MAX_GUARD_BYTES + 1, 0)
+        frames = raw.splitlines(keepends=True)
+        if len(frames) != 2 or any(not frame.endswith(b'\n') for frame in frames):
+            raise _stop('persistent execution guard has no explicit scanning transition')
+        bodies = []
+        for frame in frames:
+            value = journal._strict_json_load(frame.decode())
+            digest = value.pop('sha256')
+            if journal._digest(value) != digest:
+                raise _stop('guard checksum differs')
+            bodies.append(value)
+        original, completed = bodies
+        if set(completed) != {'state', 'manifest', 'targets'} or completed['state'] != 'SCANNING':
+            raise _stop('unknown guard state')
+        manifest = manifest_from_json(completed['manifest'])
+        root = Path(manifest.payload.library_root)
+        if (original['schema'] != 'animedb-v6-scratch-execution-guard'
+                or original['version'] != 1 or original['database'] != str(database)
+                or original['library'] != str(root) or _scratch_library_root(database) != root
+                or original['database_identity'] != list(journal._identity(database.stat()))
+                or original['library_identity'] != list(journal._identity(root.stat()))
+                or original['manifest_id'] != manifest.manifest_id
+                or original['manifest_sha256'] != hashlib.sha256(manifest_to_json(manifest).encode()).hexdigest()
+                or original['journal'] != str(root.parent / (root.name + '.journal.jsonl'))):
+            raise _stop('completed guard binding differs')
+        expected = tuple(JournalEntry(manifest.manifest_id, action.action_id, index, state)
+            for index, action in enumerate(manifest.payload.actions)
+            for state in ('PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE'))
+        if journal.load_journal(Path(original['journal']), manifest).entries != expected:
+            raise _stop('completed guard journal differs')
+        if (len(completed['targets']) != len(manifest.payload.actions)
+                or [p[0] for p in completed['targets']] != [a.target for a in manifest.payload.actions]):
+            raise _stop('completed target identities differ')
+        for action, pin in zip(manifest.payload.actions, completed['targets']):
+            # Exact target/inode binding, never a name/size/content matching heuristic.
+            target = root / action.target
+            directory = _open_absolute(target.parent)
+            try:
+                info = os.stat(target.name, dir_fd=directory, follow_symlinks=False)
+            finally:
+                os.close(directory)
+            if not stat.S_ISREG(info.st_mode) or list(journal._identity(info)) != pin[1:]:
+                raise _stop('known execution target missing or replaced')
+            if action.action != 'KEEP' and _present(root / action.source):
+                raise _stop('execution source and target conflict')
+        after = journal._check_file(fd, parent, path.name)
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise _stop('guard changed during admission')
+        return manifest
+    except ExecutionGuardStopped:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+        raise _stop('completed execution guard unconfirmed') from exc
+    finally:
+        journal._close_fds((fd, parent))
 
 
 def _database_path(bind):
@@ -198,7 +326,7 @@ def _existing_maintenance_root(database):
 
 
 @contextmanager
-def ordinary_scan_admission(bind, root):
+def ordinary_scan_admission(bind, root, *, allow_completed_scan=False):
     """Check before SQL/autoflush/probe; retain cooperating exclusion to commit.
 
     Discovery of an existing scratch boundary works in a new plain engine too.
@@ -209,7 +337,11 @@ def ordinary_scan_admission(bind, root):
             root = _library_path(root)
             database = _database_path(bind)
             if database is not None:
-                _require_no_evidence(database)
+                manifest = _require_no_evidence(database)
+            else:
+                manifest = None
+            if manifest is not None and not allow_completed_scan:
+                raise _stop('completed guard permits only explicit scanner routing, not startup writes')
             gate = maintenance_for(bind)
             if gate is None and database is not None:
                 bound_root = _scratch_library_root(database)
@@ -223,9 +355,9 @@ def ordinary_scan_admission(bind, root):
                 gate.validate_root(root)
                 admissions.enter_context(gate.writer())
             if database is not None:
-                _require_no_evidence(database)
+                manifest = _require_no_evidence(database)
         except MaintenanceStopped:
             raise
         except (OSError, ValueError) as exc:
             raise _stop('execution guard admission could not be verified') from exc
-        yield
+        yield manifest
