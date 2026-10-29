@@ -11,7 +11,7 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -86,7 +86,7 @@ from .catalog_video_presentation import (
 )
 from .database import Base, make_engine, make_session_factory
 from .maintenance import MaintenanceMiddleware, writer_admission
-from .target_execution_guard import ordinary_scan_admission
+from .target_execution_guard import ExecutionGuardStopped, NormalOperation, ordinary_scan_admission
 from .title_identity import TitleLocatorIndex, title_locator_is_reserved
 from .external_subtitle_compatibility import (
     POSITIVE_COMPATIBILITY_STATUSES,
@@ -1108,7 +1108,14 @@ def create_app(settings: Settings | None = None, *, maintenance=None) -> FastAPI
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         try:
-            with ordinary_scan_admission(engine, settings.anime_path), writer_admission(engine):
+            with ordinary_scan_admission(engine, settings.anime_path) as execution_state, writer_admission(engine):
+                if isinstance(execution_state, NormalOperation):
+                    with engine.connect() as connection:
+                        version = int(connection.scalar(text('PRAGMA user_version')) or 0)
+                    if version < 1:
+                        raise ExecutionGuardStopped(
+                            'STOP: Reorganization requires review: unversioned DB cannot '
+                            'reconstruct hierarchy from canonical paths at startup')
                 migrate_schema_at_startup(engine)
                 Base.metadata.create_all(engine)
             logger.info("AnimeDB spuštěno; knihovna=%s", settings.anime_path)

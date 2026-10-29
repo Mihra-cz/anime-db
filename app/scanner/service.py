@@ -56,6 +56,7 @@ from app.video_variants import (
 )
 if TYPE_CHECKING:
     from app.target_execution_manifest import ExecutionManifest
+    from app.target_execution_guard import NormalOperation
 
 logger = logging.getLogger(__name__)
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi"}
@@ -186,6 +187,7 @@ def _root_folder(relative: Path) -> str:
 
 def _sync_external_subtitles(
     session: Session, library_root: Path, videos: list[Video], *, preserved_ids=frozenset(),
+    preserve_known: bool = False,
 ) -> None:
     """Account for every physical subtitle once while preserving manual authority."""
     session.flush()
@@ -332,6 +334,13 @@ def _sync_external_subtitles(
                 session.delete(unresolved)
             continue
 
+        if preserve_known and any(row.compatibilities for row in linked):
+            for row in linked:
+                row.codec = data['codec']
+                row.language = data['language']
+                row.normalized_language = data['normalized_language']
+            continue
+
         if unresolved is None:
             unresolved = UnresolvedExternalSubtitle(
                 relative_path=relative_path,
@@ -407,6 +416,7 @@ def _scan_library(
     library_access_timeout_seconds: float = 10,
     library_healthcheck_interval_files: int = 25,
     scanning_manifest: ExecutionManifest | None = None,
+    normal_operation: NormalOperation | None = None,
 ) -> ScanResult:
     root = root.absolute()
     result = ScanResult()
@@ -423,6 +433,11 @@ def _scan_library(
     preserved_title_ids = set()
     preserved_subtitle_ids = set()
     preserved_unresolved_ids = set()
+    if normal_operation:
+        # Current paths identify existing rows. Canonical directory/basename
+        # presentation must never become hierarchy or parser authority.
+        preserved_video_ids = {v.id for v in existing.values()}
+        preserved_title_ids = set(session.scalars(select(CatalogTitle.id)))
     if scanning_manifest is not None:
         from .execution_rescan import verify_scanning_locators
         try:
@@ -448,7 +463,8 @@ def _scan_library(
             "Source filename differs from its locator; explicit execution evidence is required."
         )
     for subtitle in session.scalars(select(UnresolvedExternalSubtitle)).all():
-        if Path(subtitle.relative_path).name != subtitle.filename and subtitle.id not in preserved_unresolved_ids:
+        if (not normal_operation and Path(subtitle.relative_path).name != subtitle.filename
+                and subtitle.id not in preserved_unresolved_ids):
             raise LibrarySafetyError("Subtitle locator requires explicit execution evidence.")
     seen: set[str] = set()
     for path in iter_videos(root):
@@ -520,7 +536,7 @@ def _scan_library(
         ) from exc
 
     missing = [(key, video) for key, video in existing.items() if key not in seen]
-    if any(video.id in preserved_video_ids for _, video in missing):
+    if not normal_operation and any(video.id in preserved_video_ids for _, video in missing):
         raise LibrarySafetyError('Reorganization requires review: known video missing')
     existing_count = len(existing)
     if existing_count and result.found == 0:
@@ -553,7 +569,8 @@ def _scan_library(
         video for video in session.scalars(select(Video)).all()
         if video.relative_path in seen
     ]
-    _sync_external_subtitles(session, root, current_videos, preserved_ids=preserved_subtitle_ids)
+    _sync_external_subtitles(session, root, current_videos,
+        preserved_ids=preserved_subtitle_ids, preserve_known=bool(normal_operation))
     hierarchy = derive_library_hierarchy([video.relative_path for video in current_videos])
     collections = {
         value.relative_root_path: value
@@ -700,7 +717,7 @@ def _scan_library(
             ).append(video)
     for path, collection_videos in videos_by_collection_path.items():
         collection = collections[path]
-        if all(v.id in preserved_video_ids for v in collection_videos):
+        if not normal_operation and all(v.id in preserved_video_ids for v in collection_videos):
             protected_collection_paths.add(path)
             continue
         collection.local_period_hint = extract_local_period_hint(collection.local_title)
@@ -744,23 +761,27 @@ def _scan_library(
         if collection_videos is None:
             recalculate_collection_numbering(collection, videos_by_title)
             continue
-        finalize_collection_hierarchy(collection, collection_videos)
+        finalize_collection_hierarchy(collection, collection_videos,
+            preserved_title_ids=preserved_title_ids if normal_operation else frozenset())
         if _retry_deferred_reconciliation(
             session, collection, deferred_by_collection.get(collection.id, ()),
         ):
-            finalize_collection_hierarchy(collection, collection_videos)
+            finalize_collection_hierarchy(collection, collection_videos,
+                preserved_title_ids=preserved_title_ids if normal_operation else frozenset())
     for video, title in deferred_reconciliation:
         if video.catalog_title is None:
             logger.warning(
                 "Video %s zůstává pro review: Recap nemá Season kontext.",
                 video.relative_path,
             )
-    if scanning_manifest is not None:
+    if scanning_manifest is not None or normal_operation:
         from app.target_execution_guard import _database_path, _require_no_evidence
         # Recheck physical/guard evidence before committing, including changes
         # that occurred during probe or subtitle reads. Failures roll back all work.
         try:
-            _require_no_evidence(_database_path(session))
+            checked = _require_no_evidence(_database_path(session))
+            if normal_operation and checked != normal_operation:
+                raise ValueError('normal-operation admission changed during scan')
         except Exception as exc:
             raise LibrarySafetyError(f'Reorganization requires review: {exc}') from exc
     session.commit()
@@ -825,7 +846,7 @@ def scan_library(
             raise LibrarySafetyError(f"Execution rescan STOP: {exc}") from exc
     from contextlib import ExitStack
     from app.maintenance import MaintenanceBusy, MaintenanceStopped
-    from app.target_execution_guard import ordinary_scan_admission
+    from app.target_execution_guard import NormalOperation, ordinary_scan_admission
     with ExitStack() as admissions:
         scanning_manifest = None
         if execution_manifest is None:
@@ -836,7 +857,10 @@ def scan_library(
                 raise
             except MaintenanceStopped as exc:
                 raise LibrarySafetyError(f"Reorganization requires review: {exc}") from exc
-        if scanning_manifest is not None:
+        normal_operation = scanning_manifest if isinstance(scanning_manifest, NormalOperation) else None
+        if normal_operation:
+            scanning_manifest = None
+        if scanning_manifest is not None or normal_operation:
             from .execution_rescan import require_unstarted_execution_session
             try:
                 require_unstarted_execution_session(session)
@@ -867,6 +891,7 @@ def scan_library(
                     library_access_timeout_seconds=library_access_timeout_seconds,
                     library_healthcheck_interval_files=library_healthcheck_interval_files,
                     scanning_manifest=scanning_manifest,
+                    normal_operation=normal_operation,
                 )
             except Exception:
                 session.rollback()

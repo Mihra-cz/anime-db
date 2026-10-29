@@ -34,7 +34,8 @@ def case(tmp_path, monkeypatch):
             video.with_suffix('.cs.srt').write_text('1\n00:00:00,000 --> 00:00:01,000\nAhoj, jak se mas?\n')
         path = owner.database_path
         engine = make_engine(f'sqlite:///{path}')
-        Base.metadata.create_all(engine)
+        from app.migrations import migrate_schema_at_startup
+        migrate_schema_at_startup(engine)
         with Session(engine) as db:
             assert scan_library(db, owner.root).created == 3
             videos = db.scalars(select(Video).order_by(Video.id)).all()
@@ -180,6 +181,13 @@ def test_partial_execution_cannot_release_or_delete_known_ids(small_case, monkey
     with pytest.raises(Exception, match='interrupted'):
         execute(small_case, resume_scanning=True)
     assert database_rows(path) == original
+    from app.target_execution_guard import complete_reorganization, ExecutionGuardStopped
+    engine = make_engine(f'sqlite:///{path}')
+    try:
+        with pytest.raises(ExecutionGuardStopped):
+            complete_reorganization(engine, owner.root)
+    finally:
+        engine.dispose()
     raw = path.read_bytes()
     for _ in range(2):
         with pytest.raises(LibrarySafetyError, match='[Rr]eorganization'):
@@ -274,7 +282,8 @@ def test_evidence_lost_during_scan_rolls_back_all_changes(small_case, monkeypatc
     assert database_rows(path) == before and path.read_bytes() == raw
 
 
-def test_new_episode_preserves_reorganized_automatic_part_hierarchy(tmp_path, monkeypatch):
+@pytest.mark.parametrize('normal_operation', [False, True])
+def test_new_episode_preserves_reorganized_automatic_part_hierarchy(tmp_path, monkeypatch, normal_operation):
     monkeypatch.setattr('app.scanner.service.probe_video', lambda *a, **k: PROBE)
     fields = ('id', 'part_type', 'part_number', 'season_number', 'sort_order', 'original_folder_name')
     with ScratchManifestExecution.create(tmp_path) as owner:
@@ -308,6 +317,9 @@ def test_new_episode_preserves_reorganized_automatic_part_hierarchy(tmp_path, mo
             assert any(p.object_kind == 'title' and p.object_id == title_id
                 for p in manifest.payload.locator_patches)
             execute((owner, path, manifest), resume_scanning=True)
+            if normal_operation:
+                from app.target_execution_guard import complete_reorganization
+                complete_reorganization(engine, owner.root)
             assert scan(path, owner.root).unchanged == 3
             target = next(a.target for a in manifest.payload.actions if a.object_kind == 'video')
             assert Path(target).parent.as_posix() == 'New Show/Season 01'

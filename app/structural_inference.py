@@ -206,11 +206,12 @@ def infer_automatic_structural_values(
 
 def apply_automatic_structural_inference(
     collection: CatalogCollection,
+    *, preserved_title_ids: frozenset[int] | set[int] = frozenset(),
 ) -> bool:
     """Refresh automatic fields while preserving every manual hierarchy value."""
     changed = False
     for title in collection.titles:
-        if manual_hierarchy_snapshot_requires_preservation(title):
+        if title.id in preserved_title_ids or manual_hierarchy_snapshot_requires_preservation(title):
             continue
         values = infer_automatic_structural_values(
             part_type=title.part_type or "title",

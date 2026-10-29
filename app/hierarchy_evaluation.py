@@ -859,10 +859,11 @@ def finalize_collection_hierarchy(
     *,
     recalculate: bool = True,
     include_legacy_fallback: bool = False,
+    preserved_title_ids: frozenset[int] | set[int] = frozenset(),
 ) -> HierarchyEvaluationResult:
     """Run the authoritative post-assignment structural/numbering evaluation."""
     all_videos = list(collection.videos if videos is None else videos)
-    apply_automatic_structural_inference(collection)
+    apply_automatic_structural_inference(collection, preserved_title_ids=preserved_title_ids)
     if recalculate:
         recalculate_collection_numbering(
             collection,

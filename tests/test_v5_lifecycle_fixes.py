@@ -200,8 +200,8 @@ def _orphaning_inference(title_name: str):
     """Simuluje pozdější automatic inference, která odpojí Season kontext."""
     original = hierarchy_evaluation.apply_automatic_structural_inference
 
-    def patched(collection: CatalogCollection) -> bool:
-        changed = original(collection)
+    def patched(collection: CatalogCollection, **kwargs) -> bool:
+        changed = original(collection, **kwargs)
         for title in collection.titles:
             if title.local_title != title_name:
                 continue

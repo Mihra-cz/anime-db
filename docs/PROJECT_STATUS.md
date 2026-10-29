@@ -465,8 +465,32 @@ známá videa se znovu pathově nefinalizuje. Nové soubory zpracuje stávajíc�
 nejednoznačné title locators dál znamenají Review, nikoli odhad podle velikosti
 nebo canonical názvu. Před commitem se znovu kontroluje fyzická guard evidence.
 Scan vyžaduje vlastní čistou transakční hranici. Záznam SCANNING platí pouze pro
-scanner, nepovoluje startup migrations/reconstruction. Produkční ingress,
-post-cleanup přechod a obecné recovery zůstávají mimo tento řez.
+scanner, nepovoluje startup migrations/reconstruction.
+
+Explicitní scratch-only `complete_reorganization(engine, root)` ve stávajícím
+[execution guardu](../app/target_execution_guard.py) uzavírá SCANNING do NORMAL.
+Pod výhradní E6B maintenance znovu ověří původní DB/root binding, úplný COMPLETE
+journal, target inode vazby, absenci SOURCE/TARGET konfliktu, retained identity
+evidenci a původní R1 rescan commitnuté DB/FS projekce. Přechod proto patří hned
+za dokončenou execution, před další změny knihovny. Do stejného guardu pouze
+připojí checksumovaný záznam vázaný na původní prefix a identity historii;
+žádná domain row ani historická evidence se nemaže. Torn write, nepotvrzený fsync
+či finalizace zůstávají STOP. Opakované potvrzení platného NORMAL je no-op.
+
+NORMAL dovoluje nový `create_app`/lifespan, GET stránky, `/health` a `POST /scan`
+i po uzavření původních execution objektů. Historický journal/guard/identity
+zůstávají ověřovanou completion historií; jejich původní Video/subtitle IDs,
+target inody a file list už neomezují změny živé knihovny. Stávající scanner
+identifikuje známá videa podle aktuálních DB `relative_path`, zachová jejich IDs,
+membership, source filename a ruční autority i při výměně souboru na stejné cestě.
+Existující title strukturu neodvozuje z canonical cest, ani když přibude epizoda;
+nové jednoznačné titles dál inicializuje standardním workflow. Chybějící videa
+odstraňuje se stávajícími mount/empty/20% confirmation kontrolami a externí
+titulky aktualizuje původním M:N workflow. Před commitem znovu ověří admission.
+Startup na aktuální v9 neopakuje reconstruction; neversionovanou NORMAL DB
+odmítne před legacy path reconstruction. Versioned compatibility upgrady
+zůstávají pod původní maintenance výlukou. Produkční ingress, post-cleanup
+přechod a obecné recovery zůstávají mimo tento řez.
 
 `UnresolvedExternalSubtitle.filename` má stejný source/parser contract; V6
 patchuje pouze `relative_path`. Audit reads/writes rozlišuje:

@@ -4,7 +4,7 @@ The STOP record is retained. An explicit live-verified completion may append
 normal scanning authority; a free lock or loaded COMPLETE journal alone cannot.
 """
 from contextlib import ExitStack, contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import hashlib
 import os
 from pathlib import Path
@@ -21,6 +21,13 @@ from .target_execution_manifest import manifest_to_json, manifest_from_json, Jou
 
 class ExecutionGuardStopped(MaintenanceStopped):
     """Reorganization requires inspection before a write-capable scan/startup."""
+
+
+@dataclass(frozen=True)
+class NormalOperation:
+    """Verified terminal history; current identities/locators now belong to the DB."""
+
+    manifest_id: str
 
 
 def _stop(detail):
@@ -69,7 +76,8 @@ def _require_no_evidence(database):
     # Keep the original STOP namespace. Only its explicit live-verified terminal
     # transition may supply the manifest for ordinary scanner routing.
     if _present(_guard_path(database)):
-        return _scanning_manifest(database)
+        with _guard_state(database) as (state, *_):
+            return state
     # Original scratch owners use these exact adjacent names. Missing R3 bytes
     # must not admit scans of a known E1/E7 operation, including older executions.
     if _scratch_evidence_present(database):
@@ -169,42 +177,79 @@ class _ScratchExecutionGuard:
         """
         if not self._transition_attempted:
             return
-        from .target_execution_filesystem import _open_absolute
-        parent = fd = None
-        try:
-            parent = _open_absolute(self.path.parent)
-            fd = os.open(self.path.name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW
-                | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
-            info = journal._check_file(fd, parent, self.path.name)
-            if journal._identity(info) != self._identity:
-                raise _stop('original guard replaced during failure handling')
-            journal._write_all(fd, b'STOP: execution finalization failed\n')
-            os.fsync(fd)
-            os.fsync(parent)
-        except Exception as exc:
-            primary.add_note(f'Execution STOP: guard revocation unconfirmed: {exc}')
-        finally:
-            journal._close_fds((fd, parent), primary)
+        _revoke_transition(self.path, self._identity, primary)
+
+
+def _revoke_transition(path, identity, primary):
+    from .target_execution_filesystem import _open_absolute
+    parent = fd = None
+    try:
+        parent = _open_absolute(path.parent)
+        fd = os.open(path.name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW
+            | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+        info = journal._check_file(fd, parent, path.name)
+        if journal._identity(info) != identity:
+            raise _stop('original guard replaced during failure handling')
+        journal._write_all(fd, b'STOP: execution finalization failed\n')
+        os.fsync(fd)
+        os.fsync(parent)
+    except Exception as exc:
+        primary.add_note(f'Execution STOP: guard revocation unconfirmed: {exc}')
+    finally:
+        journal._close_fds((fd, parent), primary)
 
 
 _MAX_GUARD_BYTES = 16 * 1024 * 1024
 
 
-def _scanning_manifest(database):
-    """Read the explicit terminal guard state; corrupt/old STOP records fail closed."""
+def _identity_history(manifest, parent):
+    """Validate retained E7 identity records, without adopting execution authority."""
+    from .target_execution_identity import _decode_frame, _MAX_RECORD_BYTES
+    root = Path(manifest.payload.library_root)
+    root_identity = journal._identity(root.stat())
+    manifest_sha256 = hashlib.sha256(manifest_to_json(manifest).encode()).hexdigest()
+    result = []
+    for index, action in enumerate(manifest.payload.actions):
+        name = root.name + f'.identity-{index}.json'
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            dir_fd=parent)
+        try:
+            before = journal._check_file(fd, parent, name)
+            raw = os.pread(fd, _MAX_RECORD_BYTES + 1, 0)
+            evidence = _decode_frame(raw)
+            if (evidence.manifest_id != manifest.manifest_id or evidence.action != action
+                    or evidence.action_index != index
+                    or evidence.manifest_sha256 != manifest_sha256
+                    or evidence.binding.root != str(root)
+                    or (evidence.binding.root_identity.st_dev, evidence.binding.root_identity.st_ino) != root_identity):
+                raise _stop('retained identity evidence binding differs')
+            after = journal._check_file(fd, parent, name)
+            if (before.st_size != len(raw)
+                    or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)):
+                raise _stop('identity history changed during admission')
+            result.append(hashlib.sha256(raw).hexdigest())
+        finally:
+            os.close(fd)
+    return result
+
+
+@contextmanager
+def _guard_state(database, *, writable=False):
+    """Read bound completion history; only SCANNING still pins live target files."""
     from .target_execution_filesystem import _open_absolute
     path = _guard_path(database)
     parent = _open_absolute(path.parent)
     fd = None
     try:
-        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+        fd = os.open(path.name, (os.O_RDWR if writable else os.O_RDONLY)
+            | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
             dir_fd=parent)
         before = journal._check_file(fd, parent, path.name)
         if before.st_size > _MAX_GUARD_BYTES:
             raise _stop('guard too large')
         raw = os.pread(fd, _MAX_GUARD_BYTES + 1, 0)
         frames = raw.splitlines(keepends=True)
-        if len(frames) != 2 or any(not frame.endswith(b'\n') for frame in frames):
+        if len(frames) not in (2, 3) or any(not frame.endswith(b'\n') for frame in frames):
             raise _stop('persistent execution guard has no explicit scanning transition')
         bodies = []
         for frame in frames:
@@ -213,7 +258,7 @@ def _scanning_manifest(database):
             if journal._digest(value) != digest:
                 raise _stop('guard checksum differs')
             bodies.append(value)
-        original, completed = bodies
+        original, completed = bodies[:2]
         if set(completed) != {'state', 'manifest', 'targets'} or completed['state'] != 'SCANNING':
             raise _stop('unknown guard state')
         manifest = manifest_from_json(completed['manifest'])
@@ -235,7 +280,16 @@ def _scanning_manifest(database):
         if (len(completed['targets']) != len(manifest.payload.actions)
                 or [p[0] for p in completed['targets']] != [a.target for a in manifest.payload.actions]):
             raise _stop('completed target identities differ')
-        for action, pin in zip(manifest.payload.actions, completed['targets']):
+        state = manifest
+        if len(bodies) == 3:
+            normal = bodies[2]
+            if (set(normal) != {'state', 'scanning_sha256', 'identities'}
+                    or normal['state'] != 'NORMAL'
+                    or normal['scanning_sha256'] != hashlib.sha256(b''.join(frames[:2])).hexdigest()
+                    or normal['identities'] != _identity_history(manifest, parent)):
+                raise _stop('normal-operation completion evidence differs')
+            state = NormalOperation(manifest.manifest_id)
+        for action, pin in (() if isinstance(state, NormalOperation) else zip(manifest.payload.actions, completed['targets'])):
             # Exact target/inode binding, never a name/size/content matching heuristic.
             target = root / action.target
             directory = _open_absolute(target.parent)
@@ -250,13 +304,72 @@ def _scanning_manifest(database):
         after = journal._check_file(fd, parent, path.name)
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
             raise _stop('guard changed during admission')
-        return manifest
+        yield state, fd, parent, raw
     except ExecutionGuardStopped:
         raise
     except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
         raise _stop('completed execution guard unconfirmed') from exc
     finally:
         journal._close_fds((fd, parent))
+
+
+def complete_reorganization(engine, root):
+    """Explicitly retire verified SCANNING into normal operation on scratch data.
+
+    Uses the existing exclusive maintenance boundary and appends to the same
+    guard. It never resumes a move, rewrites a journal or changes domain rows.
+    """
+    from sqlalchemy.engine import Engine
+    from sqlalchemy.orm import Session
+    from .scanner.execution_rescan import verify_execution_rescan
+    if not isinstance(engine, Engine):
+        raise _stop('completion requires an engine, without a caller-owned transaction')
+    database = _database_path(engine)
+    if database is None or _scratch_library_root(database) != _library_path(root):
+        raise _stop('completion requires the original scratch database/library binding')
+    gate = maintenance_for(engine) or ScratchMaintenance(database, _library_path(root))
+    if gate.database_path != database or gate.library_root != _library_path(root):
+        raise _stop('completion maintenance binding differs')
+    attempted = False
+    guard_identity = None
+    try:
+        with gate.maintenance() as lease:
+            with _guard_state(database, writable=True) as (state, fd, parent, raw):
+                if isinstance(state, NormalOperation):
+                    return
+                with lease.write_scope(), Session(engine) as session:
+                    try:
+                        verify_execution_rescan(session, _library_path(root), state)
+                    except ValueError as exc:
+                        raise _stop(f'completion rescan differs: {exc}') from exc
+                identities = _identity_history(state, parent)
+                # Repeat physical/DB-bound guard checks after reading all evidence.
+                with _guard_state(database) as (checked, _, _, current):
+                    if checked != state or current != raw:
+                        raise _stop('execution guard changed during completion')
+                gate._check_binding(lease)
+                body = {'state': 'NORMAL', 'scanning_sha256': hashlib.sha256(raw).hexdigest(),
+                    'identities': identities}
+                frame = (journal._canonical({**body, 'sha256': journal._digest(body)}) + '\n').encode()
+                if len(raw) + len(frame) > _MAX_GUARD_BYTES:
+                    raise _stop('completed guard exceeds supported size')
+                guard_identity = journal._identity(os.fstat(fd))
+                attempted = True
+                os.lseek(fd, 0, os.SEEK_END)
+                journal._write_all(fd, frame)
+                os.fsync(fd)
+                os.fsync(parent)
+                if os.pread(fd, _MAX_GUARD_BYTES + 1, 0) != raw + frame:
+                    raise _stop('completion append changed')
+                journal._check_parent(_guard_path(database), parent)
+                journal._check_file(fd, parent, _guard_path(database).name)
+                gate._check_binding(lease)
+    except BaseException as exc:
+        if attempted:
+            _revoke_transition(_guard_path(database), guard_identity, exc)
+        if isinstance(exc, (MaintenanceStopped, KeyboardInterrupt, SystemExit)):
+            raise
+        raise _stop('normal-operation completion unconfirmed') from exc
 
 
 def _database_path(bind):
@@ -340,7 +453,7 @@ def ordinary_scan_admission(bind, root, *, allow_completed_scan=False):
                 manifest = _require_no_evidence(database)
             else:
                 manifest = None
-            if manifest is not None and not allow_completed_scan:
+            if manifest is not None and not isinstance(manifest, NormalOperation) and not allow_completed_scan:
                 raise _stop('completed guard permits only explicit scanner routing, not startup writes')
             gate = maintenance_for(bind)
             if gate is None and database is not None:
@@ -356,6 +469,8 @@ def ordinary_scan_admission(bind, root, *, allow_completed_scan=False):
                 admissions.enter_context(gate.writer())
             if database is not None:
                 manifest = _require_no_evidence(database)
+            if manifest is not None and not isinstance(manifest, NormalOperation) and not allow_completed_scan:
+                raise _stop('completed guard permits only explicit scanner routing, not startup writes')
         except MaintenanceStopped:
             raise
         except (OSError, ValueError) as exc:

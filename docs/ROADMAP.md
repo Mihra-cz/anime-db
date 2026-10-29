@@ -281,8 +281,8 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   Post-completion selhání vyžaduje reconciliation se zachováním původní silnější
   klasifikace; jiná pozdní chyba má fázi P2C_COMPLETION. Pre-execution odmítnutí
   zůstává oddělené; žádný retry, rollback ani resume nevzniká.
-  Durable completion ingress, crash recovery, post-cleanup admission, incremental
-  routing, webový ingress a produkční executor nadále nejsou implementované.
+  Obecný durable completion ingress, crash recovery, post-cleanup admission,
+  úplný canonical ingress a produkční executor nadále nejsou implementované.
   NAS execution není autorizovaná; tento řez neopravňuje ordinary write-capable
   rescan canonical stromu.
   Scratch-only R3 přidává persistentní scanner STOP před první E7 filesystem
@@ -295,8 +295,15 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   dvouprocesové race/discovery regrese i produkční SQLite kompatibilitu.
   První scratch-only řez P2C-R3 prošel nezávislým review a F1 closure review.
   Durable execution guard chrání ordinary scanner a startup při známé nedokončené
-  execution. Release/reconciliation, produkční integrace a ostatní otevřené hranice
+  execution. Obecné reconciliation, produkční integrace a ostatní otevřené hranice
   P2C zůstávají nedokončené. Produkční NAS execution není autorizovaná.
+  Funkční scratch přechod používá původní `resume_scanning=True` a explicitní
+  `complete_reorganization(engine, root)`: pod E6B ověří COMPLETE historii,
+  committed locators a původní DB/FS projekci a připojí NORMAL ke stejnému guardu.
+  Po uzavření execution funguje nový webový startup a původní scanner zvládá
+  přidání, technickou aktualizaci, výměnu na známé cestě a standardně potvrzené
+  odstranění. Známou hierarchy identitu chrání aktuální DB, historický manifest
+  není trvalý seznam neměnných souborů. Toto neuzavírá celé P2C ani production gate.
   Production crash window a napojení všech skutečných writerů na durable
   admission/storage zůstávají readiness blocker. Production readiness se netvrdí.
 - [Immutable execution manifest a read-only preflight](V6_EXECUTION_MANIFEST.md)

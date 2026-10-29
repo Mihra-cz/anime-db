@@ -1473,8 +1473,8 @@ execution kontrolách. Chyba vytvoření/zápisu/fsync/check znamená STOP před
 
 Ordinary `scan_library`, včetně `confirm_deletions=True` a `POST /scan`,
 kontroluje fixed DB namespace před SQL/autoflush, inventory, probe a write
-lifecycle. Existující marker vždy znamená STOP s důvodem, že reorganizace vyžaduje
-kontrolu; poškozený či konfliktní marker nemůže udělit povolení. Přítomnost
+lifecycle. Původní marker bez ověřeného explicitního přechodu znamená STOP s důvodem,
+že reorganizace vyžaduje kontrolu; poškozený či konfliktní marker nemůže udělit povolení. Přítomnost
 libovolného JSON ani samotný název souboru nejsou autorita k pokračování.
 Kontrola nepotřebuje a záměrně nepřijímá loaded COMPLETE jako autoritu.
 DB cesta se kanonizuje nezávisle na `ANIME_PATH`; relativní, symlink a podporované
@@ -1527,7 +1527,7 @@ kvality běžných DB dat. Výjimky `OSError`/`ValueError` vzniklé až uvnitř 
 scanner workflow se na execution chyby nepřekládají. Žádná evidence se při čtení
 nemění a SQLite se v admission neotevírá.
 `create_app` kontroluje stejné podmínky před artwork mkdir a lifespan před
-startup migracemi/`create_all`. Známá evidence zastaví nový startup. Již běžící
+startup migracemi/`create_all`. Evidence bez přechodu NORMAL zastaví nový startup. Již běžící
 aplikace může dál číst katalog a `/health`; R3 nezavádí webové recovery UI.
 
 R1 `execution_manifest=` zůstává samostatná read-only větev bez ordinary fallbacku.
@@ -1537,8 +1537,8 @@ chráněné markerem. Starší jedno/dvouakční scratch primitives nemění sv�
 
 **Marker se nikdy automaticky neuvolňuje.** Zůstává po close, SIGKILL, restartu,
 uvolnění flocku, plném COMPLETE, úspěšném R2 rescanu i E7H cleanupu. Ani ověřený
-R2 výsledek nepovoluje ordinary incremental routing. Obecný release boundary
-není schválený; je nutná budoucí explicitní ruční reconciliation. R3 neposkytuje
+R2 výsledek nepovoluje ordinary incremental routing. Explicitní scratch přechody
+jsou popsány níže; obecná ruční reconciliation zůstává otevřená. R3 neposkytuje
 unlink/reset příkaz, resume, rollback, locator repair ani post-cleanup admission.
 
 Persistentní storage/retention, production DB/library identity, globální zapojení
@@ -1546,6 +1546,47 @@ produkčních writerů a chybějící production executor jsou nadále otevřen�
 Úmyslné odstranění všech artefaktů, neparticipující klienti, změny mount namespace
 a hardware power-loss nejsou prokázané. Scratch test SIGKILL dokládá process-crash
 hranici, nikoli NAS durability. **NOT AUTHORIZED FOR NAS EXECUTION.**
+
+### Explicitní SCANNING → NORMAL
+
+`ScratchManifestExecution.execute(..., resume_scanning=True)` nejprve po živém
+R2 ověření připojí SCANNING k původnímu guardu. Tento omezený režim dovoluje jen
+scanner routing přes manifestové IDs a přesné target inode vazby; chybějící či
+nahrazené původní soubory odmítá a startup zápisy nepovoluje.
+
+Po skončení `execute` lze před dalšími změnami knihovny explicitně zavolat
+`app.target_execution_guard.complete_reorganization(engine, root)`. Přijímá
+Engine původní scratch SQLite/root dvojice, nikoli caller Session, loaded journal
+nebo boolean completion assertion. Získá výhradní stávající E6B lease a ověří
+SCANNING binding, úplné E1 pořadí všech COMPLETE actions, target inode identity,
+nepřítomnost původních MOVE sources a retained E7 identity záznamy. Stávající R1
+verifier nezávisle porovná commitnuté DB IDs/locator patches a původní post-state
+hash s aktuálním DB/FS stavem. Neúplná execution, chybějící transition, odlišná
+projekce nebo poškozená evidence znamenají STOP; žádná oprava dat se neprovádí.
+
+```python
+with maintenance.maintenance() as lease:
+    owner.execute(manifest, maintenance_owner=lease, resume_scanning=True)
+# Původní exclusive lease už skončila; potvrzení získá vlastní E6B výluku.
+complete_reorganization(engine, owner.root)
+```
+
+Do stejného guardu připojí checksumovaný NORMAL frame vázaný na celý původní
+prefix a SHA-256 identity historie. File i parent fsync jsou povinné; chyba
+appendu či finalizace zanechá STOP. Původní bytes, journal i identity artefakty
+zůstávají zachované. Opakované potvrzení platného NORMAL je no-op. Nevzniká nový
+journal, guard, recovery ani oprávnění pokračovat v přesunech.
+
+Nový startup i ordinary `POST /scan` pak ověřují completion historii, ale živé
+soubory již neporovnávají s historickým manifestovým seznamem. Scanner používá
+aktuální `relative_path` a DB IDs; technické změny a nové kopie na stejné známé
+cestě zachovávají řádek, source filename, membership a ruční autority. Nové
+soubory i M:N titulky používají stávající workflow; odstranění má původní
+mount/empty/20% confirmation ochrany. Canonical cesty nepřepisují strukturu
+existujících titles. Nejednoznačný locator zůstává Review. Admission se kontroluje
+znovu před commitem. Neversionovaný NORMAL startup se odmítá před legacy
+rekonstrukcí hierarchy; běžné versioned compatibility migrace dál drží E6B.
+Produkční NAS, post-cleanup uzavření a obecná reconciliation zůstávají mimo scope.
 
 ## Externí pre-execution gates
 
