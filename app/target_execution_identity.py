@@ -285,6 +285,7 @@ class ScratchIdentitySession:
             raise IdentityEvidenceRejected('STOP: live sequential owner/index required')
         context = cls._allocate_context(filesystem, owns_filesystem=False, bound_index=index)
         context._execution_owner = owner
+        context._evidence_path = owner.database_path.with_suffix(f'.identity-{index}.json')
         return context
 
     @classmethod
@@ -352,6 +353,9 @@ class ScratchIdentitySession:
 
     def _check_artifact_parent(self, parent: int) -> None:
         journal._check_parent(self.evidence_path, parent)
+        if self._execution_owner is not None:
+            self._execution_owner._check_storage_fd(parent)
+            return
         fs._check_mounts(self.evidence_path.parent, parent, self._filesystem._mounts)
         if (os.fstat(parent).st_dev != self._filesystem._root_identity[0]
                 or fs._mount_id(parent) != self._filesystem._mount_id
@@ -361,6 +365,9 @@ class ScratchIdentitySession:
     def _check_artifact(self, fd: int, parent: int) -> os.stat_result:
         self._check_artifact_parent(parent)
         value = journal._check_file(fd, parent, self.evidence_path.name)
+        if self._execution_owner is not None:
+            self._execution_owner._check_storage_fd(fd)
+            return value
         if (value.st_dev != self._filesystem._root_identity[0]
                 or fs._mount_id(fd) != self._filesystem._mount_id
                 or fs._read_mounts() != self._filesystem._mounts):

@@ -1550,6 +1550,25 @@ produkčních writerů a chybějící production executor jsou nadále otevřen�
 a hardware power-loss nejsou prokázané. Scratch test SIGKILL dokládá process-crash
 hranici, nikoli NAS durability. **NOT AUTHORIZED FOR NAS EXECUTION.**
 
+### Oddělené lokální úložiště E7
+
+`ScratchManifestExecution.create(media_parent, database_parent=state_parent)`
+vytváří novou knihovnu a odvodí její SQLite v nezávislém `state_parent`.
+Původní volání bez volitelného argumentu zůstává zpětně kompatibilní. Název
+SQLite zůstává `<root-name>.sqlite`; nejde o převzetí libovolné existující DB.
+Do stejného state parentu patří immutable manifest, E1 journal, guard, E6B lock,
+identity záznamy a directory/cleanup evidence v původních formátech.
+
+Vazba absolutní DB/root dvojice používá existující E6B binding a guard.
+Factory při explicitním umístění zapíše binding před první plain scanner admission.
+Completion i admission v novém engine načítají stejnou dvojici; neodvozují
+media root z parent adresáře SQLite. Evidence parent je připnutý nezávisle,
+DB a artefakty musí zůstat na jeho lokálním mountu. Media dev/inode, source a
+target parents, no-replace rename a mount-crossing kontroly zůstávají media
+invarianty. Žádný copy fallback, recovery ani CIFS allowlist se nepřidává.
+Historická E5A/E5B diagnostika a ruční rollback si ponechávají původní sousední
+scope; tato změna nevytváří restart execution authority pro E7.
+
 ### Explicitní SCANNING → NORMAL
 
 `ScratchManifestExecution.execute(..., resume_scanning=True)` nejprve po živém

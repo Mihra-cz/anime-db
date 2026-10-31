@@ -143,10 +143,10 @@ class ScratchMaintenance:
                 raise MaintenanceStopped('STOP: explicit absolute private local paths required')
         if not self.database_path.is_relative_to('/tmp') and (
                 re.fullmatch(r'v6-e2a-[0-9a-f]{32}', self.library_root.name) is None
-                or self.database_path != self.library_root.with_suffix('.sqlite')):
+                or self.database_path.name != self.library_root.name + '.sqlite'):
             raise MaintenanceStopped('STOP: original isolated local database/root binding required')
-        if not self.library_root.is_relative_to(self.database_path.parent):
-            raise MaintenanceStopped('STOP: scratch library must be in the private database directory')
+        if self.database_path.is_relative_to(self.library_root):
+            raise MaintenanceStopped('STOP: SQLite must be outside the library')
         self.lock_path = self.database_path.with_name(self.database_path.name + '.maintenance.lock')
         self._binding = (json.dumps({'version': 1, 'database': str(self.database_path),
             'library': str(self.library_root)}, sort_keys=True) + '\n').encode()

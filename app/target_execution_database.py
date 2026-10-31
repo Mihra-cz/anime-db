@@ -203,6 +203,8 @@ class _ScratchVideoDatabase:
         parent = fs._open_absolute(self.path.parent)
         self._resources.enter_context(fs._held_evidence_fd(parent))
         self._parent = parent
+        self._storage_device = os.fstat(parent).st_dev
+        self._storage_mount = fs._mount_id(parent)
         fs._check_mounts(self.path.parent, parent, self._filesystem._mounts)
         fd = os.open(self.path.name, fs._FILE, dir_fd=parent)
         self._resources.enter_context(fs._held_evidence_fd(fd))
@@ -238,7 +240,8 @@ class _ScratchVideoDatabase:
         journal._check_parent(self.path, self._parent)
         info = journal._check_file(self._fd, self._parent, self.path.name)
         fs._check_mounts(self.path.parent, self._parent, filesystem._mounts)
-        if info.st_dev != filesystem._root_identity[0] or fs._mount_id(self._fd) != filesystem._mount_id:
+        if (info.st_dev != self._storage_device or fs._mount_id(self._fd) != self._storage_mount
+                or fs._mount_id(self._parent) != self._storage_mount):
             raise ValueError('scratch SQLite root/mount binding changed')
 
     def _fingerprint(self):
@@ -441,8 +444,9 @@ class _ScratchSequenceDatabase(_ScratchPrefixDatabase):
         self._applied_indices, self._commit_attempts = set(), set()
         self._committed_count = 0
         try:
-            if path != filesystem.root.parent / (filesystem.root.name + '.sqlite'):
-                raise ValueError('original adjacent scratch SQLite required')
+            owner = getattr(filesystem, '_sequence_owner', None)
+            if owner is None or path != owner.database_path:
+                raise ValueError('original explicitly bound execution SQLite required')
             self._open()
             if {row[1] for row in self._schema[0] if row[0] == 'table'} != set(Base.metadata.tables):
                 raise ValueError('complete known scratch application schema required')

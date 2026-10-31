@@ -294,12 +294,21 @@ class ScratchManifestExecution(_ExecutionSequence):
         raise TypeError('use ScratchManifestExecution.create; no existing root adoption')
 
     @classmethod
-    def create(cls, parent: Path):
+    def create(cls, parent: Path, *, database_parent: Path | None = None):
+        """Allocate fresh media and optionally independent local SQLite storage."""
         resources = ExitStack()
         try:
             filesystem = resources.enter_context(_ManifestFilesystem.create(parent))
             owner = object.__new__(cls)
             owner._filesystem, owner._resources = filesystem, resources
+            storage = fs._absolute(Path(database_parent)) if database_parent is not None else filesystem.root.parent
+            owner._database_path = storage / (filesystem.root.name + '.sqlite')
+            from .tools.execution_manifest import validate_local_output
+            validate_local_output(owner._database_path, filesystem.root)
+            owner._storage_fd = resources.enter_context(fs._held_evidence_fd(fs._open_absolute(storage)))
+            fs._secure_directory(owner._storage_fd)
+            owner._storage_identity = fs._identity(os.fstat(owner._storage_fd))
+            owner._storage_mount = fs._check_mounts(storage, owner._storage_fd, filesystem._mounts).mount_id
             owner._mutex, owner._pid = threading.Lock(), os.getpid()
             owner._execution_thread = None
             owner._spent = owner._closed = False
@@ -317,6 +326,10 @@ class ScratchManifestExecution(_ExecutionSequence):
             owner._active_index, owner._phase = 0, 'VALIDATION'
             owner._stop_class = ScratchCoordinationStopped
             filesystem._sequence_owner = owner
+            if database_parent is not None:
+                from .maintenance import ScratchMaintenance
+                # Persist the existing binding before any plain scanner can enter.
+                ScratchMaintenance(owner.database_path, owner.root)
             return owner
         except BaseException as exc:
             resources.__exit__(type(exc), exc, exc.__traceback__)
@@ -332,11 +345,11 @@ class ScratchManifestExecution(_ExecutionSequence):
 
     @property
     def journal_path(self):
-        return self.root.parent / (self.root.name + '.journal.jsonl')
+        return self.database_path.with_suffix('.journal.jsonl')
 
     @property
     def database_path(self):
-        return self.root.parent / (self.root.name + '.sqlite')
+        return self._database_path
 
     @property
     def evidence_paths(self):
@@ -344,11 +357,23 @@ class ScratchManifestExecution(_ExecutionSequence):
 
     @property
     def directory_evidence_path(self):
-        return self.root.parent / (self.root.name + '.directories.jsonl')
+        return self.database_path.with_suffix('.directories.jsonl')
 
     @property
     def cleanup_evidence_path(self):
-        return self.root.parent / (self.root.name + '.cleanup.jsonl')
+        return self.database_path.with_suffix('.cleanup.jsonl')
+
+    def _check_storage_fd(self, fd):
+        """Evidence is local to SQLite, independently of the media mount."""
+        self._filesystem._check_root()
+        journal._check_parent(self.database_path, self._storage_fd)
+        fs._secure_directory(self._storage_fd)
+        if (fs._identity(os.fstat(self._storage_fd)) != self._storage_identity
+                or fs._check_mounts(self.database_path.parent, self._storage_fd,
+                    self._filesystem._mounts).mount_id != self._storage_mount
+                or os.fstat(fd).st_dev != self._storage_identity[0]
+                or fs._mount_id(fd) != self._storage_mount):
+            raise fs.RenameRejected('STOP: database/evidence storage binding changed')
 
     def execute(self, manifest: ExecutionManifest, *, maintenance_owner=None, cleanup_decision=None,
                 completion_rescan=False, resume_scanning=False):
@@ -380,7 +405,7 @@ class ScratchManifestExecution(_ExecutionSequence):
             raise fs.RenameRejected('STOP: no live sequential execution owner')
         # Reuse only the rollback's ownership validation, never its approval,
         # existing-root adoption or physical-return authority.
-        _require_scratch_maintenance_owner(self._maintenance_owner, self.root)
+        _require_scratch_maintenance_owner(self._maintenance_owner, self.root, database_path=self.database_path)
         if self._persistent_guard is not None:
             self._persistent_guard.check()
         if self._directories is not None:

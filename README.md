@@ -91,6 +91,15 @@ Vyžaduje původní lokální mount/preflight podmínky; bez proměnné se vynec
 [Současný kontrakt a omezení](docs/PROJECT_STATUS.md) nadále vylučují autorizaci
 produkční NAS execution. Existující knihovnu test nepřebírá.
 
+Oddělené umístění SQLite/evidence a knihovny ověřuje
+`tests/test_v6_split_storage.py`. S `ANIMEDB_SPLIT_TEST_PARENT` nastaveným na
+existující trvalý lokální adresář ponechá testovací data k inspekci; bez proměnné
+použije běžný pytest temporary adresář. Stávající factory podporuje
+`ScratchManifestExecution.create(media_parent, database_parent=state_parent)`;
+oba adresáře musí již existovat, být soukromé a splnit lokální mount kontroly.
+DB, manifest a execution evidence patří do `state_parent`, nová knihovna do
+`media_parent`. Vynechaný `database_parent` zachovává původní sousední uspořádání.
+
 ## V6 read-only Target Planner
 
 Backend foundation vypíše deterministic plán nad současnou DB a read-only

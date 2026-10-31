@@ -135,7 +135,9 @@ class _Cleanup:
                 or threading.get_ident() != owner._execution_thread
                 or manifest_to_json(self.manifest) != owner._manifest_bytes):
             raise fs.RenameRejected('STOP: cleanup lost its live execution owner')
-        _require_maintenance(owner._maintenance_owner, owner.root)
+        _require_maintenance(
+            owner._maintenance_owner, owner.root, database_path=owner.database_path,
+        )
         filesystem._check_root()
         expected = tuple(JournalEntry(self.manifest.manifest_id, action.action_id, index, state)
             for index, action in enumerate(self.manifest.payload.actions)
@@ -147,8 +149,8 @@ class _Cleanup:
         # the same held DB, full final Rn rows/schema and bytes without writes.
         journal._check_parent(db.path, db._parent)
         journal._check_file(db._fd, db._parent, db.path.name)
-        filesystem._check_fd(db._fd)
-        filesystem._check_fd(db._parent)
+        self.owner._check_storage_fd(db._fd)
+        self.owner._check_storage_fd(db._parent)
         if (_hash_file(db._fd) != (self.database_stat, self.database_content)
                 or not db._connection.in_transaction
                 or db._connection.total_changes != db._change_counts[-1]
@@ -222,8 +224,8 @@ class _Cleanup:
         if self.fd is not None:
             journal._check_parent(self.owner.cleanup_evidence_path, self.parent_fd)
             journal._check_file(self.fd, self.parent_fd, self.owner.cleanup_evidence_path.name)
-            self.filesystem._check_fd(self.parent_fd)
-            self.filesystem._check_fd(self.fd)
+            self.owner._check_storage_fd(self.parent_fd)
+            self.owner._check_storage_fd(self.fd)
             if os.pread(self.fd, len(self.raw) + 1, 0) != self.raw:
                 raise fs.RenameRejected('STOP: cleanup evidence changed')
         return snapshot
@@ -270,7 +272,7 @@ class _Cleanup:
         path = self.owner.cleanup_evidence_path
         self.parent_fd = journal._open_parent(path, self.manifest, (), (self.owner.database_path,))
         self.owner._resources.enter_context(fs._held_evidence_fd(self.parent_fd))
-        self.filesystem._check_fd(self.parent_fd)
+        self.owner._check_storage_fd(self.parent_fd)
         self.fd = os.open(path.name, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_EXCL
             | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=self.parent_fd)
         self.owner._resources.enter_context(fs._held_evidence_fd(self.fd))

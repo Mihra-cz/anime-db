@@ -57,6 +57,9 @@ def _library_path(root):
 
 
 def _scratch_library_root(database):
+    bound = _existing_maintenance_root(database)
+    if bound is not None:
+        return bound
     if (database.suffix == '.sqlite'
             and re.fullmatch(r'v6-e2a-[0-9a-f]{32}', database.stem)):
         return database.with_suffix('')
@@ -64,9 +67,9 @@ def _scratch_library_root(database):
 
 
 def _scratch_evidence_present(database):
-    root = _scratch_library_root(database)
-    if root is None:
+    if database.suffix != '.sqlite' or re.fullmatch(r'v6-e2a-[0-9a-f]{32}', database.stem) is None:
         return False
+    root = database.with_suffix('')
     suffixes = ('.journal.jsonl', '.directories.jsonl', '.cleanup.jsonl', '.identity.json')
     return (any(_present(root.parent / (root.name + suffix)) for suffix in suffixes)
         or any(root.parent.glob(root.name + '.identity-*.json')))
@@ -90,7 +93,7 @@ class _ScratchExecutionGuard:
     @classmethod
     def create(cls, database, root, manifest, maintenance_owner):
         from .target_execution_rollback import _owner
-        _owner(maintenance_owner, root)
+        _owner(maintenance_owner, root, database_path=database)
         gate = maintenance_owner.boundary
         if database != gate.database_path or manifest.payload.library_root != str(root):
             raise _stop('guard database/library/manifest binding differs')
@@ -106,7 +109,7 @@ class _ScratchExecutionGuard:
                 'manifest_id': manifest.manifest_id,
                 'manifest_sha256': hashlib.sha256(manifest_to_json(manifest).encode()).hexdigest(),
                 'initial_db_fingerprint': asdict(manifest.payload.db_fingerprint),
-                'journal': str(root.parent / (root.name + '.journal.jsonl')),
+                'journal': str(database.with_suffix('.journal.jsonl')),
             }
             raw, _ = journal._frame(body)
             fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL
@@ -270,7 +273,7 @@ def _guard_state(database, *, writable=False):
                 or original['library_identity'] != list(journal._identity(root.stat()))
                 or original['manifest_id'] != manifest.manifest_id
                 or original['manifest_sha256'] != hashlib.sha256(manifest_to_json(manifest).encode()).hexdigest()
-                or original['journal'] != str(root.parent / (root.name + '.journal.jsonl'))):
+                or original['journal'] != str(database.with_suffix('.journal.jsonl'))):
             raise _stop('completed guard binding differs')
         expected = tuple(JournalEntry(manifest.manifest_id, action.action_id, index, state)
             for index, action in enumerate(manifest.payload.actions)
@@ -398,7 +401,7 @@ def _database_path(bind):
     # evidence can relate an alias to the original local DB namespace.
     if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
         for candidate in database.parent.glob('v6-e2a-*.sqlite'):
-            if candidate == database or _scratch_library_root(candidate) is None:
+            if candidate == database or re.fullmatch(r'v6-e2a-[0-9a-f]{32}', candidate.stem) is None:
                 continue
             current = candidate.lstat()
             if (stat.S_ISREG(current.st_mode)
@@ -412,7 +415,8 @@ def _database_path(bind):
 
 def _existing_maintenance_root(database):
     # Discover only legacy /tmp or minted isolated-local E6B bindings.
-    if not database.is_relative_to('/tmp') and _scratch_library_root(database) is None:
+    if not database.is_relative_to('/tmp') and (database.suffix != '.sqlite'
+            or re.fullmatch(r'v6-e2a-[0-9a-f]{32}', database.stem) is None):
         return None
     lock = database.with_name(database.name + '.maintenance.lock')
     if not _present(lock):
@@ -427,8 +431,10 @@ def _existing_maintenance_root(database):
                 or value['database'] != str(database) or type(value['library']) is not str):
             raise _stop('conflicting maintenance binding')
         root = _library_path(value['library'])
-        if not root.is_relative_to(database.parent) or not Path(value['library']).is_absolute():
-            raise _stop('maintenance library escapes its scratch database directory')
+        if not Path(value['library']).is_absolute() or database.is_relative_to(root):
+            raise _stop('unsafe maintenance database/library placement')
+        if not database.is_relative_to('/tmp') and database.name != root.name + '.sqlite':
+            raise _stop('foreign isolated local database/root binding')
         # This is a candidate binding only. ScratchMaintenance independently
         # verifies canonical bytes, ownership, nofollow paths, mounts and flock.
         return root

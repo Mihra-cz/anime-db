@@ -101,7 +101,7 @@ def propose_scratch_video_rollback(manifest, action, *, action_index, scratch_ro
         raise ScratchRollbackStopped('STOP: rollback proposal could not be verified') from exc
 
 
-def _owner(owner, root):
+def _owner(owner, root, *, database_path=None):
     if (type(owner) is not maintenance._Lease or not owner.exclusive
             or owner._thread != threading.get_ident()
             or type(owner.boundary) is not maintenance.ScratchMaintenance):
@@ -109,7 +109,8 @@ def _owner(owner, root):
     gate = owner.boundary
     gate.check_process()
     gate._check_binding(owner)
-    if gate.library_root != root or gate.database_path != root.parent / (root.name + '.sqlite'):
+    expected = database_path if database_path is not None else root.parent / (root.name + '.sqlite')
+    if gate.library_root != root or gate.database_path != expected:
         raise ScratchRollbackStopped('STOP: foreign maintenance database/root binding')
 
 

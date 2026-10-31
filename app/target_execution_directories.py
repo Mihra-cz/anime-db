@@ -83,8 +83,8 @@ class _DirectoryPreparation:
         self.owner._check_execution()
         journal._check_parent(self.owner.directory_evidence_path, self.parent_fd)
         journal._check_file(self.fd, self.parent_fd, self.owner.directory_evidence_path.name)
-        self.filesystem._check_fd(self.parent_fd)
-        self.filesystem._check_fd(self.fd)
+        self.owner._check_storage_fd(self.parent_fd)
+        self.owner._check_storage_fd(self.fd)
         if os.pread(self.fd, len(self.raw) + 1, 0) != self.raw:
             raise fs.RenameRejected('STOP: directory preparation evidence changed')
 
@@ -105,7 +105,7 @@ class _DirectoryPreparation:
         path = self.owner.directory_evidence_path
         self.parent_fd = journal._open_parent(path, self.manifest, (), (self.owner.database_path,))
         self.owner._resources.enter_context(fs._held_evidence_fd(self.parent_fd))
-        self.filesystem._check_fd(self.parent_fd)
+        self.owner._check_storage_fd(self.parent_fd)
         self.fd = os.open(path.name, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_EXCL
             | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=self.parent_fd)
         self.owner._resources.enter_context(fs._held_evidence_fd(self.fd))

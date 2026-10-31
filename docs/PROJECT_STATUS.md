@@ -648,8 +648,17 @@ Scratch testy nejsou důkazem produkční capability: ARM64/RPi5 není provozně
 ověřené, NAS filesystem rename capability ani power-loss durability produkčního
 úložiště nejsou potvrzené. Izolovaný E7 owner lze nově alokovat také mimo `/tmp`
 v existujícím soukromém lokálním adresáři mimo repozitář. Používá stejné nové
-`v6-e2a-*` roots, sousední SQLite, E1 journal, guard a identity/directory evidenci;
-API nepřebírá existující knihovnu. Trvalost volí caller umístěním parent adresáře.
+`v6-e2a-*` roots; API nepřebírá existující knihovnu.
+`ScratchManifestExecution.create(media_parent, database_parent=state_parent)`
+umístí SQLite a stávající E1 journal, guard, maintenance lock i identity,
+directory a případnou cleanup evidenci do `state_parent`. Caller tam ukládá také
+immutable manifest. Library root vzniká nezávisle v `media_parent`. Vynechaný
+`database_parent` zachovává původní uspořádání. Explicitní DB/root dvojici drží
+původní maintenance binding a guard; plain engine ji znovu načte při admission
+a NORMAL completion. Chybějící nebo konfliktní binding není resume authority.
+DB a artefakty se kontrolují vůči vlastnímu připnutému lokálnímu parent/mountu,
+nikoli vůči media device. Zdroj a cíl každého MOVE nadále vyžadují stejný media
+mount. Formáty evidence se nemění. Trvalost volí caller umístěním adresářů.
 Limit velikosti souboru 8 MiB je odstraněn; plný SHA-256 nadále čte bloky po
 64 KiB se stability kontrolami. Přesun používá stejný no-replace rename na jednom
 filesystemu, bez copy fallbacku. Původní mount allowlist a ostatní preflight
@@ -657,6 +666,11 @@ podmínky zůstávají; opakované plné hashování videí vyžaduje výkonnost
 Lokální funkční test je [test_v6_local_library.py](../tests/test_v6_local_library.py);
 spouští se s `ANIMEDB_LOCAL_TEST_PARENT=/absolutni/trvaly/adresar` a ponechá
 unikátní knihovnu i evidenci pro inspekci. Bez této explicitní volby se vynechá.
+Oddělený layout ověřuje [test_v6_split_storage.py](../tests/test_v6_split_storage.py),
+volitelně s `ANIMEDB_SPLIT_TEST_PARENT` pro zachování lokálních dat. Test dvou
+nezávislých adresářů není důkazem skutečně odlišných zařízení. Historické E5A/E5B
+single-action diagnostiky a ruční rollback zůstávají ve svém původním sousedním
+scope; nejde o recovery API pro oddělenou E7 knihovnu.
 Před prvním řízeným NAS použitím stále chybí schválený production ingress,
 prokázaná no-replace rename/fsync capability konkrétního mountu, globální výluka
 všech skutečných writerů, aktuální záloha/snapshot a provozní postup pro STOP

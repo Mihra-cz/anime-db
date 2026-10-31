@@ -304,6 +304,9 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   zápisovým scanem je nutný NORMAL. Stejný izolovaný E7 owner podporuje trvalý
   lokální parent mimo `/tmp` a soubory nad 8 MiB s blokovým hashováním, bez
   převzetí existující knihovny nebo rozšíření produkčního mount allowlistu.
+  Volitelný `database_parent` odděluje SQLite a veškerou E7 evidenci od media
+  parentu přes původní maintenance binding/guard. MOVE zůstává na jednom media
+  mountu; CIFS capability ani skutečný běh na dvou filesystemech nejsou prokázané.
   Po uzavření execution funguje nový webový startup a původní scanner zvládá
   přidání, technickou aktualizaci, výměnu na známé cestě a standardně potvrzené
   odstranění. Známou hierarchy identitu chrání aktuální DB, historický manifest
