@@ -100,6 +100,10 @@ oba adresáře musí již existovat, být soukromé a splnit lokální mount kon
 DB, manifest a execution evidence patří do `state_parent`, nová knihovna do
 `media_parent`. Vynechaný `database_parent` zachovává původní sousední uspořádání.
 
+Samostatná [SMB/CIFS diagnostika](docs/V6_SMB_PROBE.md) testuje nízkoúrovňové
+rename, identity a fsync pouze ve výslovně zadaném prázdném pracovním adresáři.
+Její skutečný běh na SMB vyžaduje samostatné schválení; CIFS do executoru nepovoluje.
+
 ## V6 read-only Target Planner
 
 Backend foundation vypíše deterministic plán nad současnou DB a read-only
