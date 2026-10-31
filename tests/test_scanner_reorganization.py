@@ -107,6 +107,8 @@ def test_real_move_then_ordinary_scan_preserves_rows_and_is_idempotent(case):
 def test_new_unrelated_video_and_reprobe_keep_existing_authority(case):
     owner, path, manifest = case
     execute(case, resume_scanning=True)
+    from test_v6_normal_operation import complete
+    complete(path, owner.root)
     known = next(a for a in manifest.payload.actions if a.object_kind == 'video')
     engine = make_engine(f'sqlite:///{path}')
     fields = ('id', 'catalog_title_id', 'catalog_collection_id', 'filename', 'file_type',
@@ -258,32 +260,28 @@ def test_failed_scanning_transition_never_admits_scan(small_case, monkeypatch, f
     assert database_rows(path) == before
 
 
-@pytest.mark.parametrize('fault', ['video_inventory', 'subtitle_inventory', 'before_commit'])
-def test_evidence_lost_during_scan_rolls_back_all_changes(small_case, monkeypatch, fault):
+def test_scanning_is_readonly_and_drift_blocks_completion(small_case, monkeypatch):
     from app.scanner import service
+    from test_v6_normal_operation import complete
+    from app.target_execution_guard import ExecutionGuardStopped
     owner, path, manifest = small_case
     execute(small_case, resume_scanning=True)
-    action = next(a for a in manifest.payload.actions if a.object_kind == 'video' and a.action == 'MOVE')
-    if fault == 'video_inventory':
-        walk = service.iter_videos
-        monkeypatch.setattr(service, 'iter_videos', lambda root:
-            (p for p in walk(root) if p != root / action.target))
-    elif fault == 'subtitle_inventory':
-        monkeypatch.setattr(service, 'iter_external_subtitles', lambda root: iter(()))
-    else:
-        sync = service._sync_external_subtitles
-        def lost(*a, **k):
-            sync(*a, **k)
-            (owner.root / action.target).unlink()
-        monkeypatch.setattr(service, '_sync_external_subtitles', lost)
+    def no_writes(*args, **kwargs):
+        pytest.fail('SCANNING entered ordinary scanner writes')
+    monkeypatch.setattr(service, '_scan_library', no_writes)
     before, raw = database_rows(path), path.read_bytes()
+    assert scan(path, owner.root).unchanged == 2
+    assert database_rows(path) == before and path.read_bytes() == raw
+    extra = owner.root / 'unplanned.mkv'
+    extra.write_bytes(b'new file before NORMAL')
     with pytest.raises(LibrarySafetyError):
         scan(path, owner.root, confirm_deletions=True)
+    with pytest.raises(ExecutionGuardStopped):
+        complete(path, owner.root)
     assert database_rows(path) == before and path.read_bytes() == raw
 
 
-@pytest.mark.parametrize('normal_operation', [False, True])
-def test_new_episode_preserves_reorganized_automatic_part_hierarchy(tmp_path, monkeypatch, normal_operation):
+def test_new_episode_preserves_reorganized_automatic_part_hierarchy(tmp_path, monkeypatch):
     monkeypatch.setattr('app.scanner.service.probe_video', lambda *a, **k: PROBE)
     fields = ('id', 'part_type', 'part_number', 'season_number', 'sort_order', 'original_folder_name')
     with ScratchManifestExecution.create(tmp_path) as owner:
@@ -317,9 +315,11 @@ def test_new_episode_preserves_reorganized_automatic_part_hierarchy(tmp_path, mo
             assert any(p.object_kind == 'title' and p.object_id == title_id
                 for p in manifest.payload.locator_patches)
             execute((owner, path, manifest), resume_scanning=True)
-            if normal_operation:
-                from app.target_execution_guard import complete_reorganization
-                complete_reorganization(engine, owner.root)
+            from app.target_execution_guard import complete_reorganization
+            before = database_rows(path)
+            assert scan(path, owner.root).unchanged == 3
+            assert database_rows(path) == before
+            complete_reorganization(engine, owner.root)
             assert scan(path, owner.root).unchanged == 3
             target = next(a.target for a in manifest.payload.actions if a.object_kind == 'video')
             assert Path(target).parent.as_posix() == 'New Show/Season 01'

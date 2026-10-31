@@ -300,6 +300,10 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   Funkční scratch přechod používá původní `resume_scanning=True` a explicitní
   `complete_reorganization(engine, root)`: pod E6B ověří COMPLETE historii,
   committed locators a původní DB/FS projekci a připojí NORMAL ke stejnému guardu.
+  SCANNING nyní dovoluje pouze R1 read-only ověření; před prvním běžným
+  zápisovým scanem je nutný NORMAL. Stejný izolovaný E7 owner podporuje trvalý
+  lokální parent mimo `/tmp` a soubory nad 8 MiB s blokovým hashováním, bez
+  převzetí existující knihovny nebo rozšíření produkčního mount allowlistu.
   Po uzavření execution funguje nový webový startup a původní scanner zvládá
   přidání, technickou aktualizaci, výměnu na známé cestě a standardně potvrzené
   odstranění. Známou hierarchy identitu chrání aktuální DB, historický manifest

@@ -302,14 +302,15 @@ class ScratchRenameSession:
 
     @classmethod
     def create(cls, parent: Path) -> ScratchRenameSession:
-        """Explicitly create a new empty 0700 root inside a caller's /tmp tree.
+        """Explicitly create a fresh empty 0700 root in a private local directory.
 
-        This is scratch allocation, not implicit creation of target parents.
+        Use a persistent parent to retain the adjacent DB and execution evidence.
+        This is isolated allocation, not implicit creation of target parents.
         No production mode, production capability token, or reopen API exists.
         """
         parent = _absolute(Path(parent))
-        if not parent.is_relative_to(Path('/tmp')) or parent == Path('/tmp'):
-            raise RenameRejected('scratch parent must be an existing private directory under /tmp')
+        if parent in {Path('/'), Path('/tmp')}:
+            raise RenameRejected('local parent must be an existing private directory')
         parent_fd = root_fd = None
         primary = session = None
         try:

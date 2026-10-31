@@ -98,11 +98,11 @@ def test_legacy_database_without_execution_accepts_hardlinks(tmp_path, monkeypat
         engine.dispose()
 
 
-@pytest.mark.parametrize('kind', ['ordinary', 'scratch_named'])
-def test_production_namespace_does_not_activate_scratch_or_consume_lock(tmp_path, monkeypatch, kind):
+def test_production_namespace_does_not_activate_scratch_or_consume_lock(tmp_path, monkeypatch):
     path, root = ordinary_case(tmp_path)
-    name = 'anime.db' if kind == 'ordinary' else 'v6-e2a-' + 'a' * 32 + '.sqlite'
-    production = Path('/var/lib/animedb/data') / name
+    # Minted v6-e2a-*.sqlite names now also reserve isolated local bindings
+    # outside /tmp; an ordinary production DB keeps its previous policy.
+    production = Path('/var/lib/animedb/data/anime.db')
     monkeypatch.setattr(guard, '_database_path', lambda bind: production)
     touched = []
     def present(candidate):

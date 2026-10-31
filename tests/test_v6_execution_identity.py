@@ -563,16 +563,22 @@ def test_content_hash_streams_complete_file_and_detects_eof(case, monkeypatch, s
         assert any(offset > 0 for _, offset in requests)
 
 
-def test_large_scratch_file_is_rejected_before_content_read(case, monkeypatch):
+def test_large_file_uses_bounded_content_reads(case, monkeypatch):
     session, manifest, source, target = case
     with source.open('r+b') as stream:
         stream.truncate(8 * 1024 * 1024 + 1)
     info = source.stat()
     manifest = seal(manifest, (changed_action(manifest, expected_size=info.st_size, expected_mtime_ns=info.st_mtime_ns),))
-    monkeypatch.setattr(os, 'pread', lambda *args: pytest.fail('oversize scratch file read'))
-    with pytest.raises(api().IdentityEvidenceRejected):
-        capture(session, manifest)
-    assert not session.evidence_path.exists() and not target.exists()
+    pread, requests = os.pread, []
+    def bounded(fd, count, offset):
+        if os.readlink(f'/proc/self/fd/{fd}') == str(source):
+            assert count <= 65536
+            requests.append(count)
+        return pread(fd, count, offset)
+    monkeypatch.setattr(os, 'pread', bounded)
+    record = capture(session, manifest)
+    assert record.content.bytes_hashed == info.st_size
+    assert len(requests) > 128 and not target.exists()
 
 
 def test_e3a_has_no_db_or_journal_write_lifecycle(case, monkeypatch):

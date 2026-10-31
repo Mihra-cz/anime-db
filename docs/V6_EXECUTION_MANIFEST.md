@@ -496,8 +496,9 @@ Capture validuje stávající strict immutable manifest/action contract a vazbu
 na factory root/mount ještě před čtením souboru. E2A observation drží očekávaný
 regular file a bezpečné parents. SHA-256 používá bounded `pread` po 64 KiB až
 do EOF; počet bytes a stat včetně ctime se kontrolují před/po každém full read.
-Verze 1 odmítá scratch soubory větší než **8 MiB** před content read; limit je
-pouze scratch hranice, nikoli produkční video policy.
+Historická implementace odmítala soubory větší než **8 MiB** před content read; limit byl
+pouze scratch hranice, nikoli produkční video policy. Pro izolované lokální
+ověření byl odstraněn; formát evidence i blokové čtení zůstaly stejné.
 
 Artefakt používá E1 local-output/alias checks a nofollow directory descriptors,
 E2A scratch mount allowlist/bind-crossing policy, `O_EXCL|O_NOFOLLOW`, mode 0600
@@ -654,7 +655,8 @@ zbývá jen strict byte diagnostika a read-only E1 historie, nikdy restart execu
 E4A níže doplňuje read-only restart inspekci. **Recovery, rollback a resume stále
 neexistují.** Persistent inode/metadata/hash neprokazují nepřerušenou historii inode.
 
-Limit 8 MiB patří scratch mechanismu, není produkční omezení velikosti videa.
+Původní scratch limit 8 MiB byl odstraněn pro izolované lokální ověření;
+reader nadále používá plný SHA-256 po blocích 64 KiB.
 Capture čte celý obsah dvakrát, další identity gates jej čtou znovu; I/O cost
 velkých videí a produkční policy nejsou vyřešené. Exclusive scratch ownership
 zůstává předpoklad, nikoli globální writer/maintenance lock. Kontroly nejsou
@@ -711,8 +713,8 @@ se nepotvrzují jako aktuální DB stav.
 
 API nic nepřesouvá, nepřejmenovává, nevytváří parents, nevolá fsync,
 nepíše journal/evidence/DB, nevybírá opravu a neprovádí rollback/resume.
-Nevzniká COMPLETE ani DB_RECONCILED. Scratch hranice 8 MiB a exclusive ownership
-zůstávají; nejde o produkční recovery, reboot/mount recovery ani NAS capability.
+Nevzniká COMPLETE ani DB_RECONCILED. Exclusive ownership
+zůstává; nejde o produkční recovery, reboot/mount recovery ani NAS capability.
 
 Testy ukončí původní proces přes SIGKILL při PENDING před rename, po rename před
 FS_APPLIED, po FS_APPLIED a po FS_VERIFIED. Další nový proces provede inspekci;
@@ -749,7 +751,8 @@ WAL, `-wal`/`-shm` nebo existující `-journal` znamenají STOP před RW připoj
 Kontrola [SQLite headeru](https://sqlite.org/fileformat.html#file_format_version_numbers)
 zabraňuje otevření WAL ještě před SQL PRAGMA kontrolou. Používá se `mode=rw`
 bez implicitního vytvoření DB a DELETE transaction journal se synchronous FULL.
-Sdílený E3A full-file reader omezuje také scratch DB fingerprint na 8 MiB.
+Sdílený E3A full-file reader počítá také scratch DB fingerprint blokově,
+bez původního limitu 8 MiB.
 
 Před rename se získá SQLite `BEGIN IMMEDIATE` writer reservation. Ověří se
 celý manifest-bound DB fingerprint, jedno pozitivní integer Video.id,
@@ -1551,8 +1554,9 @@ hranici, nikoli NAS durability. **NOT AUTHORIZED FOR NAS EXECUTION.**
 
 `ScratchManifestExecution.execute(..., resume_scanning=True)` nejprve po živém
 R2 ověření připojí SCANNING k původnímu guardu. Tento omezený režim dovoluje jen
-scanner routing přes manifestové IDs a přesné target inode vazby; chybějící či
-nahrazené původní soubory odmítá a startup zápisy nepovoluje.
+R1 read-only ověření přesné manifestové DB/FS projekce; chybějící či nahrazené
+původní soubory odmítá a startup ani běžné scanner zápisy nepovoluje. První
+zápisový scan smí proběhnout až po explicitním dokončení do NORMAL.
 
 Po skončení `execute` lze před dalšími změnami knihovny explicitně zavolat
 `app.target_execution_guard.complete_reorganization(engine, root)`. Přijímá

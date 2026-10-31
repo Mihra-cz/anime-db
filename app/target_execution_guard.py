@@ -57,7 +57,7 @@ def _library_path(root):
 
 
 def _scratch_library_root(database):
-    if (database.is_relative_to('/tmp') and database.suffix == '.sqlite'
+    if (database.suffix == '.sqlite'
             and re.fullmatch(r'v6-e2a-[0-9a-f]{32}', database.stem)):
         return database.with_suffix('')
     return None
@@ -389,32 +389,30 @@ def _database_path(bind):
     # Reopening the same SQLite through relative/symlink/URI paths must still
     # find its fixed denial namespace. This does not open a DB connection.
     database = Path(name).resolve()
-    if database.is_relative_to('/tmp'):
-        try:
-            info = database.stat()
-        except FileNotFoundError:
-            return database
-        # Preserve the original same-directory hardlink guard without rejecting
-        # ordinary hardlinks. Only an exact inode match AND existing scratch
-        # evidence can relate an alias to the original local DB namespace.
-        if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
-            for candidate in database.parent.glob('v6-e2a-*.sqlite'):
-                if candidate == database or _scratch_library_root(candidate) is None:
-                    continue
-                current = candidate.lstat()
-                if (stat.S_ISREG(current.st_mode)
-                        and journal._identity(current) == journal._identity(info)
-                        and (_present(_guard_path(candidate))
-                            or _present(candidate.with_name(candidate.name + '.maintenance.lock'))
-                            or _scratch_evidence_present(candidate))):
-                    return candidate
+    try:
+        info = database.stat()
+    except FileNotFoundError:
+        return database
+    # Preserve the original same-directory hardlink guard without rejecting
+    # ordinary hardlinks. Only an exact inode match AND existing scratch
+    # evidence can relate an alias to the original local DB namespace.
+    if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+        for candidate in database.parent.glob('v6-e2a-*.sqlite'):
+            if candidate == database or _scratch_library_root(candidate) is None:
+                continue
+            current = candidate.lstat()
+            if (stat.S_ISREG(current.st_mode)
+                    and journal._identity(current) == journal._identity(info)
+                    and (_present(_guard_path(candidate))
+                        or _present(candidate.with_name(candidate.name + '.maintenance.lock'))
+                        or _scratch_evidence_present(candidate))):
+                return candidate
     return database
 
 
 def _existing_maintenance_root(database):
-    # Discovery is local E6B only. A similarly named production sidecar does
-    # not activate ScratchMaintenance's /tmp, mount, file-type or nlink policy.
-    if not database.is_relative_to('/tmp'):
+    # Discover only legacy /tmp or minted isolated-local E6B bindings.
+    if not database.is_relative_to('/tmp') and _scratch_library_root(database) is None:
         return None
     lock = database.with_name(database.name + '.maintenance.lock')
     if not _present(lock):

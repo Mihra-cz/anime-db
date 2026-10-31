@@ -75,6 +75,22 @@ LAN. [Nexus podklady](deploy/nexus/README.md) oddělují aktuální návod od hi
 pytest
 ```
 
+## Izolované lokální ověření V6
+
+Existující E7 workflow lze ověřit s velkým souborem v trvalém soukromém
+lokálním adresáři mimo repozitář a `/tmp`:
+
+```bash
+ANIMEDB_LOCAL_TEST_PARENT=/absolutni/lokalni/v6-testy \
+  .venv/bin/pytest tests/test_v6_local_library.py -q
+```
+
+Test vytvoří novou knihovnu a SQLite, provede SOURCE → TARGET → SQLite → NORMAL,
+restart a běžný scan. Unikátní testovací adresář s evidencí ponechá k inspekci.
+Vyžaduje původní lokální mount/preflight podmínky; bez proměnné se vynechá.
+[Současný kontrakt a omezení](docs/PROJECT_STATUS.md) nadále vylučují autorizaci
+produkční NAS execution. Existující knihovnu test nepřebírá.
+
 ## V6 read-only Target Planner
 
 Backend foundation vypíše deterministic plán nad současnou DB a read-only

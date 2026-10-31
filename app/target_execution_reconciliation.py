@@ -63,9 +63,9 @@ def _paths(manifest, action, index, root, journal_path, evidence_path) -> None:
     # This gate precedes validators that lstat the manifest's root. Never resolve
     # caller-supplied symlinks or a production root to find out whether it is safe.
     fs._absolute(root)
-    if (not root.is_relative_to('/tmp') or root.parent == Path('/tmp')
+    if (root.parent in {Path('/'), Path('/tmp')}
             or re.fullmatch(r'v6-e2a-[0-9a-f]{32}', root.name) is None):
-        raise ValueError('existing E2A scratch root in a private /tmp directory required')
+        raise ValueError('existing E2A root in a private local directory required')
     if (type(manifest) is not ExecutionManifest or type(action) is not ManifestAction
             or manifest.payload.library_root != str(root)):
         raise ValueError('immutable manifest must name this scratch root')

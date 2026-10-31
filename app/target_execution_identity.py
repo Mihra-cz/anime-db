@@ -24,7 +24,6 @@ from .target_execution_manifest import (
 _SCHEMA = 'animedb-v6-file-identity'
 _VERSION = 1
 _MAX_RECORD_BYTES = 65536
-_MAX_FILE_BYTES = 8 * 1024 * 1024  # Fixed scratch boundary, not a video fingerprint policy.
 _CHUNK_BYTES = 65536
 
 
@@ -127,7 +126,7 @@ def _safe_file(value: FileStatEvidence) -> None:
     if (value.file_type != 'regular' or not stat.S_ISREG(value.mode) or value.nlink != 1
             or value.uid != os.geteuid() or value.mode & 0o022 or value.st_dev < 0
             or value.st_ino <= 0 or value.gid < 0 or value.ctime_ns < 0
-            or value.mtime_ns < 0 or not 0 <= value.size <= _MAX_FILE_BYTES):
+            or value.mtime_ns < 0 or value.size < 0):
         raise IdentityEvidenceRejected('STOP: independent private regular scratch file required')
 
 

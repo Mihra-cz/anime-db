@@ -436,7 +436,7 @@ původní E1/E7 evidencí je STOP. Samotný R2 úspěch marker neuvolňuje; nač
 nejsou restart authority. Explicitní přechod pro scanner je popsán níže. F1 admission používá
 caller library root jen lexikálně; NAS přístup ordinary scanneru dál patří do
 odděleného healthcheck procesu s timeoutem. E7 root i maintenance se odvozují
-jednotně z kanonické DB identity pod `/tmp`; wrong-root je STOP. Existující
+jednotně z kanonické DB identity izolované knihovny; wrong-root je STOP. Existující
 lokální E6B binding se načítá z lock namespace, ne z caller rootu. Marker se
 kontroluje také po získání lease. Běžné DB bez execution evidence nepřebírají
 scratch file-type/nlink policy a produkční `.maintenance.lock` mimo `/tmp`
@@ -457,15 +457,11 @@ původní STOP záznam ani journal nemaže. Volba se nekombinuje s cleanupem.
 Neúplný/poškozený přechod, chybějící či nahrazený známý target, obnovený SOURCE
 nebo neaplikovaný DB locator znamenají STOP i při potvrzeném mazání.
 
-Následující `scan_library(session, root)` používá původní write-capable scanner,
-nikoli R1 verifier. Manifestové object IDs a persisted locators chrání známá
-Video/subtitle IDs, owner membership, source filename, typ a M:N compatibility.
-Technický re-probe zachovává ruční track overrides. Collection obsahující jen
-známá videa se znovu pathově nefinalizuje. Nové soubory zpracuje stávající scanner;
-nejednoznačné title locators dál znamenají Review, nikoli odhad podle velikosti
-nebo canonical názvu. Před commitem se znovu kontroluje fyzická guard evidence.
-Scan vyžaduje vlastní čistou transakční hranici. Záznam SCANNING platí pouze pro
-scanner, nepovoluje startup migrations/reconstruction.
+Ve stavu SCANNING `scan_library(session, root)` provede pouze původní R1
+read-only ověření přesné DB/FS projekce. Běžný zápisový scan je povolen až v
+NORMAL; změněná projekce před dokončením znamená STOP. Tím scanner nemůže
+změnit data potřebná pro `complete_reorganization`. SCANNING nepovoluje
+startup migrations/reconstruction.
 
 Explicitní scratch-only `complete_reorganization(engine, root)` ve stávajícím
 [execution guardu](../app/target_execution_guard.py) uzavírá SCANNING do NORMAL.
@@ -650,8 +646,21 @@ Nevzniká produkční execution authority.
 Dokončené E1–E6B foundations platí pouze pro povolený izolovaný rozsah.
 Scratch testy nejsou důkazem produkční capability: ARM64/RPi5 není provozně
 ověřené, NAS filesystem rename capability ani power-loss durability produkčního
-úložiště nejsou potvrzené. Limit 8 MiB je scratch hranice, nikoli produkční limit;
-opakované plné hashování velkých videí vyžaduje samostatné výkonnostní posouzení.
+úložiště nejsou potvrzené. Izolovaný E7 owner lze nově alokovat také mimo `/tmp`
+v existujícím soukromém lokálním adresáři mimo repozitář. Používá stejné nové
+`v6-e2a-*` roots, sousední SQLite, E1 journal, guard a identity/directory evidenci;
+API nepřebírá existující knihovnu. Trvalost volí caller umístěním parent adresáře.
+Limit velikosti souboru 8 MiB je odstraněn; plný SHA-256 nadále čte bloky po
+64 KiB se stability kontrolami. Přesun používá stejný no-replace rename na jednom
+filesystemu, bez copy fallbacku. Původní mount allowlist a ostatní preflight
+podmínky zůstávají; opakované plné hashování videí vyžaduje výkonnostní posouzení.
+Lokální funkční test je [test_v6_local_library.py](../tests/test_v6_local_library.py);
+spouští se s `ANIMEDB_LOCAL_TEST_PARENT=/absolutni/trvaly/adresar` a ponechá
+unikátní knihovnu i evidenci pro inspekci. Bez této explicitní volby se vynechá.
+Před prvním řízeným NAS použitím stále chybí schválený production ingress,
+prokázaná no-replace rename/fsync capability konkrétního mountu, globální výluka
+všech skutečných writerů, aktuální záloha/snapshot a provozní postup pro STOP
+při ztrátě evidence nebo přerušení. Lokální test tyto podmínky nenahrazuje.
 Produkční executor, globální execution lock, produkční maintenance boundary,
 produkční DB reconciliation, automatické resume, rollback, crash recovery a NAS physical
 execution nejsou implementované. **NOT AUTHORIZED FOR NAS EXECUTION.**

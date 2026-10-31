@@ -872,12 +872,14 @@ def scan_library(
             if gate is not None:
                 gate.validate_root(root)
             try:
-                if execution_manifest is not None:
+                if execution_manifest is not None or scanning_manifest is not None:
+                    # SCANNING retains the exact post-state needed for NORMAL.
+                    # Ordinary writes are admitted only after explicit completion.
                     from .execution_rescan import verify_execution_rescan
                     try:
                         if require_mount and not is_on_mounted_source(root):
                             raise ValueError("execution library is not on a mounted source")
-                        count = verify_execution_rescan(session, root, execution_manifest)
+                        count = verify_execution_rescan(session, root, execution_manifest or scanning_manifest)
                     except (ValueError, TypeError, OSError) as exc:
                         raise LibrarySafetyError(f"Execution rescan STOP: {exc}") from exc
                     session.rollback()  # End the read transaction without a write lifecycle.

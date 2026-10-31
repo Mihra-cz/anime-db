@@ -12,13 +12,14 @@ from functools import wraps
 from inspect import signature
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import threading
 
 from sqlalchemy.engine import make_url
 
-from .target_execution_filesystem import _open_absolute, _held_evidence_fd
+from .target_execution_filesystem import _open_absolute, _held_evidence_fd, _secure_directory
 from .target_execution_mounts import _check_mounts, _read_mounts
 
 
@@ -137,9 +138,13 @@ class ScratchMaintenance:
         self.database_path, self.library_root = Path(database_path), Path(library_root)
         self._pid = os.getpid()
         for path in (self.database_path, self.library_root):
-            if (not path.is_absolute() or not path.is_relative_to('/tmp')
-                    or '..' in path.parts or path == Path('/tmp')):
-                raise MaintenanceStopped('STOP: explicit absolute scratch paths under /tmp required')
+            if (not path.is_absolute()
+                    or '..' in path.parts or path in {Path('/'), Path('/tmp')}):
+                raise MaintenanceStopped('STOP: explicit absolute private local paths required')
+        if not self.database_path.is_relative_to('/tmp') and (
+                re.fullmatch(r'v6-e2a-[0-9a-f]{32}', self.library_root.name) is None
+                or self.database_path != self.library_root.with_suffix('.sqlite')):
+            raise MaintenanceStopped('STOP: original isolated local database/root binding required')
         if not self.library_root.is_relative_to(self.database_path.parent):
             raise MaintenanceStopped('STOP: scratch library must be in the private database directory')
         self.lock_path = self.database_path.with_name(self.database_path.name + '.maintenance.lock')
@@ -174,6 +179,7 @@ class ScratchMaintenance:
         mounts = _read_mounts()
         for path in (self.database_path.parent, self.library_root):
             with _held_evidence_fd(_open_absolute(path)) as fd:
+                _secure_directory(fd)
                 _check_mounts(path, fd, mounts)
         try:
             info = self.database_path.lstat()
