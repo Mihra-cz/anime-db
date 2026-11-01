@@ -15,6 +15,7 @@ import threading
 import pytest
 
 from app import target_execution_coordination as stops
+from app import target_execution_filesystem as fs
 from app.maintenance import ScratchMaintenance
 from app.target_execution_manifest import manifest_to_json, post_state_hash_from_manifest
 from app.target_execution_sequence import ScratchManifestExecution
@@ -263,7 +264,7 @@ def test_changed_approved_state_stops_before_rmdir(tmp_path, monkeypatch, change
                 monkeypatch.setattr(fs, '_read_mounts', lambda: ())
             elif change == 'mount_id':
                 mount_id, held = fs._mount_id, owner._directories.pins['old/copy']
-                monkeypatch.setattr(fs, '_mount_id', lambda fd: -1 if fd == held else mount_id(fd))
+                monkeypatch.setattr(fs, '_mount_id', lambda fd: -1 if fs._identity(os.fstat(fd)) == held else mount_id(fd))
             elif change == 'maintenance':
                 owner._maintenance_owner = None
             elif change == 'journal':
@@ -334,13 +335,13 @@ def test_failure_preserves_exact_prefix_files_and_db_without_retry(tmp_path, mon
             if cleanup is not None and (
                     (moment == 'intent_fsync' and state['current'] == 'INTENT' and fd == cleanup.fd) or
                     (moment == 'intent_parent_fsync' and state['current'] == 'INTENT' and fd == cleanup.parent_fd) or
-                    (moment == 'parent_fsync' and state.get('rmdir') and fd == cleanup.pins['old']) or
+                    (moment == 'parent_fsync' and state.get('rmdir') and fs._identity(os.fstat(fd)) == cleanup.pins['old']) or
                     (moment == 'complete_fsync' and state['current'] == 'COMPLETE' and fd == cleanup.fd)):
                 raise OSError(errno.EIO, 'fsync failure')
             return real_fsync(fd)
 
         def rmdir(name, *, dir_fd=None):
-            assert name == 'copy' and dir_fd == owner._directories.pins['old']
+            assert name == 'copy' and fs._identity(os.fstat(dir_fd)) == owner._directories.pins['old']
             assert records(owner)[-1]['state'] == 'INTENT'
             if moment == 'rmdir':
                 raise OSError(errno.EIO, 'rmdir result unconfirmed')
@@ -425,7 +426,8 @@ def test_unknown_content_at_cleanup_barriers_is_preserved_and_stops_sequence(tmp
             return result
         def synced(fd):
             result = fsync(fd)
-            if race == 'after_parent_fsync' and state.get('removed') and fd == owner._directories.pins['old']:
+            if (race == 'after_parent_fsync' and state.get('removed')
+                    and fs._identity(os.fstat(fd)) == owner._directories.pins['old']):
                 inject()
             return result
         def decision(proposal):

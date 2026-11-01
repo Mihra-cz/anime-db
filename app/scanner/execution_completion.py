@@ -1,9 +1,10 @@
 """Live scratch E7G completion bridge, not a persisted/replayable permission.
 
-Only the original owner can consume its acknowledged E1 writer and live identity
-pins. Loaded journals, outcomes and matching hashes do not confer admission.
+Only the original owner can consume its acknowledged E1 writer and completed
+identity checkpoints. Loaded journals, outcomes and hashes grant no admission.
 """
 import sqlite3
+import os
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
@@ -23,9 +24,10 @@ def _check_live_completion(owner):
     if type(owner) is not ScratchManifestExecution:
         raise ValueError('original live scratch execution owner required')
     owner._check_execution()  # Original PID/thread/mutex and exclusive E6B lease.
-    if (owner._phase != _PHASE or not owner._completion_rescan_requested
-            or owner._cleanup_decision is not None or owner.cleanup_outcome is not None):
-        raise ValueError('completion rescan is available only at the original live pre-cleanup boundary')
+    if owner._phase != _PHASE or not owner._completion_rescan_requested:
+        raise ValueError('completion rescan requires the original live verified completion boundary')
+    if owner._cleanup_decision is not None and owner.cleanup_outcome is None:
+        raise ValueError('requested cleanup has no verified outcome')
     actions = owner._manifest.payload.actions
     expected_indices = set(range(len(actions)))
     if (not actions or owner._active_index != len(actions) - 1
@@ -42,9 +44,20 @@ def _check_live_completion(owner):
         raise ValueError('all original actions require acknowledged DB_RECONCILED and COMPLETE history')
     # Includes original R0-derived final rows/schema, independent committed DB
     # read, acknowledged commit count/fingerprint and the original post hash.
-    owner._database._verify_stored(len(actions) - 1)
-    for index in range(len(actions)):
-        owner._verify_physical(index)
+    if owner.cleanup_outcome is not None and owner.cleanup_outcome.removed:
+        from app.target_execution_cleanup import read_completed_cleanup
+        owner._cleanup_verifier._check()
+        checked = read_completed_cleanup(owner.database_path, owner._manifest, owner.root)
+        if checked != owner.cleanup_outcome:
+            raise ValueError('live cleanup outcome differs from durable evidence')
+        owner._cleanup_verifier._check()
+        owner._database._verify_stored(len(actions) - 1, verify_post_hash=False)
+        for index in range(len(actions)):
+            owner._verify_physical(index)
+    else:
+        owner._database._verify_stored(len(actions) - 1)
+        for index in range(len(actions)):
+            owner._verify_physical(index, full=True)
     owner._require_journal()
     owner._check_execution()
 
@@ -69,7 +82,8 @@ def run_completed_scratch_rescan(owner):
             connection.connection.driver_connection.execute('BEGIN')
 
         with Session(engine) as session:
-            result = scan_library(session, owner.root, execution_manifest=owner._manifest)
+            result = scan_library(session, owner.root, execution_manifest=owner._manifest,
+                execution_cleanup=owner.cleanup_outcome if owner.cleanup_outcome and owner.cleanup_outcome.removed else None)
         _check_live_completion(owner)
         return result
     except Exception as exc:

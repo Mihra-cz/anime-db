@@ -53,7 +53,7 @@ def require_unstarted_execution_session(session: Session) -> None:
         raise ValueError('execution rescan cannot adopt a connection transaction')
 
 
-def verify_execution_rescan(session: Session, root: Path, manifest: ExecutionManifest) -> int:
+def verify_execution_rescan(session: Session, root: Path, manifest: ExecutionManifest, *, cleanup=None) -> int:
     """Return known video count for the checked approved planner/execution projection.
 
     Stat parity is a freshness check after ID/locator admission, never identity
@@ -117,6 +117,9 @@ def verify_execution_rescan(session: Session, root: Path, manifest: ExecutionMan
             raise ValueError('execution target absent or stale')
         if action.action != 'KEEP' and action.source in entries:
             raise ValueError('execution source still present')
+    if cleanup is not None:
+        from app.target_execution_cleanup import restore_cleanup_directories
+        snapshot = restore_cleanup_directories(snapshot, cleanup)
     if post_state_hash_from_manifest(manifest, context, snapshot) != payload.expected_post_hash:
         raise ValueError('execution post-state changed; incremental routing requires review')
     return len(context.videos)

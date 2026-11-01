@@ -93,7 +93,7 @@ class _LiveIdentityChecks:
                 raise
             raise ScratchFilesystemReconciliationRequired('STOP: identity artefact untrusted', phase) from exc
 
-    def _require_identity(self, manifest, action, captured, fd, parent, before, phase, *, moved) -> None:
+    def _require_identity(self, manifest, action, captured, fd, parent, before, phase, *, moved):
         self._check_identity_anchor(manifest, action, captured, fd, parent, before, phase)
         comparison = self._identity.compare(manifest, action, action_index=captured.action_index)
         if (type(comparison) is not IdentityComparison or comparison.outcome != 'MATCH'
@@ -110,6 +110,7 @@ class _LiveIdentityChecks:
                 or any(getattr(current.observed_file, key) != getattr(captured.filesystem, key) for key in attributes)):
             raise ScratchFilesystemReconciliationRequired('STOP: actual identity/content evidence mismatch', phase)
         self._check_identity_anchor(manifest, action, captured, fd, parent, before, phase)
+        return current.observed_file
 
 
 class ScratchActionSession(_LiveIdentityChecks):

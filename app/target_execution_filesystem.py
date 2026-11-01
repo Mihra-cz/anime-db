@@ -274,6 +274,9 @@ def _validate_scratch_binding(manifest: ExecutionManifest, action: ManifestActio
         raise RenameRejected('invalid manifest: ' + str(exc)) from exc
     if action not in manifest.payload.actions:
         raise RenameRejected('action does not exactly match sealed manifest')
+    from .target_planner import import_namespace
+    if import_namespace(action.source) or import_namespace(action.target):
+        raise RenameRejected('protected IMPORT is outside reorganization authority')
     if action.action not in {'KEEP', 'MOVE', 'QUARANTINE'} or action.criticality == 'REVIEW':
         raise RenameRejected('action requires review or is unsupported')
     if manifest.payload.generation_diagnostics:
@@ -377,7 +380,7 @@ class ScratchRenameSession:
         if (_identity(os.fstat(self._root_fd)) != self._root_identity
                 or _mount_id(self._root_fd) != self._mount_id):
             raise RenameRejected('held execution root descriptor changed')
-        _check_mounts(self.root, self._root_fd, self._mounts)
+        self._check_media_mount(self._root_fd)
         fd = _open_absolute(self.root)
         try:
             if (_identity(os.fstat(fd)) != self._root_identity
@@ -389,6 +392,18 @@ class ScratchRenameSession:
         else:
             _close_evidence_fd(fd)
         _secure_directory(self._root_fd)
+
+    def _check_media_mount(self, fd):
+        binding = getattr(self, '_production_binding', None)
+        if binding is None:
+            return _check_mounts(self.root, fd, self._mounts)
+        from . import target_execution_mounts as media
+        return media._check_production_mount(self.root, fd, self._mounts,
+            share=binding['share'], share_root=binding['share_root'], writable=True)
+
+    def _check_state_mount(self, path, fd):
+        return _check_mounts(path, fd, self._mounts,
+            **({'allow_root_mount': True} if getattr(self, '_production_binding', None) else {}))
 
     def _check_fd(self, fd: int) -> None:
         if os.fstat(fd).st_dev != self._root_identity[0]:

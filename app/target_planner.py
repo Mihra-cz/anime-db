@@ -30,7 +30,7 @@ _SHARED_PATHS = {
     'extras_menus': ('Extras', 'Menu'),
 }
 _AVAILABLE_EDGES = frozenset({'automatic_match', 'confirmed_compatible'})
-_TECHNICAL_ROOTS = {'subs': 'Subs', 'duplicates': 'Duplicates', '#recycle': '#recycle'}
+_TECHNICAL_ROOTS = {'subs': 'Subs', 'duplicates': 'Duplicates', '#recycle': '#recycle', 'import': 'IMPORT'}
 
 
 def relative_locator_safe(path: str) -> bool:
@@ -46,6 +46,11 @@ def technical_root(path: str) -> str | None:
     return _TECHNICAL_ROOTS.get(collision_keys(path.split('/')[0]).fold_key)
 
 
+def import_namespace(path: str) -> bool:
+    """The reserved staging lane is the first component, never a nested name."""
+    return technical_root(path) == 'IMPORT'
+
+
 def root_targets(context: PlannerContext) -> dict[int, tuple[str | None, tuple[str, ...], str]]:
     result = {}
     for collection in context.collections:
@@ -55,7 +60,7 @@ def root_targets(context: PlannerContext) -> dict[int, tuple[str | None, tuple[s
         name = resolve_physical_name(context.naming, 'collection', collection.id)
         component = sanitize_component(name.effective_text) if name.effective_text else None
         issues = name.diagnostics + (tuple(d.code for d in component.diagnostics if d.severity == 'error') if component else ())
-        if component and component.valid and collision_keys(component.component).fold_key in {'#recycle', 'duplicates', 'subs'}:
+        if component and component.valid and collision_keys(component.component).fold_key in _TECHNICAL_ROOTS:
             issues += ('reserved_library_namespace',)
         result[collection.id] = (
             component.component if name.ready and component and component.valid and not issues else None,

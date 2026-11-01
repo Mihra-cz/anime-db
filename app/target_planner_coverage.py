@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from .target_planner import relative_locator_safe
+from .target_planner import relative_locator_safe, import_namespace
 from .target_planner_types import FilesystemSnapshot, TargetPlan
 
 
@@ -89,7 +89,8 @@ def report_coverage(snapshot: FilesystemSnapshot, plan: TargetPlan) -> LibraryCo
             inventory_issues.add(CoverageIssue(path, 'duplicate_inventory_path'))
     for record in plan.records:
         records[record.source_relative_path].append(record)
-    excluded = {path for path, entries in inventory.items() if any(e.kind == 'system_excluded' for e in entries)}
+    excluded = {path for path, entries in inventory.items()
+        if any(e.kind == 'system_excluded' or (e.kind == 'directory' and import_namespace(path)) for e in entries)}
     excluded_parents = {parent for path in excluded for parent in _parents(path)}
     uninspectable = {entry.relative_path for entry in snapshot.entries
         if entry.kind not in {'regular', 'directory'}}
@@ -196,7 +197,7 @@ def report_coverage(snapshot: FilesystemSnapshot, plan: TargetPlan) -> LibraryCo
             issues.add(CoverageIssue(path, code))
         exists = None if kinds == {'inaccessible'} or (not entries and uninspectable_ancestor) else bool(entries)
         directories.append(DirectoryCoverage(path, disposition, exists, empty,
-            required, kinds == {'directory'} and not subtree_unknown, tuple(reasons)))
+            required, kinds == {'directory'} and not subtree_unknown and path not in excluded, tuple(reasons)))
 
     issues.update(inventory_issues | file_issues)
     counts = Counter({action: 0 for action in ('MOVE', 'KEEP', 'QUARANTINE', 'REVIEW')})

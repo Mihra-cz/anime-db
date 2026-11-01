@@ -1,4 +1,4 @@
-"""R3 persistent STOP latch for the original scratch E7 owner.
+"""Persistent STOP latch and verified completion for the original E7 owner.
 
 The STOP record is retained. An explicit live-verified completion may append
 normal scanning authority; a free lock or loaded COMPLETE journal alone cannot.
@@ -68,6 +68,16 @@ def _scratch_library_root(database):
 
 def _scratch_evidence_present(database):
     if database.suffix != '.sqlite' or re.fullmatch(r'v6-e2a-[0-9a-f]{32}', database.stem) is None:
+        # Production E7 keeps the same DB-derived namespace. Missing both the
+        # guard and binding must not hide a partially executed operation.
+        candidates = [database.with_suffix(s) for s in ('.journal.jsonl', '.directories.jsonl', '.cleanup.jsonl')]
+        candidates += list(database.parent.glob(database.stem + '.identity-*.json'))
+        for path in candidates:
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            return True
         return False
     root = database.with_suffix('')
     suffixes = ('.journal.jsonl', '.directories.jsonl', '.cleanup.jsonl', '.identity.json')
@@ -111,6 +121,8 @@ class _ScratchExecutionGuard:
                 'initial_db_fingerprint': asdict(manifest.payload.db_fingerprint),
                 'journal': str(database.with_suffix('.journal.jsonl')),
             }
+            if gate.production_share is not None:
+                body.update(version=2, share=gate.production_share, share_root=gate.share_root)
             raw, _ = journal._frame(body)
             fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL
                 | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
@@ -160,6 +172,9 @@ class _ScratchExecutionGuard:
             targets.append([action.target, *journal._identity(info)])
         body = {'state': 'SCANNING', 'manifest': manifest_to_json(owner._manifest),
             'targets': targets}
+        if owner.cleanup_outcome is not None and owner.cleanup_outcome.removed:
+            from .target_execution_cleanup import cleanup_evidence_digest
+            body['cleanup_sha256'] = cleanup_evidence_digest(owner.database_path)
         raw = (journal._canonical({**body, 'sha256': journal._digest(body)}) + '\n').encode()
         if len(self._raw) + len(raw) > _MAX_GUARD_BYTES:
             raise _stop('completed guard exceeds supported size')
@@ -205,15 +220,15 @@ def _revoke_transition(path, identity, primary):
 _MAX_GUARD_BYTES = 16 * 1024 * 1024
 
 
-def _identity_history(manifest, parent):
-    """Validate retained E7 identity records, without adopting execution authority."""
+def _identity_history(manifest, parent, *, database=None, root_identity=None):
+    """Validate v1 FULL/v2 metadata records; hash their bytes, never infer media SHA."""
     from .target_execution_identity import _decode_frame, _MAX_RECORD_BYTES
     root = Path(manifest.payload.library_root)
-    root_identity = journal._identity(root.stat())
+    root_identity = journal._identity(root.stat()) if root_identity is None else tuple(root_identity)
     manifest_sha256 = hashlib.sha256(manifest_to_json(manifest).encode()).hexdigest()
     result = []
     for index, action in enumerate(manifest.payload.actions):
-        name = root.name + f'.identity-{index}.json'
+        name = (database.stem if database is not None else root.name) + f'.identity-{index}.json'
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
             dir_fd=parent)
         try:
@@ -262,19 +277,35 @@ def _guard_state(database, *, writable=False):
                 raise _stop('guard checksum differs')
             bodies.append(value)
         original, completed = bodies[:2]
-        if set(completed) != {'state', 'manifest', 'targets'} or completed['state'] != 'SCANNING':
+        if (set(completed) not in ({'state', 'manifest', 'targets'}, {'state', 'manifest', 'targets', 'cleanup_sha256'})
+                or completed['state'] != 'SCANNING'):
             raise _stop('unknown guard state')
         manifest = manifest_from_json(completed['manifest'])
         root = Path(manifest.payload.library_root)
+        production = original.get('version') == 2
+        historical = len(bodies) == 3 and production
         if (original['schema'] != 'animedb-v6-scratch-execution-guard'
-                or original['version'] != 1 or original['database'] != str(database)
+                or original['version'] not in (1, 2) or original['database'] != str(database)
                 or original['library'] != str(root) or _scratch_library_root(database) != root
                 or original['database_identity'] != list(journal._identity(database.stat()))
-                or original['library_identity'] != list(journal._identity(root.stat()))
+                or (not historical and original['library_identity'] != list(journal._identity(root.stat())))
                 or original['manifest_id'] != manifest.manifest_id
                 or original['manifest_sha256'] != hashlib.sha256(manifest_to_json(manifest).encode()).hexdigest()
                 or original['journal'] != str(database.with_suffix('.journal.jsonl'))):
             raise _stop('completed guard binding differs')
+        if production:
+            binding = _maintenance_record(database)
+            if (binding is None or binding['version'] != 2 or binding['share'] != original['share']
+                    or binding['share_root'] != original['share_root']):
+                raise _stop('production share binding differs')
+            from . import target_execution_mounts as media
+            media._check_production_mount(root, None, media._read_mounts(), share=binding['share'],
+                share_root=binding['share_root'], writable=False)
+        if 'cleanup_sha256' in completed:
+            from .target_execution_cleanup import cleanup_evidence_digest, read_completed_cleanup
+            if cleanup_evidence_digest(database) != completed['cleanup_sha256']:
+                raise _stop('cleanup history changed')
+            read_completed_cleanup(database, manifest, root, verify_filesystem=False)
         expected = tuple(JournalEntry(manifest.manifest_id, action.action_id, index, state)
             for index, action in enumerate(manifest.payload.actions)
             for state in ('PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE'))
@@ -289,7 +320,8 @@ def _guard_state(database, *, writable=False):
             if (set(normal) != {'state', 'scanning_sha256', 'identities'}
                     or normal['state'] != 'NORMAL'
                     or normal['scanning_sha256'] != hashlib.sha256(b''.join(frames[:2])).hexdigest()
-                    or normal['identities'] != _identity_history(manifest, parent)):
+                    or normal['identities'] != _identity_history(manifest, parent, database=database,
+                        root_identity=original['library_identity'] if production else None)):
                 raise _stop('normal-operation completion evidence differs')
             state = NormalOperation(manifest.manifest_id)
         for action, pin in (() if isinstance(state, NormalOperation) else zip(manifest.payload.actions, completed['targets'])):
@@ -330,7 +362,7 @@ def complete_reorganization(engine, root):
     database = _database_path(engine)
     if database is None or _scratch_library_root(database) != _library_path(root):
         raise _stop('completion requires the original scratch database/library binding')
-    gate = maintenance_for(engine) or ScratchMaintenance(database, _library_path(root))
+    gate = maintenance_for(engine) or ScratchMaintenance.existing(database, _library_path(root))
     if gate.database_path != database or gate.library_root != _library_path(root):
         raise _stop('completion maintenance binding differs')
     attempted = False
@@ -342,10 +374,11 @@ def complete_reorganization(engine, root):
                     return
                 with lease.write_scope(), Session(engine) as session:
                     try:
-                        verify_execution_rescan(session, _library_path(root), state)
+                        cleanup = _cleanup_from_guard(database, state, raw)
+                        verify_execution_rescan(session, _library_path(root), state, cleanup=cleanup)
                     except ValueError as exc:
                         raise _stop(f'completion rescan differs: {exc}') from exc
-                identities = _identity_history(state, parent)
+                identities = _identity_history(state, parent, database=database)
                 # Repeat physical/DB-bound guard checks after reading all evidence.
                 with _guard_state(database) as (checked, _, _, current):
                     if checked != state or current != raw:
@@ -400,8 +433,8 @@ def _database_path(bind):
     # ordinary hardlinks. Only an exact inode match AND existing scratch
     # evidence can relate an alias to the original local DB namespace.
     if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
-        for candidate in database.parent.glob('v6-e2a-*.sqlite'):
-            if candidate == database or re.fullmatch(r'v6-e2a-[0-9a-f]{32}', candidate.stem) is None:
+        for candidate in database.parent.iterdir():
+            if candidate == database:
                 continue
             current = candidate.lstat()
             if (stat.S_ISREG(current.st_mode)
@@ -413,33 +446,54 @@ def _database_path(bind):
     return database
 
 
-def _existing_maintenance_root(database):
-    # Discover only legacy /tmp or minted isolated-local E6B bindings.
-    if not database.is_relative_to('/tmp') and (database.suffix != '.sqlite'
-            or re.fullmatch(r'v6-e2a-[0-9a-f]{32}', database.stem) is None):
+def _cleanup_from_guard(database, manifest, raw):
+    completed = journal._strict_json_load(raw.splitlines()[1].decode())
+    if 'cleanup_sha256' not in completed:
         return None
+    from .target_execution_cleanup import read_completed_cleanup, cleanup_evidence_digest
+    if cleanup_evidence_digest(database) != completed['cleanup_sha256']:
+        raise _stop('cleanup history differs')
+    return read_completed_cleanup(database, manifest, Path(manifest.payload.library_root))
+
+
+def _maintenance_record(database):
     lock = database.with_name(database.name + '.maintenance.lock')
-    if not _present(lock):
-        return None
-    fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise _stop('maintenance binding is not a regular file')
-        value = journal._strict_json_load(os.pread(fd, 65536, 0).decode('utf-8'))
-        if (type(value) is not dict or set(value) != {'version', 'database', 'library'}
-                or type(value['version']) is not int or value['version'] != 1
+        lock.lstat()
+    except FileNotFoundError:
+        return None
+    from .target_execution_filesystem import _open_absolute, _held_evidence_fd
+    with _held_evidence_fd(_open_absolute(lock.parent)) as parent:
+        fd = os.open(lock.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+        with _held_evidence_fd(fd):
+            info = journal._check_file(fd, parent, lock.name)
+            if info.st_size > 65536:
+                raise _stop('maintenance binding too large')
+            value = journal._strict_json_load(os.pread(fd, 65537, 0).decode('utf-8'))
+        keys = {'version', 'database', 'library'}
+        if isinstance(value, dict) and value.get('version') == 2:
+            keys |= {'share', 'share_root'}
+        if (type(value) is not dict or set(value) != keys
+                or type(value['version']) is not int or value['version'] not in (1, 2)
                 or value['database'] != str(database) or type(value['library']) is not str):
             raise _stop('conflicting maintenance binding')
         root = _library_path(value['library'])
         if not Path(value['library']).is_absolute() or database.is_relative_to(root):
             raise _stop('unsafe maintenance database/library placement')
-        if not database.is_relative_to('/tmp') and database.name != root.name + '.sqlite':
-            raise _stop('foreign isolated local database/root binding')
-        # This is a candidate binding only. ScratchMaintenance independently
-        # verifies canonical bytes, ownership, nofollow paths, mounts and flock.
-        return root
-    finally:
-        os.close(fd)
+        if value['version'] == 1 and not database.is_relative_to('/tmp'):
+            if (database.suffix != '.sqlite' or re.fullmatch(r'v6-e2a-[0-9a-f]{32}', database.stem) is None):
+                return None
+            if database.name != root.name + '.sqlite':
+                raise _stop('foreign isolated local database/root binding')
+        if value['version'] == 2:
+            from .target_execution_mounts import _validate_share
+            _validate_share(value['share'], value['share_root'])
+        return value
+
+
+def _existing_maintenance_root(database):
+    record = _maintenance_record(database)
+    return _library_path(record['library']) if record is not None else None
 
 
 @contextmanager
@@ -467,12 +521,18 @@ def ordinary_scan_admission(bind, root, *, allow_completed_scan=False):
                 if bound_root is not None:
                     if root != bound_root:
                         raise _stop('scanner root differs from the database execution binding')
-                    gate = ScratchMaintenance(database, bound_root)
+                    gate = ScratchMaintenance.existing(database, bound_root)
             if gate is not None:
                 gate.validate_root(root)
                 admissions.enter_context(gate.writer())
             if database is not None:
                 manifest = _require_no_evidence(database)
+            if gate is not None and gate.production_share is not None:
+                from . import target_execution_mounts as media
+                mount = media._check_production_mount(root, None, media._read_mounts(),
+                    share=gate.production_share, share_root=gate.share_root, writable=False)
+                if 'ro' not in mount.options:
+                    raise _stop('ordinary production operation requires its RO media view')
             if manifest is not None and not isinstance(manifest, NormalOperation) and not allow_completed_scan:
                 raise _stop('completed guard permits only explicit scanner routing, not startup writes')
         except MaintenanceStopped:

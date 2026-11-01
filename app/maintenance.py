@@ -1,4 +1,4 @@
-"""E6B: opt-in, same-host cooperative exclusion for explicit local scratch data.
+"""E6B: same-host cooperative exclusion for explicit DB/library bindings.
 
 A free advisory lock is never evidence of a safe FS/DB state or resume authority.
 The fixed namespace is not removed on release. Noncooperating writers are outside.
@@ -132,24 +132,30 @@ class _BorrowedLease:
 
 
 class ScratchMaintenance:
-    """One immutable SQLite/root binding; no environment or production activation."""
+    """Immutable scratch or explicitly registered production DB/library binding."""
 
-    def __init__(self, database_path: Path, library_root: Path):
+    def __init__(self, database_path: Path, library_root: Path, *, production_share=None, share_root='/'):
         self.database_path, self.library_root = Path(database_path), Path(library_root)
+        self.production_share, self.share_root = production_share, share_root
+        if production_share is not None:
+            from .target_execution_mounts import _validate_share
+            _validate_share(production_share, share_root)
         self._pid = os.getpid()
         for path in (self.database_path, self.library_root):
             if (not path.is_absolute()
                     or '..' in path.parts or path in {Path('/'), Path('/tmp')}):
                 raise MaintenanceStopped('STOP: explicit absolute private local paths required')
-        if not self.database_path.is_relative_to('/tmp') and (
+        if production_share is None and not self.database_path.is_relative_to('/tmp') and (
                 re.fullmatch(r'v6-e2a-[0-9a-f]{32}', self.library_root.name) is None
                 or self.database_path.name != self.library_root.name + '.sqlite'):
             raise MaintenanceStopped('STOP: original isolated local database/root binding required')
         if self.database_path.is_relative_to(self.library_root):
             raise MaintenanceStopped('STOP: SQLite must be outside the library')
         self.lock_path = self.database_path.with_name(self.database_path.name + '.maintenance.lock')
-        self._binding = (json.dumps({'version': 1, 'database': str(self.database_path),
-            'library': str(self.library_root)}, sort_keys=True) + '\n').encode()
+        binding = {'version': 1, 'database': str(self.database_path), 'library': str(self.library_root)}
+        if production_share is not None:
+            binding.update(version=2, share=production_share, share_root=share_root)
+        self._binding = (json.dumps(binding, sort_keys=True) + '\n').encode()
         self._check_paths()
         lease = None
         try:
@@ -177,14 +183,20 @@ class ScratchMaintenance:
     def _check_paths(self):
         self.check_process()
         mounts = _read_mounts()
-        for path in (self.database_path.parent, self.library_root):
+        paths = (self.database_path.parent, self.library_root) if self.production_share is None else (self.database_path.parent,)
+        for path in paths:
             with _held_evidence_fd(_open_absolute(path)) as fd:
                 _secure_directory(fd)
-                _check_mounts(path, fd, mounts)
+                _check_mounts(path, fd, mounts, **({'allow_root_mount': True} if self.production_share else {}))
+        if self.production_share is not None:
+            from . import target_execution_mounts as media
+            media._check_production_mount(self.library_root, None, mounts, share=self.production_share,
+                share_root=self.share_root, writable=False)
         try:
             info = self.database_path.lstat()
         except FileNotFoundError:
-            pass
+            if self.production_share is not None:
+                raise MaintenanceStopped('STOP: existing production SQLite required; no initialization')
         else:
             if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                     or info.st_uid != os.geteuid() or info.st_mode & 0o022):
@@ -201,9 +213,20 @@ class ScratchMaintenance:
 
     def validate_engine_url(self, database_url):
         url = make_url(database_url)
-        if url.drivername != 'sqlite' or url.database != str(self.database_path) or url.query:
+        uri = (self.production_share is not None and url.database == self.database_path.as_uri()
+            and dict(url.query) == {'mode': 'rw', 'uri': 'true'})
+        if url.drivername != 'sqlite' or not (uri or (url.database == str(self.database_path) and not url.query)):
             raise MaintenanceStopped('STOP: engine does not match explicit scratch SQLite')
         self._check_paths()
+
+    @classmethod
+    def existing(cls, database_path, library_root):
+        """Reconstruct only an existing explicit binding, never infer production permission."""
+        from .target_execution_guard import _maintenance_record
+        record = _maintenance_record(Path(database_path))
+        if record is not None and record['version'] == 2:
+            return cls(database_path, library_root, production_share=record['share'], share_root=record['share_root'])
+        return cls(database_path, library_root)
 
     def validate_root(self, root):
         if Path(root) != self.library_root:

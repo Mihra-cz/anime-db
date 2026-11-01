@@ -5,10 +5,11 @@ original post hash gates admission only; cleanup has its own snapshot contract.
 """
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, ExitStack
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import os
+from pathlib import Path
 import sqlite3
 import stat
 import threading
@@ -17,11 +18,23 @@ from . import target_execution_filesystem as fs
 from . import target_execution_journal as journal
 from .target_execution_coordination import ScratchFilesystemReconciliationRequired
 from .target_execution_database import _rows, _schema
-from .target_execution_identity import _hash_file
-from .target_execution_manifest import JournalEntry, _canonical, _digest, manifest_to_json
+from .target_execution_identity import _hash_file, _file_stat
+from .target_execution_manifest import JournalEntry, _canonical, _digest, _decode_type, _strict_json_load, manifest_to_json
 from .target_execution_rollback import _owner as _require_maintenance
-from .target_planner import technical_root
+from .target_planner import technical_root, relative_locator_safe
 from .target_planner_coverage import DirectoryCoverage
+from .physical_naming_components import collision_keys
+from .target_planner_types import FilesystemEntry, FilesystemSnapshot
+
+
+def _protected_directory(path):
+    """Reorganization cannot remove reserved roots or system directories."""
+    if not isinstance(path, str) or path == '.':
+        return True
+    parts = fs._locator(path)
+    normalized = tuple(collision_keys(part).fold_key for part in parts)
+    return (normalized[0] in {'import', 'duplicates', 'subs', '#recycle', '@eadir'}
+        or any(part in {'#recycle', '@eadir'} for part in normalized))
 
 
 @dataclass(frozen=True)
@@ -40,9 +53,16 @@ class CleanupEntry:
     content_sha256: str | None = None
 
 
+def _stable_entry(entry):
+    # Excluded contents were never inventoried. Only this directory's identity,
+    # type and access metadata belong to the reorganization evidence.
+    return (replace(entry, nlink=1, size=0, mtime_ns=0, ctime_ns=0)
+        if entry.kind == 'system_excluded' else entry)
+
+
 def _entry(path, kind, info, content=None):
-    return CleanupEntry(path, kind, info.st_dev, info.st_ino, info.st_mode,
-        info.st_uid, info.st_gid, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns, content)
+    return _stable_entry(CleanupEntry(path, kind, info.st_dev, info.st_ino, info.st_mode,
+        info.st_uid, info.st_gid, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns, content))
 
 
 @dataclass(frozen=True)
@@ -93,14 +113,17 @@ def approve_cleanup(proposal: CleanupProposal, directories: tuple[str, ...], *, 
             or proposal.proposal_sha256 != _seal(proposal, 'proposal_sha256')
             or type(directories) is not tuple or not directories
             or any(type(p) is not str for p in directories)
+            or any(_protected_directory(p) for p in directories)
             or len(set(directories)) != len(directories)
             or not set(directories) <= {d.path for d in proposal.candidates}
             or type(actor) is not str or not actor.strip() or type(reason) is not str or not reason.strip()):
         raise ValueError('explicit exact candidate paths, actor and reason required')
     # Approving a parent never implicitly approves its empty child directories.
-    for path in directories:
-        if any(e.path.startswith(path + '/') and
-                (e.kind != 'directory' or e.path not in directories) for e in proposal.before_snapshot):
+    selected = set(directories)
+    for entry in proposal.before_snapshot:
+        parts = entry.path.split('/')
+        if any('/'.join(parts[:depth]) in selected for depth in range(1, len(parts))) and (
+                entry.kind != 'directory' or entry.path not in selected):
             raise ValueError('approved directory has retained/unknown contents')
     approval = CleanupApproval(proposal.proposal_sha256, directories, actor, reason, '')
     return replace(approval, approval_sha256=_seal(approval, 'approval_sha256'))
@@ -115,118 +138,493 @@ class CleanupOutcome:
     before_snapshot: tuple[CleanupEntry, ...]
     after_snapshot: tuple[CleanupEntry, ...]
     after_snapshot_sha256: str
+    mode: str = 'FULL'
+
+
+_MAX_CLEANUP_BYTES = 64 * 1024 * 1024
+
+
+def _read_local(path):
+    """Pin local evidence without touching its historical media root."""
+    from .tools.execution_manifest import validate_local_output, _mount_fstype
+    path = Path(path)
+    validate_local_output(path)
+    if _mount_fstype(path.parent) in {'tmpfs', 'ramfs'}:
+        raise ValueError('STOP: cleanup history requires durable local storage')
+    with fs._held_evidence_fd(fs._open_absolute(path.parent)) as parent:
+        fs._check_mounts(path.parent, parent, fs._read_mounts(), allow_root_mount=True)
+        with fs._held_evidence_fd(os.open(path.name, fs._FILE, dir_fd=parent)) as fd:
+            before = journal._check_file(fd, parent, path.name)
+            if before.st_size > _MAX_CLEANUP_BYTES:
+                raise ValueError('STOP: cleanup evidence exceeds supported size')
+            raw = os.pread(fd, before.st_size + 1, 0)
+            after = journal._check_file(fd, parent, path.name)
+            if (_file_stat(before) != _file_stat(after) or len(raw) != before.st_size):
+                raise ValueError('STOP: cleanup evidence changed while reading')
+            journal._check_parent(path, parent)
+            return raw, journal._identity(before)
+
+
+def cleanup_evidence_digest(database_path: Path) -> str:
+    """Hash the retained existing E7H artefact; never grant move authority."""
+    raw, _ = _read_local(Path(database_path).with_suffix('.cleanup.jsonl'))
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _cleanup_frames(raw, *, terminal='COMPLETE'):
+    previous, rows = None, []
+    for sequence, frame in enumerate(raw.splitlines(keepends=True)):
+        if not frame.endswith(b'\n'):
+            raise ValueError('STOP: incomplete cleanup history')
+        row = _strict_json_load(frame.decode('utf-8'))
+        if type(row) is not dict:
+            raise ValueError('STOP: malformed cleanup frame')
+        digest = row.pop('sha256')
+        if (type(row.get('sequence')) is not int or row['sequence'] != sequence
+                or row.get('previous_sha256') != previous or digest != _digest(row)
+                or frame != (_canonical(dict(row, sha256=digest)) + '\n').encode()):
+            raise ValueError('STOP: cleanup chain/checksum differs')
+        previous = digest
+        rows.append(row)
+    if not rows or rows[0].get('state') != 'BOUND' or rows[-1].get('state') != terminal:
+        raise ValueError('STOP: cleanup is not durably complete')
+    return rows
+
+
+def _entries(entries, *, metadata=False):
+    result = {entry.path: entry for entry in entries}
+    if len(result) != len(entries) or tuple(sorted(result)) != tuple(entry.path for entry in entries):
+        raise ValueError('STOP: cleanup snapshot has duplicate or unordered paths')
+    if '.' not in result or result['.'].kind != 'directory':
+        raise ValueError('STOP: cleanup snapshot lacks its root')
+    for entry in entries:
+        if entry.path != '.':
+            if entry.kind == 'system_excluded':
+                if not relative_locator_safe(entry.path) or '\x00' in entry.path:
+                    raise ValueError('STOP: unsafe excluded directory path')
+            else:
+                fs._locator(entry.path)
+        if (entry.kind not in {'regular', 'directory', 'system_excluded'}
+                or entry.device < 0 or entry.inode <= 0 or entry.nlink < 1
+                or entry.size < 0 or entry.mtime_ns < 0 or entry.ctime_ns < 0
+                or (entry.kind == 'regular') != stat.S_ISREG(entry.mode)
+                or (entry.kind != 'regular') != stat.S_ISDIR(entry.mode)):
+            raise ValueError('STOP: cleanup snapshot has unsafe entries')
+        if entry.kind == 'regular':
+            absent = metadata and entry.content_sha256 is None
+            if (entry.nlink != 1 or (not absent and (type(entry.content_sha256) is not str
+                    or len(entry.content_sha256) != 64
+                    or any(c not in '0123456789abcdef' for c in entry.content_sha256)))):
+                raise ValueError('STOP: cleanup file lacks full content evidence')
+        elif entry.content_sha256 is not None:
+            raise ValueError('STOP: directory cannot carry file content evidence')
+        if entry.path != '.':
+            parent = entry.path.rsplit('/', 1)[0] if '/' in entry.path else '.'
+            if parent not in result or result[parent].kind != 'directory':
+                raise ValueError('STOP: cleanup entry has no inventoried parent')
+    return result
+
+
+def _cleanup_delta(proposal, approval, complete, *, metadata=False):
+    before = _entries(proposal.before_snapshot, metadata=metadata)
+    after_entries = _decode_type(tuple[CleanupEntry, ...], complete['after_snapshot'])
+    after = _entries(after_entries, metadata=metadata)
+    order = tuple(sorted(approval.directories, key=lambda path: (-path.count('/'), path)))
+    if (_decode_type(tuple[str, ...], complete['removed']) != order
+            or set(after) != set(before) - set(order)
+            or any(path not in before or before[path].kind != 'directory' for path in order)):
+        raise ValueError('STOP: cleanup removed an unapproved entry')
+    mutable_parents = {path.rsplit('/', 1)[0] if '/' in path else '.' for path in order}
+    for path, entry in after.items():
+        original = before[path]
+        if path in mutable_parents and original.kind == 'directory':
+            original = replace(original, size=entry.size, nlink=entry.nlink,
+                mtime_ns=entry.mtime_ns, ctime_ns=entry.ctime_ns)
+        if _stable_entry(entry) != _stable_entry(original):
+            raise ValueError('STOP: cleanup changed an unapproved entry')
+    digest = _digest([asdict(entry) for entry in after_entries])
+    preserved = tuple(entry.path for entry in after_entries if entry.kind == 'directory')
+    if (complete['after_snapshot_sha256'] != digest
+            or _decode_type(tuple[str, ...], complete['preserved']) != preserved):
+        raise ValueError('STOP: cleanup final snapshot differs')
+    return CleanupOutcome(proposal.manifest_id, proposal.proposal_sha256, order, preserved,
+        proposal.before_snapshot, after_entries, digest, 'METADATA_RENAME' if metadata else 'FULL')
+
+
+def _verify_cleanup_filesystem(root, outcome):
+    expected = _entries(outcome.after_snapshot, metadata=outcome.mode == 'METADATA_RENAME')
+    actual = {}
+    with fs._held_evidence_fd(fs._open_absolute(root)) as root_fd:
+        root_identity, mount_id = fs._identity(os.fstat(root_fd)), fs._mount_id(root_fd)
+
+        def walk(path, fd):
+            fs._secure_directory(fd)
+            before = _entry(path, 'directory', os.fstat(fd))
+            actual[path] = before
+            for name in sorted(os.listdir(fd)):
+                child = name if path == '.' else path + '/' + name
+                entry = expected.get(child)
+                if entry is None:
+                    raise ValueError('STOP: unexpected file or directory after cleanup')
+                named = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if entry.kind == 'system_excluded' and stat.S_ISDIR(named.st_mode):
+                    with fs._held_evidence_fd(os.open(name,
+                            os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)) as excluded:
+                        if fs._identity(os.fstat(excluded)) != fs._identity(named) or fs._mount_id(excluded) != mount_id:
+                            raise ValueError('STOP: excluded directory alias or identity differs')
+                        actual[child] = _entry(child, 'system_excluded', os.fstat(excluded))
+                    continue
+                flags = fs._DIRECTORY if entry.kind == 'directory' else fs._FILE
+                with fs._held_evidence_fd(os.open(name, flags, dir_fd=fd)) as held:
+                    info = os.fstat(held)
+                    if (fs._identity(info) != fs._identity(named) or info.st_dev != root_identity[0]
+                            or fs._mount_id(held) != mount_id):
+                        raise ValueError('STOP: cleanup target identity or mount differs')
+                    if entry.kind == 'directory':
+                        walk(child, held)
+                    else:
+                        observed = _file_stat(info)
+                        digest = None
+                        if entry.content_sha256 is not None:
+                            observed, content = _hash_file(held)
+                            digest = content.digest
+                        current = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                        if (observed.st_dev, observed.st_ino, observed.size, observed.mtime_ns, observed.ctime_ns) != (
+                                current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns):
+                            raise ValueError('STOP: cleanup target changed while hashing')
+                        actual[child] = _entry(child, 'regular', current, digest)
+            if before != _entry(path, 'directory', os.fstat(fd)):
+                raise ValueError('STOP: cleanup directory changed during verification')
+
+        walk('.', root_fd)
+        with fs._held_evidence_fd(fs._open_absolute(root)) as reopened:
+            if fs._identity(os.fstat(reopened)) != root_identity or fs._mount_id(reopened) != mount_id:
+                raise ValueError('STOP: cleanup root changed during verification')
+    if actual != {path: _stable_entry(entry) for path, entry in expected.items()}:
+        raise ValueError('STOP: filesystem differs from completed cleanup evidence')
+
+
+def _original_directories(database, manifest, proposal, before):
+    """Use E7F's retained R0 pins, never a caller-invented cleanup candidate."""
+    raw, _ = _read_local(database.with_suffix('.directories.jsonl'))
+    frames = _cleanup_frames(raw, terminal='READY')
+    bound, ready = frames[0], frames[-1]
+    common = {'sequence', 'previous_sha256', 'state'}
+    if (bound.get('schema') != 'animedb-v6-directory-preparation'
+            or type(bound.get('version')) is not int or bound['version'] != 1
+            or bound.get('manifest_id') != proposal.manifest_id
+            or bound.get('manifest_sha256') != proposal.manifest_sha256
+            or bound.get('root') != proposal.root or bound.get('root_identity') != list(proposal.root_identity)
+            or bound.get('mount_identity') != proposal.mount_identity or bound.get('mount_id') != proposal.mount_id
+            or bound.get('filesystem_hash') != proposal.original_filesystem_hash
+            or bound.get('directories') != list(manifest.payload.directories)
+            or type(bound.get('existing')) is not dict):
+        raise ValueError('STOP: original directory evidence binding differs')
+    original = {path: _decode_type(tuple[int, int], identity) for path, identity in bound['existing'].items()}
+    for path, identity in original.items():
+        fs._locator(path)
+        if path not in before or before[path].kind not in {'directory', 'system_excluded'} or identity != (
+                before[path].device, before[path].inode):
+            raise ValueError('STOP: original directory identity differs')
+    created = tuple(path for path in manifest.payload.directories if path not in original)
+    if (set(ready) != common | {'created'} or ready['created'] != list(created)
+            or len(frames) != 2 + 2 * len(created)):
+        raise ValueError('STOP: directory preparation is incomplete')
+    pins = {'.': proposal.root_identity, **original}
+    for index, path in enumerate(created):
+        intent, verified = frames[1 + 2 * index:3 + 2 * index]
+        parent = path.rsplit('/', 1)[0] if '/' in path else '.'
+        identity = (before[path].device, before[path].inode) if path in before else None
+        if (set(intent) != common | {'path', 'parent_identity'}
+                or intent['state'] != 'INTENT' or intent['path'] != path or parent not in pins
+                or intent['parent_identity'] != list(pins[parent])
+                or set(verified) != common | {'path', 'identity', 'mtime_ns', 'parent_mtime_ns'}
+                or verified['state'] != 'VERIFIED' or verified['path'] != path
+                or identity is None or verified['identity'] != list(identity)):
+            raise ValueError('STOP: directory preparation acknowledgement differs')
+        pins[path] = identity
+    return original
+
+
+def read_completed_cleanup(database_path: Path, manifest, root: Path, *, verify_filesystem: bool = True) -> CleanupOutcome:
+    """Validate existing E7H history; this never creates execution authority.
+
+    Historical NORMAL admission checks retained bytes only. Pre-NORMAL callers
+    additionally prove the current final DB and exact post-cleanup filesystem.
+    """
+    database, root = Path(database_path), Path(root)
+    if not database.is_absolute() or database.is_relative_to(root) or str(root) != manifest.payload.library_root:
+        raise ValueError('STOP: cleanup database/library binding differs')
+    try:
+        raw, _ = _read_local(database.with_suffix('.cleanup.jsonl'))
+        frames = _cleanup_frames(raw)
+        bound, complete = frames[0], frames[-1]
+        common = {'sequence', 'previous_sha256', 'state'}
+        metadata = bound.get('version') == 2
+        if (set(bound) != common | {'schema', 'version', 'proposal', 'approval'} | ({'mode'} if metadata else set())
+                or bound['schema'] != 'animedb-v6-directory-cleanup' or type(bound['version']) is not int
+                or bound['version'] not in (1, 2) or (metadata and bound['mode'] != 'METADATA_RENAME')
+                or set(complete) != common | {
+                    'removed', 'preserved', 'after_snapshot', 'after_snapshot_sha256'}):
+            raise ValueError('STOP: unsupported cleanup history')
+        proposal = _decode_type(CleanupProposal, bound['proposal'])
+        approval = _decode_type(CleanupApproval, bound['approval'])
+        payload = manifest.payload
+        if (proposal.manifest_id != manifest.manifest_id
+                or proposal.manifest_sha256 != hashlib.sha256(manifest_to_json(manifest).encode()).hexdigest()
+                or proposal.root != str(root) or proposal.execution_journal != str(database.with_suffix('.journal.jsonl'))
+                or proposal.original_filesystem_hash != payload.filesystem_hash
+                or proposal.expected_post_hash != payload.expected_post_hash
+                or proposal.mount_identity != payload.mount_identity):
+            raise ValueError('STOP: cleanup proposal differs from approved execution')
+        before = _entries(proposal.before_snapshot, metadata=metadata)
+        if (proposal.root_identity != (before['.'].device, before['.'].inode)
+                or {entry.path for entry in proposal.before_snapshot if entry.kind == 'regular'} != {a.target for a in payload.actions}):
+            raise ValueError('STOP: cleanup proposal lacks original targets/root identity')
+        if any((before[action.target].size, before[action.target].mtime_ns) != (
+                action.expected_size, action.expected_mtime_ns) for action in payload.actions):
+            raise ValueError('STOP: cleanup file metadata differs from approved execution')
+        from .target_execution_identity import _decode_frame
+        for index, action in enumerate(payload.actions):
+            evidence = _decode_frame(_read_local(database.with_suffix(f'.identity-{index}.json'))[0])
+            entry = before[action.target]
+            if (evidence.manifest_id != manifest.manifest_id or evidence.action != action
+                    or evidence.action_index != index or evidence.manifest_sha256 != proposal.manifest_sha256
+                    or evidence.binding.root != str(root)
+                    or (evidence.binding.root_identity.st_dev, evidence.binding.root_identity.st_ino) != proposal.root_identity
+                    or (evidence.filesystem.st_dev, evidence.filesystem.st_ino,
+                        evidence.filesystem.size, evidence.filesystem.mtime_ns) != (
+                            entry.device, entry.inode, entry.size, entry.mtime_ns)
+                    or (not metadata and evidence.mode != 'FULL')
+                    or entry.content_sha256 != (evidence.content.digest if evidence.content is not None else None)):
+                raise ValueError('STOP: cleanup identity/content mode differs from execution evidence')
+        original_directories = _original_directories(database, manifest, proposal, before)
+        review = {entry.path: entry for entry in proposal.directory_review}
+        if len(review) != len(proposal.directory_review) or len({c.path for c in proposal.candidates}) != len(proposal.candidates):
+            raise ValueError('STOP: ambiguous cleanup candidates')
+        for candidate in proposal.candidates:
+            entry, coverage = before.get(candidate.path), review.get(candidate.path)
+            if (_protected_directory(candidate.path) or entry is None or entry.kind != 'directory'
+                    or candidate.identity != (entry.device, entry.inode) or coverage is None
+                    or original_directories.get(candidate.path) != candidate.identity
+                    or coverage.required_in_target or not coverage.contents_inventoried
+                    or coverage.disposition != candidate.disposition
+                    or candidate.disposition not in {'CLEANUP_REVIEW', 'UNRESOLVED_EMPTY'}
+                    or candidate.path in payload.directories):
+                raise ValueError('STOP: cleanup candidate lacks original inventory authority')
+        if approval != approve_cleanup(proposal, approval.directories, actor=approval.actor, reason=approval.reason):
+            raise ValueError('STOP: cleanup approval differs')
+        outcome = _cleanup_delta(proposal, approval, complete, metadata=metadata)
+        if len(frames) != 2 + 2 * len(outcome.removed):
+            raise ValueError('STOP: cleanup action history is incomplete')
+        replay = dict(before)
+        for index, path in enumerate(outcome.removed):
+            intent, verified = frames[1 + 2 * index:3 + 2 * index]
+            parent_path = path.rsplit('/', 1)[0] if '/' in path else '.'
+            if (set(intent) != common | {'path', 'identity', 'parent_identity'}
+                    or intent['state'] != 'INTENT' or intent['path'] != path
+                    or intent['identity'] != [before[path].device, before[path].inode]
+                    or intent['parent_identity'] != [before[parent_path].device, before[parent_path].inode]
+                    or verified['state'] != 'VERIFIED' or verified['path'] != path
+                    or set(verified) != common | ({'path', 'parent_after', 'delta_sha256'} if metadata else {'path', 'snapshot_sha256'})):
+                raise ValueError('STOP: cleanup acknowledgement differs')
+            if metadata:
+                parent_after = _decode_type(CleanupEntry, verified['parent_after'])
+                original_parent = replay[parent_path]
+                immutable_parent = replace(original_parent, size=parent_after.size, nlink=parent_after.nlink,
+                    mtime_ns=parent_after.mtime_ns, ctime_ns=parent_after.ctime_ns)
+                if (parent_after.nlink < 1 or parent_after.size < 0
+                        or parent_after.mtime_ns < 0 or parent_after.ctime_ns < 0
+                        or parent_after != immutable_parent
+                        or verified['delta_sha256'] != _digest({'path': path, 'parent_after': verified['parent_after']})):
+                    raise ValueError('STOP: cleanup parent delta differs')
+                replay.pop(path)
+                replay[parent_path] = parent_after
+            elif (type(verified['snapshot_sha256']) is not str or len(verified['snapshot_sha256']) != 64
+                    or any(c not in '0123456789abcdef' for c in verified['snapshot_sha256'])):
+                raise ValueError('STOP: cleanup snapshot checksum differs')
+        if metadata and tuple(replay[path] for path in sorted(replay)) != outcome.after_snapshot:
+            raise ValueError('STOP: cleanup delta history differs from final snapshot')
+        if not metadata and frames[-2]['snapshot_sha256'] != outcome.after_snapshot_sha256:
+            raise ValueError('STOP: cleanup final acknowledgement differs')
+        raw_journal, journal_identity = _read_local(database.with_suffix('.journal.jsonl'))
+        if (journal_identity != proposal.execution_identity
+                or hashlib.sha256(raw_journal).hexdigest() != proposal.execution_sha256):
+            raise ValueError('STOP: original complete execution journal changed')
+        # No shared flock: the live executor may still hold its exclusive writer.
+        with fs._held_evidence_fd(fs._open_absolute(database.parent)) as parent:
+            with fs._held_evidence_fd(os.open(database.with_suffix('.journal.jsonl').name, fs._FILE, dir_fd=parent)) as fd:
+                expected = tuple(JournalEntry(manifest.manifest_id, action.action_id, index, state)
+                    for index, action in enumerate(payload.actions)
+                    for state in ('PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE'))
+                if journal._read_history(fd, manifest) != expected:
+                    raise ValueError('STOP: original execution is incomplete')
+        if verify_filesystem:
+            with fs._held_evidence_fd(fs._open_absolute(database.parent)) as parent:
+                with fs._held_evidence_fd(os.open(database.name, fs._FILE, dir_fd=parent)) as fd:
+                    journal._check_file(fd, parent, database.name)
+                    if _hash_file(fd)[1].digest != proposal.database_sha256:
+                        raise ValueError('STOP: final database changed after cleanup')
+                    journal._check_file(fd, parent, database.name)
+            _verify_cleanup_filesystem(root, outcome)
+        if _read_local(database.with_suffix('.cleanup.jsonl'))[0] != raw:
+            raise ValueError('STOP: cleanup history changed during verification')
+        return outcome
+    except (KeyError, TypeError, UnicodeError, IndexError) as exc:
+        raise ValueError('STOP: malformed completed cleanup history') from exc
+
+
+def restore_cleanup_directories(snapshot: FilesystemSnapshot, outcome: CleanupOutcome) -> FilesystemSnapshot:
+    """Reconstruct only deleted directory entries for the original post hash.
+
+    The caller must first validate the retained cleanup chain and current state.
+    No filesystem or manifest is changed and no new baseline is sealed.
+    """
+    entries = {entry.relative_path: entry for entry in snapshot.entries}
+    before = {entry.path: entry for entry in outcome.before_snapshot}
+    for path in outcome.removed:
+        original = before.get(path)
+        if path in entries or original is None or original.kind != 'directory' or _protected_directory(path):
+            raise ValueError('STOP: invalid cleanup reconstruction')
+        entries[path] = FilesystemEntry(path, 'directory', mtime_ns=original.mtime_ns)
+    return replace(snapshot, entries=tuple(entries[path] for path in sorted(entries)))
 
 
 class _Cleanup:
     def __init__(self, owner):
         self.owner, self.filesystem = owner, owner._filesystem
         self.manifest = owner._manifest
-        self.pins = {'.': self.filesystem._root_fd, **owner._directories.pins}
+        self.pins = {'.': self.filesystem._root_identity, **owner._directories.pins}
         self.removed = []
-        self.raw, self.previous, self.sequence = b'', None, 0
+        self.raw, self.previous, self.sequence = bytearray(), None, 0
+        self._artifact_checkpoint = None
+        self._last_raw, self._last_offset = b'', 0
         self.fd = self.parent_fd = None
-        self.expected = None
+        self._expected_entries = None
+        self._active_paths = ()
         self.journal_bytes = os.pread(owner._writer._fd, os.fstat(owner._writer._fd).st_size + 1, 0)
         self.database_stat, self.database_content = _hash_file(owner._database._fd)
+        self.preparation_stat = _file_stat(os.fstat(owner._directories.fd))
 
-    def _check_static(self):
+    @property
+    def expected(self):
+        return tuple(self._expected_entries[path] for path in sorted(self._expected_entries))
+
+    def _check_static(self, *, full=False):
         owner, filesystem, db = self.owner, self.filesystem, self.owner._database
         if (owner._closed or os.getpid() != owner._pid or not owner._mutex.locked()
                 or threading.get_ident() != owner._execution_thread
-                or manifest_to_json(self.manifest) != owner._manifest_bytes):
+                or self.manifest is not owner._manifest):
             raise fs.RenameRejected('STOP: cleanup lost its live execution owner')
         _require_maintenance(
             owner._maintenance_owner, owner.root, database_path=owner.database_path,
         )
         filesystem._check_root()
-        expected = tuple(JournalEntry(self.manifest.manifest_id, action.action_id, index, state)
-            for index, action in enumerate(self.manifest.payload.actions)
-            for state in ('PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE'))
-        if (owner._require_journal() != expected
-                or os.pread(owner._writer._fd, len(self.journal_bytes) + 1, 0) != self.journal_bytes):
-            raise fs.RenameRejected('STOP: complete original execution journal required')
+        owner._persistent_guard.check()
+        owner._check_journal()
+        if full:
+            expected = tuple(JournalEntry(self.manifest.manifest_id, action.action_id, index, state)
+                for index, action in enumerate(self.manifest.payload.actions)
+                for state in ('PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE'))
+            if (owner._require_journal() != expected
+                    or os.pread(owner._writer._fd, len(self.journal_bytes) + 1, 0) != self.journal_bytes):
+                raise fs.RenameRejected('STOP: complete original execution journal required')
         # Do not call E7D's original post-hash verification after rmdir. Check
         # the same held DB, full final Rn rows/schema and bytes without writes.
         journal._check_parent(db.path, db._parent)
         journal._check_file(db._fd, db._parent, db.path.name)
         self.owner._check_storage_fd(db._fd)
         self.owner._check_storage_fd(db._parent)
-        if (_hash_file(db._fd) != (self.database_stat, self.database_content)
+        if (_file_stat(os.fstat(db._fd)) != self.database_stat
                 or not db._connection.in_transaction
                 or db._connection.total_changes != db._change_counts[-1]
                 or db._connection.execute('PRAGMA data_version').fetchone()[0] != db._version):
             raise fs.RenameRejected('STOP: final DB projection changed during cleanup')
-        with closing(sqlite3.connect(db._uri + '?mode=ro', uri=True, timeout=0)) as fresh:
-            fresh.execute('PRAGMA query_only=ON')
-            fresh.execute('BEGIN')
-            if _rows(fresh) != db._states[-1] or _schema(fresh) != db._schema:
-                raise fs.RenameRejected('STOP: independent final DB projection differs')
+        if full:
+            with closing(sqlite3.connect(db._uri + '?mode=ro', uri=True, timeout=0)) as fresh:
+                fresh.execute('PRAGMA query_only=ON')
+                fresh.execute('BEGIN')
+                if _rows(fresh) != db._states[-1] or _schema(fresh) != db._schema:
+                    raise fs.RenameRejected('STOP: independent final DB projection differs')
         preparation = owner._directories
         journal._check_parent(owner.directory_evidence_path, preparation.parent_fd)
         journal._check_file(preparation.fd, preparation.parent_fd, owner.directory_evidence_path.name)
-        if os.pread(preparation.fd, len(preparation.raw) + 1, 0) != preparation.raw:
+        if (_file_stat(os.fstat(preparation.fd)) != self.preparation_stat or
+                (full and os.pread(preparation.fd, len(preparation.raw) + 1, 0) != preparation.raw)):
             raise fs.RenameRejected('STOP: original directory evidence changed')
 
-    def _snapshot(self):
-        """Read only through held nofollow directories; reject any unaccounted entry."""
+    def _snapshot(self, *, full=False):
+        """Whole-state nofollow metadata inventory, without implicit media reads.
+
+        Only a source explicitly selected for FULL verification has a digest.
+        Ordinary METADATA_RENAME entries retain content_sha256=None throughout.
+        """
         filesystem = self.filesystem
         filesystem._check_root()
         removed = set(self.removed)
-        pins = {p: fd for p, fd in self.pins.items() if p not in removed}
+        pins = {p: identity for p, identity in self.pins.items() if p not in removed}
         targets = {a.target: (i, a) for i, a in enumerate(self.manifest.payload.actions)}
         excluded = {e.relative_path for e in self.owner._database._initial_snapshot.entries if e.kind == 'system_excluded'}
-        entries = {'.': _entry('.', 'directory', os.fstat(pins['.']))}
-        for path, parent in sorted(pins.items()):
-            filesystem._check_root()
-            if path != '.':
-                filesystem._parent_binding(fs._locator(path) + ('<child>',), parent)
-            before = _entry(path, 'directory', os.fstat(parent))
-            for name in sorted(os.listdir(parent)):
-                child = name if path == '.' else path + '/' + name
-                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
-                if child in excluded and stat.S_ISDIR(info.st_mode):
-                    entries[child] = _entry(child, 'system_excluded', info)
-                elif child in pins and child != '.' and stat.S_ISDIR(info.st_mode):
-                    fd = pins[child]
-                    filesystem._check_fd(fd)
-                    fs._secure_directory(fd)
-                    if fs._identity(info) != fs._identity(os.fstat(fd)):
-                        raise fs.RenameRejected('STOP: cleanup directory identity changed')
-                    entries[child] = _entry(child, 'directory', info)
-                elif child in targets and stat.S_ISREG(info.st_mode):
-                    index, action = targets[child]
-                    fd, original, _, content = self.owner._prepared[index]
-                    filesystem._check_fd(fd)
-                    fs._check_source(fd, parent, name, action, original)
-                    observed, hashed = _hash_file(fd)
-                    if hashed != content:
-                        raise fs.RenameRejected('STOP: completed file content changed')
-                    current = fs._check_source(fd, parent, name, action, original)
-                    if (observed.size, observed.mtime_ns, observed.ctime_ns) != (
-                            current.st_size, current.st_mtime_ns, current.st_ctime_ns):
-                        raise fs.RenameRejected('STOP: file changed during cleanup inventory')
-                    entries[child] = _entry(child, 'regular', current, hashed.digest)
-                else:
-                    raise fs.RenameRejected('STOP: unknown content, symlink or unexpected directory: ' + child)
-            if before != _entry(path, 'directory', os.fstat(parent)):
-                raise fs.RenameRejected('STOP: directory changed during cleanup inventory')
+        entries = {'.': _entry('.', 'directory', os.fstat(filesystem._root_fd))}
+        for path in sorted(pins):
+            with self.owner._directories.open(path) as parent:
+                self._snapshot_directory(path, parent, pins, targets, excluded, entries, full=full)
         if set(entries) != set(pins) | set(targets) | excluded:
             raise fs.RenameRejected('STOP: cleanup inventory has missing entries')
         filesystem._check_root()
         return tuple(entries[p] for p in sorted(entries))
 
-    def _check(self):
-        self._check_static()
-        snapshot = self._snapshot()
-        if self.expected is not None and snapshot != self.expected:
+    def _snapshot_directory(self, path, parent, pins, targets, excluded, entries, *, full):
+        filesystem = self.filesystem
+        filesystem._check_root()
+        if path != '.':
+            filesystem._parent_binding(fs._locator(path) + ('<child>',), parent)
+        before = _entry(path, 'directory', os.fstat(parent))
+        for name in sorted(os.listdir(parent)):
+            child = name if path == '.' else path + '/' + name
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if child in excluded and stat.S_ISDIR(info.st_mode):
+                entries[child] = _entry(child, 'system_excluded', info)
+            elif child in pins and child != '.' and stat.S_ISDIR(info.st_mode):
+                if fs._identity(info) != pins[child]:
+                    raise fs.RenameRejected('STOP: cleanup directory identity changed')
+                entries[child] = _entry(child, 'directory', info)
+            elif child in targets and stat.S_ISREG(info.st_mode):
+                index, action = targets[child]
+                self.owner._verify_physical(index, full=full)
+                current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if _file_stat(current) != self.owner._completed_stats[index]:
+                    raise fs.RenameRejected('STOP: file changed during cleanup inventory')
+                content = self.owner._prepared[index][3]
+                entries[child] = _entry(child, 'regular', current, content.digest if content is not None else None)
+            else:
+                raise fs.RenameRejected('STOP: unknown content, symlink or unexpected directory: ' + child)
+        if before != _entry(path, 'directory', os.fstat(parent)):
+            raise fs.RenameRejected('STOP: directory changed during cleanup inventory')
+
+    def _check(self, *, full=False):
+        self._check_static(full=full)
+        snapshot = self._snapshot(full=full) if full else None
+        if full and _hash_file(self.owner._database._fd) != (self.database_stat, self.database_content):
+            raise fs.RenameRejected('STOP: final DB content changed during cleanup')
+        if full and self._expected_entries is not None and snapshot != self.expected:
             raise fs.RenameRejected('STOP: filesystem differs from approved cleanup delta')
-        self._check_static()
+        if not full:
+            for path in self._active_paths:
+                if path in self.owner._directories.removed:
+                    continue
+                with self.owner._directories.open(path) as fd:
+                    if _entry(path, 'directory', os.fstat(fd)) != self._expected_entries[path]:
+                        raise fs.RenameRejected('STOP: active cleanup directory changed')
+        self._check_static(full=full)
         if self.fd is not None:
             journal._check_parent(self.owner.cleanup_evidence_path, self.parent_fd)
             journal._check_file(self.fd, self.parent_fd, self.owner.cleanup_evidence_path.name)
             self.owner._check_storage_fd(self.parent_fd)
             self.owner._check_storage_fd(self.fd)
-            if os.pread(self.fd, len(self.raw) + 1, 0) != self.raw:
+            if (journal._checkpoint_stat(os.fstat(self.fd)) != self._artifact_checkpoint
+                    or os.pread(self.fd, len(self._last_raw) + 1, self._last_offset) != self._last_raw
+                    or (full and os.pread(self.fd, len(self.raw) + 1, 0) != self.raw)):
                 raise fs.RenameRejected('STOP: cleanup evidence changed')
         return snapshot
 
@@ -238,19 +636,21 @@ class _Cleanup:
         journal._write_all(self.fd, raw)
         os.fsync(self.fd)
         os.fsync(self.parent_fd)
+        self._last_offset, self._last_raw = len(self.raw), raw
+        self._artifact_checkpoint = journal._checkpoint_stat(os.fstat(self.fd))
         self.raw += raw
         self._check()
         self.sequence += 1
         self.previous = digest
 
     def _proposal(self):
-        self.expected = self._check()
+        self._expected_entries = {entry.path: entry for entry in self._check(full=True)}
         review = self.owner._database._initial_coverage.directories
         current = {e.path: e for e in self.expected}
         candidates = tuple(CleanupCandidate(d.path, (current[d.path].device, current[d.path].inode), d.disposition)
             for d in review if d.disposition in {'CLEANUP_REVIEW', 'UNRESOLVED_EMPTY'}
             and d.contents_inventoried and not d.required_in_target and d.path in current
-            and not technical_root(d.path) and not any(p.casefold() == '#recycle' for p in d.path.split('/')))
+            and not technical_root(d.path) and not _protected_directory(d.path))
         payload = self.manifest.payload
         proposal = CleanupProposal(self.manifest.manifest_id,
             hashlib.sha256(self.owner._manifest_bytes.encode()).hexdigest(), str(self.owner.journal_path),
@@ -263,7 +663,7 @@ class _Cleanup:
     def run(self, decision):
         proposal = self._proposal()
         approval = decision(proposal)
-        self._check()
+        self._check(full=True)
         if approval is None:
             return self._outcome(proposal)
         if (type(approval) is not CleanupApproval
@@ -277,48 +677,63 @@ class _Cleanup:
             | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=self.parent_fd)
         self.owner._resources.enter_context(fs._held_evidence_fd(self.fd))
         journal._lock(self.fd, True)
-        self._append('BOUND', schema='animedb-v6-directory-cleanup', version=1,
+        self._artifact_checkpoint = journal._checkpoint_stat(os.fstat(self.fd))
+        self._append('BOUND', schema='animedb-v6-directory-cleanup', version=2, mode='METADATA_RENAME',
             proposal=asdict(proposal), approval=asdict(approval))
         for path in sorted(approval.directories, key=lambda p: (-p.count('/'), p)):
             self._check()
+            if _protected_directory(path):
+                raise fs.RenameRejected('STOP: protected directory cannot be removed')
             parts = fs._locator(path)
             parent_path = '/'.join(parts[:-1]) or '.'
-            parent, fd = self.pins[parent_path], self.pins[path]
-            if os.listdir(fd):
-                raise fs.RenameRejected('STOP: approved directory is not empty')
-            self._append('INTENT', path=path, identity=fs._identity(os.fstat(fd)),
-                parent_identity=fs._identity(os.fstat(parent)))
-            self._check()
-            if os.listdir(fd):
-                raise fs.RenameRejected('STOP: approved directory is no longer empty')
-            os.rmdir(parts[-1], dir_fd=parent)
-            # Capture only the removed entry and its direct parent's immediate
-            # stat delta, before callbacks/barriers can introduce alien changes.
-            parent_info = os.fstat(parent)
-            self.removed.append(path)
-            self.expected = tuple(_entry(parent_path, 'directory', parent_info) if e.path == parent_path else e
-                for e in self.expected if e.path != path)
-            os.fsync(parent)
-            if os.fstat(fd).st_nlink != 0:
-                raise fs.RenameRejected('STOP: held approved directory removal not proven')
-            # Independently reopen the parent via nofollow traversal, then check
-            # exact absence plus all other directories, files/content and DB.
-            self.filesystem._parent_binding(parts, parent)
-            fs._absent(parent, parts[-1])
-            self._check()
-            self._append('VERIFIED', path=path, snapshot_sha256=_digest([asdict(e) for e in self.expected]))
-        after = self._check()
+            self._active_paths = (parent_path, path)
+            with ExitStack() as active:
+                parent = active.enter_context(self.owner._directories.open(parent_path))
+                fd = active.enter_context(self.owner._directories.open(path))
+                self._remove(path, parts, parent_path, parent, fd)
+        self._active_paths = ()
+        after = self._check(full=True)
         result = self._outcome(proposal, after)
         self._append('COMPLETE', removed=result.removed, preserved=result.preserved,
             after_snapshot=[asdict(e) for e in after], after_snapshot_sha256=result.after_snapshot_sha256)
-        self._check()
+        self._check(full=True)
         return result
+
+    def _remove(self, path, parts, parent_path, parent, fd):
+        if os.listdir(fd):
+            raise fs.RenameRejected('STOP: approved directory is not empty')
+        self._append('INTENT', path=path, identity=fs._identity(os.fstat(fd)),
+            parent_identity=fs._identity(os.fstat(parent)))
+        self._check()
+        if os.listdir(fd):
+            raise fs.RenameRejected('STOP: approved directory is no longer empty')
+        if _protected_directory(path):
+            raise fs.RenameRejected('STOP: protected directory cannot be removed')
+        os.rmdir(parts[-1], dir_fd=parent)
+        # Capture only the removed entry and its direct parent's immediate
+        # stat delta, before callbacks/barriers can introduce alien changes.
+        parent_info = os.fstat(parent)
+        self.removed.append(path)
+        self.owner._directories.removed.add(path)
+        self._expected_entries.pop(path)
+        self._expected_entries[parent_path] = _entry(parent_path, 'directory', parent_info)
+        os.fsync(parent)
+        if os.fstat(fd).st_nlink != 0:
+            raise fs.RenameRejected('STOP: held approved directory removal not proven')
+        # Independently reopen the parent via nofollow traversal, then check
+        # exact absence plus all other directories, files/content and DB.
+        self.filesystem._parent_binding(parts, parent)
+        fs._absent(parent, parts[-1])
+        self._check()
+        parent_after = asdict(self._expected_entries[parent_path])
+        self._append('VERIFIED', path=path, parent_after=parent_after,
+            delta_sha256=_digest({'path': path, 'parent_after': parent_after}))
 
     def _outcome(self, proposal, after=None):
         after = self.expected if after is None else after
         return CleanupOutcome(self.manifest.manifest_id, proposal.proposal_sha256, tuple(self.removed),
             tuple(e.path for e in after if e.kind == 'directory'), proposal.before_snapshot, after,
-            _digest([asdict(e) for e in after]))
+            _digest([asdict(e) for e in after]), 'METADATA_RENAME')
 
 
 def _run_cleanup(owner, decision):
@@ -328,10 +743,13 @@ def _run_cleanup(owner, decision):
     owner._require_journal()
     owner._database._verify_stored(len(owner._manifest.payload.actions) - 1)
     for index in range(len(owner._manifest.payload.actions)):
-        owner._verify_physical(index)
+        owner._verify_physical(index, full=True)
     owner._phase = 'CLEANUP'
     try:
-        return _Cleanup(owner).run(decision)
+        # Completion retains the original acknowledged bytes and held artefacts,
+        # not merely a later reload with the same removed paths and snapshots.
+        owner._cleanup_verifier = _Cleanup(owner)
+        return owner._cleanup_verifier.run(decision)
     except Exception as exc:
         # Even a full last frame cannot prove a failed fsync acknowledgement.
         # Keep all bytes and the actual FS; the spent execution always closes.

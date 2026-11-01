@@ -61,7 +61,7 @@ def _mount_id(fd: int) -> int:
     return int(values[0])
 
 
-def _check_mounts(root: Path, fd: int, mounts: tuple[MountRecord, ...]) -> MountRecord:
+def _check_mounts(root: Path, fd: int, mounts: tuple[MountRecord, ...], *, allow_root_mount=False) -> MountRecord:
     """Reject subtree mounts and differently named aliases in this namespace.
 
     Device equality alone misses same-device bind mounts. Compare the filesystem
@@ -86,6 +86,8 @@ def _check_mounts(root: Path, fd: int, mounts: tuple[MountRecord, ...]) -> Mount
         raise ValueError('execution mount is read-only')
     storage_root = current.fs_root / root.relative_to(current.point).as_posix()
     for other in mounts:
+        if allow_root_mount and other.mount_id == mount_id:
+            continue
         if other.point.is_relative_to(root):
             raise ValueError('mount at or inside execution root is forbidden')
         if other.mount_id == mount_id or other.device != current.device:
@@ -96,4 +98,73 @@ def _check_mounts(root: Path, fd: int, mounts: tuple[MountRecord, ...]) -> Mount
                 raise ValueError('bind mount aliases execution root or ancestor')
         elif other.fs_root.is_relative_to(storage_root):
             raise ValueError('bind mount aliases execution subtree')
+    return current
+
+
+def _validate_share(share: str, share_root: str) -> None:
+    parts = share.split('/') if type(share) is str else ()
+    if (len(parts) != 4 or parts[:2] != ['', ''] or not all(parts[2:])
+            or any(c in share for c in ('\\', '\x00', '@', '?', '#'))
+            or any(p in {'.', '..'} for p in parts[2:])
+            or type(share_root) is not str or not share_root.startswith('/')
+            or str(PurePosixPath(share_root)) != share_root or '..' in PurePosixPath(share_root).parts):
+        raise ValueError('explicit canonical SMB server/share and filesystem subtree required')
+
+
+def _check_production_mount(root: Path, fd: int | None, mounts: tuple[MountRecord, ...], *,
+                            share: str, share_root: str, writable: bool) -> MountRecord:
+    """Explicit media policy; never extends the local scratch/state allowlist.
+
+    The fd-less check binds ordinary RO admission using local mountinfo only.
+    Live execution additionally pins descriptors, device and mount identity.
+    """
+    _validate_share(share, share_root)
+    root = Path(root)
+    covering = [m for m in mounts if root.is_relative_to(m.point)]
+    if not covering:
+        raise ValueError('production media mount unavailable')
+    depth = max(len(m.point.parts) for m in covering)
+    visible = [m for m in covering if len(m.point.parts) == depth]
+    if len(visible) != 1:
+        raise ValueError('ambiguous production media mount')
+    current = visible[0]
+    by_id = {m.mount_id: m for m in mounts}
+    ancestors, cursor = set(), current
+    while cursor is not None:
+        if cursor.mount_id in ancestors:
+            raise ValueError('cyclic production mount ancestry')
+        ancestors.add(cursor.mount_id)
+        parent = by_id.get(cursor.parent_id)
+        if parent is cursor and cursor.point == Path('/'):
+            break
+        if parent is not None and parent.point != cursor.point and parent.point not in cursor.point.parents:
+            raise ValueError('production mount parent binding differs')
+        cursor = parent
+    if any(m.point in current.point.parents and m.mount_id not in ancestors for m in mounts):
+        raise ValueError('production library is hidden by an ancestor mount')
+    if (current.fstype != 'cifs' or current.source.casefold() != share.casefold()
+            or str(current.fs_root / root.relative_to(current.point).as_posix()) != share_root):
+        raise ValueError('production media server/share/subtree differs')
+    if fd is not None:
+        info = os.fstat(fd)
+        if (_mount_id(fd) != current.mount_id
+                or current.device != (os.major(info.st_dev), os.minor(info.st_dev))):
+            raise ValueError('production descriptor mount/device differs')
+    if writable and ('rw' not in current.options or (fd is not None
+            and os.fstatvfs(fd).f_flag & os.ST_RDONLY)):
+        raise ValueError('production execution requires a writable media mount')
+    for other in mounts:
+        if other.mount_id == current.mount_id:
+            continue
+        if other.point.is_relative_to(root):
+            raise ValueError('mount at or inside production library is forbidden')
+        same_share = other.fstype == 'cifs' and other.source.casefold() == current.source.casefold()
+        if not same_share and other.device != current.device:
+            continue
+        storage = PurePosixPath(share_root)
+        if storage.is_relative_to(other.fs_root):
+            if other.point / storage.relative_to(other.fs_root) != root:
+                raise ValueError('production library has a visible mount alias')
+        elif other.fs_root.is_relative_to(storage):
+            raise ValueError('production library subtree has a visible mount alias')
     return current

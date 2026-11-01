@@ -166,6 +166,11 @@ def _identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
+def _checkpoint_stat(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+        info.st_mode, info.st_uid, info.st_gid, info.st_nlink)
+
+
 def _close_after_failure(fd: int, primary: BaseException) -> None:
     try:
         os.close(fd)
@@ -382,6 +387,8 @@ class DurableJournal:
             writer._completed: set[str] = set()
             writer._digest = digest
             writer._stat = (current.st_size, current.st_mtime_ns)
+            writer._checkpoint_stat = _checkpoint_stat(current)
+            writer._last_offset, writer._last_raw = 0, raw
             writer._pid = os.getpid()
             writer._mutex = threading.Lock()
             writer._poisoned = False
@@ -426,6 +433,28 @@ class DurableJournal:
                 self._poisoned = True
                 raise
 
+    def checkpoint(self, manifest):
+        """Bounded check of this owner's fsynced append boundary, never replay.
+
+        Local ctime/identity and the last acknowledged frame fence intermediate
+        operations. Full canonical history is still parsed at whole-state gates.
+        """
+        if os.getpid() != self._pid:
+            raise JournalError('writer inherited by another process')
+        with self._mutex:
+            if self._closed or self._poisoned or manifest is not self._manifest:
+                raise ReconciliationRequired('STOP: live journal checkpoint unavailable')
+            try:
+                _check_parent(self._path, self._parent_fd)
+                before = _check_file(self._fd, self._parent_fd, self._path.name)
+                if (_checkpoint_stat(before) != self._checkpoint_stat
+                        or os.pread(self._fd, len(self._last_raw) + 1, self._last_offset) != self._last_raw
+                        or _checkpoint_stat(_check_file(self._fd, self._parent_fd, self._path.name)) != self._checkpoint_stat):
+                    raise ReconciliationRequired('STOP: acknowledged journal checkpoint changed')
+            except BaseException:
+                self._poisoned = True
+                raise
+
     def append(self, entry: JournalEntry) -> None:
         if os.getpid() != self._pid:
             raise JournalError('writer inherited by another process')
@@ -440,7 +469,8 @@ class DurableJournal:
             try:
                 _check_parent(self._path, self._parent_fd)
                 current = _check_file(self._fd, self._parent_fd, self._path.name)
-                if (current.st_size, current.st_mtime_ns) != self._stat:
+                if ((current.st_size, current.st_mtime_ns) != self._stat
+                        or _checkpoint_stat(current) != self._checkpoint_stat):
                     raise ReconciliationRequired('STOP: journal changed outside writer', self._entries)
                 _write_all(self._fd, raw)
                 os.fsync(self._fd)
@@ -456,7 +486,9 @@ class DurableJournal:
             if entry.state == 'COMPLETE':
                 self._completed.add(entry.action_id)
             self._digest = digest
+            self._last_offset, self._last_raw = self._stat[0], raw
             self._stat = (current.st_size, current.st_mtime_ns)
+            self._checkpoint_stat = _checkpoint_stat(current)
 
     def close(self) -> None:
         if os.getpid() != self._pid:

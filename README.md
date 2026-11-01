@@ -1,6 +1,6 @@
 # AnimeDB
 
-AnimeDB je jednoduchý read-only katalog anime knihovny. Rekurzivně najde MKV, MP4, M4V a AVI, načte technická metadata přes `ffprobe`, spáruje externí titulky a zobrazí souhrn ve webovém rozhraní. Do adresáře knihovny nikdy nezapisuje.
+AnimeDB je katalog anime knihovny s běžným read-only přístupem k NAS. Rekurzivně najde MKV, MP4, M4V a AVI, načte technická metadata přes `ffprobe`, spáruje externí titulky a zobrazí souhrn ve webovém rozhraní. Běžný scanner zapisuje pouze lokální SQLite; rootový `IMPORT` neprochází. Schválenou V6 reorganizaci provádí samostatný administrativní worker.
 
 ## Dokumentace
 
@@ -8,6 +8,7 @@ AnimeDB je jednoduchý read-only katalog anime knihovny. Rekurzivně najde MKV, 
 - [ROADMAP](docs/ROADMAP.md) — vývojový plán V1–V10, aktuální progress a podmínky uzavření/zahájení verzí.
 - [HISTORY](docs/HISTORY.md) — technická historie významných milníků.
 - [V6_NAMING_CONTRACT](docs/V6_NAMING_CONTRACT.md) — schválená pravidla fyzických názvů a struktury pro V6.
+- [V6 produkční vstup](docs/V6_PRODUCTION_REORGANIZATION.md) — existující knihovna/SQLite, izolovaný RW worker, chráněné IMPORT/Duplicates, E7H a návrat do RO provozu; před provozním použitím vyžaduje Nexus ověření a schválení.
 
 ## Spuštění bez Dockeru
 
@@ -176,9 +177,11 @@ readiness bez preflight binding checks a nemění manifest ani jeho semantic has
 Current production dry-run má záměrně vrátit NOT_READY, dokud nejsou doložené
 snapshot, DB backup, maintenance a write/no-replace capability. CLI nepřidává
 warning acknowledgements; bez approved envelope zůstávají blockerem.
-Skutečný executor neexistuje a NAS execution není autorizovaná: tyto commands nepřesouvají
-ani nepřejmenovávají soubory, nevytvářejí library directories, snapshot nebo
-backup a nespouštějí scanner. P2C a Completeness zůstávají pending.
+Tyto dva commands nepřesouvají ani nepřejmenovávají soubory, nevytvářejí library
+directories, snapshot nebo backup a nespouštějí scanner. Samostatný
+[administrativní E7 vstup](docs/V6_PRODUCTION_REORGANIZATION.md) navíc vyžaduje
+execution approval a výluku; skutečná NAS execution dosud není autorizovaná.
+Completeness UI zůstává pending.
 
 ## Chování skenu
 

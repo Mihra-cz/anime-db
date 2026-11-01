@@ -1,6 +1,7 @@
 """E3A standalone scratch identity evidence, never execution/recovery authority.
 
-No existing-root adoption, rename, journal/DB writes or restart/resume API.
+The standalone factory stays scratch-only; E7 supplies its explicit live binding.
+No rename, journal/DB writes or restart/resume API is granted here.
 Content equality does not prove physical inode origin after live evidence loss.
 """
 from __future__ import annotations
@@ -23,6 +24,7 @@ from .target_execution_manifest import (
 
 _SCHEMA = 'animedb-v6-file-identity'
 _VERSION = 1
+_METADATA_VERSION = 2
 _MAX_RECORD_BYTES = 65536
 _CHUNK_BYTES = 65536
 
@@ -88,7 +90,8 @@ class FileIdentityEvidence:
     action: ManifestAction
     binding: ScratchBinding
     filesystem: FileStatEvidence
-    content: ContentEvidence
+    content: ContentEvidence | None
+    mode: str = 'FULL'
 
 
 @dataclass(frozen=True)
@@ -148,8 +151,47 @@ def _hash_file(fd: int) -> tuple[FileStatEvidence, ContentEvidence]:
     return before, ContentEvidence('sha256', digest.hexdigest(), 'FULL', offset)
 
 
+def _validate_content(evidence: FileIdentityEvidence) -> None:
+    """Validate each version's actual proof without upgrading legacy evidence."""
+    if (type(evidence) is not FileIdentityEvidence or evidence.schema != _SCHEMA
+            or type(evidence.version) is not int or type(evidence.mode) is not str
+            or type(evidence.filesystem) is not FileStatEvidence):
+        raise IdentityEvidenceRejected('STOP: unsupported identity evidence schema/version/mode')
+    try:
+        _decode_type(FileStatEvidence, asdict(evidence.filesystem))
+    except (ValueError, TypeError) as exc:
+        raise IdentityEvidenceRejected('STOP: invalid filesystem evidence shape') from exc
+    _safe_file(evidence.filesystem)
+    content = evidence.content
+    if evidence.version == _METADATA_VERSION and evidence.mode == 'METADATA_RENAME':
+        if content is not None:
+            raise IdentityEvidenceRejected('STOP: metadata identity cannot claim content proof')
+        return
+    if evidence.version != _VERSION or evidence.mode != 'FULL' or type(content) is not ContentEvidence:
+        raise IdentityEvidenceRejected('STOP: unsupported identity evidence schema/version/mode/content')
+    if (content.algorithm != 'sha256' or content.coverage != 'FULL'
+            or type(content.bytes_hashed) is not int or content.bytes_hashed != evidence.filesystem.size
+            or type(content.digest) is not str or re.fullmatch('[0-9a-f]{64}', content.digest) is None):
+        raise IdentityEvidenceRejected('STOP: invalid full-content evidence')
+
+
+def _file_evidence(fd: int, mode: str) -> tuple[FileStatEvidence, ContentEvidence | None]:
+    if mode == 'FULL':
+        return _hash_file(fd)
+    if mode != 'METADATA_RENAME':
+        raise IdentityEvidenceRejected('STOP: unsupported identity capture mode')
+    before = _file_stat(os.fstat(fd))
+    _safe_file(before)
+    if before != _file_stat(os.fstat(fd)):
+        raise IdentityEvidenceReconciliationRequired('STOP: file changed during metadata observation')
+    return before, None
+
+
 def _frame(evidence: FileIdentityEvidence) -> bytes:
+    _validate_content(evidence)
     body = asdict(evidence)
+    if evidence.version == _VERSION:
+        body.pop('mode')
     raw = (_canonical({'evidence': body, 'sha256': _digest(body)}) + '\n').encode('utf-8')
     if len(raw) > _MAX_RECORD_BYTES:
         raise IdentityEvidenceRejected('STOP: evidence record exceeds scratch limit')
@@ -163,7 +205,11 @@ def _decode_frame(raw: bytes) -> FileIdentityEvidence:
         value = _strict_json_load(raw.decode('utf-8'))
         if type(value) is not dict or set(value) != {'evidence', 'sha256'}:
             raise ValueError('unknown or missing record fields')
-        evidence = _decode_type(FileIdentityEvidence, value['evidence'])
+        body = value['evidence']
+        if type(body) is dict and type(body.get('version')) is int and body['version'] == _VERSION and 'mode' not in body:
+            body = dict(body, mode='FULL')
+        evidence = _decode_type(FileIdentityEvidence, body)
+        _validate_content(evidence)
         if raw != _frame(evidence):
             raise ValueError('noncanonical bytes or checksum mismatch')
         return evidence
@@ -174,8 +220,8 @@ def _decode_frame(raw: bytes) -> FileIdentityEvidence:
 def _validate_record(evidence: FileIdentityEvidence, manifest: ExecutionManifest,
                      action: ManifestAction, index: int, manifest_sha256: str, *,
                      root: Path, root_identity: DirectoryIdentity, mount, mounts) -> None:
-    if (evidence.schema != _SCHEMA or evidence.version != _VERSION
-            or evidence.manifest_id != manifest.manifest_id or evidence.manifest_sha256 != manifest_sha256
+    _validate_content(evidence)
+    if (evidence.manifest_id != manifest.manifest_id or evidence.manifest_sha256 != manifest_sha256
             or evidence.action != action or evidence.action_index != index):
         raise IdentityEvidenceRejected('STOP: evidence version/manifest/action binding mismatch')
     binding = evidence.binding
@@ -187,13 +233,10 @@ def _validate_record(evidence: FileIdentityEvidence, manifest: ExecutionManifest
             or any(parent.st_dev != binding.root_identity.st_dev or parent.st_ino <= 0
                 for parent in (binding.source_parent, binding.target_parent))):
         raise IdentityEvidenceRejected('STOP: evidence scratch root/parent/mount binding mismatch')
-    value, content = evidence.filesystem, evidence.content
-    _safe_file(value)
+    value = evidence.filesystem
     if (value.st_dev != binding.root_identity.st_dev
-            or (value.size, value.mtime_ns) != (action.expected_size, action.expected_mtime_ns)
-            or content.algorithm != 'sha256' or content.coverage != 'FULL'
-            or content.bytes_hashed != value.size or re.fullmatch('[0-9a-f]{64}', content.digest) is None):
-        raise IdentityEvidenceRejected('STOP: invalid filesystem/full-content evidence')
+            or (value.size, value.mtime_ns) != (action.expected_size, action.expected_mtime_ns)):
+        raise IdentityEvidenceRejected('STOP: invalid filesystem evidence binding')
 
 
 def _current_parent(root: int, parts: tuple[str, ...], stack: ExitStack,
@@ -213,6 +256,8 @@ def _current_parent(root: int, parts: tuple[str, ...], stack: ExitStack,
 def _locator_comparison(locator: str, parent: int, evidence: FileIdentityEvidence | None,
                         stack: ExitStack, mount_id: int, pin_fd: int | None = None
                         ) -> tuple[LocatorComparison, int | None]:
+    if evidence is not None:
+        _validate_content(evidence)
     name = fs._locator(locator)[-1]
     try:
         info = os.stat(name, dir_fd=parent, follow_symlinks=False)
@@ -224,7 +269,7 @@ def _locator_comparison(locator: str, parent: int, evidence: FileIdentityEvidenc
     stack.enter_context(fs._held_evidence_fd(fd))
     if fs._mount_id(fd) != mount_id:
         raise IdentityEvidenceRejected('STOP: file mount crossing')
-    observed, content = _hash_file(fd)
+    observed, content = _file_evidence(fd, evidence.mode if evidence is not None else 'FULL')
     if current != observed or _file_stat(os.stat(name, dir_fd=parent, follow_symlinks=False)) != observed:
         raise IdentityEvidenceReconciliationRequired('STOP: locator changed during comparison')
     numeric, content_match, physical = 'UNKNOWN', 'UNKNOWN', 'UNKNOWN'
@@ -233,7 +278,8 @@ def _locator_comparison(locator: str, parent: int, evidence: FileIdentityEvidenc
         # Rename changes ctime; it detects mutations within a read, not across rename.
         attributes = ('st_dev', 'st_ino', 'size', 'mtime_ns', 'file_type', 'nlink', 'mode', 'uid', 'gid')
         numeric = 'MATCH' if all(getattr(observed, k) == getattr(expected, k) for k in attributes) else 'MISMATCH'
-        content_match = 'MATCH' if content == evidence.content else 'MISMATCH'
+        content_match = ('NOT_CHECKED' if evidence.mode == 'METADATA_RENAME'
+            else 'MATCH' if content == evidence.content else 'MISMATCH')
         if pin_fd is not None:
             pin = _file_stat(os.fstat(pin_fd))
             if (pin.st_dev, pin.st_ino) != (expected.st_dev, expected.st_ino):
@@ -284,6 +330,10 @@ class ScratchIdentitySession:
                 or os.getpid() != owner._pid or not index < len(owner._manifest.payload.actions)):
             raise IdentityEvidenceRejected('STOP: live sequential owner/index required')
         context = cls._allocate_context(filesystem, owns_filesystem=False, bound_index=index)
+        metadata_rename = owner._metadata_rename(index)
+        if type(metadata_rename) is not bool:
+            raise IdentityEvidenceRejected('STOP: explicit execution identity mode required')
+        context._identity_mode = 'METADATA_RENAME' if metadata_rename else 'FULL'
         context._execution_owner = owner
         context._evidence_path = owner.database_path.with_suffix(f'.identity-{index}.json')
         return context
@@ -299,6 +349,7 @@ class ScratchIdentitySession:
             session._resources.enter_context(filesystem)
         session._bound_index = bound_index
         session._execution_owner = None
+        session._identity_mode = 'FULL'
         session._pid = os.getpid()
         session._mutex = threading.Lock()
         session._attempted = session._closed = session._poisoned = session._durable = False
@@ -306,7 +357,7 @@ class ScratchIdentitySession:
         session._source_parent_fd = session._target_parent_fd = None
         session._artifact_fd = session._artifact_parent_fd = None
         session._captured_record = session._artifact_stat = None
-        session._mount = next(m for m in filesystem._mounts if m.mount_id == filesystem._mount_id)
+        session._mount = filesystem._check_media_mount(filesystem._root_fd)
         return session
 
     @property
@@ -332,6 +383,8 @@ class ScratchIdentitySession:
                         and not (action.action == 'KEEP' and self._execution_owner is not None
                             and self._execution_owner._identity_authorized(self, manifest, action, index)))):
                 raise IdentityEvidenceRejected('STOP: exact MOVE/QUARANTINE action/index required')
+            if self._execution_owner is not None:
+                return self._execution_owner._manifest_sha256
             return hashlib.sha256(manifest_to_json(manifest).encode('utf-8')).hexdigest()
         except (ValueError, TypeError, AttributeError) as exc:
             if isinstance(exc, IdentityEvidenceRejected):
@@ -386,7 +439,7 @@ class ScratchIdentitySession:
             try:
                 envelope = self._bind(manifest, action, action_index)
                 with self._filesystem.observe(manifest, action) as observation:
-                    before, content = _hash_file(observation._source_fd)
+                    before, content = _file_evidence(observation._source_fd, self._identity_mode)
                     observation._check(self._filesystem, manifest, action)
                     pin = os.dup(observation._source_fd)
                     self._resources.enter_context(fs._held_evidence_fd(pin))
@@ -396,9 +449,11 @@ class ScratchIdentitySession:
                         parent_pin = os.dup(held)
                         self._resources.enter_context(fs._held_evidence_fd(parent_pin))
                         setattr(self, attribute, parent_pin)
-                    evidence = FileIdentityEvidence(_SCHEMA, _VERSION, manifest.manifest_id, envelope,
+                    evidence = FileIdentityEvidence(_SCHEMA,
+                        _METADATA_VERSION if self._identity_mode == 'METADATA_RENAME' else _VERSION,
+                        manifest.manifest_id, envelope,
                         action_index, action, self._binding(observation._source_parent, observation._target_parent),
-                        before, content)
+                        before, content, self._identity_mode)
                     self._validate_record(evidence, manifest, action, action_index, envelope)
                     raw = _frame(evidence)
                     with ExitStack() as stack:
@@ -418,7 +473,7 @@ class ScratchIdentitySession:
                         info = self._check_artifact(fd, parent)
                         if info.st_size != len(raw) or os.pread(fd, _MAX_RECORD_BYTES + 1, 0) != raw:
                             raise IdentityEvidenceReconciliationRequired('STOP: evidence changed during persistence')
-                        after, repeated = _hash_file(observation._source_fd)
+                        after, repeated = _file_evidence(observation._source_fd, self._identity_mode)
                         if (before, content) != (after, repeated):
                             raise IdentityEvidenceReconciliationRequired('STOP: source changed after evidence persistence')
                         observation._check(self._filesystem, manifest, action)
@@ -429,7 +484,7 @@ class ScratchIdentitySession:
                         if (before != _file_stat(os.fstat(observation._source_fd))
                                 or _file_stat(info) != _file_stat(self._check_artifact(fd, parent))
                                 or os.pread(fd, _MAX_RECORD_BYTES + 1, 0) != raw):
-                            raise IdentityEvidenceReconciliationRequired('STOP: source/evidence changed after final hash')
+                            raise IdentityEvidenceReconciliationRequired('STOP: source/evidence changed after final observation')
                         # Independent read-only open: duplicating the writer fd
                         # would retain its exclusive flock and block later loads.
                         artifact_pin = os.open(self.evidence_path.name, fs._FILE, dir_fd=parent)
@@ -509,7 +564,7 @@ class ScratchIdentitySession:
                 or fs._mount_id(root) != self._filesystem._mount_id
                 or fs._read_mounts() != self._filesystem._mounts):
             raise IdentityEvidenceRejected('STOP: original root/mount binding unavailable')
-        fs._check_mounts(self.root, root, self._filesystem._mounts)
+        self._filesystem._check_media_mount(root)
         return root
 
     def _current_parent(self, root: int, parts: tuple[str, ...], stack: ExitStack,
@@ -542,7 +597,7 @@ class ScratchIdentitySession:
                             raise IdentityEvidenceRejected('STOP: live parent pin binding changed')
                     source, source_fd = self._locator_comparison(action.source, source_parent, evidence, stack)
                     target, target_fd = self._locator_comparison(action.target, target_parent, evidence, stack)
-                    # A hash/absence observation can become stale before the other read.
+                    # The first locator observation can become stale during the second.
                     for observed, fd, parent in ((source, source_fd, source_parent), (target, target_fd, target_parent)):
                         name = fs._locator(observed.locator)[-1]
                         if fd is None:
@@ -566,9 +621,15 @@ class ScratchIdentitySession:
                         outcome, diagnostics = 'MISMATCH', ('STOP: observed file contradicts identity evidence',)
                     elif current.physical_identity_match == current.filesystem_match == current.content_match == 'MATCH':
                         outcome, diagnostics = 'MATCH', ('live held inode and full content match; no execution authority',)
+                    elif (evidence.mode == 'METADATA_RENAME'
+                            and current.physical_identity_match == current.filesystem_match == 'MATCH'
+                            and current.content_match == 'NOT_CHECKED'):
+                        outcome, diagnostics = 'METADATA_MATCH', ('live held inode and metadata match; content not checked',)
                     else:
-                        diagnostics = ('STOP: content equality cannot prove original inode after live evidence loss',)
-                if outcome != 'MATCH':
+                        diagnostics = (('STOP: metadata equality cannot prove original inode after live evidence loss'
+                            if evidence.mode == 'METADATA_RENAME' else
+                            'STOP: content equality cannot prove original inode after live evidence loss'),)
+                if outcome not in {'MATCH', 'METADATA_MATCH'}:
                     self._poisoned = self._filesystem._poisoned = True
                 return IdentityComparison(outcome, source, target, diagnostics)
             except (KeyboardInterrupt, SystemExit) as exc:

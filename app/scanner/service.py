@@ -54,6 +54,7 @@ from app.video_variants import (
     assign_video_catalog_title,
     reconcile_video_catalog_title,
 )
+from app.target_planner import import_namespace
 if TYPE_CHECKING:
     from app.target_execution_manifest import ExecutionManifest
     from app.target_execution_guard import NormalOperation
@@ -97,6 +98,7 @@ def iter_videos(root: Path):
         directories[:] = sorted(
             d for d in directories
             if d.casefold() not in IGNORED_DIRECTORIES and not d.startswith(".")
+            and not import_namespace((Path(current) / d).relative_to(root).as_posix())
         )
         for filename in sorted(files):
             path = Path(current) / filename
@@ -114,6 +116,7 @@ def iter_external_subtitles(root: Path):
         directories[:] = sorted(
             d for d in directories
             if d.casefold() not in IGNORED_DIRECTORIES and not d.startswith(".")
+            and not import_namespace((Path(current) / d).relative_to(root).as_posix())
         )
         for filename in sorted(files):
             path = Path(current) / filename
@@ -419,6 +422,12 @@ def _scan_library(
     normal_operation: NormalOperation | None = None,
 ) -> ScanResult:
     root = root.absolute()
+    # Existing staging rows require an explicit decision. Hiding their files
+    # from discovery must never turn into ordinary missing-file deletion.
+    with session.no_autoflush:
+        for model in (Video, ExternalSubtitle, UnresolvedExternalSubtitle):
+            if any(import_namespace(path) for path in session.scalars(select(model.relative_path))):
+                raise LibrarySafetyError('IMPORT catalog records require explicit review before scanning.')
     result = ScanResult()
     last_successful_file: str | None = None
     try:
@@ -835,6 +844,7 @@ def scan_library(
     library_access_timeout_seconds: float = 10,
     library_healthcheck_interval_files: int = 25,
     execution_manifest: ExecutionManifest | None = None,
+    execution_cleanup=None,
 ) -> ScanResult:
     if execution_manifest is not None:
         from .execution_rescan import require_unstarted_execution_session
@@ -879,7 +889,13 @@ def scan_library(
                     try:
                         if require_mount and not is_on_mounted_source(root):
                             raise ValueError("execution library is not on a mounted source")
-                        count = verify_execution_rescan(session, root, execution_manifest or scanning_manifest)
+                        cleanup = execution_cleanup
+                        if scanning_manifest is not None:
+                            from app.target_execution_guard import _database_path, _guard_state, _cleanup_from_guard
+                            database = _database_path(session)
+                            with _guard_state(database) as (_, _, _, raw):
+                                cleanup = _cleanup_from_guard(database, scanning_manifest, raw)
+                        count = verify_execution_rescan(session, root, execution_manifest or scanning_manifest, cleanup=cleanup)
                     except (ValueError, TypeError, OSError) as exc:
                         raise LibrarySafetyError(f"Execution rescan STOP: {exc}") from exc
                     session.rollback()  # End the read transaction without a write lifecycle.

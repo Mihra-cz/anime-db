@@ -13,7 +13,7 @@ import stat
 from .physical_naming_components import (
     collision_keys, component_preview, evaluate_windows_path_budget,
 )
-from .target_planner import project_targets, relative_locator_safe, root_targets, source_collection, technical_root
+from .target_planner import project_targets, relative_locator_safe, root_targets, source_collection, technical_root, import_namespace
 from .target_planner_types import (
     FilesystemEntry, FilesystemSnapshot, PlanRecord, PlannerContext, SideAssetAccounting,
     TargetCollision, TargetPlan,
@@ -43,7 +43,7 @@ def validate_inventory_root(root: Path) -> Path:
     return root
 
 
-def inventory_filesystem(root: Path) -> FilesystemSnapshot:
+def inventory_filesystem(root: Path, *, hash_archives: bool = True) -> FilesystemSnapshot:
     """Exactly one traversal, lstat semantics, no links or recycle-bin descent.
 
     Only source archive files are read for byte-identical-copy evidence. Videos,
@@ -76,14 +76,14 @@ def inventory_filesystem(root: Path) -> FilesystemSnapshot:
                 if stat.S_ISDIR(info.st_mode):
                     # lstat identifies the directory, with no descent, listing
                     # or ACL bypass inside the Synology system lane.
-                    if child.name.casefold() == '#recycle':
+                    if child.name.casefold() == '#recycle' or import_namespace(rel):
                         entries.append(FilesystemEntry(rel, 'system_excluded'))
                         continue
                     entries.append(FilesystemEntry(rel, 'directory', mtime_ns=info.st_mtime_ns))
                     walk(Path(child.path))
                 elif stat.S_ISREG(info.st_mode):
                     digest = None
-                    if Path(child.name).suffix.lower() in _ARCHIVES and technical_root(rel) != 'Subs':
+                    if hash_archives and Path(child.name).suffix.lower() in _ARCHIVES and technical_root(rel) != 'Subs':
                         # O_NOFOLLOW also protects a leaf swapped after lstat.
                         # FileIO owns allocation and cleanup on constructor failure.
                         with io.open(child.path, 'rb', opener=lambda path, _flags:
@@ -339,7 +339,8 @@ def plan_library(context: PlannerContext, snapshot: FilesystemSnapshot | None = 
     diagnostics = list(snapshot.diagnostics if snapshot else ('filesystem_not_checked',))
     excluded = tuple(e.relative_path for e in snapshot.entries if e.kind == 'system_excluded') if snapshot else ()
     def system_excluded(path):
-        return (any(collision_keys(p).fold_key == '#recycle' for p in PurePosixPath(path).parts[:-1])
+        return (import_namespace(path)
+            or any(collision_keys(p).fold_key == '#recycle' for p in PurePosixPath(path).parts[:-1])
             or any(path == p or path.startswith(p + '/') for p in excluded))
     if snapshot:
         records.extend(_extra_records(context, snapshot, records))

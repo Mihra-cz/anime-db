@@ -14,7 +14,7 @@ import sqlite3
 from typing import get_args, get_origin, get_type_hints
 import types
 
-from .target_planner import project_container_locators, relative_locator_safe
+from .target_planner import project_container_locators, relative_locator_safe, import_namespace
 from .target_planner_filesystem import plan_library, validate_inventory_root
 from .target_planner_post_state import simulate_post_state, verify_post_state
 from .target_planner_types import (
@@ -586,6 +586,8 @@ def _validate_manifest(manifest: ExecutionManifest) -> None:
             raise ValueError('invalid action or criticality')
         if not relative_locator_safe(a.source) or not relative_locator_safe(a.target):
             raise ValueError('unsafe action locator')
+        if import_namespace(a.source) or import_namespace(a.target):
+            raise ValueError('IMPORT is outside V6 reorganization authority')
         if any(part.casefold() == '#recycle' for part in PurePosixPath(a.source).parts + PurePosixPath(a.target).parts):
             raise ValueError('system excluded action')
         if a.expected_size < 0 or a.expected_mtime_ns < 0 or not a.criticality_reason:
@@ -601,6 +603,8 @@ def _validate_manifest(manifest: ExecutionManifest) -> None:
         if any(dependency not in action_ids for dependency in a.depends_on):
             raise ValueError('unknown action dependency')
     expected_dirs = {str(parent) for a in p.actions for parent in PurePosixPath(a.target).parents if str(parent) != '.'}
+    if any(import_namespace(path) for path in p.directories):
+        raise ValueError('IMPORT cannot be a planned reorganization directory')
     if p.directories != tuple(sorted(expected_dirs, key=lambda path:(len(PurePosixPath(path).parts), path))):
         raise ValueError('directory dependency mismatch')
     approved_fields = {
@@ -613,6 +617,8 @@ def _validate_manifest(manifest: ExecutionManifest) -> None:
     for patch in p.locator_patches:
         if patch.field not in approved_fields.get(patch.object_kind, ()):
             raise ValueError('unapproved locator field')
+        if import_namespace(patch.before) or import_namespace(patch.after):
+            raise ValueError('IMPORT locators require explicit review outside V6 reorganization')
         historical_root_dot = (patch.object_kind == 'video' and patch.field == 'root_folder'
             and patch.before == '.')
         if (not (relative_locator_safe(patch.before) or historical_root_dot)

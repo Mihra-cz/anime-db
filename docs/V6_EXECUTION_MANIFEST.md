@@ -2,8 +2,11 @@
 
 [Manifest foundation](../app/target_execution_manifest.py) zachycuje jeden fresh
 Target Planner result. Workflow končí `GENERATE → REVIEW → PREFLIGHT →
-READY_FOR_EXECUTION`. Produkční filesystem executor, DB reconciliation,
-rollback/recovery ani purge nejsou implementované.
+READY_FOR_EXECUTION`. Samostatný administrativní E7 vstup nad tímto manifestem
+je popsaný v [produkčním kontraktu](V6_PRODUCTION_REORGANIZATION.md).
+Běžná reorganizace používá [METADATA_RENAME](#e7-metadata_rename-a-životnost-deskriptorů)
+bez čtení obsahu videí; starší popisy obsahových E3/E7 checkpointů níže patří
+FULL/legacy režimu. Automatický rollback/recovery ani purge nejsou implementované.
 
 ## Immutable approval boundary
 
@@ -1611,6 +1614,100 @@ znovu před commitem. Neversionovaný NORMAL startup se odmítá před legacy
 rekonstrukcí hierarchy; běžné versioned compatibility migrace dál drží E6B.
 Produkční NAS, post-cleanup uzavření a obecná reconciliation zůstávají mimo scope.
 
+## Produkční vstup pro existující knihovnu
+
+`ScratchManifestExecution.open_existing(root, database_path=..., share=...,
+share_root='/')` rozšiřuje stejný E7 owner; veřejné single-action scratch
+primitives ani scratch CIFS allowlist se nemění. Existující lokální v9 SQLite
+se otevírá bez create/migrace, s kontrolou headeru/sidecarů, integrity/FK,
+fingerprintu, úplné projekce a držené identity. Exact canonical SHA-256 approval,
+warning acknowledgements a fresh úplný preflight jsou povinné.
+
+`app.tools.reorganize` skládá existující deployment runtime lock, E6B, E7,
+schválený E7H cleanup a dokončení NORMAL. Cleanup evidence má původní formát;
+její hash je navázaný do SCANNING guardu. Přesný odstraněný directory-only delta
+se ověří samostatně a původní `expected_post_hash` se kontroluje po čistě
+in-memory rekonstrukci odstraněných adresářů. Manifest se nepřesealuje.
+
+Produkční E6B binding a guard používají verzi 2 s explicitním server/share
+a filesystem podstromem; verze 1 zůstává podporovaná pro původní scratch.
+Historie identity se ověřuje proti původnímu execution root bindingu.
+Po NORMAL smí oddělený RO mount používat jiné dev/inode/mount ID, musí však
+prokázat stejný schválený server/share/podstrom. Neplatná nebo chybějící evidence
+znamená STOP. Rootový IMPORT je mimo reorganizaci a zůstává trvale chráněný;
+E7H chrání rovněž Duplicates včetně podstromu. DELETE ani V7 Import nevznikají.
+
+Podrobný [provozní kontrakt](V6_PRODUCTION_REORGANIZATION.md) popisuje existující
+Nexus instalaci, RO/RW izolaci, schvalování, povinné externí gates a STOP.
+Lokální implementace není autorizace skutečné NAS execution.
+
+### E7 METADATA_RENAME a životnost deskriptorů
+
+Běžná reorganizace E7 používá `METADATA_RENAME`: mění jména a cesty na jednom
+share a nečte payload videí při admission, MOVE/KEEP/QUARANTINE, cleanupu ani
+NORMAL. Nejde o obsahový audit. Schválený canonical manifest, warning
+acknowledgements, fresh preflight, writer exclusion, DB backup a snapshot
+zůstávají povinné. `RENAME_NOREPLACE`, nofollow, file/directory fsync, E1,
+locator-only transakce a STOP bez retry/rollbacku se nemění.
+
+E3 identity evidence v2 má explicitní `mode: METADATA_RENAME` a `content: null`.
+Není v ní náhradní digest, coverage FULL ani tvrzení o přečtených bajtech.
+Porovnání vrací `METADATA_MATCH` a obsah `NOT_CHECKED`; není to obsahový MATCH.
+Původní E3 v1 FULL zůstává čitelná v původních canonical bytes. Neznámá verze,
+režim nebo kombinace metadata režimu s content proof se odmítá. Samostatné
+E3/E6 diagnostiky nadále používají FULL a zachovávají UNKNOWN po ztrátě pinu.
+
+Volitelné `verify_content=(SOURCE_RELATIVE_PATH, ...)` v existujícím E7 vybere
+konkrétní schválené zdroje pro FULL; worker nabízí opakovatelné `--verify-content`.
+Nevybrané soubory zůstávají metadata-only. Každý artefakt pravdivě ukládá svůj
+vlastní režim. Neexistující nebo duplicitní výběr je STOP před fyzickými zásahy.
+SHA manifestu, journalu, řídicí evidence a lokální DB nadále znamená skutečně
+spočítaný checksum těchto objektů, nikoliv SHA mediálního obsahu.
+
+Admission ověří SOURCE a zachytí dev/inode, size, mtime, ctime, mode, UID/GID
+s nlink. FD zavře. Aktivní akce drží skutečný source inode a parent FD přes
+rename, fsync, ověření TARGET a COMPLETE. Po COMPLETE se zavřou; další kontrolní
+body otevírají cíle nofollow proti zachyceným identitám. Po jejich uvolnění se
+netvrdí nepřerušená inode provenance. Shoda stat sama nedokazuje obsahovou shodu;
+přepis se stejnými všemi sledovanými metadaty může zůstat neodhalený. Snapshot
+ani úspěšný rename tento chybějící obsahový důkaz nedoplňují.
+
+E7 mezi úplnými kontrolními body ověřuje aktivní akci, bezprostředního
+předchůdce a jejich adresářové vazby, nikoliv stále celý hotový prefix. Před
+finálními container locator patches znovu ověří všechny soubory. Lokální E1
+checkpoint ověřuje PID, původního
+writera, dev/inode/ctime a poslední fsynced frame; na hranicích celého workflow
+se znovu parsuje úplná canonical historie. E7F/E7H používají stejný princip
+pro své existující artefakty. Řídicí úložiště musí být lokální, pod správným
+UID a ve výlučném vlastnictví workeru. Změny v nedotčených cestách se mohou
+odhalit až na následujícím úplném metadata checkpointu; neznamená to povolení
+souběžných writerů. Při rmdir se vždy bezprostředně ověří konkrétní leaf/parent,
+identita a prázdnost; není možné odstranit soubor ani rekurzivně vymazat obsah.
+
+E7H v2 ukládá `mode: METADATA_RENAME`, metadata snapshoty a pro nehashované
+regular soubory `content_sha256: null`. Výslovně vybrané FULL soubory mají
+skutečný digest. VERIFIED potvrzuje pouze schválený directory delta s přesným
+`parent_after` a `delta_sha256`, nikoliv nový obsahový audit celé knihovny.
+Reader z delta historie zrekonstruuje finální snapshot a nezávisle ověří
+skutečný post-cleanup stav. Původní E7H v1 FULL historie zůstává podporovaná.
+Původní manifest ani `expected_post_hash` se nemění: jde o DB/filesystem
+projekci, odstraněné directory entries se pro její ověření doplní jen v paměti.
+
+E7 SQLite drží R0 a jednu průběžnou projekci indexovanou PK, ne všechny plné
+R0…Rn kopie. Každý UPDATE má původní ID/before podmínky; SQLite authorizer
+povoluje jen právě schválené locator sloupce a zakazuje trigger writes, DDL
+a další semantic writes. Mezi úplnými branami se ověřují dotčené rows,
+transaction/total_changes, data_version, schema/user_version a přesný lokální
+stat checkpoint. Každý commit má nezávislé čtení dotčených rows; před dokončením
+se ověří všechny rows/schema a původní post hash. Raw externí DB writery
+advisory lock neblokuje; provozní výluka všech writerů je stále nezbytná.
+
+FD se nehromadí s počtem videí ani sibling adresářů. Rmdir leaf/parent zůstává
+otevřený až přes fsync a `nlink == 0`. Rootový IMPORT a #recycle mají stálé
+O_PATH piny bez průchodu obsahem. Jejich mtime/ctime/size/nlink nejsou obsahem
+reorganizace, ale existence, typ, dev/inode, mode, UID/GID a alias se kontrolují.
+IMPORT a Duplicates zůstávají chráněné. SQLite schema v9 se nemění.
+
 ## Externí pre-execution gates
 
 Read-only preflight vrací `READY_FOR_EXECUTION`, `NOT_READY`, `STALE` nebo `ERROR`.
@@ -1692,7 +1789,8 @@ Jiný validní root vrací `NOT_READY/windows_root_mismatch`, vynechaný argumen
 CLI report uvádí sealed `windows_root`; manifest se při dry-run nemění.
 
 Tento ingress nevytváří production artifacts, snapshot ani backup a neprovádí
-remount nebo probes. Executor stále neexistuje; NAS execution není autorizovaná.
+remount nebo probes. Sám nespouští execution; používá jej také samostatný
+produkční E7 vstup popsaný výše. Skutečná NAS execution není autorizovaná.
 Operational runbook vytvořený pro starší HEAD vyžaduje po změně CLI revalidation
 proti novému committed HEAD před jakoukoli budoucí write authorization.
 
@@ -1704,7 +1802,7 @@ v scanner create/update lifecycle zůstává P2C debt. Completeness UI je pendin
 `#recycle` je SYSTEM_EXCLUDED mimo aktivní knihovnu: bez traversal, čtení obsahu,
 manifest action, recovery nebo oprávnění. DB-known locator uvnitř zůstává
 explicitní missing active asset (`source_missing_or_not_regular`), ne recovery
-authority. Technical roots `Subs`/`Duplicates`/`#recycle` nejsou anime owner
+authority. Technical roots `Subs`/`Duplicates`/`#recycle`/`IMPORT` nejsou anime owner
 locator authority.
 
 ## Read-only a verification boundary

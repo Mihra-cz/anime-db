@@ -212,10 +212,13 @@ fresh parity a final verification používají stejný sealed kontext. V1 zůst�
 historicky čitelný bez nové execution authority; v1 ani nesvázaný v2 kontext
 nemohou získat produkční readiness. Nexus je připravené cílové prostředí,
 nikoli automaticky autorizovaný executor.
-Produkční mount capability je neověřená; produkční globální lock/maintenance boundary,
-produkční executor/DB reconciliation, automatické resume, obecný/produkční
-a automatický rollback, crash recovery a NAS cleanup zůstávají samostatnou
-budoucí prací.
+Explicitní produkční vstup nyní používá stejné E7 nad existující SQLite/knihovnou,
+fresh preflight, runtime/E6B výluku a schválený E7H cleanup před NORMAL.
+Chrání IMPORT/Duplicates a podporuje oddělený RW worker a RO běžnou aplikaci;
+podrobnosti jsou v [provozním kontraktu](V6_PRODUCTION_REORGANIZATION.md).
+Nezávislé review, skutečný Nexus deployment/capability a produkční execution
+zůstávají neověřené. Automatické resume, obecný/produkční a automatický rollback
+ani crash recovery nejsou implementované.
 P2C authoritative context resolution a inkrementální scanner routing jsou
 odložené; první omezený řez P2C je implementovaný. Fyzický rename
 ani move na NAS zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
@@ -376,9 +379,11 @@ identity. R1/R2 jsou úplné projekce z ověřeného R0 a sealed locator patches
 finální expected_post_hash se vyžaduje až u R2. Selhání B nevrací dokončenou A.
 Veřejná jednoakční API ani E4A/E5B recovery rozsah se nerozšiřují.
 
-V6 zůstává **Probíhá**. Produkční executor, globální execution lock,
-maintenance boundary, produkční DB reconciliation, automatické resume, obecný/produkční
-a automatický rollback, crash recovery a NAS physical execution nejsou implementované.
+V6 zůstává **Probíhá**. Produkční vstup rozšiřuje současné E7 a E6B; nevzniká
+druhý executor ani recovery framework. Vyžaduje schválení a doložení všech
+externích výluk, aktuálního deploymentu a ochranných kopií. Skutečná NAS physical
+execution, automatické resume, obecný/produkční a automatický rollback ani crash
+recovery nejsou ověřené či implementované podle svého scope.
 Scratch testy nejsou důkazem produkční capability: ARM64/RPi5 není provozně
 ověřené, NAS filesystem rename capability není ověřená a power-loss durability
 produkčního úložiště není potvrzená. Scratch limit 8 MiB není produkční limit;
@@ -452,7 +457,13 @@ hádání identity při kopírování. Import není implementován.
 
 - Cíl: bezpečně zpracovat neuspořádané zdroje z PC, archivy, zálohy, obnovy HDD,
   opakované downloady, různé encody/repacky/remuxy, poškozená videa a samostatné titulky.
-- Před jakýmkoliv kopírováním provést preflight **celého importního batche**:
+- Uživatel ukládá incoming soubory přímo na Synology do trvale chráněného
+  `Anime/IMPORT`. AnimeDB/Nexus nezprostředkovávají upload ani kopírování.
+  Import analyzuje pouze tento scope přes RO účet, používá společné komponenty
+  a Review; po potvrzení dokončeného kopírování a fyzického plánu worker provede
+  MOVE v jednom RW mountu stejného share. Aktualizuje dotčené záznamy bez
+  automatického full scanu; kořen IMPORT se nikdy neodstraňuje.
+- Před zařazením provést preflight **celého importního batche**:
   inventura → hash/technická analýza → porovnání s katalogem → návrh identit,
   duplicit/náhrad a subtitle vazeb → kompletní plán a preview → rozhodnutí uživatele.
 - Shoda spolehlivého hashe celého souboru je důkaz exact duplicate s bezpečným
@@ -464,6 +475,14 @@ hádání identity při kopírování. Import není implementován.
   návratu. Replacement nejprve ověří incoming soubor i novou kopii; teprve poté
   lze samostatně nabídnout odstranění původní verze. Funkční kopie se nemaže předem.
 - Přesuny, přejmenování a mazání vždy vyžadují explicitní potvrzení.
+- **Řízené odstranění schválených duplicit z `Anime/Duplicates`** musí pokrýt
+  kopie vzniklé původní V6 reorganizací, pozdějšími V7 importy i dalšími
+  potvrzenými deduplikačními operacemi. Uživatel vybere konkrétní fyzické kopie;
+  workflow ověří zachovávaný PRIMARY, identity a související titulky, získá
+  explicitní schválení a provede bezpečné odstranění s aktualizací SQLite
+  a trvalou evidencí. Duplicate relation sama není delete authority. Různé
+  encody a legitimní varianty lze ponechat; kořen Duplicates zůstává chráněný
+  i po vyprázdnění. Ve V6 se fyzické mazání duplicit neimplementuje.
 
 Současný Video model nemá persistentní file hash a scanner hashing neprovádí;
 existující duplicate relation proto není sama důkazem bitové shody pro import.

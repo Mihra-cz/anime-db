@@ -91,8 +91,7 @@ def test_separate_database_and_library_complete_normal(tmp_path, monkeypatch):
             assert [e.state for e in load_journal(owner.journal_path, manifest).entries] == [
                 'PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE']
             record = _decode_frame(owner.evidence_paths[0].read_bytes())
-            with target.open('rb') as stream:
-                assert hashlib.file_digest(stream, 'sha256').hexdigest() == record.content.digest
+            assert (record.version, record.mode, record.content) == (2, 'METADATA_RENAME', None)
             assert record.filesystem.st_ino == info.st_ino
             marker = path.with_name(path.name + '.execution-guard.json')
             held = marker.with_name(marker.name + '.held')

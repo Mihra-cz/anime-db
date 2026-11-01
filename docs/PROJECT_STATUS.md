@@ -399,8 +399,9 @@ Neexistuje automatická detekce podle canonical filename.
 Crash window MOVE → dosud necommitnuté locator patches vyžaduje persistentní
 výluku ordinary scanneru; basename divergence samotná nestačí. Scratch E7 je
 chráněný [P2C-R3 guardem](V6_EXECUTION_MANIFEST.md#p2c-r3-persistentní-stop-pro-ordinary-scanner).
-Produkční executor a jeho durable admission/storage napojení stále neexistují;
-produkční writery musí zůstat zastavené až do samostatně ověřeného uzavření.
+Samotný R3 marker neposkytuje produkční execution authority. Explicitní E7
+produkční vstup je popsaný níže; produkční writery musí zůstat zastavené až
+do samostatně ověřeného uzavření.
 
 Scratch-only P2C-R2 nabízí volitelné
 `ScratchManifestExecution.execute(..., completion_rescan=True)`. Po dokončení
@@ -408,7 +409,9 @@ všech původních E7G actions, ještě v původním PID/thread owneru pod výhr
 lease a před close, interní bridge ověří přesný sealed envelope, živého E1 writera
 s úplnou acknowledged historií všech PENDING → FS_APPLIED → FS_VERIFIED →
 DB_RECONCILED → COMPLETE, finální committed Rn včetně rows/schema a původního
-expected post hash, všechny původní identity/content pins a carried evidence.
+expected post hash, původní identity artefakty, metadata a carried evidence.
+Obsah se ověřuje pouze u výslovně zvolených FULL souborů; běžný E7 používá
+níže popsaný METADATA_RENAME.
 Nezávislá SQLite `mode=ro` Session provede původní P2C-R1 rescan. Stejné živé
 kontroly se opakují po čtení, před přijetím výsledku. Není přidán nový journal
 ani execution lifecycle. Výsledek `completion_rescan_result` je jen diagnostika
@@ -451,7 +454,7 @@ zůstává otevřené.
 První funkční integrace běžného scanneru používá explicitní scratch-only
 `ScratchManifestExecution.execute(..., resume_scanning=True)`. Před přechodem
 provede původní živé E7/R2 kontroly včetně acknowledged COMPLETE journalu,
-committed DB projekce a fyzických identity/content pins. Do stávajícího guardu
+committed DB projekce a fyzických inode/metadatových vazeb. Do stávajícího guardu
 připojí stav SCANNING s immutable manifestem a přesnými target inode vazbami;
 původní STOP záznam ani journal nemaže. Volba se nekombinuje s cleanupem.
 Neúplný/poškozený přechod, chybějící či nahrazený známý target, obnovený SOURCE
@@ -662,7 +665,14 @@ mount. Formáty evidence se nemění. Trvalost volí caller umístěním adresá
 Limit velikosti souboru 8 MiB je odstraněn; plný SHA-256 nadále čte bloky po
 64 KiB se stability kontrolami. Přesun používá stejný no-replace rename na jednom
 filesystemu, bez copy fallbacku. Původní mount allowlist a ostatní preflight
-podmínky zůstávají; opakované plné hashování videí vyžaduje výkonnostní posouzení.
+podmínky zůstávají. Běžný E7 nyní používá
+[METADATA_RENAME](V6_EXECUTION_MANIFEST.md#e7-metadata_rename-a-životnost-deskriptorů):
+nečte payload videí a E3 v2/E7H v2 výslovně uvádí neprovedené obsahové ověření.
+Původní FULL evidence je čitelná a cílené FULL ověření je volitelné. FD se
+uvolňují po COMPLETE; průběžné kontroly se týkají aktivních cest, úplné metadata
+brány zůstávají na hranicích workflow. SQLite drží jednu průběžnou projekci
+s přesnými locator delty místo všech plných prefixů. Obsahová shoda videí se
+v běžném režimu neprokazuje; writer exclusion, backup a snapshot jsou povinné.
 Lokální funkční test je [test_v6_local_library.py](../tests/test_v6_local_library.py);
 spouští se s `ANIMEDB_LOCAL_TEST_PARENT=/absolutni/trvaly/adresar` a ponechá
 unikátní knihovnu i evidenci pro inspekci. Bez této explicitní volby se vynechá.
@@ -671,13 +681,32 @@ volitelně s `ANIMEDB_SPLIT_TEST_PARENT` pro zachování lokálních dat. Test d
 nezávislých adresářů není důkazem skutečně odlišných zařízení. Historické E5A/E5B
 single-action diagnostiky a ruční rollback zůstávají ve svém původním sousedním
 scope; nejde o recovery API pro oddělenou E7 knihovnu.
-Před prvním řízeným NAS použitím stále chybí schválený production ingress,
-prokázaná no-replace rename/fsync capability konkrétního mountu, globální výluka
-všech skutečných writerů, aktuální záloha/snapshot a provozní postup pro STOP
-při ztrátě evidence nebo přerušení. Lokální test tyto podmínky nenahrazuje.
-Produkční executor, globální execution lock, produkční maintenance boundary,
-produkční DB reconciliation, automatické resume, rollback, crash recovery a NAS physical
-execution nejsou implementované. **NOT AUTHORIZED FOR NAS EXECUTION.**
+Explicitní [produkční vstup do stejného E7](V6_PRODUCTION_REORGANIZATION.md)
+otevírá existující knihovnu a lokální SQLite v9, vyžaduje approval přesných
+canonical manifest bytes a fresh preflight a používá stávající runtime lock
+a E6B výluku. Běžná aplikace má RO přístup `anime_scan`; administrativní worker
+používá izolovaný RW mount `anime_import`, bez copy fallbacku. State/media
+kontroly jsou oddělené a scratch CIFS allowlist se nemění.
+
+Rootový IMPORT je rezervovaný, scanner/inventory jej neprocházejí a reorganizace
+jej nepřijímá jako SOURCE/TARGET ani cleanup kandidáta. Již evidované IMPORT
+locators vyžadují explicitní review místo SQL missing cleanupu. D04 QUARANTINE
+zachovává potvrzené duplicate secondary i ID v Duplicates; directory cleanup
+chrání IMPORT, Duplicates, Subs a systémové namespaces i při prázdném obsahu.
+
+E7H se provede po ověření původního post-state a před SCANNING → NORMAL.
+Completion ověří původní E7F/E1 a cleanup chain, přesný directory-only delta,
+finální DB i skutečný filesystem. Odstraněné directory entries doplní jen
+v paměti pro původní post hash; manifest se nepřesealuje. Guard uchovává hash
+cleanup evidence. NORMAL ověřuje historické pins vůči execution bindingu
+a současný RO mount vůči stejnému server/share/podstromu, nikoli shodu živého
+dev/inode dvou nezávislých pohledů.
+
+Zbývá nezávislé review, read-only ověření skutečně běžícího Nexus deploymentu,
+řízená aktualizace kompatibilního image, doložení serverových ACL a výluky všech
+writerů, capability konkrétního CIFS mountu a aktuální backup/snapshot. Lokální
+testy tyto podmínky nenahrazují. Automatické resume, rollback a crash recovery
+nejsou implementované. **NOT AUTHORIZED FOR NAS EXECUTION.**
 
 Otevřené INFO-1 (možný fd leak při selhání `os.fdopen` po `os.dup` v E1)
 a INFO-2 (možné zavření recyklovaného čísla fd v jednom regresním testu)
