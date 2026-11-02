@@ -77,6 +77,103 @@ def case(tmp_path):
         yield session, *prepare(session)
 
 
+def test_nested_read_checkpoint_bounds_mount_reads_and_root_reopens(case, monkeypatch):
+    fs = api()
+    session, _, _, _ = case
+    mounts, opened = [], []
+    real_mounts, real_open = fs._read_mounts, fs._open_absolute
+
+    def read_mounts():
+        mounts.append(True)
+        return real_mounts()
+
+    def open_absolute(path):
+        opened.append(path)
+        return real_open(path)
+
+    monkeypatch.setattr(fs, '_read_mounts', read_mounts)
+    monkeypatch.setattr(fs, '_open_absolute', open_absolute)
+    before_fds = len(os.listdir('/proc/self/fd'))
+    with session._checkpoint():
+        for _ in range(30):
+            with session._checkpoint():
+                session._check_root()
+    assert len(mounts) == 2
+    assert opened == [session.root, session.root]
+    assert len(os.listdir('/proc/self/fd')) == before_fds
+
+
+@pytest.mark.parametrize('change', ['nested_mount', 'bind_root', 'bind_subtree'])
+def test_checkpoint_refreshes_mounts_after_observation_before_rename(case, monkeypatch, change):
+    fs = api()
+    session, manifest, source, target = case
+    records = fs._read_mounts()
+    current = next(m for m in records if m.mount_id == fs._mount_id(session._root_fd))
+    storage = current.fs_root / session.root.relative_to(current.point).as_posix()
+    extra = replace(current, mount_id=max(m.mount_id for m in records)+1,
+        point=session.root / 'new' if change == 'nested_mount' else session.root.parent / 'alias',
+        fs_root=storage / 'old' if change == 'bind_subtree' else storage)
+    with session.observe(manifest, manifest.payload.actions[0]) as observed:
+        real_check = observed.check_before
+
+        def check_before(*args):
+            real_check(*args)
+            monkeypatch.setattr(fs, '_read_mounts', lambda: records + (extra,))
+
+        monkeypatch.setattr(observed, 'check_before', check_before)
+        monkeypatch.setattr(fs, '_rename_noreplace', lambda *a: pytest.fail('changed mount reached rename'))
+        with pytest.raises(fs.RenameRejected):
+            with session._checkpoint():
+                session.rename(manifest, manifest.payload.actions[0], observation=observed)
+    assert source.exists() and not target.exists()
+
+
+def test_checkpoint_mount_change_in_syscall_stops_before_durability_ack(case, monkeypatch):
+    fs = api()
+    session, manifest, source, target = case
+    real_rename = fs._rename_noreplace
+
+    def renamed(*args):
+        real_rename(*args)
+        monkeypatch.setattr(fs, '_read_mounts', lambda: ())
+
+    monkeypatch.setattr(fs, '_rename_noreplace', renamed)
+    with pytest.raises(fs.RenameReconciliationRequired) as caught:
+        with session._checkpoint():
+            session.rename(manifest, manifest.payload.actions[0])
+    assert caught.value.syscall_succeeded is True
+    assert session._poisoned and target.exists() and not source.exists()
+
+
+@pytest.mark.parametrize('change', ['mount', 'root_binding', 'held_fd'])
+def test_read_checkpoint_rejects_changes_at_exit(case, tmp_path, monkeypatch, change):
+    fs = api()
+    session, _, _, _ = case
+    with pytest.raises(fs.RenameRejected):
+        with session._checkpoint():
+            if change == 'mount':
+                monkeypatch.setattr(fs, '_read_mounts', lambda: ())
+            elif change == 'root_binding':
+                session.root.rename(tmp_path / 'original-root')
+                session.root.mkdir(mode=0o700)
+            else:
+                # Keep the original root descriptor alive for session cleanup.
+                monkeypatch.setattr(session, '_root_identity', (0, 0))
+
+
+@pytest.mark.parametrize('error', [ValueError, KeyboardInterrupt])
+def test_checkpoint_exception_never_leaves_reusable_mount_snapshot(case, monkeypatch, error):
+    fs = api()
+    session, _, _, _ = case
+    with pytest.raises(error):
+        with session._checkpoint():
+            with session._checkpoint():
+                raise error('interrupted checkpoint')
+    monkeypatch.setattr(fs, '_read_mounts', lambda: ())
+    with pytest.raises(fs.RenameRejected):
+        session._check_root()
+
+
 @pytest.mark.parametrize('action', ['MOVE', 'QUARANTINE'])
 def test_rename_preserves_inode_bytes_and_manifest_and_confirms_barriers(tmp_path, action):
     fs = api()

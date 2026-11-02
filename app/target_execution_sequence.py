@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
+from functools import wraps
 import os
 from pathlib import Path
 import threading
@@ -22,6 +23,15 @@ from .target_execution_identity import (
 )
 from .target_execution_manifest import ExecutionManifest, JournalEntry, manifest_to_json
 from .target_execution_rollback import _owner as _require_scratch_maintenance_owner
+
+
+def _filesystem_checkpoint(check):
+    """Coalesce nested E7 checks, never the whole action or execution."""
+    @wraps(check)
+    def checked(self, *args, **kwargs):
+        with self._filesystem._checkpoint():
+            return check(self, *args, **kwargs)
+    return checked
 
 
 class _ExecutionSequence:
@@ -490,6 +500,7 @@ class ScratchManifestExecution(_ExecutionSequence):
             raise ValueError('production execution requires explicit cleanup review and completion to SCANNING')
         self._check_execution()
 
+    @_filesystem_checkpoint
     def _check_execution(self):
         if (self._closed or not self._spent or os.getpid() != self._pid
                 or not self._mutex.locked() or threading.get_ident() != self._execution_thread):
@@ -632,6 +643,7 @@ class ScratchManifestExecution(_ExecutionSequence):
             for index in range(len(manifest.payload.actions)))
         self._guards = tuple(_LiveIdentityChecks(context) for context in self._identities)
 
+    @_filesystem_checkpoint
     def _verify_prepared(self, index):
         action = self._manifest.payload.actions[index]
         _, before, observed, _ = self._prepared[index]
@@ -652,6 +664,7 @@ class ScratchManifestExecution(_ExecutionSequence):
         if _file_stat(observation._before) != self._prepared[index][2]:
             raise fs.RenameRejected('STOP: observation no longer matches the original preflight pin')
 
+    @_filesystem_checkpoint
     def _require_predecessor(self):
         self._phase = 'DEPENDENCY_GATE'
         self._check_journal()
@@ -682,6 +695,10 @@ class ScratchManifestExecution(_ExecutionSequence):
         except Exception as exc:
             raise ScratchJournalReconciliationRequired('STOP: live execution journal unconfirmed', self._phase) from exc
 
+    @_filesystem_checkpoint
+    def _append(self, state):
+        return super()._append(state)
+
     def _execute_actions(self):
         result = []
         for index in range(len(self._manifest.payload.actions)):
@@ -707,6 +724,7 @@ class ScratchManifestExecution(_ExecutionSequence):
                 self._persistent_guard.enable_scanning(self)
         return tuple(result)
 
+    @_filesystem_checkpoint
     def _identity_check(self, index, *, moved=None):
         action = self._manifest.payload.actions[index]
         if index in self._completed_stats:
@@ -809,6 +827,7 @@ class ScratchManifestExecution(_ExecutionSequence):
                     or _file_stat(os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)) != _file_stat(current)):
                 raise fs.RenameRejected('STOP: target changed during reopen')
 
+    @_filesystem_checkpoint
     def _verify_physical(self, index, *, full=False):
         """Reopen exact metadata; read bytes only for explicitly selected FULL sources.
 

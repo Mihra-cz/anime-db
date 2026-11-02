@@ -92,6 +92,8 @@ class _Measurements:
         self.peak_fds = self.start_fds
         self.hash_seconds = 0.0
         self.video_read_bytes = 0
+        self.filesystem_calls, self.mount_reads, self.mount_parses = Counter(), Counter(), Counter()
+        self.root_checks, self.move_seconds = Counter(), []
 
     def marker(self, phase):
         os.write(2, f'V6_MEDIA_PHASE {phase} {self.root}\n'.encode())
@@ -104,6 +106,48 @@ class _Measurements:
     def install(self, monkeypatch):
         real_hash, real_open, real_dup = identity._hash_file, os.open, os.dup
         real_read, real_pread = os.read, os.pread
+        real_text, real_parse = Path.read_text, mounts._parse_mounts
+        from app import target_execution_filesystem as fs
+        from app.target_execution_sequence import ScratchManifestExecution
+        real_root, real_move = fs.ScratchRenameSession._check_root, ScratchManifestExecution._run_move
+
+        def read_text(path, *args, **kwargs):
+            if str(path) == '/proc/self/mountinfo':
+                self.mount_reads[self.phase] += 1
+            return real_text(path, *args, **kwargs)
+
+        def parse(raw):
+            self.mount_parses[self.phase] += 1
+            return real_parse(raw)
+
+        def check_root(session, *args, **kwargs):
+            self.root_checks[self.phase] += 1
+            return real_root(session, *args, **kwargs)
+
+        def move(owner, index):
+            reads, parses = self.mount_reads[self.phase], self.mount_parses[self.phase]
+            calls = self.filesystem_calls.copy()
+            os.write(2, f'V6_ACTION_PHASE BEGIN {index} {self.root}\n'.encode())
+            started = time.perf_counter()
+            result = real_move(owner, index)
+            self.move_seconds.append(dict(index=index, action=owner._manifest.payload.actions[index].action,
+                seconds=time.perf_counter()-started,
+                mountinfo_reads=self.mount_reads[self.phase]-reads,
+                mountinfo_parses=self.mount_parses[self.phase]-parses,
+                filesystem_calls=dict(self.filesystem_calls-calls)))
+            os.write(2, f'V6_ACTION_PHASE END {index} {self.root}\n'.encode())
+            return result
+
+        # Native syscall traces must exclude Python measurement overhead.
+        if os.environ.get('V6_SCALING_NATIVE_TRACE') == '1':
+            monkeypatch.setattr(ScratchManifestExecution, '_run_move', move)
+            return
+
+        def counted(name, call):
+            def invoke(*args, **kwargs):
+                self.filesystem_calls[f'{self.phase}:{name}'] += 1
+                return call(*args, **kwargs)
+            return invoke
 
         def payload(fd, count):
             if self.phase == 'fixture_view_copy':
@@ -156,6 +200,13 @@ class _Measurements:
         monkeypatch.setattr(os, 'dup', duplicated)
         monkeypatch.setattr(os, 'read', read)
         monkeypatch.setattr(os, 'pread', pread)
+        monkeypatch.setattr(Path, 'read_text', read_text)
+        monkeypatch.setattr(mounts, '_parse_mounts', parse)
+        monkeypatch.setattr(fs.ScratchRenameSession, '_check_root', check_root)
+        monkeypatch.setattr(ScratchManifestExecution, '_run_move', move)
+        for name in ('open', 'close', 'stat', 'lstat', 'fstat', 'statvfs', 'fstatvfs',
+                'readlink', 'fsync', 'scandir', 'listdir', 'pread'):
+            monkeypatch.setattr(os, name, counted(name, getattr(os, name)))
 
 
 def _save(metrics):
@@ -200,6 +251,7 @@ def test_full_execution_hash_and_fd_cost_remains_bounded(tmp_path, monkeypatch, 
         metrics = dict(actions=count, directory_mode=directory_mode, file_bytes=file_bytes,
             original_directories=original_directories, execution_seconds=None,
             ro_startup_seconds=None, start_open_fds=measurement.start_fds,
+            library_root=str(root), database_path=str(path),
             app_source=str(Path(identity.__file__).resolve().parent))
 
         def record(stage):
@@ -209,6 +261,9 @@ def test_full_execution_hash_and_fd_cost_remains_bounded(tmp_path, monkeypatch, 
                 peak_sampled_open_fds=measurement.peak_fds,
                 peak_sampled_fd_delta=measurement.peak_fds-measurement.start_fds,
                 video_read_bytes_python=measurement.video_read_bytes,
+                mountinfo_reads=dict(measurement.mount_reads), mountinfo_parses=dict(measurement.mount_parses),
+                root_checks=dict(measurement.root_checks), filesystem_calls=dict(measurement.filesystem_calls),
+                action_seconds=list(measurement.move_seconds),
                 process_peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                 end_open_fds=len(os.listdir('/proc/self/fd')))
             _save(metrics)
@@ -227,6 +282,12 @@ def test_full_execution_hash_and_fd_cost_remains_bounded(tmp_path, monkeypatch, 
                 approved_sha256=hashlib.sha256(manifest_to_json(manifest).encode()).hexdigest(),
                 runtime=runtime, runtime_lock=lock, cleanup_decision=decide)
             metrics['execution_seconds'] = time.perf_counter() - started
+            measurement.phase = 'normal_admission'
+            measurement.marker('NORMAL_ADMISSION')
+            from app.target_execution_guard import NormalOperation, _require_no_evidence
+            started = time.perf_counter()
+            assert isinstance(_require_no_evidence(path), NormalOperation)
+            metrics['normal_admission_seconds'] = time.perf_counter() - started
             record('NORMAL')
             measurement.marker('FIXTURE_VIEW_COPY')
             measurement.phase = 'fixture_view_copy'
@@ -255,7 +316,13 @@ def test_full_execution_hash_and_fd_cost_remains_bounded(tmp_path, monkeypatch, 
             started = time.perf_counter()
             with TestClient(create_app(settings_for(path, root))) as client:
                 assert client.get('/health').status_code == 200
-            metrics['ro_startup_seconds'] = time.perf_counter() - started
+                metrics['ro_startup_seconds'] = time.perf_counter() - started
+                measurement.phase = 'normal_scan'
+                measurement.marker('NORMAL_SCAN')
+                started = time.perf_counter()
+                response = client.post('/scan', follow_redirects=False)
+                assert response.status_code == 303 and 'error=' not in response.headers['location']
+                metrics['normal_scan_seconds'] = time.perf_counter() - started
             record('RO_STARTED')
             measurement.marker('END')
         assert database_rows(path) == expected_rows(original, manifest.payload.locator_patches)
@@ -264,6 +331,12 @@ def test_full_execution_hash_and_fd_cost_remains_bounded(tmp_path, monkeypatch, 
         media_calls = sum(value for key, value in measurement.calls.items() if key.endswith(':media'))
         assert media_calls == 0, metrics
         assert measurement.video_read_bytes == 0, metrics
+        if os.environ.get('V6_SCALING_NATIVE_TRACE') != '1':
+            # Retained identity count must not multiply mountinfo work at admission.
+            assert measurement.mount_reads['normal_admission'] <= 16, metrics
+            assert measurement.mount_parses['normal_admission'] <= 8, metrics
+            for action in measurement.move_seconds[:-1]:
+                assert action['mountinfo_reads'] <= 250, action
         # These cases have fixed directory depth. Completed file descriptors
         # and one descriptor per sibling directory must not accumulate.
         assert measurement.peak_fds - measurement.start_fds <= 64, metrics

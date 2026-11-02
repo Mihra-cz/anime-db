@@ -142,3 +142,22 @@ def test_media_syscall_probe_observes_native_child_access_and_excludes_fixture_c
     result = summarize((parent, child))['/synthetic/Anime']
     assert (result['media_read_bytes'], result['media_mapped_bytes'], result['media_copy_bytes']) == (
         read_bytes, mapped_bytes, copy_bytes)
+
+
+def test_syscall_probe_counts_one_action_and_resolved_proc_mountinfo(tmp_path):
+    from v6_media_io_probe import summarize
+    trace = tmp_path / 'syscalls.123'
+    trace.write_text(
+        '1.0 write(2</log>, "V6_MEDIA_PHASE EXECUTION /synthetic/Anime\\n", 50) = 50\n'
+        '2.0 write(2</log>, "V6_ACTION_PHASE BEGIN 1 /synthetic/Anime\\n", 50) = 50\n'
+        '3.0 openat(AT_FDCWD, "/proc/self/mountinfo", O_RDONLY) = 5</proc/123/mountinfo>\n'
+        '4.0 read(5</proc/123/mountinfo>, "record", 4096) = 6\n'
+        '5.0 renameat2(6</synthetic/Anime/old>, "source.mkv", 7</synthetic/Anime/new>, "target.mkv", RENAME_NOREPLACE) = 0\n'
+        '6.0 write(2</log>, "V6_ACTION_PHASE END 1 /synthetic/Anime\\n", 50) = 50\n'
+        '7.0 write(2</log>, "V6_MEDIA_PHASE FIXTURE_VIEW_COPY /synthetic/Anime\\n", 50) = 50\n'
+        '8.0 read(5</proc/123/mountinfo>, "excluded", 4096) = 8\n')
+    result = summarize((trace,))['/synthetic/Anime']
+    assert result['action_filesystem_calls'] == {'1': {'openat': 1, 'read': 1, 'renameat2': 1}}
+    assert result['mountinfo_read_calls'] == {'EXECUTION': 1}
+    assert result['action_mountinfo_read_calls'] == {'1': 1}
+    assert result['media_read_bytes'] == 0

@@ -30,6 +30,27 @@ def fixture(*, content='episode', source='old/source.mkv'):
 DB = {'sha256': 'a'*64, 'size': 100, 'mtime_ns': 10, 'user_version': 9}
 
 
+def test_repeated_evidence_decoding_resolves_static_types_once(monkeypatch):
+    from app import target_execution_manifest as module
+    from app.target_execution_cleanup import CleanupEntry
+    resolutions = []
+    real_hints = module.get_type_hints
+
+    def hints(annotation):
+        resolutions.append(annotation)
+        return real_hints(annotation)
+
+    monkeypatch.setattr(module, 'get_type_hints', hints)
+    raw = dict(path='video.mkv', kind='regular', device=1, inode=2, mode=0o100600,
+        uid=1000, gid=1000, nlink=1, size=16, mtime_ns=17, ctime_ns=18, content_sha256=None)
+    for _ in range(128):
+        assert module._decode_type(CleanupEntry, raw).size == 16
+    assert len(resolutions) <= 1
+    for invalid in (dict(raw, size=True), dict(raw, foreign=True), dict(raw, inode='2')):
+        with pytest.raises(ValueError):
+            module._decode_type(CleanupEntry, invalid)
+
+
 def make(ctx=None, snap=None, **kwargs):
     if ctx is None:
         ctx, snap = fixture()

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timezone
+from functools import lru_cache
 import hashlib
 import json
 from pathlib import PurePosixPath
@@ -656,6 +657,12 @@ def _validate_manifest(manifest: ExecutionManifest) -> None:
             raise ValueError('invalid duplicate side asset')
 
 
+@lru_cache(maxsize=128)
+def _dataclass_hints(annotation):
+    """Only class schemas are cached; every untrusted value is decoded afresh."""
+    return get_type_hints(annotation)
+
+
 def _decode_type(annotation, value):
     origin = get_origin(annotation)
     if origin is tuple:
@@ -681,7 +688,7 @@ def _decode_type(annotation, value):
     if hasattr(annotation, '__dataclass_fields__'):
         if type(value) is not dict or set(value) != {f.name for f in fields(annotation)}:
             raise ValueError('unknown or missing field')
-        hints = get_type_hints(annotation)
+        hints = _dataclass_hints(annotation)
         return annotation(**{f.name: _decode_type(hints[f.name], value[f.name]) for f in fields(annotation)})
     if type(value) is not annotation:
         raise ValueError('type mismatch')

@@ -373,13 +373,43 @@ class ScratchRenameSession:
         """Observed scratch binding only; never a production capability assertion."""
         return self._mount_identity
 
-    def _check_root(self) -> None:
-        if _read_mounts() != self._mounts:
+    @contextmanager
+    def _checkpoint(self):
+        """Share root/mount validation only within one synchronous control point.
+
+        Entry/exit rewalk the named root and read fresh mountinfo. Rename has
+        additional fresh fences even when called inside a checkpoint. No state
+        survives the scope, including a failed or interrupted check.
+        """
+        owner = (os.getpid(), threading.get_ident())
+        active = getattr(self, '_checkpoint_owner', None)
+        if active is not None:
+            if active != owner:
+                raise RenameRejected('filesystem checkpoint belongs to another thread/process')
+            yield
+            return
+        self._check_root()
+        self._checkpoint_owner = owner
+        try:
+            yield
+        finally:
+            self._checkpoint_owner = None
+        self._check_root()
+
+    def _check_root(self, *, fresh=False) -> None:
+        active = getattr(self, '_checkpoint_owner', None)
+        if active is not None and active != (os.getpid(), threading.get_ident()):
+            raise RenameRejected('filesystem checkpoint belongs to another thread/process')
+        refresh = fresh or active is None
+        if refresh and _read_mounts() != self._mounts:
             raise RenameRejected('mount table changed; capability must not be reused')
         # Every action path is resolved from this held descriptor, not the root path.
         if (_identity(os.fstat(self._root_fd)) != self._root_identity
                 or _mount_id(self._root_fd) != self._mount_id):
             raise RenameRejected('held execution root descriptor changed')
+        _secure_directory(self._root_fd)
+        if not refresh:
+            return
         self._check_media_mount(self._root_fd)
         fd = _open_absolute(self.root)
         try:
@@ -391,7 +421,6 @@ class ScratchRenameSession:
             raise
         else:
             _close_evidence_fd(fd)
-        _secure_directory(self._root_fd)
 
     def _check_media_mount(self, fd):
         binding = getattr(self, '_production_binding', None)
@@ -512,6 +541,8 @@ class ScratchRenameSession:
                         observation.check_before(self, manifest, action, source_fd, source_parent, target_parent)
                     if action.action == 'KEEP':
                         return RenameResult(manifest.manifest_id, action.action_id, 'KEEP', False, False)
+                    # A surrounding read checkpoint cannot cover a mutation.
+                    self._check_root(fresh=True)
                     self._attempted.add(key)
                     attempted = True
                     try:
@@ -521,7 +552,7 @@ class ScratchRenameSession:
                             raise
                         # A known errno is insufficient if current source binding
                         # changed or the target is the original source inode.
-                        self._check_root()
+                        self._check_root(fresh=True)
                         self._parent_binding(source_parts, source_parent)
                         self._parent_binding(target_parts, target_parent)
                         _check_source(source_fd, source_parent, source_parts[-1], action, before)
@@ -567,7 +598,7 @@ class ScratchRenameSession:
 
     def _verify_applied(self, action: ManifestAction, source_fd: int, source_parent: int,
                         target_parent: int, before: os.stat_result) -> None:
-        self._check_root()
+        self._check_root(fresh=True)
         self._parent_binding(_locator(action.source), source_parent)
         self._parent_binding(_locator(action.target), target_parent)
         _absent(source_parent, _locator(action.source)[-1])

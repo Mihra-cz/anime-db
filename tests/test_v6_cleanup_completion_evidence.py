@@ -133,6 +133,62 @@ def test_reading_cleanup_evidence_may_change_access_time(completed):
     assert cleanup.cleanup_evidence_digest(database) == expected
 
 
+def test_historical_admission_pins_evidence_parent_once(completed, monkeypatch):
+    """Mount parsing must stay bounded when retained identity records grow."""
+    owner, manifest, database = completed
+    from app import target_execution_filesystem as fs
+    opened, mount_reads = [], []
+    real_open, real_text = fs._open_absolute, Path.read_text
+
+    def open_absolute(path):
+        opened.append(path)
+        return real_open(path)
+
+    def read_text(path, *args, **kwargs):
+        if str(path) == '/proc/self/mountinfo':
+            mount_reads.append(path)
+        return real_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(fs, '_open_absolute', open_absolute)
+    monkeypatch.setattr(Path, 'read_text', read_text)
+    outcome = cleanup.read_completed_cleanup(database, manifest, owner.root, verify_filesystem=False)
+    assert outcome == owner.cleanup_outcome
+    assert opened == [database.parent]
+    assert len(mount_reads) <= 4
+
+
+@pytest.mark.parametrize('change', ['parent', 'mount', 'identity_symlink', 'identity_bytes'])
+def test_historical_reader_stops_if_pinned_evidence_changes(completed, monkeypatch, change):
+    owner, manifest, database = completed
+    from app import target_execution_filesystem as fs
+    real_pread = os.pread
+    injected = []
+
+    def pread(fd, size, offset):
+        raw = real_pread(fd, size, offset)
+        if not injected and Path(os.readlink(f'/proc/self/fd/{fd}')) == owner.cleanup_evidence_path:
+            injected.append(True)
+            if change == 'parent':
+                database.parent.rename(database.parent.with_name(database.parent.name + '-original'))
+                database.parent.mkdir(mode=0o700)
+            elif change == 'mount':
+                monkeypatch.setattr(fs, '_read_mounts', lambda: ())
+            else:
+                path = database.with_suffix('.identity-0.json')
+                if change == 'identity_symlink':
+                    saved = path.with_suffix('.saved')
+                    path.rename(saved)
+                    path.symlink_to(saved)
+                else:
+                    path.write_bytes(path.read_bytes().replace(b'"action_index":0', b'"action_index":1'))
+        return raw
+
+    monkeypatch.setattr(os, 'pread', pread)
+    with pytest.raises((ValueError, OSError)):
+        cleanup.read_completed_cleanup(database, manifest, owner.root, verify_filesystem=False)
+    assert injected
+
+
 def test_live_cleanup_owner_rejects_rechecksummed_approval_replacement(tmp_path, monkeypatch):
     original_run = cleanup._Cleanup.run
 

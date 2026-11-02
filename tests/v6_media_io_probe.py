@@ -15,6 +15,9 @@ import subprocess
 import sys
 
 VIDEO = re.compile(r'\.(?:mkv|mp4|m4v|avi)(?: \(deleted\))?$', re.I)
+FILESYSTEM_CALLS = frozenset(('open', 'openat', 'openat2', 'close', 'newfstatat', 'fstat', 'statx',
+    'statfs', 'fstatfs', 'getdents64', 'readlink', 'readlinkat', 'fsync', 'fdatasync', 'renameat2',
+    'read', 'pread64', 'readv', 'preadv', 'preadv2', 'write', 'pwrite64', 'lseek', 'fcntl', 'flock'))
 
 
 def read_events(paths):
@@ -43,7 +46,7 @@ def read_events(paths):
 
 
 def summarize(paths):
-    phase, root = None, None
+    phase, root, action = None, None, None
     cases = {}
     for timestamp, pid, body in read_events(paths):
         marker = re.search(r'"V6_MEDIA_PHASE (\w+) ([^"\\]+)\\n"', body)
@@ -51,13 +54,31 @@ def summarize(paths):
             phase, root = marker.groups()
             cases.setdefault(root, {'media_read_bytes': 0, 'media_read_calls': 0,
                 'media_mapped_bytes': 0, 'media_copy_bytes': 0,
-                'process_read_syscall_bytes': 0, 'events': []})
+                'process_read_syscall_bytes': 0, 'events': [], 'filesystem_calls': {},
+                'action_filesystem_calls': {}, 'mountinfo_read_calls': {}, 'action_mountinfo_read_calls': {}})
             continue
-        if phase not in {'EXECUTION', 'RO_STARTUP'} or root is None:
+        marker = re.search(r'"V6_ACTION_PHASE (BEGIN|END) (\d+) ([^"\\]+)\\n"', body)
+        if marker and body.startswith('write('):
+            action = marker[2] if marker[1] == 'BEGIN' else None
+            continue
+        if phase not in {'EXECUTION', 'NORMAL_ADMISSION', 'RO_STARTUP', 'NORMAL_SCAN'} or root is None:
             continue
         returned = re.search(r'= (\d+)\s*$', body)
         read = re.match(r'(read|pread64|readv|preadv|preadv2)\(\d+<([^>]+)>', body)
         case = cases[root]
+        call = body.split('(', 1)[0]
+        if call in FILESYSTEM_CALLS:
+            calls = case['filesystem_calls'].setdefault(phase, {})
+            calls[call] = calls.get(call, 0) + 1
+            if action is not None:
+                calls = case['action_filesystem_calls'].setdefault(action, {})
+                calls[call] = calls.get(call, 0) + 1
+        if read and re.fullmatch(r'/proc/(?:self|\d+)/mountinfo', read[2]):
+            counts = case['mountinfo_read_calls']
+            counts[phase] = counts.get(phase, 0) + 1
+            if action is not None:
+                counts = case['action_mountinfo_read_calls']
+                counts[action] = counts.get(action, 0) + 1
         if re.match(r'(read|pread64|readv|preadv|preadv2)\(', body) and returned:
             case['process_read_syscall_bytes'] += int(returned[1])
         if read and VIDEO.search(read[2]) and read[2].startswith(root + '/'):
@@ -86,14 +107,19 @@ def main():
     parser.add_argument('--counts', default='2,4,8,16')
     parser.add_argument('--mode', choices=['constant', 'growing'])
     parser.add_argument('--file-bytes', type=int, default=65536)
+    parser.add_argument('--filesystem', action='store_true', help='Trace filesystem calls without Python counters')
     args = parser.parse_args()
     args.output.mkdir(mode=0o700, parents=True, exist_ok=True)
     trace = args.output / 'syscalls'
     environment = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', ANIME_PATH='/tmp', DATABASE_URL='sqlite://',
         METADATA_DOWNLOAD_ARTWORK='false', V6_SCALING_COUNTS=args.counts,
         V6_SCALING_FILE_BYTES=str(args.file_bytes), V6_SCALING_METRICS_PATH=str(args.output / 'metrics.json'))
+    trace_calls = 'read,pread64,readv,preadv,preadv2,mmap,sendfile,copy_file_range,write'
+    if args.filesystem:
+        trace_calls = ','.join(sorted(FILESYSTEM_CALLS | {'mmap', 'sendfile', 'copy_file_range'}))
+        environment['V6_SCALING_NATIVE_TRACE'] = '1'
     command = ['strace', '-ff', '-ttt', '-yy', '-s', '256', '-o', str(trace), '-e',
-        'trace=read,pread64,readv,preadv,preadv2,mmap,sendfile,copy_file_range,write',
+        'trace=' + trace_calls,
         sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', '-p', 'no:faulthandler',
         'tests/test_v6_execution_scaling.py', '-q', '-s', '--tb=short']
     if args.mode:
@@ -102,8 +128,8 @@ def main():
         result = subprocess.run(command, env=environment, stdout=log, stderr=subprocess.STDOUT)
     cases = summarize(args.output.glob('syscalls.*'))
     report = {'pytest_exit_code': result.returncode, 'cases': cases,
-        'scope': 'EXECUTION and RO_STARTUP only; fixture creation and RO-view copy excluded',
-        'syscalls': 'read,pread64,readv,preadv,preadv2,mmap,sendfile,copy_file_range; strace follows descendants'}
+        'scope': 'EXECUTION, NORMAL_ADMISSION, RO_STARTUP, NORMAL_SCAN; fixture creation and RO-view copy excluded',
+        'syscalls': trace_calls + '; strace follows descendants'}
     (args.output / 'io.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))
     if result.returncode:

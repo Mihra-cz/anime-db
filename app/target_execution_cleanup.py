@@ -5,7 +5,7 @@ original post hash gates admission only; cleanup has its own snapshot contract.
 """
 from __future__ import annotations
 
-from contextlib import closing, ExitStack
+from contextlib import closing, contextmanager, ExitStack
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import os
@@ -144,15 +144,28 @@ class CleanupOutcome:
 _MAX_CLEANUP_BYTES = 64 * 1024 * 1024
 
 
-def _read_local(path):
-    """Pin local evidence without touching its historical media root."""
-    from .tools.execution_manifest import validate_local_output, _mount_fstype
+@contextmanager
+def _local_evidence_parent(path):
+    """One admission's local mount snapshot and nofollow directory binding."""
+    from .tools.execution_manifest import validate_local_output
     path = Path(path)
     validate_local_output(path)
-    if _mount_fstype(path.parent) in {'tmpfs', 'ramfs'}:
-        raise ValueError('STOP: cleanup history requires durable local storage')
     with fs._held_evidence_fd(fs._open_absolute(path.parent)) as parent:
-        fs._check_mounts(path.parent, parent, fs._read_mounts(), allow_root_mount=True)
+        mounts = fs._read_mounts()
+        fs._check_mounts(path.parent, parent, mounts, allow_root_mount=True)
+        yield parent
+        journal._check_parent(path, parent)
+        if fs._read_mounts() != mounts:
+            raise ValueError('STOP: local evidence mount changed during admission')
+
+
+def _read_local(path, *, parent=None):
+    """Pin local evidence without touching its historical media root."""
+    path = Path(path)
+    if parent is None:
+        with _local_evidence_parent(path) as parent:
+            return _read_local(path, parent=parent)
+    else:
         with fs._held_evidence_fd(os.open(path.name, fs._FILE, dir_fd=parent)) as fd:
             before = journal._check_file(fd, parent, path.name)
             if before.st_size > _MAX_CLEANUP_BYTES:
@@ -161,7 +174,6 @@ def _read_local(path):
             after = journal._check_file(fd, parent, path.name)
             if (_file_stat(before) != _file_stat(after) or len(raw) != before.st_size):
                 raise ValueError('STOP: cleanup evidence changed while reading')
-            journal._check_parent(path, parent)
             return raw, journal._identity(before)
 
 
@@ -304,9 +316,9 @@ def _verify_cleanup_filesystem(root, outcome):
         raise ValueError('STOP: filesystem differs from completed cleanup evidence')
 
 
-def _original_directories(database, manifest, proposal, before):
+def _original_directories(database, manifest, proposal, before, parent):
     """Use E7F's retained R0 pins, never a caller-invented cleanup candidate."""
-    raw, _ = _read_local(database.with_suffix('.directories.jsonl'))
+    raw, _ = _read_local(database.with_suffix('.directories.jsonl'), parent=parent)
     frames = _cleanup_frames(raw, terminal='READY')
     bound, ready = frames[0], frames[-1]
     common = {'sequence', 'previous_sha256', 'state'}
@@ -355,8 +367,13 @@ def read_completed_cleanup(database_path: Path, manifest, root: Path, *, verify_
     database, root = Path(database_path), Path(root)
     if not database.is_absolute() or database.is_relative_to(root) or str(root) != manifest.payload.library_root:
         raise ValueError('STOP: cleanup database/library binding differs')
+    with _local_evidence_parent(database) as parent:
+        return _read_completed_cleanup(database, manifest, root, parent, verify_filesystem=verify_filesystem)
+
+
+def _read_completed_cleanup(database, manifest, root, parent, *, verify_filesystem):
     try:
-        raw, _ = _read_local(database.with_suffix('.cleanup.jsonl'))
+        raw, _ = _read_local(database.with_suffix('.cleanup.jsonl'), parent=parent)
         frames = _cleanup_frames(raw)
         bound, complete = frames[0], frames[-1]
         common = {'sequence', 'previous_sha256', 'state'}
@@ -386,7 +403,7 @@ def read_completed_cleanup(database_path: Path, manifest, root: Path, *, verify_
             raise ValueError('STOP: cleanup file metadata differs from approved execution')
         from .target_execution_identity import _decode_frame
         for index, action in enumerate(payload.actions):
-            evidence = _decode_frame(_read_local(database.with_suffix(f'.identity-{index}.json'))[0])
+            evidence = _decode_frame(_read_local(database.with_suffix(f'.identity-{index}.json'), parent=parent)[0])
             entry = before[action.target]
             if (evidence.manifest_id != manifest.manifest_id or evidence.action != action
                     or evidence.action_index != index or evidence.manifest_sha256 != proposal.manifest_sha256
@@ -398,7 +415,7 @@ def read_completed_cleanup(database_path: Path, manifest, root: Path, *, verify_
                     or (not metadata and evidence.mode != 'FULL')
                     or entry.content_sha256 != (evidence.content.digest if evidence.content is not None else None)):
                 raise ValueError('STOP: cleanup identity/content mode differs from execution evidence')
-        original_directories = _original_directories(database, manifest, proposal, before)
+        original_directories = _original_directories(database, manifest, proposal, before, parent)
         review = {entry.path: entry for entry in proposal.directory_review}
         if len(review) != len(proposal.directory_review) or len({c.path for c in proposal.candidates}) != len(proposal.candidates):
             raise ValueError('STOP: ambiguous cleanup candidates')
@@ -447,27 +464,30 @@ def read_completed_cleanup(database_path: Path, manifest, root: Path, *, verify_
             raise ValueError('STOP: cleanup delta history differs from final snapshot')
         if not metadata and frames[-2]['snapshot_sha256'] != outcome.after_snapshot_sha256:
             raise ValueError('STOP: cleanup final acknowledgement differs')
-        raw_journal, journal_identity = _read_local(database.with_suffix('.journal.jsonl'))
+        journal_path = database.with_suffix('.journal.jsonl')
+        raw_journal, journal_identity = _read_local(journal_path, parent=parent)
         if (journal_identity != proposal.execution_identity
                 or hashlib.sha256(raw_journal).hexdigest() != proposal.execution_sha256):
             raise ValueError('STOP: original complete execution journal changed')
         # No shared flock: the live executor may still hold its exclusive writer.
-        with fs._held_evidence_fd(fs._open_absolute(database.parent)) as parent:
-            with fs._held_evidence_fd(os.open(database.with_suffix('.journal.jsonl').name, fs._FILE, dir_fd=parent)) as fd:
-                expected = tuple(JournalEntry(manifest.manifest_id, action.action_id, index, state)
-                    for index, action in enumerate(payload.actions)
-                    for state in ('PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE'))
-                if journal._read_history(fd, manifest) != expected:
-                    raise ValueError('STOP: original execution is incomplete')
+        with fs._held_evidence_fd(os.open(journal_path.name, fs._FILE, dir_fd=parent)) as fd:
+            before_journal = journal._check_file(fd, parent, journal_path.name)
+            expected = tuple(JournalEntry(manifest.manifest_id, action.action_id, index, state)
+                for index, action in enumerate(payload.actions)
+                for state in ('PENDING', 'FS_APPLIED', 'FS_VERIFIED', 'DB_RECONCILED', 'COMPLETE'))
+            if (journal._identity(before_journal) != journal_identity
+                    or os.pread(fd, len(raw_journal) + 1, 0) != raw_journal
+                    or journal._read_history(fd, manifest) != expected
+                    or _file_stat(journal._check_file(fd, parent, journal_path.name)) != _file_stat(before_journal)):
+                raise ValueError('STOP: original execution is incomplete or changed')
         if verify_filesystem:
-            with fs._held_evidence_fd(fs._open_absolute(database.parent)) as parent:
-                with fs._held_evidence_fd(os.open(database.name, fs._FILE, dir_fd=parent)) as fd:
-                    journal._check_file(fd, parent, database.name)
-                    if _hash_file(fd)[1].digest != proposal.database_sha256:
-                        raise ValueError('STOP: final database changed after cleanup')
-                    journal._check_file(fd, parent, database.name)
+            with fs._held_evidence_fd(os.open(database.name, fs._FILE, dir_fd=parent)) as fd:
+                journal._check_file(fd, parent, database.name)
+                if _hash_file(fd)[1].digest != proposal.database_sha256:
+                    raise ValueError('STOP: final database changed after cleanup')
+                journal._check_file(fd, parent, database.name)
             _verify_cleanup_filesystem(root, outcome)
-        if _read_local(database.with_suffix('.cleanup.jsonl'))[0] != raw:
+        if _read_local(database.with_suffix('.cleanup.jsonl'), parent=parent)[0] != raw:
             raise ValueError('STOP: cleanup history changed during verification')
         return outcome
     except (KeyError, TypeError, UnicodeError, IndexError) as exc:

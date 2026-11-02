@@ -1684,6 +1684,14 @@ odhalit až na následujícím úplném metadata checkpointu; neznamená to povo
 souběžných writerů. Při rmdir se vždy bezprostředně ověří konkrétní leaf/parent,
 identita a prázdnost; není možné odstranit soubor ani rekurzivně vymazat obsah.
 
+Vnořené E7 kontroly sdílejí ověření mountinfo a named rootu jen uvnitř jednoho
+synchronního kontrolního bodu. Na jeho vstupu a výstupu se mountinfo načte
+znovu a root se znovu otevře nofollow; kontrola drženého root FD probíhá i uvnitř.
+Bezprostředně před rename a při obou post-rename kontrolách zůstává nové úplné
+ověření mountu a root bindingu. Snapshot nepřežívá kontrolní bod ani výjimku;
+nejde o časovou cache přes celou akci. SOURCE/TARGET parent vazby se dál
+ověřují samostatně.
+
 E7H v2 ukládá `mode: METADATA_RENAME`, metadata snapshoty a pro nehashované
 regular soubory `content_sha256: null`. Výslovně vybrané FULL soubory mají
 skutečný digest. VERIFIED potvrzuje pouze schválený directory delta s přesným
@@ -1692,6 +1700,13 @@ Reader z delta historie zrekonstruuje finální snapshot a nezávisle ověří
 skutečný post-cleanup stav. Původní E7H v1 FULL historie zůstává podporovaná.
 Původní manifest ani `expected_post_hash` se nemění: jde o DB/filesystem
 projekci, odstraněné directory entries se pro její ověření doplní jen v paměti.
+
+Čtení dokončené cleanup historie připne a ověří lokální evidence adresář jednou
+pro celé admission. Identity, directory a journal artefakty otevírá relativně
+k tomuto FD s nofollow a kontrolou identity a stabilních metadat před/po čtení.
+Při odchodu znovu ověří named parent a aktuální mountinfo; checksumy, úplný
+journal, vazby všech identity záznamů a kompatibilita FULL/v2 se ověřují dál.
+Omezená cache typových anotací tříd neukládá načtená data ani výsledek validace.
 
 E7 SQLite drží R0 a jednu průběžnou projekci indexovanou PK, ne všechny plné
 R0…Rn kopie. Každý UPDATE má původní ID/before podmínky; SQLite authorizer
