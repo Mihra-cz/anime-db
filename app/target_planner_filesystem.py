@@ -310,10 +310,24 @@ def _namespace_collisions(records, directories=()):
             for i in indices:
                 records[i] = _diagnose(records[i], 'collection_root_collision')
     managed = [r for r in records if r.object_kind in {'video', 'subtitle'} and r.target_relative_path and r.duplicate is None]
+    # Index only requested prefixes, preserving the original managed order.
+    namespaces = {r.auxiliary_namespace for r in records if r.auxiliary_namespace}
+    namespace_keys = {path: tuple(collision_keys(p).fold_key for p in PurePosixPath(path).parts)
+                      for path in namespaces}
+    prefix_owners = {key: [] for key in namespace_keys.values()}
+    lengths = sorted({len(key) for key in prefix_owners})
+    if lengths:
+        for owner in managed:
+            parent = tuple(collision_keys(p).fold_key for p in PurePosixPath(owner.target_relative_path).parent.parts)
+            for length in lengths:
+                if length > len(parent):
+                    continue
+                key = parent[:length]
+                if key in prefix_owners:
+                    prefix_owners[key].append(owner)
     for index, record in enumerate(records):
         if record.auxiliary_namespace:
-            key = tuple(collision_keys(p).fold_key for p in PurePosixPath(record.auxiliary_namespace).parts)
-            owners = [r for r in managed if tuple(collision_keys(p).fold_key for p in PurePosixPath(r.target_relative_path).parent.parts[:len(key)]) == key]
+            owners = prefix_owners[namespace_keys[record.auxiliary_namespace]]
             if owners:
                 records[index] = _diagnose(record, 'auxiliary_managed_namespace_collision', status='REVIEW')
                 collisions.append(TargetCollision('auxiliary_namespace', (record.auxiliary_namespace,), tuple(
