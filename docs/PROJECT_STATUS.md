@@ -88,7 +88,7 @@ Closure neznamená nulový backlog. Vědomě otevřené zůstává:
   numbering migrace pro canonical filename grammar;
   transakce cest ve filesystemu a DB; move manifest, preview a rollback;
   fyzická strategie externích titulků.
-- **Konec V6 – completeness:** 16 CZ externích titulků `confirmed_no_match`
+- **Historický konec V6 – nyní Completeness V6.5 / Release Tracking V7.5:** 16 CZ externích titulků `confirmed_no_match`
   bez video targetu; 11 titulů, kde provider uvádí více epizod než lokální
   knihovna; chybějící standardní epizody a další completeness / Release
   Tracking evidence.
@@ -301,7 +301,38 @@ neklasifikovaného obsahu; auxiliary v root Extras se skutečným subtree; root 
 zůstává KEEP. confirmed_no_match je subtitle present/video missing,
 nikoli quarantine. D06 safe continuation používá jen přesně doloženou ručně
 confirmed series; nejistota zachová original subtitle přímo v rootu.
-P2C, execution, NAS fyzický cleanup, purge action a Completeness UI jsou pending.
+Tento foundation checkpoint ponechával P2C/execution pending; jejich navazující
+implementaci popisují další sekce. Produkční NAS cleanup není autorizován,
+purge action a uživatelské Completeness UI (V6.5) zůstávají pending.
+
+### Webový read-only náhled reorganizace
+
+`/reorganization` zobrazuje databázové počty přes vlastní SQLite `mode=ro`
+session. Běžný GET se knihovny nedotýká. Explicitní POST náhledu spustí
+existující Target Planner nad fresh filesystem inventory v samostatném procesu
+s vlastním `REORGANIZATION_PREVIEW_TIMEOUT_SECONDS` (default 120 s, konečná
+kladná hodnota nejvýše 3600 s); souběh je omezen
+na jeden náhled na aplikační instanci. Proces neimportuje aplikační startup,
+neprovádí migrace ani scan, neukládá plán a nečte obsah souborů pro hashing.
+Před inventurou proběhne existující `check_library_access` s `REQUIRE_MOUNT`
+a nezměněným health-check timeoutem. Hashování archivů je vypnuté, takže
+nepotvrzená shoda může zůstat REVIEW. Worker po timeoutu dostane skupinový
+SIGKILL a cleanup čeká pouze omezenou dobu; přežívající kernelové I/O blokuje
+nový náhled do skutečného ukončení původního procesu.
+
+Stránka seskupuje BLOCKED/REVIEW/WARNING před výchozím sbaleným READY,
+filtruje a stránkuje detaily po 50. Všechna data zachovává v odpovědi a umožňuje
+stažení celého read-only JSON. Počty operací přebírá z coverage, nikoli z
+blokovaných návrhů MOVE; odlišuje neúplnou inventuru od nutného cleanup/warning
+rozhodnutí. Ukazuje SOURCE → TARGET, planner statusy, kolize, důvody
+neúplného coverage a existující/navrhované adresáře; odkazuje na Naming,
+Layout a Hierarchy Review. READY položka ani complete planning coverage
+nepotvrzuje execution readiness nebo fyzicky ověřený výsledek. Výsledek je
+jednorázový snapshot bez uložené authority; timeout/chyba neposkytuje částečný
+plán. Preview není execution manifest: archive evidence a Windows root mohou
+vést k jinému hashi. Budoucí approval/execution vyžaduje aktuální plný manifest,
+runtime evidence a preflight. Web zatím nemá approval ani execution ovládání; fyzické spuštění bude
+doplněno později v rámci V6. Verze a closure podmínky určuje [ROADMAP](ROADMAP.md).
 
 [Container locator projection](../app/target_planner.py) zachovává single-leaf
 locator a pro řízený CM/Promo fan-out `extras_promo` jednoho ownera vrací explicitní
@@ -801,7 +832,8 @@ zůstává beze změny. Existing membership/explicit selectors zachovávají own
 nový soubor `... - S02P02E03.mkv` při ambiguous locatoru zůstává unresolved/review.
 Naming/Layout choices zůstávají owner-ID based a čistá změna locatoru nemění
 jejich basis. Read-only Target Planner D01–D06 foundation je implementovaný;
-filesystem execution, fyzická reorganizace, purge a Completeness UI jsou pending.
+navazující execution foundations popisují sekce výše. Produkční fyzická
+reorganizace není autorizována; purge a Completeness UI (V6.5) jsou pending.
 
 Produkční DB po rollout: size `7213056`, mtime_ns `1791062165382571032`,
 SHA-256 `907ca68f2fbac1b1fb61413c0c8128a719afbe9a3cfc6f898d0d3295aa6107de`.
@@ -1274,9 +1306,10 @@ Kontrolní opory: [performance invariants](../tests/test_performance_invariants.
 - Supplementary singleton bez čísla, neurčené varianty a nejednoznačný season
   parent mohou být legitimně zachované neznámé údaje; aplikace je nedoplňuje
   heuristikou kvůli zelenému badge nebo přípravě filename.
-- Neexistuje fyzický rename/import planner. V6 completeness audit je plánovaný
-  jako závěrečná část V6 po úklidu NAS. Read-only identity inventory je dílčí
-  předpoklad, ne povolení k přesunu.
+- Existuje read-only Target Planner pro V6 reorganizaci; importní discovery
+  planner není implementovaný. Technické ověření výsledku zůstává ve V6,
+  uživatelská Completeness stránka je V6.5 a pokročilý Release Tracking V7.5.
+  Read-only identity inventory není povolení k přesunu.
 
 Produkční backlog zde není odhadován z historických počtů. Datované podklady:
 [classification audit](CONTENT_CLASSIFICATION_AUDIT_2026-09-02.md),

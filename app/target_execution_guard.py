@@ -411,7 +411,11 @@ def complete_reorganization(engine, root):
 def _database_path(bind):
     engine = bind.get_bind() if hasattr(bind, 'get_bind') else bind
     engine = getattr(engine, 'engine', engine)
-    url = engine.url
+    return database_path_from_url(engine.url)
+
+
+def database_path_from_url(url):
+    """Shared SQLite locator interpretation; never opens/creates a database."""
     name = url.database
     if url.get_backend_name() != 'sqlite' or not name or name == ':memory:':
         return None

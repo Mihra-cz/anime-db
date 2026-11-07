@@ -1,0 +1,16 @@
+.reorganization .panel { margin-bottom: 1rem; }
+.reorganization-counts, .reorganization-reviews { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; }
+.reorganization-counts { padding-left: 1.25rem; }
+.reorganization-reviews a { display: inline-flex; align-items: center; min-height: 44px; }
+.reorganization-path, .reorganization dd, .reorganization li { overflow-wrap: anywhere; }
+.reorganization dd { margin: .25rem 0 1rem; font-family: monospace; }
+.reorganization dt { font-weight: bold; }
+.reorganization-directories small { display: block; }
+.reorganization details summary { cursor: pointer; min-height: 44px; padding-top: .5rem; }
+.reorganization button { min-height: 44px; }
+.reorganization-files { min-width: 0; }
+.reorganization [hidden] { display: none !important; }
+.reorganization-group article { border-top: 1px solid #354154; padding-top: .5rem; }
+.reorganization-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-top: 1rem; }
+.reorganization-pagination button:disabled { opacity: .5; cursor: default; }
+.reorganization select { min-height: 44px; max-width: 100%; }

@@ -238,6 +238,7 @@ from .naming_review_web import install_naming_review_routes
 from .layout_review import aggregate_naming_badge, build_layout_review
 from .layout_review_service import layout_review_context_from_models
 from .layout_review_web import install_layout_review_routes
+from .reorganization_web import install_reorganization_routes
 from .numbering import (
     apply_deterministic_bulk_renumber, apply_sequential_numbering,
     confirmed_duplicate_groups, preview_sequential_numbering,
@@ -1131,6 +1132,7 @@ def create_app(settings: Settings | None = None, *, maintenance=None) -> FastAPI
     app.state.metadata_provider = AniListProvider(settings.metadata_request_timeout_seconds)
     install_naming_review_routes(app, templates, sessions, safe_local_redirect_target, local_redirect_response)
     install_layout_review_routes(app, templates, sessions, safe_local_redirect_target, local_redirect_response)
+    install_reorganization_routes(app, templates, settings)
     app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
     with ordinary_scan_admission(engine, settings.anime_path), writer_admission(engine):
         settings.metadata_artwork_directory.mkdir(parents=True, exist_ok=True)

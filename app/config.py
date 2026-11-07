@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+import math
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -29,6 +30,12 @@ class Settings:
     mediainfo_timeout_seconds: float = 60
     library_access_timeout_seconds: float = 10
     library_healthcheck_interval_files: int = 25
+    reorganization_preview_timeout_seconds: float = 120
+
+    def __post_init__(self):
+        value = self.reorganization_preview_timeout_seconds
+        if not math.isfinite(value) or not 0 < value <= 3600:
+            raise ValueError("REORGANIZATION_PREVIEW_TIMEOUT_SECONDS must be finite and in (0, 3600].")
 
 
 def _get_bool(name: str, default: bool = False) -> bool:
@@ -65,5 +72,6 @@ def get_settings(dotenv_path: str | Path | None = None) -> Settings:
         ffprobe_timeout_seconds=max(0.1, float(os.getenv("FFPROBE_TIMEOUT_SECONDS", "60"))),
         mediainfo_timeout_seconds=max(0.1, float(os.getenv("MEDIAINFO_TIMEOUT_SECONDS", "60"))),
         library_access_timeout_seconds=max(0.1, float(os.getenv("LIBRARY_ACCESS_TIMEOUT_SECONDS", "10"))),
+        reorganization_preview_timeout_seconds=float(os.getenv("REORGANIZATION_PREVIEW_TIMEOUT_SECONDS", "120")),
         library_healthcheck_interval_files=max(1, int(os.getenv("LIBRARY_HEALTHCHECK_INTERVAL_FILES", "25"))),
     )

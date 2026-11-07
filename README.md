@@ -42,8 +42,13 @@ FFPROBE_TIMEOUT_SECONDS=60
 MEDIAINFO_TIMEOUT_SECONDS=60
 LIBRARY_ACCESS_TIMEOUT_SECONDS=10
 LIBRARY_HEALTHCHECK_INTERVAL_FILES=25
+REORGANIZATION_PREVIEW_TIMEOUT_SECONDS=120
 METADATA_REQUEST_TIMEOUT_SECONDS=15
 ```
+
+Webový náhled reorganizace má samostatný `REORGANIZATION_PREVIEW_TIMEOUT_SECONDS`
+(výchozí 120 s, konečná kladná hodnota nejvýše 3600 s). Nemění timeout
+scanneru ani health-checku.
 
 HTTP metadata používají rozdělený timeout pro connect/read/write/pool. `ffprobe` a případné budoucí použití MediaInfo mají vlastní timeout na každý proces.
 
@@ -127,8 +132,9 @@ odděleně bez inventarizace obsahu. Report nepotvrzuje execution readiness ani
 fyzický post-state (`execution_verified=false`).
 Exit status je 0 pro úplné plánovací vyúčtování, 2 pro neúplné coverage nebo
 BLOCKED/REVIEW records a 1 při selhání determinismu nebo DB fingerprintu.
-Plán je pouze návrh: execution
-(rename/move/quarantine/purge), P2C scanner routing a Completeness UI jsou pending.
+Plán je pouze návrh. Navazující execution/P2C foundations a administrativní
+vstup popisují sekce níže a PROJECT_STATUS; produkční NAS execution není
+autorizována. Purge není implementován, Completeness UI patří do V6.5.
 
 `--post-state` navíc čistě v paměti promítne intended paths a container locators,
 přenese ověřenou quarantine side-asset evidence a ověří settled planner fixed
@@ -141,6 +147,28 @@ accounting bez ní zůstává UNKNOWN. READY quarantine není povolení k purge.
 Normal write-capable scanner není součást verification; po fyzické reorganizaci
 jej lze znovu použít až s P2C. Během budoucí execution musí být scanner/inventory
 writer zastavený nebo za explicitní maintenance boundary.
+
+## Webový read-only náhled reorganizace
+
+V hlavním menu je **Reorganizace** (`/reorganization`). GET načte pouze DB
+počty. Tlačítko **Připravit aktuální náhled** ověří dostupnost knihovny včetně
+`REQUIRE_MOUNT` a teprve pak spustí inventuru a existující Target Planner.
+Náhled nepersistuje plán, nehashuje videa ani archivy a používá SQLite `mode=ro`,
+včetně Nexus konfigurace `sqlite:///file:///data/anime.db?mode=rw&uri=true`.
+
+Výsledky jsou seskupené BLOCKED → REVIEW → WARNING → READY, filtrovatelné
+a stránkované; READY je zpočátku sbalené. Celý výsledek zůstává dostupný
+ke stažení jako read-only JSON. Souhrn operací používá coverage, takže blokovaný
+návrh MOVE není vykázán jako připravený přesun. Neúplná inventura je oddělená
+od vyúčtovaných souborů čekajících na cleanup/warning rozhodnutí.
+
+Timeout ukončí worker i jeho kontrolní proces a neposkytne částečný plán.
+Pokud proces zůstane v kernelovém I/O i po SIGKILL, další náhled je zablokován
+do jeho skutečného ukončení. Souběh je omezen v jednom aplikačním procesu.
+Web nenabízí approval ani fyzické spuštění. Jeho náhled není sealed execution
+manifest: bez hashů archivů a s jiným Windows rootem se hash může lišit.
+Budoucí approval/execution musí použít fresh plný manifest, runtime evidence
+a preflight, nikoli tento webový výsledek.
 
 ## V6 immutable manifest a read-only dry-run
 
@@ -181,7 +209,7 @@ Tyto dva commands nepřesouvají ani nepřejmenovávají soubory, nevytvářejí
 directories, snapshot nebo backup a nespouštějí scanner. Samostatný
 [administrativní E7 vstup](docs/V6_PRODUCTION_REORGANIZATION.md) navíc vyžaduje
 execution approval a výluku; skutečná NAS execution dosud není autorizovaná.
-Completeness UI zůstává pending.
+Completeness UI (V6.5) zůstává pending.
 
 ## Chování skenu
 

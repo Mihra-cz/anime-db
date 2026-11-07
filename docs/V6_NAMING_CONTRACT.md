@@ -250,7 +250,10 @@ P2B pure canonical parser core je implementovaný; authoritative context
 resolution a scanner routing P2C zůstávají odloženou dependency.
 Produkční scanner se nezměnil. Nový soubor ve shared Season containeru bez další authority
 zůstává Review. Target Planner nyní zná owner IDs z DB a na P2C nezávisí.
-Execution, fyzická reorganizace a finální Completeness UI zůstávají pending.
+Tento foundation checkpoint nepředstavuje produkční execution authority.
+Navazující execution/P2C foundations popisuje [PROJECT_STATUS](PROJECT_STATUS.md);
+produkční NAS execution vyžaduje vlastní schválení. Uživatelské Completeness UI
+je pending ve V6.5, technické ověření reorganizace zůstává V6.
 
 Bez choice použije čistý resolver jen jednoznačné shared defaults. Own
 metadata strong/optional candidate zůstává unresolved human Layout Review,
@@ -458,7 +461,8 @@ identity bez variant/MP, jediný Season/Part context v collection, žádné Vide
 pokračovací ani vyšší pozici a bezprostředně následující pozici. Jinak použije
 root/original filename.
 `confirmed_no_match` se zachovává a records mají `subtitle_present_video_missing`
-pro budoucí Completeness. Completeness UI je samostatná pending část V6.
+pro budoucí Completeness. Completeness UI je samostatná pending část V6.5; technické ověření výsledku
+reorganizace zůstává ve V6.
 
 ### Coverage, pomocné soubory a preflight
 
@@ -614,3 +618,18 @@ Následující body nejsou součástí schváleného kontraktu:
 - numbering migrace pro canonical filename grammar;
 - transakce aktualizace cest ve filesystemu a DB;
 - finální rollback/recovery protokol.
+
+## Webový náhled a execution authority
+
+Webový read-only náhled `/reorganization` používá tento planner kontrakt,
+confirmed identity a filesystem inventory; nepřidává naming ani parsing pravidla.
+GET neinventarizuje knihovnu. Explicitní preview má vlastní časový limit,
+preflight dostupnosti s REQUIRE_MOUNT, coverage souhrn a stránkované výsledky.
+Nečte obsah videí ani archivy pro hashing, takže archive equality může zůstat
+neprokázaná/REVIEW. Timeout nebo nedostupná knihovna nevytváří platný částečný plán.
+
+Webový preview není schválený immutable execution manifest. Při odlišném
+Windows rootu nebo plné archivní evidenci se může lišit i plan hash. Budoucí
+schválení a spuštění vždy vyžaduje aktuální plný manifest, runtime evidence
+a execution preflight. READY položka, vyúčtované soubory ani warning/cleanup
+rozhodnutí samy neudělují READY_FOR_EXECUTION, RW nebo delete authority.

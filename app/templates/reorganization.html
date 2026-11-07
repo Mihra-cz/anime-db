@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Reorganizace – AnimeDB{% endblock %}
+{% block main_class %}content-shell content-wide reorganization{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', path='reorganization.css') }}">{% endblock %}
+{% block content %}
+<div class="heading"><div><h1>Reorganizace knihovny</h1><p>Aktuální náhled SOURCE → TARGET podle potvrzených rozhodnutí.</p></div></div>
+<section class="panel"><h2>Stav knihovny v databázi</h2>
+<p class="reorganization-path">{{ library_root }}</p>
+{% if counts is not none %}<ul class="reorganization-counts">{% for label, count in counts.items() %}<li>{{ label }}: {{ count }}</li>{% endfor %}</ul>{% endif %}
+<p>Otevření stránky neověřuje dostupnost knihovny ani neprovádí filesystem inventuru. Počty představují databázovou evidenci.</p>
+<nav class="reorganization-reviews" aria-label="Kontroly před reorganizací"><a href="/naming-review">Naming Review · Názvy</a><a href="/naming-review/layout">Layout Review · Rozložení</a><a href="/hierarchy-review">Hierarchy Review · Hierarchie</a></nav>
+</section>
+<section class="panel"><h2>Read-only náhled</h2>
+<p>Na požádání proběhne nová inventura a plánování, nejvýše {{ '%g'|format(timeout) }} s. Náhled se neukládá. Nečte obsah videí ani nehashuje archivy; chybějící důkaz shody archivů může vyžadovat REVIEW.</p>
+<form method="post" action="/reorganization/preview"><button type="submit">Připravit aktuální náhled</button></form>
+<p><strong>Fyzické spuštění bude doplněno později.</strong> Tato stránka nezapisuje do SQLite ani knihovny a neschvaluje execution.</p>
+</section>
+{% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+{% if preview is none and not error %}<p>Náhled dosud nebyl vytvořen.</p>{% endif %}
+{% if preview is not none %}
+{% set plan = preview.plan %}{% set coverage = preview.coverage %}
+<section class="panel" aria-labelledby="plan-state"><h2 id="plan-state">{{ {'INVENTORY_INCOMPLETE':'Neúplná inventura', 'FILES_UNRESOLVED':'Nevyřešené soubory', 'DECISIONS_REQUIRED':'Vyžaduje rozhodnutí: cleanup nebo warning', 'EMPTY':'Prázdný plán', 'COVERED':'Plánovací pokrytí je úplné'}[view.state] }}</h2>
+<p>Tento jednorázový snapshot může zastarat. READY označuje položku planneru; nepotvrzuje připravenost ke spuštění ani fyzicky ověřený výsledek.</p>
+<p>Inventura: {{ 'úplná' if coverage.inventory_complete else 'neúplná' }} · Soubory: {{ 'vyúčtované' if coverage.files_complete else 'vyžadují řešení' }} · Celkové pokrytí: {{ 'úplné' if coverage.complete else 'vyžaduje rozhodnutí' }}</p>
+<ul class="reorganization-counts">{% for status, count in plan.status_counts %}<li><strong>{{ status }}</strong>: {{ count }}</li>{% endfor %}</ul>
+<h3>Počty souborů podle coverage</h3><ul class="reorganization-counts">{% for action, count in view.operations.items() %}<li data-operation="{{ action }}">{{ action }}: {{ count }}</li>{% endfor %}</ul>
+<p>REVIEW zahrnuje také blokované a nevyúčtované soubory. Návrh MOVE u blokované položky není připravený přesun.</p>
+<p>Nové adresáře podle coverage: {{ view.new_directories }}. Jde pouze o návrh vytvoření.</p>
+<p>Windows cesta: {{ plan.windows_state }}</p>
+<p>Webový náhled není schválený execution manifest. Plný manifest může mít jiný hash kvůli archivům nebo Windows rootu. Budoucí schválení a spuštění vyžaduje aktuální plný manifest, runtime evidence a preflight.</p>
+</section>
+<section class="panel"><h2>Podrobnosti náhledu</h2>
+<p>Všechny výsledky jsou součástí tohoto náhledu. Zobrazuje se nejvýše 50 položek na stránku v každé skupině.</p>
+<label for="reorganization-status">Stav souborů</label>
+<select id="reorganization-status"><option value="ALL">Všechny stavy</option>{% for status in statuses %}<option value="{{ status }}">{{ status }}</option>{% endfor %}</select>
+<button type="button" id="reorganization-download">Stáhnout celý read-only náhled (JSON)</button>
+<noscript><p>Pro filtrování a stránkování zapněte JavaScript. Kompletní data jsou v odpovědi v bloku reorganization-data; nic se nezahazuje.</p></noscript>
+</section>
+<section><h2>Soubory · SOURCE → TARGET</h2>
+{% for status in statuses %}<details class="panel reorganization-group" data-status="{{ status }}"{% if status != 'READY' %} open{% endif %}><summary>{{ status }} · <span data-count></span></summary><div data-page></div><nav class="reorganization-pagination" aria-label="Stránkování {{ status }}"><button type="button" data-prev>Předchozí</button><span data-position></span><button type="button" data-next>Další</button></nav></details>{% endfor %}
+</section>
+{% for kind, label in [('directories','Cílová struktura a stav adresářů'),('issues','Důvody neúplnosti a rozhodnutí'),('collisions','Kolize'),('diagnostics','Diagnostika')] %}
+<details class="panel reorganization-evidence" data-kind="{{ kind }}"><summary>{{ label }} · <span data-count></span></summary><div data-page></div><nav class="reorganization-pagination" aria-label="Stránkování {{ label }}"><button type="button" data-prev>Předchozí</button><span data-position></span><button type="button" data-next>Další</button></nav></details>
+{% endfor %}
+<script type="application/json" id="reorganization-data">{{ preview|tojson }}</script>
+<script src="{{ url_for('static', path='reorganization.js') }}" defer></script>
+{% endif %}
+{% endblock %}

@@ -25,8 +25,10 @@ Průběžné test counts, session logy a jednotlivé commity sem nepatří.
 | V3 | Hotovo | Překlady a ruční validace |
 | V4 | Hotovo | Použitelné webové rozhraní |
 | V5 | Hotovo | Stabilní hierarchie, metadata a číslování včetně navazující stabilizace |
-| V6 | Probíhá | Řízená reorganizace knihovny na NAS podle ověřených dat |
-| V7 | Plánováno | Bezpečný import a deduplikace |
+| V6 | Probíhá | Kompletní backend a frontend řízené reorganizace, včetně technického ověření výsledku |
+| V6.5 | Plánováno | Completeness UI, optimalizace, SHA-256 katalog a konsolidace testů |
+| V7 | Plánováno | Import scanner pouze pro Anime/IMPORT, nová DB evidence a deduplikace nad workflow V6 |
+| V7.5 | Plánováno | Release Tracking a pokročilé sledování pokračování |
 | V8 | Orientační / k revizi | Automatické sledování NASu |
 | V9 | Orientační / k revizi | Jellyfin / Shoko integrace |
 | V10 | Orientační / k revizi | Vizuální anime knihovna |
@@ -128,10 +130,11 @@ Closure checkpoint a vědomě otevřené položky popisuje
 [PROJECT_STATUS](PROJECT_STATUS.md#pre-v6-closure-checkpoint).
 
 Kontrola úplnosti knihovny (completeness) **není** vstupní podmínkou V6.
-Podle rozhodnutí z 2026-09-27 je závěrečnou částí V6 — po logickém
-a fyzickém úklidu NAS a před V7 importem.
+Rozhodnutí z 2026-09-27 ji původně zařadilo na konec V6. Nové schválené
+rozdělení odděluje technické ověření reorganizace (V6) od uživatelské
+Completeness stránky (V6.5) a pokročilého Release Trackingu (V7.5).
 
-## Plánovaný směr – Kontrola kompletnosti / Release tracking
+## Schválený směr – Completeness V6.5 / Release Tracking V7.5
 
 Samostatná uživatelská stránka a pracovní přehled jsou plánované, nikoli dnes
 implementované. Vstupem mají být pouze lokální `CatalogTitle` s bezpečně
@@ -164,11 +167,11 @@ obsah a nově zjištěná pokračování anime, které už v knihovně máme.
   sehnat“, ale nesmí smazat ani změnit fakt, že existují. Stavy **Mám**,
   **Čeká na import** a **Sháním** budoucí release tracking nevypínají.
 
-Finální completeness audit je závěrečnou částí V6 po úklidu NAS a před V7.
-Tento plánovaný uživatelský workflow je dlouhodobá evidence chybějícího
-a nového obsahu a podklad pro tento audit; V6 samotná je řízená fyzická
-reorganizace NAS. Release tracking žádný rename ani move
-neprovádí. Platí `člověk > automatika; nejistota → Review`.
+Tyto záměry a doménové invarianty zůstávají zachované. Uživatelský přehled
+chybějících epizod patří do V6.5; pokročilé provider relations, nová pokračování
+a navazující release backlog do V7.5. Technické ověření V6 nepotřebuje hotovou
+Completeness stránku. Release Tracking žádný rename ani move neprovádí.
+Platí `člověk > automatika; nejistota → Review`.
 
 ## V6 – Řízená reorganizace knihovny na NAS
 
@@ -260,8 +263,9 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
   INCOMPLETE nebo UNKNOWN, po reloadu bez evidence default UNKNOWN. Closure gate
   vyžaduje i skutečnou scratch DB kopii, locator-only patches a normální read-only
   loader se simulated post-execution snapshotem, včetně negative reloadu bez evidence.
-  Fyzická execution, potvrzení konkrétního plánu pro NAS, Completeness UI
-  po cleanupu a P2C zůstávají pending.
+  Tento historický foundation checkpoint ponechával execution, potvrzení NAS plánu,
+  P2C a Completeness UI pending. Navazující E fáze jsou popsané níže;
+  Completeness UI je podle nového rozdělení samostatná V6.5.
   P2C není prerequisite reorganizace ani read-only post-state verification,
   je však required před ordinary write-capable scanner rescanem canonical tree.
   První omezený řez P2C podporuje read-only rescan kompletního nezměněného post-state
@@ -399,12 +403,12 @@ otevřené; dokončení foundations neznamená jejich vyřešení.
 Orientační pořadí; podrobné členění fází se stanoví až při jejich schválení.
 
 1. Canonical naming a struktura (naming kontrakt, Naming Review a Layout Review).
-2. Planner a preview konkrétních operací.
+2. Planner a preview konkrétních operací včetně webového ovládání.
 3. Bezpečný execution základ (transakce cest, manifest, rollback/recovery).
 4. Fyzický a logický úklid NAS, včetně disposition potvrzených duplicit.
-5. Ověření výsledného stavu.
-6. Finální completeness audit.
-7. Closure V6.
+5. Technické ověření výsledného filesystem/SQLite stavu, coverage, identity,
+   subtitle vazeb a návratu do běžného provozu.
+6. Dokončení webového workflow a closure V6; uživatelská Completeness není gate.
 
 V7 import začíná až po closure V6.
 
@@ -429,29 +433,49 @@ v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md); tamtéž je seznam dosud
 otevřených design otázek. Kontrakt není hotový filename formatter: konkrétní
 názvy všech reprezentací musí projít preview a kontrolou kolizí.
 
-### Úplnost jako závěrečná část V6, nikoli odhad z počtu souborů
+### Webové workflow a technické ověření V6
 
-Kontrola úplnosti proběhne jako finální audit V6 po úklidu NAS a před V7:
-porovnání konkrétního CatalogTitle s potvrzeným externím rozsahem, chybějící
-a nerozpoznané epizody, nevysvětlené duplicity, různé reprezentace, titulky bez
-videa a konflikty lokální/providerové struktury. Bezpečný základ je logická
-identita a odpovídající season/external scope, nikoli slepě absolute číslo.
+V6 zahrnuje celý reorganizační backend i frontend. První webový řez
+`/reorganization` poskytuje read-only stav DB a explicitně vyžádaný aktuální
+náhled existujícího planneru: SOURCE → TARGET, operace, stavy, kolize,
+coverage a adresáře. GET neinventarizuje knihovnu. Náhled má omezenou dobu
+požadavku, nepersistuje plán a neposkytuje execution ani approval backend.
+Neúplné coverage, BLOCKED a REVIEW nezakládají execution readiness; ani
+úplné plánovací pokrytí není fyzicky ověřený výsledek.
 
-Chybějící běžný díl a nevysvětlená kolize standardní identity jsou závažné;
-nejistá identita vyžaduje review. Potvrzené legitimní varianty ani duplicate
-secondary nesmějí být mechanicky považovány za další chybějící/duplicitní epizodu.
-Absence supplementary obsahu není chybou úplnosti hlavní standardní série.
-„Bez CZ/SK“ znamená chybějící překlad, nikoli chybějící epizodu.
+Zbývá webové potvrzení konkrétního plánu, bezpečné napojení na existující
+administrativní execution workflow a zobrazení jeho výsledku/recovery.
+Tento řez nepřidává executor, RW mount ani povolení k NAS execution.
 
-Známé podklady pro tento audit jsou vedené v
-[PROJECT_STATUS](PROJECT_STATUS.md#pre-v6-closure-checkpoint) (např. externí
-titulky bez video targetu a tituly s vyšším providerovým počtem epizod).
-Původní náměty na procenta úplnosti a CZ/SK překladu zůstávají orientačním
-reporting směrem k revizi. Současné metadata completion úplnost knihovny neřeší.
+Technické ověření dokončené reorganizace zůstává closure podmínkou V6:
+porovnání skutečných cest a SQLite locatorů se schváleným plánem, zachování
+identit, kompatibility titulků, chráněných IMPORT/Duplicates/systémových složek,
+vyúčtování operací a bezpečný návrat do RO/běžného provozu. Chybějící soubor,
+kolize nebo neúplná evidence musí zůstat viditelným problémem.
+
+## V6.5 – Completeness UI a konsolidace
+
+Stav: Plánováno. Samostatná etapa po V6; její UI není podmínkou uzavření V6.
+
+- Uživatelská stránka Completeness: konkrétní chybějící standardní epizody,
+  nerozpoznané identity a konflikty lokálního/providerového scope. Vychází
+  z potvrzených metadat a logical identities, nikoli počtu fyzických souborů.
+- Varianty, complete Media Parts a confirmed duplicate secondary nezvyšují
+  počet logických epizod. Absence supplementary obsahu není chybějící běžný
+  díl; „bez CZ/SK“ je chybějící překlad, nikoli epizoda. Chybějící běžný díl
+  a nevysvětlená kolize standardní identity jsou závažné; nejistota → Review.
+- Optimalizace, persistentní SHA-256 katalog a konsolidace testů. Konkrétní
+  schema a hashing lifecycle vyžadují návrh této etapy; webový náhled V6
+  nevyžaduje hashování MKV a žádný hash katalog nyní nezavádí.
+
+Historické podklady (například subtitle bez video targetu a vyšší providerový
+počet epizod) zůstávají v [PROJECT_STATUS](PROJECT_STATUS.md#pre-v6-closure-checkpoint).
+Nejde o nově ověřený dnešní backlog. Procenta úplnosti a CZ/SK zůstávají směrem
+k revizi; současný metadata completion není úplnost knihovny.
 
 ## V7 – Bezpečný import a deduplikace
 
-Stav: Plánováno. Začíná až po closure V6 včetně finálního completeness auditu.
+Stav: Plánováno. Začíná až po closure V6; Completeness UI patří do V6.5.
 Navazuje na ověřenou hierarchii a řízenou cílovou strukturu, nikoli na nové
 hádání identity při kopírování. Import není implementován.
 
@@ -463,6 +487,10 @@ hádání identity při kopírování. Import není implementován.
   a Review; po potvrzení dokončeného kopírování a fyzického plánu worker provede
   MOVE v jednom RW mountu stejného share. Aktualizuje dotčené záznamy bez
   automatického full scanu; kořen IMPORT se nikdy neodstraňuje.
+- Nový importní scanner má discovery scope výhradně `Anime/IMPORT`, vlastní
+  novou DB evidenci incoming souborů a deduplikace. Pro následné review,
+  plánování a organizaci znovu používá hotové V6 workflow; nevytváří druhé
+  reorganizační jádro. Běžný scanner knihovny tím nepřebírá discovery importu.
 - Před zařazením provést preflight **celého importního batche**:
   inventura → hash/technická analýza → porovnání s katalogem → návrh identit,
   duplicit/náhrad a subtitle vazeb → kompletní plán a preview → rozhodnutí uživatele.
@@ -486,6 +514,17 @@ hádání identity při kopírování. Import není implementován.
 
 Současný Video model nemá persistentní file hash a scanner hashing neprovádí;
 existující duplicate relation proto není sama důkazem bitové shody pro import.
+
+## V7.5 – Release Tracking a pokročilé sledování pokračování
+
+Stav: Plánováno. Navazuje na Completeness a bezpečný import.
+
+Pokročilé sledování nových Season, Part, Filmů, OVA a dalších pokračování
+vychází z potvrzených metadata vazeb a bezpečných provider relations.
+Zachovává výše schválené pracovní stavy a rozhodnutí „Nebavilo / nebudu shánět“
+i oddělení faktické existence pokračování od aktivního backlogu. Candidate
+nebo podobnost názvu nevytváří autoritu; nejednoznačnosti vyžadují Review.
+Provider relations a tento workflow dosud nejsou implementované.
 
 ## V8 – Automatické sledování NASu
 
@@ -526,10 +565,11 @@ scope a aktuální rozhodnutí o uzavírání, nikoli starou značku dokončení
 Původní V6 nadpis „Úplnost knihovny“ nepřebíráme jako poslední scope: pozdější
 Season/Part/Media Part a supplementary podklady počítají s fyzickými návrhy
 a aktuální rozhodnutí při docs review určuje V6 jako řízenou reorganizaci NAS.
-Audit úplnosti je podle rozhodnutí z 2026-09-27 závěrečnou částí V6, nikoli
-vstupní podmínkou; samostatný dlouhodobý workflow kontroly kompletnosti
-a release trackingu je výše zachován jako plánovaný směr, nikoli nově
-přečíslovaná verze.
+Rozhodnutí z 2026-09-27 zařadilo audit úplnosti na závěr V6. Nové schválené
+rozdělení toto členění zpřesňuje: V6 dokončuje backend/frontend reorganizace
+a technické ověření, V6.5 přebírá Completeness UI, optimalizace, SHA-256 katalog
+a konsolidaci testů; V7 přidává IMPORT discovery/DB evidenci/deduplikaci nad V6
+a V7.5 pokročilý Release Tracking. Historické doménové kontrakty tím nezanikají.
 V7 zachovává konkrétně rozpracovaný importní kontrakt; V8–V10 zůstávají původními
 stručnými směry bez nového detailního odsouhlasení, proto mají orientační stav.
 
