@@ -31,6 +31,8 @@ class Settings:
     library_access_timeout_seconds: float = 10
     library_healthcheck_interval_files: int = 25
     reorganization_preview_timeout_seconds: float = 120
+    reorganization_approval_inbox: Path | None = None
+    reorganization_approval_outbox: Path | None = None
 
     def __post_init__(self):
         value = self.reorganization_preview_timeout_seconds
@@ -73,5 +75,7 @@ def get_settings(dotenv_path: str | Path | None = None) -> Settings:
         mediainfo_timeout_seconds=max(0.1, float(os.getenv("MEDIAINFO_TIMEOUT_SECONDS", "60"))),
         library_access_timeout_seconds=max(0.1, float(os.getenv("LIBRARY_ACCESS_TIMEOUT_SECONDS", "10"))),
         reorganization_preview_timeout_seconds=float(os.getenv("REORGANIZATION_PREVIEW_TIMEOUT_SECONDS", "120")),
+        reorganization_approval_inbox=Path(os.environ['REORGANIZATION_APPROVAL_INBOX']) if os.getenv('REORGANIZATION_APPROVAL_INBOX') else None,
+        reorganization_approval_outbox=Path(os.environ['REORGANIZATION_APPROVAL_OUTBOX']) if os.getenv('REORGANIZATION_APPROVAL_OUTBOX') else None,
         library_healthcheck_interval_files=max(1, int(os.getenv("LIBRARY_HEALTHCHECK_INTERVAL_FILES", "25"))),
     )

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Schválení reorganizace – AnimeDB{% endblock %}
+{% block main_class %}content-shell content-wide reorganization{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', path='reorganization.css') }}">{% endblock %}
+{% block content %}
+{% set p = manifest.payload %}
+<h1>Finální canonical manifest</h1>
+<p><a href="/reorganization/approval">Manifesty</a> · <a href="/reorganization">Orientační náhled</a> · Správce pro evidenci: {{ actor }}</p>
+<section class="panel">
+{% if accepted %}<h2>Převzato hostitelem · spuštění deaktivované</h2>
+{% elif receipt %}<h2>Schváleno</h2>
+{% elif reviewed %}<h2>Manifest připraven k výslovnému schválení</h2>
+{% else %}<h2>Vyžaduje potvrzení warningů a preflight</h2>{% endif %}
+<p><strong>Předáno ke spuštění: ne · Spuštěno: ne.</strong> Tato část workflow fyzické spuštění neumožňuje. Převzetí hostitelem pouze ověří a jednorázově spotřebuje schválení.</p>
+<p>Canonical SHA-256 celého zobrazeného envelope včetně acknowledgements:</p><p class="reorganization-path"><strong>{{ canonical_sha256 }}</strong></p>
+<p class="reorganization-path">Manifest ID: {{ manifest.manifest_id }}<br>Původní hostitelský SHA: {{ source }}</p>
+<p><a href="/reorganization/approval/{{ source }}/manifest">Stáhnout přesný canonical execution manifest</a></p>
+<ul class="reorganization-counts">{% for action in ['MOVE','KEEP','QUARANTINE'] %}<li>{{ action }}: {{ p.actions|selectattr('action','equalto',action)|list|length }}</li>{% endfor %}<li>Nové adresáře: {{ bundle.new_directories|length }}</li></ul>
+<p>Potřebné cílové adresáře celkem: {{ p.directories|length }}. Fyzické duplicity se nemažou.</p>
+<p class="reorganization-path">Library root: {{ p.library_root }}<br>Windows root: {{ p.windows_root }}<br>RW mount binding: {{ p.mount_identity }}<br>DB SHA-256: {{ p.db_fingerprint.sha256 }}<br>DB velikost: {{ p.db_fingerprint.size }} · mtime_ns: {{ p.db_fingerprint.mtime_ns }} · schema: {{ p.db_fingerprint.user_version }}<br>Filesystem evidence: {{ p.filesystem_hash }}</p>
+<p>Hostitelská runtime evidence zachycena: {{ bundle.published_at }}; platnost nejvýše 15 minut. Web používá vlastní RO pohled na stejné cesty. Neprokazuje aktuální RW mount, runtime výluku ani odstavení writerů.</p>
+{% if not current %}<p role="alert"><strong>STOP: hostitelská evidence vypršela. Tento manifest již nelze schválit ani předat; správce musí připravit nový původní manifest.</strong></p>{% endif %}
+{% if result %}<p>Čerstvý read-only preflight DB/filesystemu proti zachycené hostitelské runtime evidence: {{ result.outcome }}. Host před jakýmkoliv budoucím spuštěním znovu ověří skutečné provozní podmínky.</p>{% else %}<p>Otevření stránky neprovádí inventuru. Aktuální preflight proběhne při přípravě i při schvalovacím POST; neúspěch nebo stale evidence znamenají STOP.</p>{% endif %}
+{% if p.generation_diagnostics or p.actions|selectattr('criticality','equalto','REVIEW')|list %}<p><strong>STOP: manifest vyžaduje REVIEW/BLOCKED.</strong></p>{% else %}<p>Publikovaný manifest nemá nevyřešené BLOCKED/REVIEW ani kolize. Připravenost ke schválení závisí na úspěšném čerstvém preflightu a přesném potvrzení warningů.</p>{% endif %}
+{% for diagnostic in p.generation_diagnostics %}<p>{{ diagnostic }}</p>{% endfor %}
+</section>
+<section class="panel"><h2>Konkrétní warning acknowledgements</h2>
+{% if not reviewed %}<p>Potvrďte každý warning zvlášť. Tím se připraví canonical envelope s vašimi acknowledgements; jeho nový SHA si prohlédnete před konečným schválením.</p>{% else %}<p>Acknowledgements jsou již součástí zobrazeného canonical SHA. Změna kterékoliv hodnoty zneplatní schválení.</p>{% endif %}
+<form method="post" action="/reorganization/approval/{{ source }}/prepare" id="manifest-prepare">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+{% if not reviewed %}<label>Jméno správce pro evidenci <input name="actor" value="{{ actor }}" maxlength="128" required></label><p>Jde o evidenční údaj v administrátorské LAN aplikaci; nepřihlašujete se k účtu.</p>{% endif %}
+<div id="manifest-warnings" class="reorganization-group"><p data-count></p><div data-page></div><nav class="reorganization-pagination" aria-label="Stránkování warningů"><button type="button" data-prev>Předchozí</button><span data-position></span><button type="button" data-next>Další</button></nav></div>
+{% if not reviewed and current %}<button type="submit" id="manifest-prepare-submit" disabled>Připravit přesný manifest k finálnímu schválení</button><noscript><p>Pro jednotlivá potvrzení a stránkování zapněte JavaScript.</p></noscript>{% endif %}
+</form></section>
+{% if reviewed %}<section class="panel"><h2>Výslovné schválení přesného SHA-256</h2>
+<form method="post" action="/reorganization/approval/{{ source }}/approve">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="sha256" value="{{ canonical_sha256 }}"><input type="hidden" name="actor" value="{{ actor }}">
+{% if not receipt and current %}<label><input type="checkbox" name="confirm" value="yes" required> Schvaluji celý výše uvedený canonical manifest {{ canonical_sha256 }}, včetně SOURCE → TARGET, KEEP/MOVE/QUARANTINE a konkrétních warning acknowledgements.</label>
+<p><button type="submit">Schválit tento canonical manifest</button></p>{% elif receipt %}<p>Jednorázové schválení uloženo: {{ receipt.approved_at }}. Znovu je schválit ani přepsat nelze.</p>{% endif %}
+</form></section>{% endif %}
+<section class="panel"><h2>Soubory · SOURCE → TARGET</h2>
+<p>Data pocházejí přímo z canonical manifestu. Nejvýše 50 položek na stránku.</p>
+<label>Operace <select id="manifest-action"><option value="ALL">Všechny</option>{% for action in ['MOVE','KEEP','QUARANTINE'] %}<option>{{ action }}</option>{% endfor %}</select></label>
+<label>Stav <select id="manifest-status"><option value="ALL">Všechny</option><option>READY</option><option>WARNING</option><option>REVIEW</option></select></label>
+<label>Hledat SOURCE/TARGET <input type="search" id="manifest-search"></label>
+<div id="manifest-actions"><p data-count></p><div data-page></div><nav class="reorganization-pagination" aria-label="Stránkování akcí"><button type="button" data-prev>Předchozí</button><span data-position></span><button type="button" data-next>Další</button></nav></div>
+</section>
+<details class="panel"><summary>Výsledná adresářová struktura</summary><div id="manifest-directories"><p data-count></p><div data-page></div><nav class="reorganization-pagination" aria-label="Stránkování adresářů"><button type="button" data-prev>Předchozí</button><span data-position></span><button type="button" data-next>Další</button></nav></div></details>
+<section class="panel"><h2>Cleanup po přesunech</h2><p>Toto schválení není schválením cleanup proposal. E7H vytvoří živý proposal až po fyzických přesunech. Správce pak přes existující CLI potvrdí konkrétní nepotřebné prázdné adresáře a přesný živý proposal SHA. IMPORT, Duplicates, Subs a systémové adresáře zůstávají chráněné.</p></section>
+<details class="panel"><summary>Celý přesný canonical JSON</summary><pre class="reorganization-path">{{ canonical }}</pre></details>
+<script type="application/json" id="manifest-data">{{ manifest|tojson }}</script>
+<script type="application/json" id="manifest-new-directories">{{ bundle.new_directories|tojson }}</script>
+<script src="{{ url_for('static', path='reorganization_approval.js') }}" defer></script>
+{% endblock %}

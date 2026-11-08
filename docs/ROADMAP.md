@@ -443,9 +443,13 @@ požadavku, nepersistuje plán a neposkytuje execution ani approval backend.
 Neúplné coverage, BLOCKED a REVIEW nezakládají execution readiness; ani
 úplné plánovací pokrytí není fyzicky ověřený výsledek.
 
-Zbývá webové potvrzení konkrétního plánu, bezpečné napojení na existující
-administrativní execution workflow a zobrazení jeho výsledku/recovery.
-Tento řez nepřidává executor, RW mount ani povolení k NAS execution.
+Druhý webový řez přidává [schválení přesného canonical manifestu](V6_WEB_APPROVAL.md),
+konkrétní warning acknowledgements, CSRF a jednorázové hostitelské převzetí
+po kontrole originálu, aktuálního stavu, runtime.lock a RW CIFS policy.
+Současná LAN aplikace je administrace bez nových účtů či přihlašování.
+Fyzické spuštění této větve zůstává deaktivované. Zbývá napojení průběhu,
+živého E7H cleanup rozhodnutí, skutečného předání stávajícímu E7 a výsledků/STOP.
+Tento řez nepřidává executor, webový RW mount ani povolení k NAS execution.
 
 Technické ověření dokončené reorganizace zůstává closure podmínkou V6:
 porovnání skutečných cest a SQLite locatorů se schváleným plánem, zachování

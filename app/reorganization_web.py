@@ -147,6 +147,7 @@ def install_reorganization_routes(app, templates, settings):
             'counts': counts, 'library_root': str(settings.anime_path),
             'preview': preview, 'view': view, 'error': error, 'statuses': STATUSES,
             'timeout': timeout, 'preference_return_to': '/reorganization',
+            'approval_available': bool(settings.reorganization_approval_inbox),
         }), status_code=status_code)
         response.headers['Cache-Control'] = 'no-store'
         return response
@@ -184,3 +185,6 @@ def install_reorganization_routes(app, templates, settings):
                           'nebo není připojen požadovaný mount; žádný platný plán není k dispozici.', status_code=503)
         finally:
             lock.release()
+
+    from .reorganization_approval_web import install_approval_routes
+    install_approval_routes(app, templates, settings)

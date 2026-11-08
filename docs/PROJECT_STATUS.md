@@ -305,7 +305,7 @@ Tento foundation checkpoint ponechával P2C/execution pending; jejich navazujíc
 implementaci popisují další sekce. Produkční NAS cleanup není autorizován,
 purge action a uživatelské Completeness UI (V6.5) zůstávají pending.
 
-### Webový read-only náhled reorganizace
+### Webový náhled a schvalování reorganizace
 
 `/reorganization` zobrazuje databázové počty přes vlastní SQLite `mode=ro`
 session. Běžný GET se knihovny nedotýká. Explicitní POST náhledu spustí
@@ -330,9 +330,18 @@ Layout a Hierarchy Review. READY položka ani complete planning coverage
 nepotvrzuje execution readiness nebo fyzicky ověřený výsledek. Výsledek je
 jednorázový snapshot bez uložené authority; timeout/chyba neposkytuje částečný
 plán. Preview není execution manifest: archive evidence a Windows root mohou
-vést k jinému hashi. Budoucí approval/execution vyžaduje aktuální plný manifest,
-runtime evidence a preflight. Web zatím nemá approval ani execution ovládání; fyzické spuštění bude
-doplněno později v rámci V6. Verze a closure podmínky určuje [ROADMAP](ROADMAP.md).
+vést k jinému hashi. Schválení/execution vyžaduje aktuální plný manifest,
+runtime evidence a preflight. [Webové schválení](V6_WEB_APPROVAL.md) nyní odděleně
+přebírá původní canonical manifest z hostitelského RO inboxu, vytváří konkrétní
+warning acknowledgements a ve druhém kroku jednorázově schvaluje přesný SHA-256.
+POST chrání CSRF; současná LAN aplikace je administrace bez účtů a přihlašování.
+Hostitelský opt-in nástroj ověří originál, lokálně potvrzený SHA, aktuální stav,
+stávající runtime.lock a RW CIFS policy a spotřebuje approval v soukromém ledgeru.
+Web používá fresh DB/FS preflight proti časově omezené zachycené hostitelské runtime
+evidence, nikoli proti domnělému RW bindingu svého RO mountu.
+Fyzické spuštění této větve zůstává deaktivované do napojení průběhu a živého E7H
+rozhodnutí; převzetí hostitelem není spuštění. Schema, E7 executor, doménová
+pravidla ani preview se nemění. Verze a closure podmínky určuje [ROADMAP](ROADMAP.md).
 
 [Container locator projection](../app/target_planner.py) zachovává single-leaf
 locator a pro řízený CM/Promo fan-out `extras_promo` jednoho ownera vrací explicitní

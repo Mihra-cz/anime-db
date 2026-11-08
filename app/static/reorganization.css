@@ -14,3 +14,7 @@
 .reorganization-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-top: 1rem; }
 .reorganization-pagination button:disabled { opacity: .5; cursor: default; }
 .reorganization select { min-height: 44px; max-width: 100%; }
+.reorganization pre.reorganization-path { white-space: pre-wrap; word-break: break-word; }
+.reorganization article { overflow-wrap: anywhere; }
+.reorganization input[type="search"], .reorganization input[name="actor"] { min-height: 44px; max-width: 100%; }
+.reorganization #manifest-warnings label { display: flex; align-items: center; gap: .75rem; min-height: 44px; }
