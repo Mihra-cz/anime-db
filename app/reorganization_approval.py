@@ -25,6 +25,12 @@ MAX_AGE_SECONDS = 900
 MAX_RECORD_BYTES = 16 * 1024 * 1024
 
 
+def require_current_proposal(bundle):
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(bundle['published_at'])).total_seconds()
+    if not 0 <= age <= MAX_AGE_SECONDS:
+        raise ValueError('host proposal expired; prepare a new proposal')
+
+
 def now():
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
@@ -179,9 +185,7 @@ def _check_proposal(bundle, final, *, database, library_root, runtime=None):
         raise ValueError('nonempty execution manifest required by E7')
     if replace(final, acknowledgements=original.acknowledgements) != original:
         raise ValueError('manifest differs from host original')
-    age = (datetime.now(timezone.utc) - datetime.fromisoformat(bundle['published_at'])).total_seconds()
-    if not 0 <= age <= MAX_AGE_SECONDS:
-        raise ValueError('host proposal expired; prepare a new proposal')
+    require_current_proposal(bundle)
     if str(fs._absolute(database)) != bundle['database'] or str(library_root) != original.payload.library_root:
         raise ValueError('database/library binding differs')
     _check_sqlite_input(database)
@@ -235,8 +239,32 @@ def publish_proposal(*, inbox, database, library_root, share, share_root, manife
     return source
 
 
-def write_review(outbox, source_sha256, final):
+def write_review(outbox, source_sha256, final, *, actor=None):
+    actors = {a.actor for a in final.acknowledgements}
+    actor = actor or (next(iter(actors)) if len(actors) == 1 else None)
+    if actor is not None:
+        if not actor.strip() or (actors and actors != {actor}):
+            raise ValueError('review actor differs from warning acknowledgements')
+        write_record(outbox, identity(source_sha256) + '.review-actor.json', _json({
+            'source_sha256': source_sha256, 'approved_sha256': sha256(final), 'actor': actor}))
     return write_record(outbox, identity(source_sha256) + '.review.json', manifest_to_json(final))
+
+
+def read_review_actor(outbox, source_sha256, final):
+    try:
+        metadata = _strict_json_load(read_record(outbox, identity(source_sha256) + '.review-actor.json'))
+    except FileNotFoundError:
+        # Historical acknowledgements already contain the original actor.
+        actors = {a.actor for a in final.acknowledgements}
+        if len(actors) == 1:
+            return next(iter(actors))
+        raise ValueError('review actor missing; preserve historical review and prepare a new manifest')
+    if (type(metadata) is not dict or set(metadata) != {'source_sha256', 'approved_sha256', 'actor'}
+            or metadata['source_sha256'] != source_sha256 or metadata['approved_sha256'] != sha256(final)
+            or type(metadata['actor']) is not str or not metadata['actor'].strip()
+            or any(a.actor != metadata['actor'] for a in final.acknowledgements)):
+        raise ValueError('review actor binding differs')
+    return metadata['actor']
 
 
 def read_review(outbox, source_sha256):
@@ -262,8 +290,8 @@ def read_approval(outbox, source_sha256):
 
 def accept_approval(*, inbox, outbox, ledger, source_sha256, approved_sha256, actor,
                     database, library_root, share, share_root, runtime, runtime_lock,
-                    writers_stopped=False):
-    """Consume once after host checks. Physical execution deliberately stays disabled.
+                    writers_stopped=False, for_execution=False):
+    """Consume once after host checks; disabled acceptance is never start authority.
 
     The local operator supplies the exact SHA independently of the web request.
     No command, path, runtime assertion or execution option comes from that request.
@@ -286,10 +314,36 @@ def accept_approval(*, inbox, outbox, ledger, source_sha256, approved_sha256, ac
             or (share, share_root) != (bundle['share'], bundle['share_root'])):
         raise ValueError('host authorization differs from exact web approval')
     with runtime_exclusion(runtime_lock):
+        if os.path.lexists(record_path(ledger, identity(final.manifest_id) + '.accepted.json')):
+            raise FileExistsError('approval already spent; no execution retry or disabled-claim adoption')
         current = worker_runtime(library_root, share=share, share_root=share_root, runtime=runtime)
         _require_ready(check_proposal(bundle, final, database=database, library_root=library_root, runtime=current))
-        accepted = {**receipt, 'state': 'ACCEPTED_EXECUTION_DISABLED', 'started': False, 'accepted_at': now()}
+        if type(for_execution) is not bool:
+            raise ValueError('explicit execution claim required')
+        accepted = {**receipt, 'state': 'EXECUTION_CLAIMED' if for_execution else 'ACCEPTED_EXECUTION_DISABLED',
+            'started': False, 'accepted_at': now()}
         # Payload identity also stops republishing the same plan with a new timestamp/envelope.
         write_record(ledger, identity(final.manifest_id) + '.accepted.json', _json(accepted))
         write_record(inbox, identity(source_sha256) + '.acceptance.json', _json(accepted))
     return accepted
+
+
+def read_execution_result(inbox, source_sha256, final):
+    result = _strict_json_load(read_record(inbox, identity(source_sha256) + '.result.json'))
+    total = len(final.payload.actions)
+    if (type(result) is not dict or result.get('source_sha256') != source_sha256
+            or result.get('approved_sha256') != sha256(final) or result.get('manifest_id') != final.manifest_id
+            or result.get('state') not in {'NORMAL', 'STOP'} or type(result.get('total')) is not int or result['total'] != total
+            or type(result.get('completed')) is not int or not 0 <= result['completed'] <= total
+            or type(result.get('remaining')) is not int or result['remaining'] != total - result['completed']
+            or type(result.get('started')) is not bool or (result['completed'] and not result['started'])
+            or any(type(result.get(key)) is not str or not result[key].strip() for key in
+                   ('actor', 'phase', 'finished_at', 'journal_path', 'guard_path', 'cleanup_evidence_path'))
+            or (result.get('error') is not None and type(result['error']) is not str)
+            or not (result.get('removed_directories') is None and result.get('state') == 'STOP'
+                    or type(result.get('removed_directories')) is list
+                    and all(type(path) is str for path in result['removed_directories']))
+            or (result['state'] == 'NORMAL' and result.get('error') is not None)
+            or (result['state'] == 'NORMAL' and (result['completed'] != total or not result['started']))):
+        raise ValueError('execution result binding differs')
+    return result

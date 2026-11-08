@@ -469,18 +469,21 @@ class ScratchManifestExecution(_ExecutionSequence):
 
     def execute(self, manifest: ExecutionManifest, *, maintenance_owner=None, cleanup_decision=None,
                 completion_rescan=False, resume_scanning=False, runtime_evidence=None, approved_manifest_sha256=None,
-                verify_content=()):
+                verify_content=(), progress=None):
         try:
             return self._execute_once(manifest, maintenance_owner=maintenance_owner,
                 cleanup_decision=cleanup_decision, completion_rescan=completion_rescan,
                 resume_scanning=resume_scanning, runtime_evidence=runtime_evidence,
-                approved_manifest_sha256=approved_manifest_sha256, verify_content=verify_content)
+                approved_manifest_sha256=approved_manifest_sha256, verify_content=verify_content, progress=progress)
         except BaseException:
             self.completion_rescan_result = None
             raise
 
     def _accept_scope(self, *, maintenance_owner, cleanup_decision=None, completion_rescan=False,
-                      resume_scanning=False, runtime_evidence=None, approved_manifest_sha256=None, verify_content=()):
+                      resume_scanning=False, runtime_evidence=None, approved_manifest_sha256=None, verify_content=(), progress=None):
+        if progress is not None and not callable(progress):
+            raise ValueError('progress must be a callable observer')
+        self._progress = progress
         if (type(verify_content) is not tuple or any(type(path) is not str for path in verify_content)
                 or len(set(verify_content)) != len(verify_content)):
             raise ValueError('explicit unique source paths required for optional content verification')
@@ -637,7 +640,10 @@ class ScratchManifestExecution(_ExecutionSequence):
         self._phase = 'EXECUTION_GUARD'
         self._persistent_guard = self._resources.enter_context(closing(
             _ScratchExecutionGuard.create(self.database_path, self.root, manifest, self._maintenance_owner)))
+        self._notify_progress('MANIFEST_CONFIRMED')
+        self._notify_progress('FOLDER_TREE_PREPARING')
         self._directories.prepare()
+        self._notify_progress('FOLDER_TREE_CONFIRMED')
         self._identities = tuple(self._resources.enter_context(
             ScratchIdentitySession._new_execution_context(self._filesystem, self, index))
             for index in range(len(manifest.payload.actions)))
@@ -697,7 +703,22 @@ class ScratchManifestExecution(_ExecutionSequence):
 
     @_filesystem_checkpoint
     def _append(self, state):
-        return super()._append(state)
+        result = super()._append(state)
+        if self._progress is not None:
+            # Observe only the acknowledged E1 prefix; never persist a second
+            # per-action history or turn this notification into authority.
+            completed = len(self._completed_actions)
+            self._progress({'phase': state, 'action_index': self._active_index,
+                'completed': completed, 'total': len(self._manifest.payload.actions),
+                'remaining': len(self._manifest.payload.actions) - completed})
+        return result
+
+    def _notify_progress(self, phase):
+        if self._progress is not None:
+            completed = len(self._completed_actions)
+            self._progress({'phase': phase, 'completed': completed,
+                'total': len(self._manifest.payload.actions),
+                'remaining': len(self._manifest.payload.actions) - completed})
 
     def _execute_actions(self):
         result = []
@@ -709,14 +730,17 @@ class ScratchManifestExecution(_ExecutionSequence):
             result.append(self._run_move(index))
         self._require_journal()
         self._directories.check_bindings()
+        self._notify_progress('ACTIONS_CONFIRMED')
         if self._cleanup_decision is not None:
             from .target_execution_cleanup import _run_cleanup
             self.cleanup_outcome = _run_cleanup(self, self._cleanup_decision)
             self._directories.removed = set(self.cleanup_outcome.removed)
+            self._notify_progress('CLEANUP_CONFIRMED')
         else:
             for index in range(len(self._manifest.payload.actions)):
                 self._verify_physical(index, full=True)
         if self._completion_rescan_requested:
+            self._notify_progress('FINAL_VERIFICATION')
             from .scanner.execution_completion import run_completed_scratch_rescan
             self._phase = 'P2C_COMPLETION'
             self.completion_rescan_result = run_completed_scratch_rescan(self)

@@ -9,7 +9,7 @@ AnimeDB je katalog anime knihovny s běžným read-only přístupem k NAS. Rekur
 - [HISTORY](docs/HISTORY.md) — technická historie významných milníků.
 - [V6_NAMING_CONTRACT](docs/V6_NAMING_CONTRACT.md) — schválená pravidla fyzických názvů a struktury pro V6.
 - [V6 produkční vstup](docs/V6_PRODUCTION_REORGANIZATION.md) — existující knihovna/SQLite, izolovaný RW worker, chráněné IMPORT/Duplicates, E7H a návrat do RO provozu; před provozním použitím vyžaduje Nexus ověření a schválení.
-- [V6 webové schválení](docs/V6_WEB_APPROVAL.md) — přesný canonical manifest, CSRF a jednorázové hostitelské převzetí; fyzické spuštění této větve je deaktivované.
+- [V6 webové schválení](docs/V6_WEB_APPROVAL.md) — canonical schválení, explicitní hostitelský E7, živý E7H cleanup a výsledný report po RO restartu.
 
 ## Spuštění bez Dockeru
 

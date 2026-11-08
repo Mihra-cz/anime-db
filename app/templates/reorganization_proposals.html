@@ -3,6 +3,6 @@
 {% block content %}
 <h1>Finální manifesty</h1>
 <p><a href="/reorganization">Zpět na orientační náhled</a></p>
-<p>Původní canonical manifesty dodává správce z prostředí izolovaného RW workeru. Schválení provádí správce v současné LAN administraci. Fyzické spuštění je deaktivované.</p>
+<p>Původní canonical manifesty dodává správce z prostředí izolovaného RW workeru. Schválení provádí správce v současné LAN administraci. Fyzické spuštění provádí pouze správce přes hostitelský příkaz. Po obnovení aplikace zde najdete výsledný report.</p>
 {% for source in sources %}<p><a href="/reorganization/approval/{{ source }}">{{ source }}</a></p>{% else %}<p>Správce zatím nepublikoval žádný finální manifest.</p>{% endfor %}
 {% endblock %}

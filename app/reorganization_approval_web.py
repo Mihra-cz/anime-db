@@ -12,7 +12,7 @@ import time
 from urllib.parse import parse_qs
 
 from fastapi import HTTPException, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from . import reorganization_approval as approval
@@ -65,7 +65,7 @@ def install_approval_routes(app, templates, settings):
         # All current AnimeDB routes are trusted-LAN administration by explicit
         # product decision. Keep this boundary ready for future access control.
         if not configured(settings):
-            raise HTTPException(503, 'Schvalování není nakonfigurováno; fyzické spuštění je deaktivované.')
+            raise HTTPException(503, 'Schvalování není nakonfigurováno.')
 
     def actor_value(value):
         value = value.strip()
@@ -140,14 +140,17 @@ def install_approval_routes(app, templates, settings):
         finally:
             lock.release()
 
-    def render(request, source, *, result=None, prepared_actor=None):
+    def render(request, source):
         bundle, original, final = load(source)
         manifest = final or original
         digest = approval.sha256(manifest)
         actors = {a.actor for a in manifest.acknowledgements}
         if len(actors) > 1:
             raise HTTPException(409, 'STOP: nejednoznačný správce review.')
-        actor = next(iter(actors), prepared_actor or 'administrator')
+        try:
+            actor = approval.read_review_actor(outbox, source, final) if final is not None else 'administrator'
+        except (ValueError, OSError):
+            raise HTTPException(409, 'STOP: správce review není bezpečně doložen; připravte nový původní manifest.')
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(bundle['published_at'])).total_seconds()
         current = 0 <= age <= approval.MAX_AGE_SECONDS
         try:
@@ -162,19 +165,26 @@ def install_approval_routes(app, templates, settings):
         try:
             accepted = json.loads(approval.read_record(inbox, source + '.acceptance.json'))
             if (receipt is None or accepted.get('approved_sha256') != digest
-                    or accepted.get('state') != 'ACCEPTED_EXECUTION_DISABLED' or accepted.get('started') is not False):
+                    or accepted.get('state') not in {'ACCEPTED_EXECUTION_DISABLED', 'EXECUTION_CLAIMED'} or accepted.get('started') is not False):
                 raise ValueError('acceptance differs')
         except FileNotFoundError:
             accepted = None
         except (ValueError, OSError, AttributeError):
             raise HTTPException(409, 'STOP: neplatné hostitelské převzetí.')
+        try:
+            execution_result = approval.read_execution_result(inbox, source, manifest)
+        except FileNotFoundError:
+            execution_result = None
+        except (ValueError, OSError, TypeError, KeyError):
+            raise HTTPException(409, 'STOP: výsledek execution neodpovídá schválenému manifestu.')
         if receipt is not None:
             actor = receipt['actor']
         csrf = token(source, digest)
         response = templates.TemplateResponse(request, 'reorganization_approval.html', display_safe({
             'source': source, 'manifest': as_view(manifest), 'canonical_sha256': digest,
             'canonical': manifest_to_json(manifest), 'bundle': bundle, 'reviewed': final is not None,
-            'receipt': receipt, 'accepted': accepted, 'csrf': csrf, 'actor': actor, 'result': result,
+            'receipt': receipt, 'accepted': accepted, 'csrf': csrf, 'actor': actor, 'result': None,
+            'execution_result': execution_result,
             'current': current,
         }))
         response.set_cookie(COOKIE, csrf, max_age=approval.MAX_AGE_SECONDS, httponly=True,
@@ -183,9 +193,21 @@ def install_approval_routes(app, templates, settings):
                                  'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff'})
         return response
 
-    @app.get('/reorganization/approval', response_class=HTMLResponse)
-    def proposals(request: Request):
-        administration(request)
+    def stop_page(request, error):
+        return templates.TemplateResponse(request, 'reorganization_stop.html', {
+            'detail': str(error.detail), 'status_code': error.status_code,
+        }, status_code=error.status_code, headers={
+            **(error.headers or {}), 'Cache-Control': 'no-store', 'Referrer-Policy': 'same-origin',
+            'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff'})
+
+    def show(request, action):
+        try:
+            administration(request)
+            return action()
+        except HTTPException as error:
+            return stop_page(request, error)
+
+    def list_proposals(request):
         try:
             names = sorted(p.name[:64] for p in Path(inbox).iterdir()
                            if p.name.endswith('.proposal.json') and len(p.name) == 78)
@@ -196,63 +218,78 @@ def install_approval_routes(app, templates, settings):
         return templates.TemplateResponse(request, 'reorganization_proposals.html', {'sources': names},
                                           headers={'Cache-Control': 'no-store'})
 
+    @app.get('/reorganization/approval', response_class=HTMLResponse)
+    def proposals(request: Request):
+        return show(request, lambda: list_proposals(request))
+
     @app.get('/reorganization/approval/{source}', response_class=HTMLResponse)
     def proposal(request: Request, source: str):
-        administration(request)
-        return render(request, source)
+        return show(request, lambda: render(request, source))
 
     @app.get('/reorganization/approval/{source}/manifest')
     def download(request: Request, source: str):
-        administration(request)
-        _, original, final = load(source)
-        return Response(manifest_to_json(final or original), media_type='application/json',
-            headers={'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="execution-manifest.json"'})
+        def canonical_response():
+            _, original, final = load(source)
+            return Response(manifest_to_json(final or original), media_type='application/json',
+                headers={'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="execution-manifest.json"'})
+        return show(request, canonical_response)
 
-    @app.post('/reorganization/approval/{source}/prepare', response_class=HTMLResponse)
-    async def prepare(request: Request, source: str):
+    def load_request(request, source):
         administration(request)
-        bundle, original, existing = await run_in_threadpool(load, source)
-        fields = await form(request, source, approval.sha256(existing or original))
-        if existing is not None:
-            raise HTTPException(409, 'Review už existuje; nelze je přepsat ani znovu připravit.')
+        bundle, original, final = load(source)
+        return bundle, original, final, approval.sha256(final or original)
+
+    def save_decision(command, source, bundle, original, existing, fields):
         actor = actor_value(fields.get('actor', [''])[0])
-        try:
-            final = await run_in_threadpool(approval.prepare_review, bundle, actor=actor,
-                                           warning_ids=fields.get('warnings', []))
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
-        result = await run_in_threadpool(fresh, source, final)
-        try:
-            await run_in_threadpool(approval.write_review, outbox, source, final)
-        except FileExistsError:
-            raise HTTPException(409, 'Review už existuje.')
-        except (ValueError, OSError):
-            raise HTTPException(503, 'STOP: review se nepodařilo bezpečně uložit; neopakovat automaticky.')
-        return await run_in_threadpool(render, request, source, result=result, prepared_actor=actor)
-
-    @app.post('/reorganization/approval/{source}/approve', response_class=HTMLResponse)
-    async def approve(request: Request, source: str):
-        administration(request)
-        bundle, _original, final = await run_in_threadpool(load, source)
-        if final is None:
+        if command == 'prepare':
+            if existing is not None:
+                raise HTTPException(409, 'Review už existuje; nelze je přepsat ani znovu připravit.')
+            try:
+                final = approval.prepare_review(bundle, actor=actor, warning_ids=fields.get('warnings', []))
+            except ValueError as exc:
+                raise HTTPException(422, str(exc))
+            fresh(source, final)
+            try:
+                approval.write_review(outbox, source, final, actor=actor)
+            except FileExistsError:
+                raise HTTPException(409, 'Review už existuje.')
+            except (ValueError, OSError):
+                raise HTTPException(503, 'STOP: review se nepodařilo bezpečně uložit; neopakovat automaticky.')
+            return
+        if existing is None:
             raise HTTPException(409, 'Nejprve připravte přesný canonical manifest k review.')
-        fields = await form(request, source, approval.sha256(final))
-        if fields.get('sha256') != [approval.sha256(final)] or fields.get('confirm') != ['yes']:
+        if fields.get('sha256') != [approval.sha256(existing)] or fields.get('confirm') != ['yes']:
             raise HTTPException(422, 'Vyžadováno výslovné schválení zobrazeného SHA-256.')
-        actor = actor_value(fields.get('actor', [''])[0])
         try:
-            approval.validate_review(bundle, final, actor=actor)
-        except ValueError as exc:
+            approval.validate_review(bundle, existing, actor=actor)
+            if actor != approval.read_review_actor(outbox, source, existing):
+                raise ValueError('review actor differs')
+        except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc))
-        result = await run_in_threadpool(fresh, source, final)
+        fresh(source, existing)
         try:
-            await run_in_threadpool(approval.write_approval, outbox, source, final,
-                                    actor=actor, approved_sha256=fields['sha256'][0])
+            approval.write_approval(outbox, source, existing, actor=actor, approved_sha256=fields['sha256'][0])
         except FileExistsError:
             raise HTTPException(409, 'Manifest byl již jednorázově schválen.')
         except (ValueError, OSError):
             raise HTTPException(503, 'STOP: schválení se nepodařilo bezpečně uložit; neopakovat automaticky.')
-        return await run_in_threadpool(render, request, source, result=result)
+
+    async def submit(request, source, command):
+        try:
+            bundle, original, final, digest = await run_in_threadpool(load_request, request, source)
+            fields = await form(request, source, digest)
+            await run_in_threadpool(save_decision, command, source, bundle, original, final, fields)
+            return RedirectResponse('/reorganization/approval/' + source, status_code=303)
+        except HTTPException as error:
+            return await run_in_threadpool(stop_page, request, error)
+
+    @app.post('/reorganization/approval/{source}/prepare', response_class=HTMLResponse)
+    async def prepare(request: Request, source: str):
+        return await submit(request, source, 'prepare')
+
+    @app.post('/reorganization/approval/{source}/approve', response_class=HTMLResponse)
+    async def approve(request: Request, source: str):
+        return await submit(request, source, 'approve')
 
 
 def as_view(manifest):

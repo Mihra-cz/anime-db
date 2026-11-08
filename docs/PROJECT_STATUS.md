@@ -339,9 +339,23 @@ Hostitelský opt-in nástroj ověří originál, lokálně potvrzený SHA, aktu�
 stávající runtime.lock a RW CIFS policy a spotřebuje approval v soukromém ledgeru.
 Web používá fresh DB/FS preflight proti časově omezené zachycené hostitelské runtime
 evidence, nikoli proti domnělému RW bindingu svého RO mountu.
-Fyzické spuštění této větve zůstává deaktivované do napojení průběhu a živého E7H
-rozhodnutí; převzetí hostitelem není spuštění. Schema, E7 executor, doménová
-pravidla ani preview se nemění. Verze a closure podmínky určuje [ROADMAP](ROADMAP.md).
+Explicitní hostitelský `execute` nyní spotřebuje nové schválení ve stejném ledgeru,
+uvolní kontrolní runtime lock a předá canonical manifest původnímu E7, který
+lock/E6B a preflight znovu ověří. Historický `ACCEPTED_EXECUTION_DISABLED` se nikdy
+neaktivuje. Terminál ukazuje fázi/počty z potvrzeného E1 a používá původní živý
+E7H cleanup. Po NORMAL nebo zachytitelném STOP vzniká pouze souhrnný report v RO
+inboxu, dostupný po restartu na původním GET. Chybějící report zůstává nepotvrzený,
+bez retry. Persistované SHA-bound metadata zachovají jméno i bez warningů;
+POST používá 303/GET, HTML STOP stránky a blokující práci v threadpoolu.
+Stávající 900sekundová admission se kontroluje i před E7; není timeoutem běhu.
+Hostitelský start vyžaduje stdin/stdout TTY a načtené readline před claimem.
+Volitelný lokální `progress.json` je pouze odvozený přehled potvrzených E1/E7
+fází a počtů, atomicky aktualizovaný na hranicích fází a přibližně po 5 sekundách.
+Samostatný [nenasazený Nginx edge](../deploy/nexus/service-edge/README.md) obsahuje
+statickou servisní stránku pro dobu odstávky, s jasným neověřeným stavem při
+zastaralých zprávách. Zachování stejného LAN portu vyžaduje pozdější provozní
+změnu Compose; původní deployment se nemění. Nic neobchází startup guard.
+Schema, doménová pravidla ani preview se nemění. Verze a closure podmínky určuje [ROADMAP](ROADMAP.md).
 
 [Container locator projection](../app/target_planner.py) zachovává single-leaf
 locator a pro řízený CM/Promo fan-out `extras_promo` jednoho ownera vrací explicitní

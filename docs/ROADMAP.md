@@ -447,9 +447,16 @@ Druhý webový řez přidává [schválení přesného canonical manifestu](V6_W
 konkrétní warning acknowledgements, CSRF a jednorázové hostitelské převzetí
 po kontrole originálu, aktuálního stavu, runtime.lock a RW CIFS policy.
 Současná LAN aplikace je administrace bez nových účtů či přihlašování.
-Fyzické spuštění této větve zůstává deaktivované. Zbývá napojení průběhu,
-živého E7H cleanup rozhodnutí, skutečného předání stávajícímu E7 a výsledků/STOP.
-Tento řez nepřidává executor, webový RW mount ani povolení k NAS execution.
+Třetí webový řez propojuje explicitní hostitelský `execute` s původním E7,
+živým CLI schválením E7H, completion do NORMAL a uloženým souhrnným výsledkem
+na původním webu po RO restartu. Počty/fáze terminálu používají potvrzený E1;
+nevzniká nový executor ani paralelní move journal. Historická disabled acceptance
+zůstává spotřebovaná. Web má persistentní jméno správce, PRG a HTML STOP stránky.
+Vše je ověřené jen lokálně synteticky; provozní ověření a fyzicky ověřený NAS
+výsledek nadále zbývají. Živý odvozený přehled má lokální JSON a statickou
+servisní stránku v samostatném nenasazeném Nginx override; stejná LAN URL vyžaduje
+pozdější provozní změnu vstupní HTTP vrstvy. Nevzniká aplikační server/daemon,
+webový RW mount ani povolení k NAS execution.
 
 Technické ověření dokončené reorganizace zůstává closure podmínkou V6:
 porovnání skutečných cest a SQLite locatorů se schváleným plánem, zachování

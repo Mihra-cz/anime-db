@@ -63,7 +63,7 @@ def test_real_preview_and_sources_unchanged(web):
     assert 'Canonical/Season 01/Canonical - S01E01.mkv' in response.text
     assert 'MOVE' in response.text and 'READY' in response.text
     assert 'Vyžaduje rozhodnutí: cleanup nebo warning' in response.text
-    assert 'Fyzické spuštění bude doplněno později' in response.text
+    assert 'Fyzické spuštění provádí správce na hostiteli' in response.text
     assert {p: fingerprint(p) for p in before} == before
     assert {p: p.stat().st_mtime_ns for p in directories} == directories
     assert set(p for p in media.rglob('*') if p.is_file()) == set(before) - {database}

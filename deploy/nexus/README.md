@@ -10,6 +10,10 @@ Struktura navazuje na Nexus Project Cookbook v1.0. Lokální kopie
 `/srv/nexus/PROJECTS.md` se před schválenou instalací musí znovu ověřit.
 Manifest zůstává `planned`; žádný podklad není povolení k nasazení.
 
+Volitelný [HTTP edge a servisní stránka V6](service-edge/README.md) jsou
+samostatný **nenasazený** override pro pozdější zachování stejné URL během E7.
+Níže popsaná základní konfigurace jedné služby se tím nemění.
+
 | Lokální podklad | Cíl na Nexusu |
 | --- | --- |
 | Schválené zdroje | `/srv/nexus/projects/anime-db/src/` |

@@ -311,7 +311,7 @@ def test_other_routes_remain_available_during_approval_io(web, monkeypatch, oper
     monkeypatch.setattr(target, name, slow_once)
     before = snapshot(case[2], case[1].root)
     async def exercise():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url='http://testserver') as concurrent:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url='http://testserver', follow_redirects=True) as concurrent:
             task = asyncio.create_task(concurrent.post(path + '/' + operation, data=data,
                 headers={'origin': 'http://testserver', 'cookie': f'reorganization_csrf={csrf(page)}'}))
             try:

@@ -105,6 +105,24 @@ Scratch allowlist se nemění. Produkční media policy navíc ověřuje explici
 CIFS server/share/podstrom, mount ancestry, nepřítomnost aliasů a crossingů,
 RW stav a držené descriptors. State používá lokální filesystem policy.
 
+Pro manifest schválený ve webu používejte [hostitelský `execute` schvalovacího
+nástroje](V6_WEB_APPROVAL.md#explicitní-hostitelský-start), který spotřebuje právě
+toto schválení, uvolní kontrolní runtime lock a zavolá stejný E7 vstup. Dosavadní
+`accept` se stavem `ACCEPTED_EXECUTION_DISABLED` neposkytuje start authority.
+Původní přímý CLI příklad výše zůstává samostatným administrativním vstupem;
+není návodem obcházet jednorázový webový ledger nebo opakovat nejasný běh.
+
+Hostitelský `execute` spouštějte v `tmux` nebo `screen` s přímo připojeným
+terminálem na stdin i stdout a s dostupným Python `readline`. CLI ověří a načte
+`readline` ještě před claimem; bez něj se dlouhý JSON cleanupu může v kanonickém
+terminálu oříznout. **Nepoužívat `| tee` ani přesměrování stdout**; CLI takový
+start odmítne před execution. Původní journal a výsledkový report zůstávají
+uložené nezávisle na terminálovém výpisu.
+
+Pro budoucí živý přehled je připraven [samostatný nenasazený HTTP edge](../deploy/nexus/service-edge/README.md).
+Jeho instalace mění vlastnictví LAN portu 8000 a vyžaduje oddělené provozní
+schválení. Stávající Compose ani Nexus tento lokální řez nemění.
+
 ## Cleanup a dokončení
 
 Po všech MOVE/KEEP/QUARANTINE se nejprve ověří původní finální post-state.

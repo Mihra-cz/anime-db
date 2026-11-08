@@ -52,7 +52,7 @@ def runtime_exclusion(path: Path, *, stop_execution=None):
 def execute_approved_reorganization(*, database: Path, library_root: Path, share: str,
                                     share_root: str, manifest, approved_sha256: str,
                                     runtime: RuntimeEvidence, runtime_lock: Path, cleanup_decision,
-                                    verify_content=()):
+                                    verify_content=(), progress=None, admission_check=None):
     """Compose existing locks, E7, E7H and completion. No retry/adoption after STOP."""
     canonical = manifest_to_json(manifest)
     if hashlib.sha256(canonical.encode()).hexdigest() != approved_sha256:
@@ -62,6 +62,17 @@ def execute_approved_reorganization(*, database: Path, library_root: Path, share
     started = False
     revoked = False
     operation_owner = None
+    total = len(manifest.payload.actions)
+
+    def phase(name, completed=0):
+        if progress is not None:
+            progress({'phase': name, 'completed': completed, 'total': total, 'remaining': total - completed})
+
+    def decide_cleanup(proposal):
+        phase('WAITING_FOR_CLEANUP_APPROVAL', total)
+        decision = cleanup_decision(proposal)
+        phase('E7H_CLEANUP', total)
+        return decision
 
     def stop_execution(exc):
         nonlocal revoked
@@ -72,16 +83,22 @@ def execute_approved_reorganization(*, database: Path, library_root: Path, share
             _revoke_transition(guard.path, guard._identity, exc)
 
     try:
+        phase('RUNTIME_EXCLUSION')
         with runtime_exclusion(runtime_lock, stop_execution=stop_execution):
+            if admission_check is not None:
+                admission_check()
             with ScratchManifestExecution.open_existing(library_root, database_path=database,
                     share=share, share_root=share_root) as owner:
                 operation_owner = owner
                 gate = ScratchMaintenance.existing(database, library_root)
                 with gate.maintenance() as lease:
                     started = True
-                    owner.execute(manifest, maintenance_owner=lease, cleanup_decision=cleanup_decision,
+                    phase('E7_PREFLIGHT')
+                    owner.execute(manifest, maintenance_owner=lease,
+                        cleanup_decision=decide_cleanup if cleanup_decision is not None else None,
                         resume_scanning=True, runtime_evidence=runtime,
-                        approved_manifest_sha256=approved_sha256, verify_content=verify_content)
+                        approved_manifest_sha256=approved_sha256, verify_content=verify_content, progress=progress)
+                phase('NORMAL_VERIFICATION', total)
                 engine = make_engine('sqlite:///' + database.as_uri() + '?mode=rw&uri=true', maintenance=gate)
                 try:
                     complete_reorganization(engine, library_root)
@@ -89,6 +106,7 @@ def execute_approved_reorganization(*, database: Path, library_root: Path, share
                     engine.dispose()
                 result = {'manifest_id': manifest.manifest_id, 'state': 'NORMAL',
                     'removed_directories': list(owner.cleanup_outcome.removed)}
+        phase('NORMAL', total)
         return result
     except BaseException as exc:
         # In particular, a failed wrapper finalization must not leave a newly

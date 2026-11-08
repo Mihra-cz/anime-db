@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="cs"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AnimeDB – Servisní přehled</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui,sans-serif;background:#10141d;color:#e2e8f2}body{margin:0;padding:clamp(20px,5vw,64px)}main{max-width:780px;margin:auto}h1{font-size:clamp(24px,4vw,32px);font-weight:600}p{line-height:1.6}table{width:100%;border-collapse:collapse;margin:24px 0}th,td{text-align:left;border-bottom:1px solid #30394a;padding:14px 8px}th{font-weight:500}td{font-family:ui-monospace,monospace}.PASS{color:#8bdab1}.WORK{color:#9dc7ff}.STOP{color:#ffa7a7}.WAIT,small{color:#a6b2c7}#result{font-weight:600}#confirmed{overflow-wrap:anywhere}footer{color:#a6b2c7;font-size:14px}
+</style><script defer src="/_service/service.js"></script></head>
+<body><main><h1>AnimeDB – Servisní přehled</h1>
+<p id="message" role="status">Aplikace je momentálně nedostupná. Stav reorganizace není ověřen.</p>
+<p id="result">Stav neověřen</p>
+<table aria-label="Průběh reorganizace"><thead><tr><th>Fáze</th><th>Stav</th><th>Potvrzeno</th></tr></thead><tbody>
+<tr data-phase="manifest"><th>Manifest</th><td>WAIT</td><td></td></tr>
+<tr data-phase="folders"><th>Folder Tree</th><td>WAIT</td><td></td></tr>
+<tr data-phase="rename"><th>Rename / MOVE</th><td>WAIT</td><td></td></tr>
+<tr data-phase="sqlite"><th>SQLite a locatory</th><td>WAIT</td><td></td></tr>
+<tr data-phase="cleanup"><th>Cleanup</th><td>WAIT</td><td></td></tr>
+<tr data-phase="verification"><th>Verification / NORMAL</th><td>WAIT</td><td></td></tr>
+</tbody></table>
+<p id="confirmed"></p><footer>Odvozený přehled, aktualizace přibližně každých 5 sekund. Autoritou jsou E1/E7 a terminál správce. Tato stránka nic nespouští ani neopakuje.</footer>
+<noscript><p>Pro živý přehled zapněte JavaScript. Bez aktualizací zůstává stav neověřený.</p></noscript>
+</main></body></html>

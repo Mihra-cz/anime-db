@@ -1,203 +1,238 @@
-# V6 Web, část 2 – přesný manifest a schválení
+# V6 – webové schválení, administrativní provedení a výsledky
 
-Současná AnimeDB je kompletně administrátorská aplikace v důvěryhodné domácí
-LAN, minimálně do konce V7.5. Tato část nepřidává účty, role ani přihlašování.
-Jméno správce ve formuláři je evidenční údaj, nikoli ověření identity.
-Budoucí oddělení administrace nemá přiřazenou verzi; rozsah V8–V10 se nemění.
+AnimeDB zůstává kompletně administrátorskou aplikací v důvěryhodné domácí LAN,
+minimálně do konce V7.5. Nepřidávají se účty, role ani přihlašování. Jméno správce
+je evidenční údaj, nikoli ověření identity. Budoucí oddělení administrace nemá
+přiřazenou verzi; rozsah V8–V10 se nemění.
 
-**Webové schválení funguje. Fyzické spuštění z této větve je deaktivované.**
-Administrativní převzetí pouze ověří a jednorázově spotřebuje schválení.
-Nevzniká executor, daemon, job queue, runtime lock ani nový DB model.
-Dosavadní [produkční E7 vstup](V6_PRODUCTION_REORGANIZATION.md) se nemění.
+Funkční řetězec tvoří canonical manifest → webové review/schválení → explicitní
+hostitelský `execute` → původní E7 → živé interaktivní E7H rozhodnutí → NORMAL →
+webový report po obnovení aplikace. Jde o lokálně synteticky ověřenou implementaci,
+nikoli provedený deploy nebo povolení k produkční reorganizaci NAS. Provozní
+předpoklady zůstávají v [produkčním runbooku](V6_PRODUCTION_REORGANIZATION.md).
 
-## Hranice procesu a úložiště
+## Oddělení procesů a dat
 
-- Web má dosavadní RO media mount, lokální SQLite a samostatný lokální outbox.
-  Nemá RW media mount, SMB credentials, Docker socket ani obecný command endpoint.
-- Správce publikuje původní canonical manifest do lokálního inboxu. **Inbox se
-  webu připojí samostatným read-only bindem.** Samotný chmod při stejném UID
-  tuto hranici nenahrazuje. Nezpřístupňovat jeho zapisovatelného předka.
-- Outbox je webu zapisovatelný. Host jeho obsah považuje za nedůvěryhodný:
-  ověří jej proti vlastnímu původnímu manifestu a nezávisle zadanému finálnímu SHA.
-- Jednorázový host ledger je oddělený od obou schránek a web jej vůbec nedostane.
-  Host přidá informační acceptance receipt do inboxu až po zápisu ledgeru.
-- Všechny schránky a evidence jsou mimo media root/repozitář na lokálním
-  filesystemu, s kompatibilním efektivním UID a bez group/world write práv.
-  Doporučené adresáře `0700`, soubory vytváří nástroj jako `0600`.
-  Adresáře připravuje správce; web je automaticky nevytváří.
+- Web má dosavadní RO media mount a lokální SQLite. Nemá RW media mount,
+  SMB credentials, Docker socket ani command/execute endpoint.
+- Host publikuje původní canonical manifest do lokálního inboxu. Web dostane
+  **samostatný read-only bind inboxu**, bez zapisovatelného předka. Chmod při
+  stejném UID tuto hranici nenahrazuje.
+- Web zapisuje jen lokální outbox review a approval artefaktů. Host jim
+  nedůvěřuje: porovnává je s původním manifestem a lokálně zadaným finálním SHA.
+- Host-private ledger je oddělený od obou schránek a web k němu nemá přístup.
+  Stejný create-once ledger chrání dosavadní `accept` i skutečný `execute`.
+- Evidence zůstávají mimo knihovnu/repozitář na lokálním filesystemu, se stejným
+  efektivním UID a bez group/world write práv. Doporučené adresáře `0700`;
+  nástroj vytváří soubory `0600`. Adresáře připravuje správce.
 
-Například oddělené bindy `/approval-inbox:ro`, `/approval-outbox:rw` a pouze
-hostitelský `/approval-ledger`. Nejde o provedený deploy ani změnu Compose.
-Konfigurace webu je opt-in, bez ní jsou schvalovací routy nedostupné:
+Například `/approval-inbox:ro`, `/approval-outbox:rw` a host-private
+`/approval-ledger`. Nejde o provedenou konfiguraci Compose. Web je opt-in:
 
 ```ini
 REORGANIZATION_APPROVAL_INBOX=/approval-inbox
 REORGANIZATION_APPROVAL_OUTBOX=/approval-outbox
 ```
 
-Web i administrativní prostředí používají stejné absolutní cesty k existující
-SQLite a knihovně, například `/data/anime.db` a `/media/anime`. Jejich RO/RW
-CIFS pohledy mohou mít různé dev/inode. Manifest se vytváří nad RW pohledem
-workeru a tento binding se po webovém schválení nepřepisuje. Žádný mount se
-kvůli schválení nepřepíná. Současná production mount policy vyžaduje právě
-jediný autorizovaný CIFS pohled na daný share/podstrom bez viditelných aliasů.
+Web i worker mají stejné absolutní cesty SQLite/knihovny, například
+`/data/anime.db` a `/media/anime`. Jejich RO a RW CIFS pohledy mohou mít různé
+inode/dev. Finální manifest se vytváří nad RW pohledem workeru a jeho binding
+se po schválení nepřepisuje. Worker vyžaduje jediný autorizovaný CIFS pohled
+na přesný server/share/podstrom bez viditelných aliasů. Credentials a mount
+připravuje správce mimo web i tento nástroj.
 
-## Příprava původního manifestu na hostiteli
+## Původní canonical manifest a publikace
 
-Použít existující `app.tools.execution_manifest generate-manifest`, nikoli JSON
-z orientačního webového preview. Generator používá `build_execution_manifest`,
-aktuální Target Planner a potvrzené Naming/Layout/Hierarchy autority.
-Obsahuje skutečné akce KEEP/MOVE/QUARANTINE, SOURCE/TARGET, directory dependencies,
-DB fingerprint, filesystem a archivní evidence, worker mount binding a Windows root.
+Použít dosavadní `app.tools.execution_manifest generate-manifest`, nikoli JSON
+z orientačního preview. Generator používá `build_execution_manifest`, Target
+Planner a potvrzené Naming/Layout/Hierarchy autority. Obsahuje skutečné
+SOURCE/TARGET, KEEP/MOVE/QUARANTINE, directory dependencies, DB fingerprint,
+filesystem/archivní evidence, worker mount binding a Windows root.
 
-Běžná videa se nehashují. ZIP/RAR/7Z používají přesně dosavadní archive evidence
-kontrakt generatoru/inventury. Lightweight preview nadále archivy nehashuje a
-může mít jiný plan hash; nikdy se automaticky nepovyšuje na execution manifest.
+Běžná videa se nehashují. ZIP/RAR/7Z používají přesně současný archive evidence
+kontrakt. Lightweight preview nadále archivy nehashuje, může mít jiný plan hash
+a nezakládá execution authority.
 
-Správce připraví existující 14polovou runtime evidence, skutečný snapshot a
-nezávislou lokální DB backup kopii vázané na manifest. Backup musí být pro
-webový RO preflight dostupný na stejném místě, ideálně samostatným RO bindem.
-Evidence je omezená na daný manifest; neuděluje webu RW capability.
+Správce dodá existující 14polovou runtime evidence, skutečný snapshot a nezávislou
+lokální backup kopii SQLite vázané na manifest. Backup musí být pro webový RO
+preflight dostupný na stejném místě, ideálně samostatným RO bindem.
 
-Následující příkazy jsou návod pro budoucí samostatně autorizovanou hostitelskou
-operaci, nikoli povolení kontaktovat NAS nebo Nexus během vývoje:
+Příklad pro budoucí samostatně autorizovaný hostitelský provoz:
 
 ```bash
 python -m app.tools.reorganization_approval publish \
   --db /data/anime.db --library-root /media/anime \
-  --share //SERVER/Anime --share-root / \
-  --manifest /data/final-manifest.json \
-  --runtime-evidence /data/runtime-evidence.json \
-  --windows-root '\\SERVER\Anime' --inbox /approval-inbox
+  --share //SERVER/Anime --share-root / --manifest /data/final-manifest.json \
+  --runtime-evidence /data/runtime-evidence.json --windows-root '\\SERVER\Anime' \
+  --inbox /approval-inbox
 ```
 
-Publish načte a ověří canonical manifest, skutečný RW CIFS mount a fresh
-read-only preflight. Povolí pouze ještě nepotvrzené konkrétní warningy;
-jakýkoliv jiný NOT_READY, STALE, ERROR, BLOCKED nebo REVIEW znamená STOP.
-Nevolá E7, startup, migrace ani scanner. Před otevřením SQLite kontroluje
-existující schema-v9 rollback-mode header a nepřítomnost WAL/SHM/journalů,
-stejně jako E7; žádnou recovery nezahajuje.
+Publish ověří canonical manifest, aktuální RW mount a fresh read-only preflight.
+Připustí jen dosud nepotvrzené konkrétní warningy; ostatní NOT_READY, STALE,
+ERROR, BLOCKED nebo REVIEW znamenají STOP. Nevolá worker, startup, migrace ani
+scanner. SQLite se před otevřením kontroluje na existující schema-v9 rollback
+header a nepřítomnost WAL/SHM/journalů; žádná implicitní recovery.
 
-Vznikne create-once `<source_sha256>.proposal.json` s původním canonical JSON,
-zachycenou runtime evidence, časem a počtem/přesnými cestami nových adresářů.
-SHA se počítá z UTF-8 `manifest_to_json`, bez koncového newline.
+Vznikne immutable `<source_sha256>.proposal.json` s původním canonical JSON,
+zachycenou runtime evidence, časem a přesnými novými adresáři. SHA je UTF-8
+`manifest_to_json` bez koncového newline.
 
-## Webové review a jednorázové schválení
+## Webové review a schválení
 
-`/reorganization` ponechává dosavadní orientační preview a odkazuje na
-`/reorganization/approval`. Otevření manifestu ani stažení canonical JSON
-neprovádí filesystem inventuru a nemění SQLite či media.
+`/reorganization` zachovává orientační preview a odkazuje na
+`/reorganization/approval`. GET/stažení neinventarizují media a nemění SQLite.
 
-1. Správce vidí přesné počty KEEP/MOVE/QUARANTINE, nové a potřebné adresáře,
-   výslednou strukturu, skutečné SOURCE/TARGET, Windows/mount/DB/FS bindingy,
-   konkrétní warning IDs i celý canonical envelope ke stažení.
-2. Ve formuláři uvede evidenční jméno a jednotlivě potvrdí všechny warningy.
-   POST `/prepare` vytvoří dosavadní `WarningAcknowledgement` objekty.
-   Jejich actor/timestamp jsou součástí nového canonical SHA.
-3. Omezený samostatný RO proces znovu načte DB a plnou filesystem inventory,
-   použije existující `preflight_execution_manifest` nad přesným envelope a
-   publikovanou hostitelskou runtime evidence. Vyžaduje READY_FOR_EXECUTION.
-   Tento výsledek **neprokazuje aktuální RW runtime**; stránka to výslovně uvádí.
-4. Uloží se create-once `<source_sha256>.review.json`. Správce si prohlédne
-   výsledný canonical SHA a přesný envelope. Nejde ještě o schválení.
-5. Samostatný POST `/approve` vyžaduje checkbox i přesný zobrazený SHA,
-   znovu úspěšný fresh RO preflight a vytvoří jediný `.approval.json` receipt.
-   Původní manifest se nepřepočítává a payload/timestamp se nemění; jediným
-   dovoleným rozdílem proti původnímu envelope jsou konkrétní acknowledgements.
+1. Správce vidí počty operací, nové/potřebné adresáře, SOURCE/TARGET, strukturu,
+   warning IDs a přesné Windows/mount/DB/FS bindingy i canonical JSON ke stažení.
+2. Zadá jméno a jednotlivě potvrdí warningy. POST `/prepare` vytvoří stávající
+   `WarningAcknowledgement` objekty a vyžaduje úspěšný fresh preflight.
+3. Uloží se canonical `.review.json` a malý `.review-actor.json`, vázaný na
+   původní source SHA a finální canonical SHA. Metadata správce nemění manifest
+   ani execution authority; umožňují zachovat jméno i po GET bez warningů.
+   Neúplný zápis se neopravuje/přepisuje automaticky. Historické review bez
+   warningů a bez metadata správce vyžaduje nový manifest; jméno se nevymýšlí.
+4. Úspěšný POST přesměruje HTTP 303 na původní GET manifestu. Finální formulář
+   schvaluje právě zobrazený canonical SHA, včetně acknowledgements.
+5. POST `/approve` znovu ověří fresh DB/FS preflight, explicitní checkbox, SHA
+   i správce review, vytvoří jediný `.approval.json` a přesměruje 303 na GET.
 
-Akce, adresáře i warningy jsou stránkované po 50; filtry operací/stavů a hledání
-se týkají celého manifestu. Výběr warningů přetrvává přes stránky.
-POST vyžaduje shodný Origin a podepsaný CSRF token vázaný na source i canonical
-SHA, s HttpOnly/SameSite=Strict cookie. CSRF secret je pouze v paměti procesu;
-nejde o přihlášení ani uživatelskou session. Restart nebo přechod na jiný
-webový proces vyžaduje nové otevření formuláře. Pro současnou jedinou instanci
-není potřeba sdílená session služba.
+Preflight webu pracuje s aktuální DB/plnou inventurou a **zachycenou hostitelskou
+runtime evidence**, nikoli s fiktivním RW bindingem vlastního RO mountu. Host
+musí skutečné podmínky ověřit znovu. Payload a původní timestamp se nemění;
+jediný povolený rozdíl envelope jsou konkrétní acknowledgements.
 
-Hostitelská evidence i CSRF mají platnost nejvýše 15 minut. Po vypršení se musí
-připravit nový původní manifest a znovu provést review, nikoli přepsat existující
-soubory. Timeout používá stávající `REORGANIZATION_PREVIEW_TIMEOUT_SECONDS`,
-stejnou bounded admission a kill/reap policy; přežívající proces blokuje další
-inventuru. Chyba neposkytne částečný platný plán nebo schválení.
+Akce, adresáře a warningy se stránkují po 50; filtry a hledání platí pro celý
+manifest, výběr warningů přežívá stránkování. Design a preview zůstávají stejné.
+POST chrání shodný Origin a podepsaný CSRF vázaný na source/canonical SHA,
+s HttpOnly/SameSite=Strict cookie a `Referrer-Policy: same-origin`.
+`Origin: null` se odmítá. CSRF secret je v paměti procesu; restart nebo jiný
+webový proces vyžaduje nové otevření formuláře. Všechna blokující práce POSTu
+včetně konfigurace, SHA, načítání, zápisů a renderu běží ve Starlette threadpoolu.
+Chyby zobrazují HTML STOP stránku se zachovaným HTTP statusem, bez přeměny
+chyby na úspěch nebo automatického retry.
 
-## Hostitelské převzetí – execution stále vypnutá
+## Časová platnost
 
-Po webovém schválení správce odstaví aplikaci a všechny dotčené writery,
-ověří skutečnou sdílenou cestu existujícího `/state/runtime.lock` a spustí
-administrativní kontrolu v izolovaném RW prostředí se stejným efektivním UID
-jako vlastník lokální SQLite/evidence. Zastavení vzdálených NAS writerů nelze
-prokázat advisory flockem; zůstává výslovnou provozní povinností správce.
+Zachovává se původních **900 sekund od publikace** pro přípravu, schválení
+a hostitelské převzetí. CSRF má stejnou maximální délku platnosti. Změna
+lhůty nebyla zavedena: lokální syntetický průchod neprokázal její nedostatečnost
+a měření není odhad doby NASu nebo lidského review celé knihovny.
+
+Host kontroluje lhůtu při převzetí a znovu pod původním runtime lockem před
+vstupem do E7. Jde o admission, nikoli timeout rozběhnuté reorganizace:
+platně zahájený běh může trvat déle než 15 minut, bez umělého STOP uprostřed
+přesunů/cleanupu. Expirovaný plán se nespouští; vyžaduje nový manifest a review.
+Čekání na živý cleanup nevytváří nové schválení reorganizace ani retry authority.
+
+Preview/inspect dál používají vlastní `REORGANIZATION_PREVIEW_TIMEOUT_SECONDS`
+a dosavadní kill/reap policy; přežívající proces blokuje další inventuru.
+Execution není automaticky zabíjena tímto webovým timeoutem.
+
+## Explicitní hostitelský start
+
+Správce odstaví celou aplikaci a všechny dotčené writery, ověří totožný lokální
+`/state/runtime.lock`, RW mount, UID/GID a ostatní provozní podmínky. Vzdálené
+NAS writery advisory flock neblokuje; jejich odstavení je provozní povinnost.
+Příkaz ještě před spotřebováním schválení vyžaduje skutečný interaktivní **stdin
+i stdout** a dostupný Python modul `readline`. Ten se načte před execution, aby
+dlouhý JSON seznam cleanupu neomezoval kanonický terminál na 4095 znaků.
+Použijte přímo připojený terminál v `tmux` nebo `screen`; **žádný `| tee` ani
+přesměrovaný stdout**. Chybějící TTY/readline znamená STOP před claimem.
 
 ```bash
-python -m app.tools.reorganization_approval accept \
+python -m app.tools.reorganization_approval execute \
   --db /data/anime.db --library-root /media/anime \
   --share //SERVER/Anime --share-root / \
   --inbox /approval-inbox --outbox /approval-outbox --ledger /approval-ledger \
-  --source-sha256 PUVODNI_SHA --approve-sha256 ZOBRAZENY_SCHVALENY_SHA \
+  --source-sha256 PUVODNI_SHA --approve-sha256 SCHVALENY_CANONICAL_SHA \
   --actor SPRAVCE --runtime-evidence /data/runtime-evidence.json \
   --runtime-lock /state/runtime.lock --windows-root '\\SERVER\Anime' \
   --writers-stopped
 ```
 
-Host nepřebírá příkazy, paths, share, runtime assertions ani SHA z HTTP body.
-Lokálně zadaný SHA i správce se musí shodovat s canonical review a receipt.
-Ověří celý původní hostitelský envelope, stávajícím
-`app.tools.reorganize.runtime_exclusion` drží původní runtime.lock, prověří
-aktuální RW CIFS mount a fresh preflight s aktuální runtime evidence.
-Teprve pak vytvoří host-private `<manifest_id>.accepted.json`. Tím stejné
-payload identity nepomůže ani nový source envelope s jiným časem.
+Host porovná originál, canonical review, receipt, lokálně zadaný SHA/správce,
+aktuální stav, mount a preflight. Pod existujícím runtime lockem vytvoří
+`<manifest_id>.accepted.json` v původním soukromém ledgeru se stavem
+`EXECUTION_CLAIMED` a informační acceptance receipt v inboxu. **Tento kontrolní
+lock se uvolní před vstupem do workeru.** `execute_approved_reorganization`
+si původní runtime lock získá znovu, zkontroluje stáří při dispatchi, vstoupí do
+`ScratchManifestExecution.open_existing`, původního E6B a fresh E7 preflightu.
+Při změně podmínek mezi kontrolami je STOP; nic se automaticky neopakuje.
 
-Všechny záznamy používají O_EXCL, nofollow, fsync souboru a adresáře.
-Existující nebo neúplný záznam znamená STOP. Při přerušení mezi host ledgerem
-a informačním receipt zůstává approval spotřebovaný; nic se automaticky
-nemaže, neopakuje ani neobnovuje. SQLite a media se tímto převzetím nemění.
+Dosavadní příkaz `accept` pouze spotřebuje schválení do
+`ACCEPTED_EXECUTION_DISABLED`. Takový záznam **nikdy není oprávněním ke startu**.
+`execute` jej nepřebírá ani neaktivuje. Stejný ledger blokuje i jiný source
+envelope stejné payload identity. Není zde retry/resume/reset přepínač.
+Soubor vzniká O_EXCL s nofollow a fsync; neúplný/nejistý zápis zůstává STOP.
 
-Web rozlišuje „Schváleno“ a „Převzato hostitelem, spuštění deaktivované“.
-„Předáno ke spuštění: ne“ a „Spuštěno: ne“ zůstávají pravdivé i po převzetí.
-Není zde `/execute`, `/start`, retry ani skrytý přechod na dosavadní CLI.
-Převzetí není odložená úloha, kterou později někdo automaticky spustí.
+## Terminál, živý cleanup a původní evidence
 
-## Návaznost části 3 a skutečný E7
+Terminál ukazuje fázi a počty dokončených/zbývajících akcí. Callback pozoruje
+potvrzený E1 append, counts vycházejí z původního COMPLETE prefixu. Nevzniká
+paralelní evidence jednotlivých přesunů. Běžný worker používá METADATA_RENAME
+bez čtení video obsahu; volitelná FULL verifikace z původního CLI se nemění.
 
-Pro fyzické spuštění zbývá řízeně propojit schválený, jednorázově claimnutý
-canonical envelope s existujícím
-`app.tools.reorganize.execute_approved_reorganization`. Stále musí držet
-stejný runtime lock a E6B, použít `ScratchManifestExecution.open_existing`,
-E7 fresh preflight, původní journal/guard a completion do NORMAL. Nový executor
-ani runtime lock nejsou potřeba. Převzetí z této deaktivované části se nesmí
-vydávat za restart/resume authority nebo automaticky reaktivovat.
+E7 po MOVE/KEEP/QUARANTINE nejprve ověří původní post-state. Potom původní
+`_interactive_cleanup` uloží skutečný `.cleanup-proposal.json`, vypíše kandidáty
+a čeká na JSON seznam konkrétních prázdných adresářů a přesný živý proposal SHA.
+Terminál výslovně hlásí `WAITING_FOR_CLEANUP_APPROVAL`. Nejde o předem schválený
+webový výběr. E7H zachovává IMPORT, Duplicates, Subs a systémové namespaces;
+V6 fyzické duplicity nemaže. První reorganizace má zahrnout ručně schválené
+odstranění nepotřebných prázdných adresářů. Prázdný seznam má nadále dosavadní
+význam zachování adresářů; aplikace nevytváří nové cleanup pravidlo.
 
-E7H vytváří živý cleanup proposal až po přesunech a kontrole původního
-post-state. Část 3 musí řešit průběh, čekání na konkrétní rozhodnutí, STOP při
-odpojení/přerušení, výsledky a jejich pravdivé zobrazení. První běh může použít
-stávající interaktivní `_interactive_cleanup` přes administrátorský terminál:
-konkrétní JSON seznam prázdných adresářů a přesný živý proposal SHA. Předběžný
-webový výběr není cleanup approval. Tato část proto E7 nevolá s odpojeným stdin.
+Po cleanupu proběhne současná completion do NORMAL. Ctrl+C, SIGTERM, EOF,
+nesouhlas SHA nebo skutečná chyba znamenají STOP a původní guard/evidence se
+zachovají. Žádný automatický rollback, copy fallback ani opakované spuštění.
 
-První reorganizace musí zahrnovat schválený cleanup nepotřebných prázdných
-adresářů. IMPORT, Duplicates, Subs a systémové namespaces zůstávají chráněné;
-V6 fyzické duplicity nemaže. Žádné automatické retry, rollback ani copy fallback.
-Provozní audit skutečných Nexus bindů, runtime locku, UID/GID a CIFS capability
-zůstává samostatný předpoklad prvního nasazení, nikoli provedená vývojová kontrola.
+## Výsledný webový report a přerušení
 
-### Otevřené body pro část 3
+Po návratu původního workeru se do RO inboxu uloží create-once
+`<source_sha256>.result.json`: canonical identity, správce, konečný stav/fáze,
+počty, potvrzený cleanup a odkazy na původní E1/guard/E7H evidence. Je to
+souhrn, ne druhý journal. NORMAL se publikuje až po dokončení a uzavření
+původního workeru. STOP nepředstírá nulový cleanup: jeho výsledek může být
+nepotvrzený a podrobnosti zůstávají v E7H evidence.
 
-Tyto body jsou po nezávislém review vědomě odložené. Fyzické spuštění v části 2
-zůstává deaktivované.
+Po běžném RO restartu se výsledek zobrazí na původním GET manifestu, zachová
+canonical plán, filtry a stránkování. Není potřebný nový route/server/daemon.
+SIGKILL nebo neúspěšná publikace může zanechat pouze spotřebovaný claim bez
+výsledku. Web ukáže „výsledek zatím nepotvrzený“, nikoli úspěch nebo retry.
+Historický report není potvrzením aktuálního budoucího DB/FS stavu.
 
-- **N1, jméno schvalujícího:** u manifestu bez warningů přežije zadané jméno jen
-  přímou odpověď na `/prepare`. Po GET formulář použije `administrator` a host
-  `accept` se skutečným jménem skončí STOP. Řešit současně s N3, které z dalšího
-  zobrazení vždy udělá GET.
-- **N3, přesměrování po POST a STOP stránky:** obnovení stránky po POST dnes
-  vrací JSON 403 nebo 405 bez dalšího účinku a STOP hlášky jsou také JSON.
-  Doplnit přesměrování a uživatelsky srozumitelné STOP stránky.
-- **N4, event loop:** zbývající `approval.sha256` a `validate_review` v POST
-  routách přesunout mimo event loop.
-- **Napojení na skutečný E7 worker:** převzetí musí uvolnit `runtime_exclusion`
-  před voláním `execute_approved_reorganization`; stejný lock nelze vnořit.
-- **Živý E7H cleanup, průběh, výsledky a STOP** podle předchozích odstavců.
-- **Stav `ACCEPTED_EXECUTION_DISABLED`:** nesmí se automaticky převzít jako
-  oprávnění ke spuštění. Záznam v ledgeru blokuje stejný `manifest_id`, proto
-  do části 3 nepoužívat `accept` nad plánem určeným k reálnému běhu.
-- **15minutové approval okno:** ověřit na Nexusu včetně ARM, CIFS a hashování
-  archivů.
+Pokud přerušený E7 guard blokuje běžný startup, aplikace tuto výluku kvůli
+reportu neobchází. Správce nejprve vyhodnotí lokální `.result.json` a původní
+evidence v terminálu. Bez vyřešeného STOP nelze slibovat dostupný běžný web.
+
+## Živý odvozený přehled při odstavené aplikaci
+
+Volitelný `execute --service-status-dir /service-status` (nebo prostředí
+`REORGANIZATION_SERVICE_STATUS_DIR`) publikuje malý atomicky nahrazovaný
+`progress.json` na lokálním NVMe. Adresář připraví správce mimo media/repozitář,
+vlastník je UID workera, režim `0755`; veřejný soubor má `0644`. Jde o samostatný
+adresář obsahující pouze tento necitlivý souhrn, ne inbox/ledger či DB evidence.
+Jeho první publikace se ověří před claimem. Pozdější výpadek publikování nemění
+execution authority: stránka přestane považovat zprávy za aktuální.
+
+Souhrn zobrazuje WAIT/WORK/PASS/STOP pro manifest, adresáře, rename, SQLite,
+cleanup a verifikaci. Počet dokončených akcí je původní potvrzený E1 COMPLETE
+prefix; rename počítá FS_VERIFIED, SQLite fáze se stává PASS až po potvrzení
+všech akcí. Další události pouze oznamují dokončenou přípravu adresářů,
+dokončený E7H a začátek finální verifikace. NORMAL je až po návratu a uzavření
+E7 a uložení výsledku. Nevzniká druhý journal, další DB query ani NAS inventura.
+Zápis probíhá na hranicích fází a nejvýše po pěti sekundách při postupu;
+vlákno pouze uvnitř běžícího workeru obnovuje timestamp i při čekání na správce.
+Přerušení bez konečného výsledku neznamená PASS ani automatický STOP.
+
+Dosavadní deployment podklady nemají HTTP vstupní vrstvu; port 8000 vlastní
+přímo aplikace. Samostatný [nenasazený Nginx override a servisní stránka](../deploy/nexus/service-edge/README.md)
+přesunou při později schválené provozní změně stejný LAN port na malou statickou
+proxy. Ta má jen statické soubory a RO souhrn, bez SQLite/NAS/state/socketu.
+Při nedostupném backendu vrací servisní HTML, které přibližně po pěti sekundách
+načítá JSON a kontroluje skutečnou dostupnost aplikace. Načtení aplikace ji
+nespouští. STOP nic nerestartuje a guard zůstává rozhodující.
+
+Chybějící evidence nehlásí reorganizaci; starý aktivní souhrn nebo nedostupné
+aktualizace znamenají „Stav neověřen“. NORMAL/STOP záznam je výslovně poslední
+běh, nikdy důkaz další živé reorganizace. Lokální izolované proxy/browser testy
+nenahrazují ověření ARM64, firewallu a přechodu portu na skutečném Nexusu.

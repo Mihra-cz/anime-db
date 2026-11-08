@@ -13,8 +13,8 @@
 <section class="panel"><h2>Read-only náhled</h2>
 <p>Na požádání proběhne nová inventura a plánování, nejvýše {{ '%g'|format(timeout) }} s. Náhled se neukládá. Nečte obsah videí ani nehashuje archivy; chybějící důkaz shody archivů může vyžadovat REVIEW.</p>
 <form method="post" action="/reorganization/preview"><button type="submit">Připravit aktuální náhled</button></form>
-<p><strong>Fyzické spuštění bude doplněno později.</strong> Tato stránka nezapisuje do SQLite ani knihovny a neschvaluje execution.</p>
-{% if approval_available %}<p><a href="/reorganization/approval">Finální manifesty a schválení správcem</a> · Oddělené od orientačního náhledu; fyzické spuštění je deaktivované.</p>{% endif %}
+<p><strong>Fyzické spuštění provádí správce na hostiteli.</strong> Tato stránka nezapisuje do SQLite ani knihovny a neschvaluje execution.</p>
+{% if approval_available %}<p><a href="/reorganization/approval">Finální manifesty a schválení správcem</a> · Oddělené od orientačního náhledu; spuštění vyžaduje samostatný administrátorský příkaz na hostiteli.</p>{% endif %}
 </section>
 {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
 {% if preview is none and not error %}<p>Náhled dosud nebyl vytvořen.</p>{% endif %}
