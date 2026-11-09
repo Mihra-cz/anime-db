@@ -313,10 +313,15 @@ existující Target Planner nad fresh filesystem inventory v samostatném proces
 s vlastním `REORGANIZATION_PREVIEW_TIMEOUT_SECONDS` (default 120 s, konečná
 kladná hodnota nejvýše 3600 s); souběh je omezen
 na jeden náhled na aplikační instanci. Proces neimportuje aplikační startup,
-neprovádí migrace ani scan, neukládá plán a nečte obsah souborů pro hashing.
+neprovádí migrace ani scan, neukládá plán a nečte obsah videí.
 Před inventurou proběhne existující `check_library_access` s `REQUIRE_MOUNT`
-a nezměněným health-check timeoutem. Hashování archivů je vypnuté, takže
-nepotvrzená shoda může zůstat REVIEW. Worker po timeoutu dostane skupinový
+a nezměněným health-check timeoutem. V jediné inventuře se selektivně hashují pouze
+odpovídající archivy stejného názvu a velikosti v adresářích potvrzených
+secondary videí a jejich primary videí. Výběr vychází z DB duplicate vazeb;
+rozhoduje stávající archive equality pravidlo planneru. Prokázaná kopie je READY
+bez ručního rozhodnutí, chybějící důkaz ponechá REVIEW s formulářem.
+Videa ani nesouvisející archivy se nehashují a hashe se nepersistují.
+Worker po timeoutu dostane skupinový
 SIGKILL a cleanup čeká pouze omezenou dobu; přežívající kernelové I/O blokuje
 nový náhled do skutečného ukončení původního procesu.
 
@@ -331,7 +336,19 @@ nepotvrzuje execution readiness nebo fyzicky ověřený výsledek. Výsledek je
 jednorázový snapshot bez uložené authority; timeout/chyba neposkytuje částečný
 plán. Preview není execution manifest: archive evidence a Windows root mohou
 vést k jinému hashi. Schválení/execution vyžaduje aktuální plný manifest,
-runtime evidence a preflight. [Webové schválení](V6_WEB_APPROVAL.md) nyní odděleně
+runtime evidence a preflight.
+
+[Řešení archivů v REVIEW](V6_ARCHIVE_REVIEW.md) doplňuje pro
+`duplicate_side_asset_association_unresolved` explicitní přiřazení konkrétní
+potvrzené duplicitní kopii, samostatné zachování v plochém `Subs` bez kolize
+a ponechání nerozhodnutého stavu. Rozhodnutí lze změnit či zrušit i z READY.
+JSON sidecary `<SQLite soubor>.archive-reviews/` jsou lokální appdata mimo DB;
+společný read-only preload je používá pro preview, manifest i preflight bez
+změny schema v9. Změna source stat nebo duplicitní DB vazby rozhodnutí
+zneplatní do REVIEW; automatická oprava neprobíhá. Platná vazba se převádí na
+existující `SideAssetEvidence`, WARNING workflow se nemění.
+
+[Webové schválení](V6_WEB_APPROVAL.md) nyní odděleně
 přebírá původní canonical manifest z hostitelského RO inboxu, vytváří konkrétní
 warning acknowledgements a ve druhém kroku jednorázově schvaluje přesný SHA-256.
 POST chrání CSRF; současná LAN aplikace je administrace bez účtů a přihlašování.

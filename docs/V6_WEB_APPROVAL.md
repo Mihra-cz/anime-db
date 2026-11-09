@@ -50,8 +50,10 @@ SOURCE/TARGET, KEEP/MOVE/QUARANTINE, directory dependencies, DB fingerprint,
 filesystem/archivní evidence, worker mount binding a Windows root.
 
 Běžná videa se nehashují. ZIP/RAR/7Z používají přesně současný archive evidence
-kontrakt. Lightweight preview nadále archivy nehashuje, může mít jiný plan hash
-a nezakládá execution authority.
+kontrakt. Lightweight preview selektivně hashuje jen odpovídající kandidátní
+archivy podle potvrzených secondary/primary DB vazeb. Prokázané kopie řeší stejný
+planner automaticky; bez důkazu zůstává ruční REVIEW. Plné archive evidence
+a Windows root mohou nadále změnit plan hash; preview nezakládá execution authority.
 
 Správce dodá existující 14polovou runtime evidence, skutečný snapshot a nezávislou
 lokální backup kopii SQLite vázané na manifest. Backup musí být pro webový RO

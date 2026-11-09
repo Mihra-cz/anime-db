@@ -625,8 +625,11 @@ Webový read-only náhled `/reorganization` používá tento planner kontrakt,
 confirmed identity a filesystem inventory; nepřidává naming ani parsing pravidla.
 GET neinventarizuje knihovnu. Explicitní preview má vlastní časový limit,
 preflight dostupnosti s REQUIRE_MOUNT, coverage souhrn a stránkované výsledky.
-Nečte obsah videí ani archivy pro hashing, takže archive equality může zůstat
-neprokázaná/REVIEW. Timeout nebo nedostupná knihovna nevytváří platný částečný plán.
+Nečte obsah videí. Hashují se selektivně pouze odpovídající kandidátní archivy
+podle potvrzených secondary/primary DB vazeb, v rámci jediné inventury.
+Prokázaná archive equality použije existující automatické pravidlo planneru;
+bez dostatečného důkazu zůstává REVIEW s možností lidského řešení.
+Timeout nebo nedostupná knihovna nevytváří platný částečný plán.
 
 Webový preview není schválený immutable execution manifest. Při odlišném
 Windows rootu nebo plné archivní evidenci se může lišit i plan hash. Budoucí

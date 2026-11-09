@@ -43,11 +43,47 @@ def validate_inventory_root(root: Path) -> Path:
     return root
 
 
-def inventory_filesystem(root: Path, *, hash_archives: bool = True) -> FilesystemSnapshot:
+def duplicate_archive_directory_pairs(context: PlannerContext) -> tuple[tuple[str, str], ...]:
+    """Limit archive I/O using existing confirmed secondary/primary DB relations."""
+    by_parent = defaultdict(list)
+    videos = {v.id: v for v in context.videos}
+    for video in context.videos:
+        by_parent[str(PurePosixPath(video.source).parent)].append(video)
+    pairs = set()
+    for parent, members in by_parent.items():
+        if all(v.duplicate_validity == 'valid' and v.duplicate_primary_id in videos for v in members):
+            pairs.update((parent, str(PurePosixPath(videos[v.duplicate_primary_id].source).parent)) for v in members)
+    return tuple(sorted(pairs))
+
+
+def _hash_archive_entry(root, entry):
+    try:
+        # O_NOFOLLOW also protects a leaf swapped after lstat. FileIO owns
+        # allocation and cleanup on constructor failure.
+        with io.open(root / entry.relative_path, 'rb', opener=lambda path, _flags:
+                os.open(path, os.O_RDONLY | os.O_NOFOLLOW)) as archive:
+            current = os.fstat(archive.fileno())
+            if not stat.S_ISREG(current.st_mode):
+                raise OSError('archive_no_longer_regular')
+            digest = hashlib.file_digest(archive, 'sha256').hexdigest()
+            after = os.fstat(archive.fileno())
+            if (current.st_size, current.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise OSError('archive_changed_during_inventory')
+        if (entry.size, entry.mtime_ns) != (current.st_size, current.st_mtime_ns):
+            raise OSError('archive_changed_during_inventory')
+        return replace(entry, content_sha256=digest)
+    except OSError as error:
+        return FilesystemEntry(entry.relative_path, 'inaccessible', diagnostic=f'stat_or_read_error:{error.errno}')
+
+
+def inventory_filesystem(root: Path, *, hash_archives: bool = True,
+                         archive_hash_pairs: tuple[tuple[str, str], ...] = ()) -> FilesystemSnapshot:
     """Exactly one traversal, lstat semantics, no links or recycle-bin descent.
 
     Only source archive files are read for byte-identical-copy evidence. Videos,
-    subtitles and other assets need stat only. Inaccessible paths stay explicit.
+    subtitles and other assets need stat only. With hash_archives=False, optional
+    directory pairs select matching regular archives of equal size from this
+    same inventory. Inaccessible paths stay explicit.
     """
     root = validate_inventory_root(root)
     entries = []
@@ -82,22 +118,7 @@ def inventory_filesystem(root: Path, *, hash_archives: bool = True) -> Filesyste
                     entries.append(FilesystemEntry(rel, 'directory', mtime_ns=info.st_mtime_ns))
                     walk(Path(child.path))
                 elif stat.S_ISREG(info.st_mode):
-                    digest = None
-                    if hash_archives and Path(child.name).suffix.lower() in _ARCHIVES and technical_root(rel) != 'Subs':
-                        # O_NOFOLLOW also protects a leaf swapped after lstat.
-                        # FileIO owns allocation and cleanup on constructor failure.
-                        with io.open(child.path, 'rb', opener=lambda path, _flags:
-                                os.open(path, os.O_RDONLY | os.O_NOFOLLOW)) as archive:
-                            current = os.fstat(archive.fileno())
-                            if not stat.S_ISREG(current.st_mode):
-                                raise OSError('archive_no_longer_regular')
-                            digest = hashlib.file_digest(archive, 'sha256').hexdigest()
-                            after = os.fstat(archive.fileno())
-                            if (current.st_size, current.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-                                raise OSError('archive_changed_during_inventory')
-                        if (info.st_size, info.st_mtime_ns) != (current.st_size, current.st_mtime_ns):
-                            raise OSError('archive_changed_during_inventory')
-                    entries.append(FilesystemEntry(rel, 'regular', info.st_size, info.st_mtime_ns, content_sha256=digest))
+                    entries.append(FilesystemEntry(rel, 'regular', info.st_size, info.st_mtime_ns))
                 else:
                     entries.append(FilesystemEntry(rel, 'symlink' if stat.S_ISLNK(info.st_mode) else 'nonregular'))
             except OSError as error:
@@ -108,6 +129,21 @@ def inventory_filesystem(root: Path, *, hash_archives: bool = True) -> Filesyste
         walk(root)
     except OSError as error:
         entries.append(FilesystemEntry('.', 'inaccessible', diagnostic=str(error)))
+    archives = {e.relative_path: e for e in entries if e.kind == 'regular'
+                and PurePosixPath(e.relative_path).suffix.lower() in _ARCHIVES
+                and technical_root(e.relative_path) != 'Subs'}
+    selected = set(archives) if hash_archives else set()
+    if not hash_archives and archive_hash_pairs:
+        primary_parents = defaultdict(set)
+        for secondary, primary in archive_hash_pairs:
+            primary_parents[secondary].add(primary)
+        for source, entry in archives.items():
+            path = PurePosixPath(source)
+            counterparts = {str(PurePosixPath(parent) / path.name)
+                            for parent in primary_parents.get(str(path.parent), ())}
+            if counterparts and all(p in archives and archives[p].size == entry.size for p in counterparts):
+                selected.update((source, *counterparts))
+    entries = [_hash_archive_entry(root, e) if e.relative_path in selected else e for e in entries]
     return FilesystemSnapshot(str(root), tuple(sorted(entries, key=lambda e: e.relative_path)), *limits, tuple(diagnostics))
 
 
@@ -166,7 +202,9 @@ def _extra_records(context, snapshot, managed):
     evidence = defaultdict(list)
     carried = tuple(side for item in context.execution_evidence for side in item.known_side_assets)
     for side in dict.fromkeys(context.side_assets + carried):
-        if side.object_kind != 'duplicate_side_asset':
+        if side.object_kind not in {'duplicate_side_asset', 'subtitle_archive'}:
+            continue
+        if side.object_kind == 'subtitle_archive' and side.provenance != 'explicit_human_standalone_archive':
             continue
         evidence[side.source].append(side)
     taken = {r.source_relative_path for r in managed}
@@ -195,7 +233,16 @@ def _extra_records(context, snapshot, managed):
             provenance = ('exclusive_secondary_directory_and_identical_primary_archive',) if secondary_id else ()
         secondary = video_records.get(secondary_id)
         evidence_matches = all(_side_evidence_matches(item, entry, inventory) for item in side)
-        if side and technical_root(source) == 'Subs':
+        review_errors = tuple(item.provenance for item in side if item.provenance.startswith('archive_review_'))
+        if review_errors:
+            result.append(PlanRecord('duplicate_quarantine_candidate', source, source, None, 'REVIEW', 'REVIEW',
+                blockers=review_errors, authority=provenance, collection_id=collection_id))
+        elif len(side) == 1 and side[0].object_kind == 'subtitle_archive' and evidence_matches:
+            target = str(PurePosixPath('Subs') / PurePosixPath(source).name)
+            result.append(PlanRecord('subtitle_archive', source, source, target,
+                'KEEP' if target == source else 'MOVE', 'READY',
+                info=('archive_source_preserved_contents_not_classified',), authority=provenance))
+        elif side and technical_root(source) == 'Subs':
             result.append(PlanRecord('duplicate_quarantine_candidate', source, source, None, 'REVIEW', 'REVIEW',
                 blockers=('side_asset_evidence_conflicts_with_subs_lane',), authority=provenance,
                 duplicate=secondary.duplicate if secondary else None))
@@ -337,6 +384,9 @@ def _namespace_collisions(records, directories=()):
 
 def plan_library(context: PlannerContext, snapshot: FilesystemSnapshot | None = None, *, windows_root: str | None = None) -> TargetPlan:
     """Combine pure domain targets with optional coverage and preflight evidence."""
+    from .reorganization_archive_review import resolve_archive_decisions
+    reviewed_sources = {d.source for d in context.archive_decisions}
+    context = resolve_archive_decisions(context, snapshot)
     if windows_root is not None:
         evaluate_windows_path_budget(windows_root)
     records = list(project_targets(context))
@@ -440,6 +490,15 @@ def plan_library(context: PlannerContext, snapshot: FilesystemSnapshot | None = 
                     warnings=tuple(sorted(set(row.warnings + ('windows_path_budget',)))))
                 windows_state = 'WARNING'
         records[i] = row
+    # A stale human choice is a REVIEW decision again. Keep the ordinary
+    # planner diagnostics/collisions, but never offer its invalid target.
+    review_evidence = {side.source: side for side in context.side_assets if side.source in reviewed_sources}
+    for i, row in enumerate(records):
+        if row.source_relative_path in reviewed_sources and row.status == 'BLOCKED':
+            side = review_evidence[row.source_relative_path]
+            reason = side.provenance if side.provenance.startswith('archive_review_') else 'archive_review_target_invalid'
+            records[i] = replace(row, status='REVIEW', action='REVIEW', target_relative_path=None,
+                blockers=tuple(sorted(set(row.blockers + (reason,)))))
     # Accounting consumes FINAL namespace/path diagnostics. An auxiliary
     # classification alone cannot prove ownership by a secondary duplicate.
     video_sources = {v.id: v.source for v in context.videos}

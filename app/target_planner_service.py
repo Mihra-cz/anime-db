@@ -39,6 +39,8 @@ def readonly_planner_session(database_path: Path):
     engine = create_engine('sqlite://', creator=lambda: sqlite3.connect(uri, uri=True))
     try:
         with Session(engine, autoflush=False, expire_on_commit=False) as session:
+            from .reorganization_archive_review import load_archive_decisions
+            session.info['archive_decisions'] = load_archive_decisions(path)
             # Start after SQLAlchemy's initial dialect setup/rollback. BEGIN
             # is transaction control; mode=ro forbids a database write.
             session.connection().connection.driver_connection.execute('BEGIN')
@@ -167,7 +169,7 @@ def load_planner_context(session: Session) -> PlannerContext:
         result = PlannerContext(naming, layout, tuple(source_collections), tuple(target_titles), tuple(target_videos),
             tuple(TargetSubtitle(s.id, s.relative_path, tuple(sorted(edges_by_asset[s.id]))) for s in subtitles),
             tuple(UnmatchedSubtitle(s.id, s.relative_path, s.status, s.filename) for s in unmatched),
-            locator_baselines=tuple(baselines))
+            locator_baselines=tuple(baselines), archive_decisions=session.info.get('archive_decisions', ()))
     if session.new or session.dirty or session.deleted:
         raise RuntimeError('Target Planner mutated its read-only session.')
     return result

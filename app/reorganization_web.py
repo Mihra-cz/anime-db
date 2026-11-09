@@ -1,4 +1,4 @@
-"""Read-only web adapter for the existing V6 planner, with request-scoped work."""
+"""V6 planner web adapter; explicit archive decisions write local appdata only."""
 from dataclasses import asdict
 import json
 import logging
@@ -18,8 +18,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from .models import CatalogCollection, CatalogTitle, ExternalSubtitle, Video
 from .target_execution_guard import database_path_from_url, ExecutionGuardStopped
 from .target_planner_coverage import report_coverage
-from .target_planner_filesystem import inventory_filesystem, plan_library
+from .target_planner_filesystem import duplicate_archive_directory_pairs, inventory_filesystem, plan_library
 from .target_planner_service import load_planner_context, readonly_planner_session
+from .reorganization_archive_review import ArchiveReviewConflict, ArchiveReviewUnavailable, archive_review_rows, apply_archive_review
 
 logger = logging.getLogger(__name__)
 STATUSES = ('BLOCKED', 'REVIEW', 'WARNING', 'READY', 'SYSTEM_EXCLUDED')
@@ -48,18 +49,22 @@ def library_counts(database):
                                      ('Videa', Video), ('Externí titulky', ExternalSubtitle))}
 
 
-def build_preview(database, library_root, *, require_mount=False, access_timeout=10):
-    """Worker-only: no app startup, migrations, scanner writes or hashing."""
+def build_preview(database, library_root, *, require_mount=False, access_timeout=10, decision=None):
+    """Worker-only: lightweight inventory with selective duplicate archive hashes."""
     from .scanner import check_library_access, LibraryUnavailableError
     root = Path(library_root)
     check_library_access(root, timeout_seconds=access_timeout, require_mount=require_mount)
     with readonly_planner_session(Path(database)) as session:
         context = load_planner_context(session)
-    snapshot = inventory_filesystem(root, hash_archives=False)
+    snapshot = inventory_filesystem(root, hash_archives=False,
+        archive_hash_pairs=duplicate_archive_directory_pairs(context))
     if context.videos and not any(e.kind == 'regular' for e in snapshot.entries):
         raise LibraryUnavailableError('Knihovna je prázdná nebo nepřístupná proti neprázdné databázi.')
     plan = plan_library(context, snapshot)
-    return {'plan': asdict(plan), 'coverage': asdict(report_coverage(snapshot, plan))}
+    if decision is not None:
+        context, plan = apply_archive_review(database, context, snapshot, plan, decision)
+    return {'plan': asdict(plan), 'coverage': asdict(report_coverage(snapshot, plan)),
+            'archive_reviews': archive_review_rows(context, snapshot, plan)}
 
 
 def _stop_worker(process):
@@ -80,10 +85,11 @@ def _stop_worker(process):
             pass
 
 
-def run_preview(database, library_root, *, timeout, require_mount=False, access_timeout=10):
+def run_preview(database, library_root, *, timeout, require_mount=False, access_timeout=10, decision=None):
+    decision_args = [json.dumps(decision, ensure_ascii=True)] if decision is not None else []
     process = subprocess.Popen(
         [sys.executable, '-B', '-m', 'app.tools.reorganization_preview',
-         str(database), str(library_root), str(int(require_mount)), str(access_timeout)],
+         str(database), str(library_root), str(int(require_mount)), str(access_timeout), *decision_args],
         cwd=Path(__file__).resolve().parent.parent, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
     )
@@ -94,6 +100,10 @@ def run_preview(database, library_root, *, timeout, require_mount=False, access_
         if isinstance(exc, subprocess.TimeoutExpired):
             exc.worker = process  # Admission stays closed if kernel I/O outlives SIGKILL.
         raise
+    if process.returncode == 3:
+        raise ArchiveReviewConflict(json.loads(stdout)['error'])
+    if process.returncode == 4:
+        raise ArchiveReviewUnavailable()
     if process.returncode:
         # ASCII escaping prevents control characters/invalid bytes entering logs.
         diagnostic = repr(stderr[-2048:])[1:-1]
@@ -138,6 +148,10 @@ def install_reorganization_routes(app, templates, settings):
     def render(request, *, preview=None, error=None, status_code=200):
         try:
             counts = library_counts(database_path(settings.database_url))
+        except ArchiveReviewUnavailable as exc:
+            counts = None
+            error = error or str(exc)
+            status_code = 503
         except (OSError, ValueError, SQLAlchemyError):
             counts = None
             error = error or 'Databáze není dostupná pro read-only náhled.'
@@ -160,10 +174,13 @@ def install_reorganization_routes(app, templates, settings):
     def preview_redirect(request: Request):
         return RedirectResponse('/reorganization', status_code=303)
 
-    @app.post('/reorganization/preview', response_class=HTMLResponse)
-    def reorganization_preview(request: Request):
+    @app.get('/reorganization/archive-review')
+    def archive_review_redirect(request: Request):
+        return RedirectResponse('/reorganization', status_code=303)
+
+    def compute_preview(request: Request, decision=None):
         origin = request.headers.get('origin')
-        if origin and origin != str(request.base_url).rstrip('/'):
+        if (origin and origin != str(request.base_url).rstrip('/')) or request.headers.get('sec-fetch-site') == 'cross-site':
             return render(request, error='Náhled vyžaduje požadavek ze stejného webu.', status_code=403)
         if not lock.acquire(blocking=False):
             return render(request, error='Jiný náhled právě probíhá. Zkuste požadavek později.', status_code=409)
@@ -172,9 +189,15 @@ def install_reorganization_routes(app, templates, settings):
             if previous is not None and previous.poll() is None:
                 return render(request, error='Předchozí výpočet se ještě ukončuje. Zkuste požadavek později.', status_code=409)
             app.state.reorganization_stopping_worker = None
+            options = {'decision': decision} if decision is not None else {}
             preview = run_preview(database_path(settings.database_url), settings.anime_path, timeout=timeout,
-                                  require_mount=settings.require_mount, access_timeout=settings.library_access_timeout_seconds)
+                                  require_mount=settings.require_mount, access_timeout=settings.library_access_timeout_seconds,
+                                  **options)
             return render(request, preview=preview)
+        except ArchiveReviewConflict as exc:
+            return render(request, error=str(exc), status_code=409)
+        except ArchiveReviewUnavailable as exc:
+            return render(request, error=str(exc), status_code=503)
         except subprocess.TimeoutExpired as exc:
             app.state.reorganization_stopping_worker = getattr(exc, 'worker', None)
             return render(request, error=f'Náhled překročil časový limit {timeout:g} s. '
@@ -185,6 +208,18 @@ def install_reorganization_routes(app, templates, settings):
                           'nebo není připojen požadovaný mount; žádný platný plán není k dispozici.', status_code=503)
         finally:
             lock.release()
+
+    @app.post('/reorganization/preview', response_class=HTMLResponse)
+    def reorganization_preview(request: Request):
+        return compute_preview(request)
+
+    @app.post('/reorganization/archive-review', response_class=HTMLResponse)
+    async def reorganization_archive_review(request: Request):
+        form = await request.form()
+        decision = {key: str(form.get(key, '')) for key in ('source', 'fingerprint', 'choice', 'secondary_video_id')}
+        # Keep the same admission, origin check and bounded worker as preview.
+        from starlette.concurrency import run_in_threadpool
+        return await run_in_threadpool(compute_preview, request, decision)
 
     from .reorganization_approval_web import install_approval_routes
     install_approval_routes(app, templates, settings)

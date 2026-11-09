@@ -11,9 +11,10 @@
 <nav class="reorganization-reviews" aria-label="Kontroly před reorganizací"><a href="/naming-review">Naming Review · Názvy</a><a href="/naming-review/layout">Layout Review · Rozložení</a><a href="/hierarchy-review">Hierarchy Review · Hierarchie</a></nav>
 </section>
 <section class="panel"><h2>Read-only náhled</h2>
-<p>Na požádání proběhne nová inventura a plánování, nejvýše {{ '%g'|format(timeout) }} s. Náhled se neukládá. Nečte obsah videí ani nehashuje archivy; chybějící důkaz shody archivů může vyžadovat REVIEW.</p>
+<p>Na požádání proběhne nová inventura a plánování, nejvýše {{ '%g'|format(timeout) }} s. Náhled se neukládá. Obsah videí se nečte. Hashují se pouze odpovídající kandidátní archivy u potvrzených duplicit a jejich primárních videí. Prokázané kopie planner vyřeší automaticky; bez dostatečného důkazu zůstává REVIEW.</p>
 <form method="post" action="/reorganization/preview"><button type="submit">Připravit aktuální náhled</button></form>
 <p><strong>Fyzické spuštění provádí správce na hostiteli.</strong> Tato stránka nezapisuje do SQLite ani knihovny a neschvaluje execution.</p>
+<p>Řešitelné REVIEW archivy mají v detailu tlačítko Vyřešit. Explicitní rozhodnutí se ukládá do lokální appdata a používá je i další náhled a generování manifestu. Uložené rozhodnutí lze změnit nebo zrušit.</p>
 {% if approval_available %}<p><a href="/reorganization/approval">Finální manifesty a schválení správcem</a> · Oddělené od orientačního náhledu; spuštění vyžaduje samostatný administrátorský příkaz na hostiteli.</p>{% endif %}
 </section>
 {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}

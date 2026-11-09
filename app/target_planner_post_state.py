@@ -29,12 +29,14 @@ def verify_post_state(
     discards any in-memory carried evidence and leaves accounting UNKNOWN in
     quarantine; physical paths never grant provenance or delete authority.
     """
-    return plan_library(replace(context, side_assets=(), execution_evidence=execution_evidence),
+    return plan_library(replace(context, side_assets=(), archive_decisions=(), execution_evidence=execution_evidence),
                         snapshot, windows_root=windows_root)
 
 
 def _project_execution_evidence(context, snapshot, plan):
     """Expose carried scalar facts for both pure and real-reload verification."""
+    from .reorganization_archive_review import resolve_archive_decisions
+    context = resolve_archive_decisions(context, snapshot)
     inventory = {e.relative_path: e for e in snapshot.entries}
     planned_by_source = {r.source_relative_path: r for r in plan.records}
     previous = {s.source: s for item in context.execution_evidence for s in item.known_side_assets}
@@ -148,7 +150,7 @@ def simulate_post_state(
         videos=tuple(replace(v, source=by_source[v.source].target_relative_path) for v in sorted(context.videos, key=lambda v:v.id)),
         subtitles=tuple(replace(s, source=by_source[s.source].target_relative_path) for s in sorted(context.subtitles, key=lambda s:s.id)),
         unmatched=tuple(replace(s, source=by_source[s.source].target_relative_path) for s in sorted(context.unmatched, key=lambda s:s.id)),
-        side_assets=(), execution_evidence=evidence,
+        side_assets=(), archive_decisions=(), execution_evidence=evidence,
         locator_baselines=tuple(replace(b, value=locator_targets.get((b.object_kind, b.object_id, b.field), b.value))
             for b in context.locator_baselines),
     )

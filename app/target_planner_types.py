@@ -108,6 +108,20 @@ class LocatorBaseline:
 
 
 @dataclass(frozen=True)
+class ArchiveReviewDecision:
+    """Explicit local archive disposition, bound to source stat and DB IDs."""
+    source: str
+    size: int
+    mtime_ns: int
+    collection_id: int
+    choice: str
+    secondary_video_id: int | None = None
+    secondary_source: str | None = None
+    primary_video_id: int | None = None
+    primary_source: str | None = None
+
+
+@dataclass(frozen=True)
 class PlannerContext:
     naming: PhysicalNamingContext
     layout: PhysicalLayoutContext
@@ -119,6 +133,7 @@ class PlannerContext:
     side_assets: tuple[SideAssetEvidence, ...] = ()
     execution_evidence: tuple[DuplicateExecutionEvidence, ...] = ()
     locator_baselines: tuple[LocatorBaseline, ...] = ()
+    archive_decisions: tuple[ArchiveReviewDecision, ...] = ()
 
 
 @dataclass(frozen=True)
