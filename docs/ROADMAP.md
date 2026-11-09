@@ -219,13 +219,30 @@ Explicitní produkční vstup nyní používá stejné E7 nad existující SQLit
 fresh preflight, runtime/E6B výluku a schválený E7H cleanup před NORMAL.
 Chrání IMPORT/Duplicates a podporuje oddělený RW worker a RO běžnou aplikaci;
 podrobnosti jsou v [provozním kontraktu](V6_PRODUCTION_REORGANIZATION.md).
-Nezávislé review, skutečný Nexus deployment/capability a produkční execution
-zůstávají neověřené. Automatické resume, obecný/produkční a automatický rollback
+Capability RW workeru na skutečném mountu a produkční execution zůstávají
+neověřené. Automatické resume, obecný/produkční a automatický rollback
 ani crash recovery nejsou implementované.
 P2C authoritative context resolution a inkrementální scanner routing jsou
 odložené; první omezený řez P2C je implementovaný. Fyzický rename
 ani move na NAS zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
 v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
+
+### Vývoj a fyzické provedení k 2026-11-09
+
+Datovaný provozní stav, nikoli trvalé nastavení. Skutečnou konfiguraci popisuje
+[architektura instalace](../deploy/nexus/docs/ARCHITECTURE.md).
+
+| Oblast | Stav |
+| --- | --- |
+| Backend reorganizace a webová příprava (preview, manifest, schválení) | Implementováno |
+| Aplikace na Nexusu | Běží release `e53e736` z 8. 11. 2026 |
+| Archive Review a selektivní hash archivů (`3d145ee`) | Na GitHubu, na Nexusu **nenasazeno** |
+| Nginx edge | Nasazený, v reálném E7 neověřený |
+| Fyzická reorganizace NAS | **Neprovedena** |
+| Technické ověření výsledku a closure V6 | Čeká na fyzické provedení |
+
+Selektivní hash několika relevantních ZIP archivů ve V6 není SHA-256 katalog videí;
+ten patří do V6.5.
 
 ### V6.3 – Oddělení logical owner identity od fyzické cesty
 
@@ -452,11 +469,10 @@ Třetí webový řez propojuje explicitní hostitelský `execute` s původním E
 na původním webu po RO restartu. Počty/fáze terminálu používají potvrzený E1;
 nevzniká nový executor ani paralelní move journal. Historická disabled acceptance
 zůstává spotřebovaná. Web má persistentní jméno správce, PRG a HTML STOP stránky.
-Vše je ověřené jen lokálně synteticky; provozní ověření a fyzicky ověřený NAS
-výsledek nadále zbývají. Živý odvozený přehled má lokální JSON a statickou
-servisní stránku v samostatném nenasazeném Nginx override; stejná LAN URL vyžaduje
-pozdější provozní změnu vstupní HTTP vrstvy. Nevzniká aplikační server/daemon,
-webový RW mount ani povolení k NAS execution.
+Hostitelský `execute` a E7 jsou ověřené jen lokálně synteticky; provozní ověření
+a fyzicky ověřený NAS výsledek nadále zbývají. Živý odvozený přehled má lokální
+JSON a statickou servisní stránku v nasazeném Nginx edge, který v reálném E7 ještě
+neběžel. Nevzniká aplikační server/daemon, webový RW mount ani povolení k NAS execution.
 
 Technické ověření dokončené reorganizace zůstává closure podmínkou V6:
 porovnání skutečných cest a SQLite locatorů se schváleným plánem, zachování

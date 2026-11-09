@@ -1,5 +1,19 @@
 # Změny instalačních podkladů
 
+## 2026-11-09 — Dokumentace podle skutečné instalace
+
+- Read-only kontrolou doložen stav po V6 release z 8. 11. 2026: aktivní Git
+  checkout `e53e736`, archiv předchozích zdrojů v `releases/`, služby `app` a
+  `edge`, tři Compose soubory v pořadí base → edge → V6 override.
+- Popsána skutečná funkce lokálního V6 override (image, vypnutý build, approval
+  prostředí a bindy), nasazený Nginx edge a chování bindu po přesunu `src/`.
+- `OPERATIONS` má tabulku první instalace, aktualizace a ztráty DB podle kódu.
+  `FIRST_RUN` je označený jako historický. `RELEASE_UPDATE` zohledňuje práva
+  skutečné instalace.
+- Archive Review (`3d145ee`) není nasazené. Fyzická reorganizace NAS nezačala.
+  Image, soubory Compose a RW příznaky bindů doložil read-only výpis Docker API.
+  Žádná změna na Nexusu, NAS, v aplikačním ani Compose kódu.
+
 ## 2026-10-22 — Nexus First Run, jediná instalace
 
 - Aktivní návrh používá jedinou službu `app`, pracovní DB, artwork a backup

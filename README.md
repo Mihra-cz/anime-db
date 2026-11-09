@@ -69,12 +69,12 @@ tohoto uživatele zapisovatelný. Jiný UID/GID lze určit build argumenty `APP_
 a `APP_GID`. SQLite i artwork jsou v Dockeru ve výchozím stavu pod `/data`.
 Nativní Uvicorn a jeho konfigurace se nemění.
 
-Pro první čistý start jediné instance na Nexusu použijte
-[Nexus First Run](deploy/nexus/docs/FIRST_RUN.md) a jeho samostatný Compose,
-nikoli tento vývojový Compose. Lokální příprava ještě není nasazení;
-instalační kroky vyžadují samostatné schválení. Cílem je jediná služba `app`
-na `http://192.168.11.238:8000`, po ověření Docker forward firewallu pro domácí
-LAN. [Nexus podklady](deploy/nexus/README.md) oddělují aktuální návod od historie.
+Produkční instalace na Nexusu běží a tento vývojový Compose nepoužívá; skládá se
+ze tří Compose souborů popsaných v [Nexus podkladech](deploy/nexus/README.md).
+Běžící instalace se aktualizuje výhradně podle
+[RELEASE_UPDATE](deploy/nexus/docs/RELEASE_UPDATE.md). [Nexus First Run](deploy/nexus/docs/FIRST_RUN.md)
+je historický návod první instalace a na běžící instalaci se nesmí použít.
+Nasazení aplikace není souhlas s fyzickou reorganizací NAS.
 
 ## Testy
 

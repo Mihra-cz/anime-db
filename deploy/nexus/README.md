@@ -1,36 +1,39 @@
 # AnimeDB na Nexusu — jedna instalace
 
-Stav: **planned / not-deployed**. Aktuální cíl je jedna služba `app`, jeden
-Docker kontejner, jedna nová SQLite v9 a jeden artwork adresář. Přístup bude
-`http://192.168.11.238:8000` až po ověření Docker forward firewallu pro domácí
-LAN. ARM64 build, host bindy, firewall a skutečný start zatím nejsou ověřené.
+**Datovaný stav k 2026-11-09:** instalace běží se službami `app` a `edge`, aktivní
+release je `e53e736` z 8. 11. 2026. Novější Archive Review není nasazené a fyzická
+reorganizace NAS nezačala. Ověřené i neověřené údaje jsou v
+[architektuře](docs/ARCHITECTURE.md). Žádný podklad zde není povolení k nasazení.
 
-Struktura navazuje na Nexus Project Cookbook v1.0. Lokální kopie
-`PROJECT-STANDARD.md` byla přečtena; skutečný serverový standard a registr
-`/srv/nexus/PROJECTS.md` se před schválenou instalací musí znovu ověřit.
-Manifest zůstává `planned`; žádný podklad není povolení k nasazení.
+Struktura navazuje na Nexus Project Cookbook v1.0. Manifest má stav `testing`:
+Cookbook dovoluje `deployed` až po ověření restartu, logů a obnovy a obnova
+ověřená není.
 
-Volitelný [HTTP edge a servisní stránka V6](service-edge/README.md) jsou
-samostatný **nenasazený** override pro pozdější zachování stejné URL během E7.
-Níže popsaná základní konfigurace jedné služby se tím nemění.
+Produkce se skládá ze **tří Compose souborů** v pořadí základní → edge → lokální
+V6 override. Samotný základní soubor není kompletní produkční deployment.
 
-| Lokální podklad | Cíl na Nexusu |
+| Podklad | Umístění v instalaci |
 | --- | --- |
-| Schválené zdroje | `/srv/nexus/projects/anime-db/src/` |
-| `manifest.toml`, tento `README.md`, `docs/` | `/srv/nexus/projects/anime-db/` |
-| `compose.yaml` | `/srv/nexus/stacks/anime-db/compose.yaml` |
-| `.env.example` | `/srv/nexus/stacks/anime-db/.env` |
+| Schválený Git commit | `$PROJECT_ROOT/src/` |
+| Předchozí zdroje | `$PROJECT_ROOT/releases/` |
+| `compose.yaml` | `$STACK_DIR/compose.yaml` |
+| `service-edge/compose.edge.yaml` | používá se přímo z `$PROJECT_ROOT/src/` |
+| Lokální V6 override, mimo Git | `$STACK_DIR/compose.v6.yaml` |
+| `.env.example` | `$STACK_DIR/.env` |
+| `manifest.toml`, tento `README.md`, `docs/` | kopie z první instalace v `$PROJECT_ROOT/`, průběžně se neaktualizují |
 
 `first_run.py` a dosavadní `preflight.py` se vkládají do image. Kořenový
 vývojový Compose se s tímto deploymentem neslučuje.
 
-- [Architektura, datové cesty a hranice](docs/ARCHITECTURE.md)
-- [Provoz a neověřené podmínky](docs/OPERATIONS.md)
-- [Přesné instalační příkazy a první spuštění](docs/FIRST_RUN.md)
+- [Architektura, tři Compose soubory a datové cesty](docs/ARCHITECTURE.md)
+- [Provoz, první instalace a ztráta databáze](docs/OPERATIONS.md)
+- [Aktualizace běžící instalace](docs/RELEASE_UPDATE.md)
+- [Nginx edge a servisní stránka](service-edge/README.md)
+- [Historický návod první instalace](docs/FIRST_RUN.md), nepoužívat pro aktualizaci
 - [Podklady pro cílené review Claude Opus 5.5](docs/FIRST_RUN_REVIEW.md)
 - [Changelog](docs/CHANGELOG.md)
 
-Lokální statická validace bez Docker daemonu:
+Lokální statická validace základního souboru bez Docker daemonu:
 
 ```bash
 docker compose --env-file deploy/nexus/.env.example \
@@ -39,10 +42,10 @@ docker compose --env-file deploy/nexus/.env.example \
   -f deploy/nexus/compose.yaml config --services
 ```
 
-Výsledkem seznamu služeb musí být pouze `app`. Profily, druhá služba, druhý
-port ani datové větve pro porovnávání databází nejsou součástí nasazení.
-První instalaci registruje instalační příkaz; DB automaticky vytvoří první
-start přes existující migrace. Pozdější ztráta DB znamená STOP.
+Výsledkem seznamu služeb tohoto jednoho souboru je pouze `app`; `edge` přidává
+až druhý soubor. Základní soubor nemá profily, druhý port ani datové větve pro
+porovnávání databází. První instalaci registruje instalační příkaz; DB automaticky
+vytvoří první start přes existující migrace. Pozdější ztráta DB znamená STOP.
 
 ## Historické a rozpracované podklady
 

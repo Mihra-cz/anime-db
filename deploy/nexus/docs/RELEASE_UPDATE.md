@@ -14,7 +14,7 @@
 | `$PROJECT_ROOT/releases/` | Archiv předchozích checkoutů a příprava další verze |
 | `$STACK_DIR/compose.yaml` | Základní Compose |
 | `$PROJECT_ROOT/src/deploy/nexus/service-edge/compose.edge.yaml` | Compose pro stávající webový edge |
-| `$STACK_DIR/compose.v6.yaml` | Produkční override image a build |
+| `$STACK_DIR/compose.v6.yaml` | Lokální produkční override mimo Git: image, vypnutí build, approval prostředí a bindy |
 | `$APPDATA_DIR/db/` | Produkční SQLite a případná lokální rozhodnutí Archive Review |
 | `$APPDATA_DIR/state/` | Provozní stav a lock |
 | `$APPDATA_DIR/artwork/` | Artwork |
@@ -33,8 +33,8 @@ Předem určit a schválit **plný SHA** cílového commitu. Nespouštět update
 ### Předpoklady
 
 - Všechny bloky se spouštějí **na serveru v jedné interaktivní relaci Bash** (nikoli `sh`), postupně: proměnné → A → B → C → D. Blok E je jen pro návrat po selhání.
-- Účet má přístup k Dockeru, `git` a `python3` a smí zapisovat do `$PROJECT_ROOT` a `$STACK_DIR`.
-- `$PROJECT_ROOT/src` je Git checkout s remote `origin`, jehož aktivní commit je na tomto remote dostupný. Jinak STOP.
+- Relace má přístup k Docker socketu, `git` a `python3` a smí zapisovat do `$PROJECT_ROOT` a `$STACK_DIR`. Na současné instalaci to běžný SSH účet nemůže, protože tyto kořeny patří rootu a Docker socket skupině `docker`. Celou relaci proto spustit přes `sudo -i`. Blok B zachová vlastníka aktivního checkoutu.
+- `$PROJECT_ROOT/src` je Git checkout s remote `origin`, jehož aktivní commit je na tomto remote dostupný. Platí to od V6 release; nejstarší archiv z první instalace je export bez `.git`. Pokud `src/` není Git checkout, tento návod nelze použít: STOP.
 - Produkční override obsahuje právě jeden řádek `image: $IMAGE_REPO:v6-<prvních 7 znaků aktivního SHA>`. Jinak se blok C zastaví.
 - Bloky A–E běží v závorkách se `set -euo pipefail`. Chyba ukončí jen daný blok, relace i proměnné zůstanou. Další blok spustit jen po výpisu `OK` z předchozího.
 - Za uzavírací `)` nepřidávat `&&` ani `||`, Bash by tím uvnitř bloku vypnul `set -e`.
@@ -113,6 +113,11 @@ set -euo pipefail
 REMOTE="$(git -C "$SRC" remote get-url origin)"
 git clone --no-checkout "$REMOTE" "$STAGE"
 git -C "$STAGE" checkout --detach "$NEW_SHA"
+
+# Pod sudo -i by nový checkout patřil rootu. Převzít vlastníka aktivního src/,
+# aby na něm další aktualizace fungovaly stejně. Pod stejným UID nic nemění.
+# Rozsah je jen tento nový $STAGE; nikdy src/, releases/, appdata, SQLite ani NAS.
+chown -R "$(stat -c '%u:%g' "$SRC")" "$STAGE"
 test "$(git -C "$STAGE" rev-parse HEAD)" = "$NEW_SHA"
 test -f "$STAGE/Dockerfile"
 

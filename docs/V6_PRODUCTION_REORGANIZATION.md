@@ -14,17 +14,19 @@ není potvrzená úspěšným návratem `fsync`.
 
 ## Existující instalace a izolace přístupů
 
-Výchozí provozní informace jsou existující Nexus kontejner `anime-db-app-1`,
-image tag `anime-db:nexus`, SQLite
-`/srv/nexus/appdata/anime-db/db/anime.db`, schema v9 a persistentní artwork.
-Poslední známý původní deployment je z 22. 10. 2026; běžící image a případné
-lokální úpravy je nutné zjistit read-only. Tag image nedokazuje jeho commit.
+Datovaný stav k 2026-11-09 popisuje [architektura instalace](../deploy/nexus/docs/ARCHITECTURE.md):
+služby `app` a `edge`, verzovaný image podle lokálního V6 override, SQLite `DB_FILE`,
+schema v9 a persistentní artwork. Před během je nutné běžící image a případné
+lokální úpravy znovu zjistit read-only. Tag image nedokazuje jeho commit.
 N5B/N5C pracovní návrhy nejsou dokladem skutečně nasazeného startupu.
 
-- Běžná aplikace používá NAS účet `anime_scan` se serverovými RO právy a
-  pouze RO media bind. Scanner a ffprobe čtou NAS; scanner zapisuje SQLite.
-- Administrativně spouštěný worker používá samostatný účet `anime_import`
+- Běžná aplikace používá NAS účet role `NAS_SCAN_USER` se serverovými RO právy
+  a pouze RO media bind. Scanner a ffprobe čtou NAS; scanner zapisuje SQLite.
+  Kontejner aplikace nikdy nedostává RW přihlašovací údaje.
+- Administrativně spouštěný worker používá samostatný účet role `NAS_IMPORT_USER`
   a jediný schválený RW CIFS mount. SOURCE i TARGET procházejí tímto mountem.
+  Účet existuje, ale k 2026-11-09 RW worker ani jeho mount nasazené nejsou;
+  samotná existence účtu reorganizaci nepovoluje.
 - Credentials a RW mount nejsou dostupné webu. Správu mountu provádí správce
   hostitele; worker nevolá mount helper, Docker API ani obecné sudo.
 - Worker používá stejný ověřený image s entrypointem `python -m
@@ -119,9 +121,9 @@ terminálu oříznout. **Nepoužívat `| tee` ani přesměrování stdout**; CLI
 start odmítne před execution. Původní journal a výsledkový report zůstávají
 uložené nezávisle na terminálovém výpisu.
 
-Pro budoucí živý přehled je připraven [samostatný nenasazený HTTP edge](../deploy/nexus/service-edge/README.md).
-Jeho instalace mění vlastnictví LAN portu 8000 a vyžaduje oddělené provozní
-schválení. Stávající Compose ani Nexus tento lokální řez nemění.
+Pro živý přehled během E7 slouží [nasazený HTTP edge](../deploy/nexus/service-edge/README.md),
+který vlastní LAN port 8000. Publikace průběhu workerem ani servisní stránka
+během reálného E7 zatím ověřené nejsou.
 
 ## Cleanup a dokončení
 
@@ -170,11 +172,13 @@ identity a E7H artefakty. Při sidecarech nespouštět běžný startup ani impl
 SQLite recovery. Historická inode continuity po zániku procesu je UNKNOWN;
 shodný hash není oprávnění k retry, resume nebo rollbacku.
 
-Před provozním povolením zbývá read-only inventura skutečné Nexus verze,
-entrypointu, UID/GID, bindů, shodných vnitřních cest, sdílené lokální evidence,
-runtime locku a writerů, kontrola existující v9 DB, záloh a instalační evidence.
-Při tomto budoucím nasazení je nutné ověřit skutečné serverové ACL účtu
-`anime_scan` jako RO a účtu `anime_import` jako RW i jejich oddělení mezi
+Read-only kontrola 2026-11-09 doložila aktivní verzi, entrypoint, UID/GID, bindy
+aplikace, existující v9 DB a instalační evidenci. RW pohled pro worker na hostiteli
+zatím neexistuje. Před provozním povolením zbývá aktuální inventura těsně před
+během, ověření workeru, shodných vnitřních cest, sdílené lokální evidence, runtime
+locku a writerů a kontrola záloh.
+Při tomto budoucím nasazení je nutné ověřit skutečné serverové ACL role
+`NAS_SCAN_USER` jako RO a role `NAS_IMPORT_USER` jako RW i jejich oddělení mezi
 aplikací a workerem; současná dokumentace to neprokazuje. Zbývá také schválené
 ověření skutečné CIFS capability. Reprezentativně se změří čas, SHA průchody,
 I/O, paměť, FD a evidence; rozsáhlá optimalizace se nedělá bez zjištěného problému.

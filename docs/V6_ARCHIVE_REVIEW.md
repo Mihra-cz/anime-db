@@ -65,19 +65,19 @@ schválení; starý manifest se neupravuje.
 
 ## Následné nasazení na Nexus
 
-Až po nezávislé revalidaci a schválení této opravy:
+Datovaný stav k 2026-11-09: tato oprava je na GitHubu v commitu `3d145ee`, na Nexusu
+nasazená není a běží `e53e736`. Až po samostatném schválení nasazení:
 
-1. Přenést schválený zdrojový diff a rebuildovat stávající image AnimeDB pro
-   Nexus. Použít skutečný aktivní Compose a obvyklý postup aktualizace;
-   nevytvářet druhou instalaci ani nespouštět first-run provision.
+1. Aktualizovat běžící instalaci výhradně podle
+   [RELEASE_UPDATE](../deploy/nexus/docs/RELEASE_UPDATE.md); nevytvářet druhou
+   instalaci ani nespouštět `provision`.
 2. Zachovat dosavadní lokální DB directory bind. Pro `/data/anime.db` bude stav
-   v `/data/anime.db.archive-reviews/`; při dosavadním Nexus mapování odpovídá
-   `/srv/nexus/appdata/anime-db/db/anime.db.archive-reviews/`.
+   v `/data/anime.db.archive-reviews/`, tedy v `$APPDATA_DIR/db/` na hostiteli.
    Rodič `/data` musí zůstat zapisovatelný aplikačnímu UID/GID. Není třeba
    migrace, nové env proměnné ani další bind. NAS zůstává read-only.
-3. Restartovat jen běžnou aplikaci. Ověřit health a čerstvý preview; vyřešit
-   konkrétní archiv podle lidského rozhodnutí. Ověřit READY/TARGET a po restartu
-   znovu načíst preview, včetně možnosti rozhodnutí změnit nebo zrušit.
+3. Ověřit health a čerstvý preview. Archiv s prokázanou kopií má být READY bez
+   ručního zásahu; formulář se použije jen u zbývajících REVIEW. Po případném
+   ručním rozhodnutí ověřit READY/TARGET a možnost rozhodnutí změnit nebo zrušit.
 4. Při pozdějším generování finálního manifestu musí host/worker číst **stejný
    DB directory včetně `.archive-reviews`** a stejný schválený kód. Kopie jen
    `anime.db` rozhodnutí nepřenese. Samotná SQLite záloha archive-review sidecary

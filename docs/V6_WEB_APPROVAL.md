@@ -7,9 +7,11 @@ přiřazenou verzi; rozsah V8–V10 se nemění.
 
 Funkční řetězec tvoří canonical manifest → webové review/schválení → explicitní
 hostitelský `execute` → původní E7 → živé interaktivní E7H rozhodnutí → NORMAL →
-webový report po obnovení aplikace. Jde o lokálně synteticky ověřenou implementaci,
-nikoli provedený deploy nebo povolení k produkční reorganizaci NAS. Provozní
-předpoklady zůstávají v [produkčním runbooku](V6_PRODUCTION_REORGANIZATION.md).
+webový report po obnovení aplikace. Webová část je od 8. 11. 2026 nasazená; k
+2026-11-09 nebyl publikován žádný manifest a `execute` neproběhlo. Hostitelský
+řetězec je ověřený jen lokálně synteticky a nejde o povolení k produkční
+reorganizaci NAS. Provozní předpoklady zůstávají v
+[produkčním runbooku](V6_PRODUCTION_REORGANIZATION.md).
 
 ## Oddělení procesů a dat
 
@@ -26,8 +28,8 @@ předpoklady zůstávají v [produkčním runbooku](V6_PRODUCTION_REORGANIZATION
   efektivním UID a bez group/world write práv. Doporučené adresáře `0700`;
   nástroj vytváří soubory `0600`. Adresáře připravuje správce.
 
-Například `/approval-inbox:ro`, `/approval-outbox:rw` a host-private
-`/approval-ledger`. Nejde o provedenou konfiguraci Compose. Web je opt-in:
+V produkci jsou `/approval-inbox` (RO) a `/approval-outbox` (RW) připojené
+lokálním V6 override. Host-private `/approval-ledger` web nevidí. Web je opt-in:
 
 ```ini
 REORGANIZATION_APPROVAL_INBOX=/approval-inbox
@@ -226,10 +228,8 @@ Zápis probíhá na hranicích fází a nejvýše po pěti sekundách při postu
 vlákno pouze uvnitř běžícího workeru obnovuje timestamp i při čekání na správce.
 Přerušení bez konečného výsledku neznamená PASS ani automatický STOP.
 
-Dosavadní deployment podklady nemají HTTP vstupní vrstvu; port 8000 vlastní
-přímo aplikace. Samostatný [nenasazený Nginx override a servisní stránka](../deploy/nexus/service-edge/README.md)
-přesunou při později schválené provozní změně stejný LAN port na malou statickou
-proxy. Ta má jen statické soubory a RO souhrn, bez SQLite/NAS/state/socketu.
+LAN port 8000 vlastní [nasazený Nginx edge se servisní stránkou](../deploy/nexus/service-edge/README.md),
+malá statická proxy. Ta má jen statické soubory a RO souhrn, bez SQLite/NAS/state/socketu.
 Při nedostupném backendu vrací servisní HTML, které přibližně po pěti sekundách
 načítá JSON a kontroluje skutečnou dostupnost aplikace. Načtení aplikace ji
 nespouští. STOP nic nerestartuje a guard zůstává rozhodující.
@@ -237,4 +237,4 @@ nespouští. STOP nic nerestartuje a guard zůstává rozhodující.
 Chybějící evidence nehlásí reorganizaci; starý aktivní souhrn nebo nedostupné
 aktualizace znamenají „Stav neověřen“. NORMAL/STOP záznam je výslovně poslední
 běh, nikdy důkaz další živé reorganizace. Lokální izolované proxy/browser testy
-nenahrazují ověření ARM64, firewallu a přechodu portu na skutečném Nexusu.
+nenahrazují ověření firewallu a chování servisní stránky během reálného E7.

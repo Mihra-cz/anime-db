@@ -52,12 +52,19 @@ nejsou součástí aplikačního kontraktu a nejsou zde vydávány za ověřené
 
 ## Aktuální rozsah a baseline
 
-Auditovaný baseline implementace: `05984ff` — Respect confirmed supplementary
+Historický auditovaný baseline Pre-V6: `05984ff` — Respect confirmed supplementary
 placement.
 Aktuální fáze: **V6 – Probíhá: příprava bezpečné reorganizace**.
 V1–V5 jsou hotové a Pre-V6 gate je uzavřený (PASS). Fyzická reorganizace NAS
-zatím nezačala a aplikace rename/move na NAS neprovádí.
+zatím nezačala a běžná aplikace rename/move na NAS neprovádí.
 Podrobný vývojový plán a zbývající kroky jsou výhradně v [ROADMAP.md](ROADMAP.md).
+
+Datovaný provozní stav k 2026-11-09, read-only ověřený a mění ho každé nasazení:
+AnimeDB na Nexusu běží z releasu `e53e736` z 8. 11. 2026 se službami `app` a `edge`,
+schema v9 a NAS připojeným read-only. Na GitHubu je novější Archive Review
+`3d145ee` a dokumentační commit `089dcd4`; Archive Review zatím nasazené není.
+Fyzická reorganizace NAS neproběhla. Skutečnou konfiguraci popisuje
+[architektura instalace](../deploy/nexus/docs/ARCHITECTURE.md).
 
 Současné zaměření V6:
 
@@ -66,8 +73,9 @@ Současné zaměření V6:
 - Naming Review a Physical Layout Review jsou implementované a produkční
   ruční průchod je uzavřený;
 - oddělení logické title identity od locatoru jako příprava shared Season
-  containers; read-only Target Planner foundation je implementovaný,
-  produkční execution zůstává další prací.
+  containers;
+- backend reorganizace a webová příprava (preview, manifest, schválení) jsou
+  implementované, produkční execution na NAS zůstává další prací.
 
 ### Pre-V6 closure checkpoint
 
@@ -368,10 +376,9 @@ Stávající 900sekundová admission se kontroluje i před E7; není timeoutem b
 Hostitelský start vyžaduje stdin/stdout TTY a načtené readline před claimem.
 Volitelný lokální `progress.json` je pouze odvozený přehled potvrzených E1/E7
 fází a počtů, atomicky aktualizovaný na hranicích fází a přibližně po 5 sekundách.
-Samostatný [nenasazený Nginx edge](../deploy/nexus/service-edge/README.md) obsahuje
-statickou servisní stránku pro dobu odstávky, s jasným neověřeným stavem při
-zastaralých zprávách. Zachování stejného LAN portu vyžaduje pozdější provozní
-změnu Compose; původní deployment se nemění. Nic neobchází startup guard.
+[Nasazený Nginx edge](../deploy/nexus/service-edge/README.md) vlastní LAN port
+a obsahuje statickou servisní stránku pro dobu odstávky, s jasným neověřeným stavem
+při zastaralých zprávách. V reálném E7 zatím nebyl ověřen. Nic neobchází startup guard.
 Schema, doménová pravidla ani preview se nemění. Verze a closure podmínky určuje [ROADMAP](ROADMAP.md).
 
 [Container locator projection](../app/target_planner.py) zachovává single-leaf
@@ -755,8 +762,8 @@ scope; nejde o recovery API pro oddělenou E7 knihovnu.
 Explicitní [produkční vstup do stejného E7](V6_PRODUCTION_REORGANIZATION.md)
 otevírá existující knihovnu a lokální SQLite v9, vyžaduje approval přesných
 canonical manifest bytes a fresh preflight a používá stávající runtime lock
-a E6B výluku. Běžná aplikace má RO přístup `anime_scan`; administrativní worker
-používá izolovaný RW mount `anime_import`, bez copy fallbacku. State/media
+a E6B výluku. Běžná aplikace má RO přístup role `NAS_SCAN_USER`; administrativní
+worker používá izolovaný RW mount role `NAS_IMPORT_USER`, bez copy fallbacku. State/media
 kontroly jsou oddělené a scratch CIFS allowlist se nemění.
 
 Rootový IMPORT je rezervovaný, scanner/inventory jej neprocházejí a reorganizace
@@ -773,10 +780,10 @@ cleanup evidence. NORMAL ověřuje historické pins vůči execution bindingu
 a současný RO mount vůči stejnému server/share/podstromu, nikoli shodu živého
 dev/inode dvou nezávislých pohledů.
 
-Zbývá nezávislé review, read-only ověření skutečně běžícího Nexus deploymentu,
-řízená aktualizace kompatibilního image, doložení serverových ACL a výluky všech
-writerů, capability konkrétního CIFS mountu a aktuální backup/snapshot. Lokální
-testy tyto podmínky nenahrazují. Automatické resume, rollback a crash recovery
+Běžná aplikace je na Nexusu nasazená. Před produkčním během zbývá aktuální
+read-only inventura, doložení serverových ACL a výluky všech writerů, příprava
+a capability RW mountu workeru a aktuální backup/snapshot. Lokální testy tyto
+podmínky nenahrazují. Automatické resume, rollback a crash recovery
 nejsou implementované. **NOT AUTHORIZED FOR NAS EXECUTION.**
 
 Otevřené INFO-1 (možný fd leak při selhání `os.fdopen` po `os.dup` v E1)

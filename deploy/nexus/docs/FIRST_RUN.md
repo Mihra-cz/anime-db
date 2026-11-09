@@ -1,6 +1,14 @@
 # První čistý start AnimeDB na Nexusu
 
-Stav: lokálně připraveno, **nenasazeno**. Tento postup vybírá jedinou čistou
+> **Historický návod první instalace z 22. 10. 2026.** První instalace proběhla.
+> **Nepoužívat pro aktualizaci běžící instalace** a nikdy znovu nespouštět
+> `provision` nad existujícími daty. Aktualizace je v
+> [RELEASE_UPDATE](RELEASE_UPDATE.md), současný stav v
+> [ARCHITECTURE](ARCHITECTURE.md) a chování při ztrátě DB v
+> [OPERATIONS](OPERATIONS.md#první-instalace-aktualizace-a-ztráta-databáze).
+> Text níže popisuje tehdejší stav a jednoslužbový Compose bez edge.
+
+Stav v době vzniku: lokálně připraveno, nenasazeno. Tento postup vybírá jedinou čistou
 instalaci se službou `app` a DB schema v9. Tento návod nahrazuje historické
 instalační podklady. N5B, návrh N5C ani jejich rozpracované soubory se
 nemění. R1 export skutečné notebookové v9 zůstává neověřený; čistý start na

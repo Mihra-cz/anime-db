@@ -5,15 +5,15 @@ id = "anime-db"
 name = "AnimeDB"
 description = "Jedina instalace AnimeDB s novou SQLite v9, oddelenym artworkem a RO NAS"
 created = "2026-10-20"
-last_reviewed = "2026-10-22"
+last_reviewed = "2026-11-09"
 owner = "mirek"
-status = "planned"
+status = "testing" # Running; Cookbook "deployed" also requires a verified restore.
 
 [platform]
 hostname = "nexus"
 architecture = "arm64"
 os_family = "Debian 13"
-deployment = "not-deployed"
+deployment = "docker"
 
 [paths]
 project = "/srv/nexus/projects/anime-db"
@@ -27,7 +27,7 @@ external_data = ["/mnt/nas-anime", "/mnt/nas-backup"]
 
 [services]
 systemd = []
-docker = ["app"] # Planned Compose service; no running container confirmed.
+docker = ["app"] # Base Compose only; effective services and ports: docs/ARCHITECTURE.md.
 ports = ["192.168.11.238:8000:8000/tcp"]
 healthcheck = "not-configured"
 
