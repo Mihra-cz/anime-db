@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""LAB ONLY: there are no external writers to resume. Failure can be simulated."""
+import json
+import sys
+
+mode = json.load(open('/srv/animedb-v6-lab/stack/lab-hooks.json'))['start_writers']
+if mode != 'ok':
+    print('LAB simulated writer restart failure', file=sys.stderr)
+    raise SystemExit(1)
+print(json.dumps({'writers_started': True}))

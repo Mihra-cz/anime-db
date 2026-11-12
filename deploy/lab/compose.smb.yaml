@@ -1,0 +1,27 @@
+# LAB ONLY SMB server, separate project animedb-v6-lab-smb (the "NAS" is not
+# part of the coordinator-controlled app stack). Loopback only.
+name: animedb-v6-lab-smb
+
+services:
+  smb:
+    image: animedb-v6-lab-smb:local
+    ports:
+      - "127.0.0.1:1445:445"
+    restart: "no"
+    volumes:
+      - type: bind
+        source: /srv/animedb-v6-lab/smb/share
+        target: /share
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/animedb-v6-lab/smb/secrets
+        target: /secrets
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: local
+      options:
+        max-size: 1m
+        max-file: "2"

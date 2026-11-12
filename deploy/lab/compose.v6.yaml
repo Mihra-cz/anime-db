@@ -1,0 +1,26 @@
+# LAB ONLY override (mirrors the anonymized Nexus compose.v6.yaml). lab.sh
+# installs a root-owned copy with the locally built image tag substituted.
+services:
+  app:
+    image: LAB_IMAGE
+    environment:
+      REORGANIZATION_APPROVAL_INBOX: /approval-inbox
+      REORGANIZATION_APPROVAL_OUTBOX: /approval-outbox
+    volumes:
+      - type: bind
+        source: /srv/animedb-v6-lab/appdata/approval/inbox
+        target: /approval-inbox
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/animedb-v6-lab/appdata/approval/outbox
+        target: /approval-outbox
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/animedb-v6-lab/appdata/backups
+        target: /backups
+        read_only: true
+        bind:
+          create_host_path: false

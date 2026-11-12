@@ -1,0 +1,45 @@
+# LAB ONLY edge (mirrors deploy/nexus/service-edge/compose.edge.yaml). Serves the
+# real deploy/nexus/service-edge files; loopback port only. Like the Nexus edge
+# file it stays a user-owned source that the coordinator only uses via an
+# approved root-owned copy.
+services:
+  app:
+    ports: !reset []
+  edge:
+    image: nginx:stable-alpine@sha256:583b7f2fce1cdb8da5ad5c39ebd3c33b98b87d493190e548bdee1fa8c619c311
+    user: "101:101"
+    entrypoint: [nginx]
+    command: [-c, /service/nginx.conf, -g, "daemon off;"]
+    ports:
+      - "127.0.0.1:18080:8080"
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - type: bind
+        source: /srv/animedb-v6-lab/edge
+        target: /service
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/animedb-v6-lab/appdata/service
+        target: /public-status
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /run/animedb-v6-lab
+        target: /run/animedb-control
+        read_only: true
+        bind:
+          create_host_path: false
+    working_dir: /tmp
+    logging:
+      driver: local
+      options:
+        max-size: 1m
+        max-file: "2"

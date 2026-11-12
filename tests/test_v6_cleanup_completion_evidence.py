@@ -39,7 +39,7 @@ def test_completed_cleanup_reopens_and_restores_only_original_hash_projection(co
 
 
 @pytest.mark.parametrize('path', ['IMPORT', 'Import/batch', 'Duplicates', 'Duplicates/old',
-    'Subs', 'Subs/old', '#recycle', '@eaDir', 'Show/@eaDir'])
+    '#recycle', '@eaDir', 'Show/@eaDir'])
 def test_even_resealed_proposal_cannot_authorize_protected_directory(tmp_path, path):
     with ScratchManifestExecution.create(tmp_path) as owner:
         manifest, database = prepare(owner)

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "app_health_timeout_seconds": 900,
+  "image": "anime-db:v6-REPLACE_WITH_RELEASE_SHA",
+  "uid": 1000,
+  "gid": 1000,
+  "public_origin": "http://anime.example.test:8000",
+  "compose_files": [
+    "/srv/nexus/stacks/anime-db/compose.yaml",
+    "/srv/nexus/projects/anime-db/src/deploy/nexus/service-edge/compose.edge.yaml",
+    "/srv/nexus/stacks/anime-db/compose.v6.yaml"
+  ],
+  "worker_config": "/srv/nexus/stacks/anime-db/reorganization-worker.json",
+  "snapshot_hook": "/usr/local/libexec/anime-db/v6-snapshot",
+  "writers_stop_hook": "/usr/local/libexec/anime-db/v6-stop-writers",
+  "writers_start_hook": "/usr/local/libexec/anime-db/v6-start-writers",
+  "socket_gid": 101,
+  "nas_source": "//nas.example.test/Anime",
+  "database_dir": "/srv/nexus/appdata/anime-db/db",
+  "state_dir": "/srv/nexus/appdata/anime-db/state",
+  "media_ro": "/mnt/nas-anime",
+  "media_rw": "/mnt/nas-anime-v6-rw",
+  "inbox": "/srv/nexus/appdata/anime-db/approval/inbox",
+  "outbox": "/srv/nexus/appdata/anime-db/approval/outbox",
+  "ledger": "/srv/nexus/appdata/anime-db/approval/ledger",
+  "backups": "/srv/nexus/appdata/anime-db/backups/pre-change",
+  "service_status": "/srv/nexus/appdata/anime-db/service",
+  "control_dir": "/run/animedb-reorganization",
+  "private_dir": "/srv/nexus/appdata/anime-db/coordinator",
+  "runtime_evidence": "/srv/nexus/stacks/anime-db/runtime-evidence.json"
+}

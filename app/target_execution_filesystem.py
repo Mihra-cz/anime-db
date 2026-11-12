@@ -185,6 +185,67 @@ def _load_renameat2():
     return call
 
 
+@lru_cache(maxsize=1)
+def _load_statx():
+    if sys.platform != 'linux':
+        raise OSError(errno.ENOSYS, 'Linux statx required for server metadata')
+    try:
+        # libc supplies the architecture ABI, including ARM64.
+        call = ctypes.CDLL(None, use_errno=True).statx
+    except (AttributeError, OSError) as exc:
+        raise OSError(errno.ENOSYS, 'libc statx unavailable') from exc
+    call.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p]
+    call.restype = ctypes.c_int
+    return call
+
+
+class _StatxTime(ctypes.Structure):
+    _fields_ = [('seconds', ctypes.c_int64), ('nanoseconds', ctypes.c_uint32),
+        ('_reserved', ctypes.c_int32)]
+
+
+class _Statx(ctypes.Structure):
+    # Linux statx's fixed 256-byte layout, shared by x86-64 and ARM64.
+    _fields_ = [('mask', ctypes.c_uint32), ('_block_size', ctypes.c_uint32),
+        ('_attributes', ctypes.c_uint64), ('nlink', ctypes.c_uint32),
+        ('uid', ctypes.c_uint32), ('gid', ctypes.c_uint32),
+        ('mode', ctypes.c_uint16), ('_spare0', ctypes.c_uint16),
+        ('ino', ctypes.c_uint64), ('size', ctypes.c_uint64),
+        ('_blocks', ctypes.c_uint64), ('_attributes_mask', ctypes.c_uint64),
+        ('atime', _StatxTime), ('_btime', _StatxTime), ('ctime', _StatxTime), ('mtime', _StatxTime),
+        ('_rdev_major', ctypes.c_uint32), ('_rdev_minor', ctypes.c_uint32),
+        ('dev_major', ctypes.c_uint32), ('dev_minor', ctypes.c_uint32),
+        ('_spare', ctypes.c_uint64 * 14)]
+
+
+def _sync_file_metadata(fd: int, *, name: str | None = None) -> os.stat_result:
+    """Return server-synchronized statx values, never a separate cached stat.
+
+    An empty path addresses the held inode; a single child name is resolved
+    relative to fd without following symlinks. Callers retain all identity and
+    type checks. No timestamp tolerance, fallback, or syscall retry.
+    """
+    if name is not None and (not name or name in {'.', '..'} or '/' in name):
+        raise ValueError('single directory entry required for synchronized metadata')
+    result = (ctypes.c_uint64 * 32)()
+    required = 0x3df  # TYPE, MODE, NLINK, UID, GID, MTIME, CTIME, INO, SIZE
+    flags = (0x1000 if name is None else 0x100) | 0x2000  # EMPTY_PATH / SYMLINK_NOFOLLOW + FORCE_SYNC
+    if _load_statx()(fd, b'' if name is None else os.fsencode(name), flags, required, result) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, 'server metadata synchronization failed')
+    observed = _Statx.from_buffer(result)
+    if observed.mask & required != required:
+        raise OSError(errno.EOPNOTSUPP, 'server metadata incomplete')
+    if any(t.nanoseconds >= 10**9 for t in (observed.mtime, observed.ctime)):
+        raise OSError(errno.EIO, 'invalid server metadata timestamp')
+    times = {field: getattr(observed, field).seconds * 10**9 + getattr(observed, field).nanoseconds
+        for field in ('atime', 'mtime', 'ctime')}
+    return os.stat_result((observed.mode, observed.ino, os.makedev(observed.dev_major, observed.dev_minor),
+        observed.nlink, observed.uid, observed.gid, observed.size,
+        times['atime'] / 10**9, times['mtime'] / 10**9, times['ctime'] / 10**9),
+        {f'st_{field}_ns': value for field, value in times.items()})
+
+
 def _rename_noreplace(source_fd: int, source: str, target_fd: int, target: str) -> None:
     call = _load_renameat2()
     if call(source_fd, os.fsencode(source), target_fd, os.fsencode(target), _RENAME_NOREPLACE) != 0:

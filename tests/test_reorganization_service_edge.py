@@ -19,6 +19,7 @@ import uuid
 
 import pytest
 from test_reorganization_approval_web import web, case, production
+from test_reorganization_coordinator import setup as coordinator_setup, proposal_record
 
 pytestmark = pytest.mark.skipif(os.getenv('ANIMEDB_TEST_SERVICE_EDGE') != '1', reason='explicit local Docker/browser opt-in')
 ASSETS = Path(__file__).resolve().parents[1] / 'deploy/nexus/service-edge'
@@ -41,12 +42,14 @@ def http_request(url, *, data=None, origin=None):
         return response.code, response.read().decode()
 
 
-@pytest.mark.parametrize('scenario', ['status', 'large', 'application-504', 'post-outage', 'approval'])
+@pytest.mark.parametrize('scenario', ['status', 'large', 'application-504', 'post-outage', 'approval', 'cleanup-preserve', 'cleanup-delete', 'cleanup-stop', 'cleanup-two-browsers',
+    'cleanup-terminal-stop', 'cleanup-terminal-normal', 'cleanup-terminal-stop-late-post', 'cleanup-terminal-normal-late-post'])
 def test_same_url_service_fallback_and_truthful_browser_states(tmp_path, request, monkeypatch, scenario):
     assert docker('context', 'inspect', 'default', '--format', '{{.Endpoints.docker.Host}}') == 'unix:///var/run/docker.sock'
     suffix = uuid.uuid4().hex[:12]
     network, backend, edge = (f'anime-service-{suffix}-{name}' for name in ('net', 'app', 'edge'))
     public = tmp_path / 'public'; public.mkdir(mode=0o755)
+    control = tmp_path / 'control'; control.mkdir(mode=0o750)
     assets = tmp_path / 'assets'; assets.mkdir(mode=0o755)
     backend_config = tmp_path / 'backend.conf'
     backend_config.write_text('''pid /tmp/nginx.pid; events {} http { default_type text/html;
@@ -73,10 +76,11 @@ def test_same_url_service_fallback_and_truthful_browser_states(tmp_path, request
             '--mount', f'type=bind,src={assets},dst=/assets,readonly',
             '--entrypoint', 'nginx', IMAGE, '-g', 'daemon off;')
         docker('run', '-d', '--pull=never', '--name', edge, '--network', network, '-p', '127.0.0.1::8080',
-            '--user', '101:101', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+            '--user', '101:101', '--group-add', str(os.getgid()), '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
             '--tmpfs', '/tmp:rw,noexec,nosuid,size=8m,mode=1777',
             '--mount', f'type=bind,src={ASSETS},dst=/service,readonly',
             '--mount', f'type=bind,src={public},dst=/public-status,readonly',
+            '--mount', f'type=bind,src={control},dst=/run/animedb-control,readonly',
             '--entrypoint', 'nginx', IMAGE, '-c', '/service/nginx.conf', '-g', 'daemon off;')
         address = docker('port', edge, '8080/tcp')
         url = 'http://' + address
@@ -122,7 +126,7 @@ def test_same_url_service_fallback_and_truthful_browser_states(tmp_path, request
                 assert requests.count('POST /timeout 504') == 1
             else:
                 assert not any(line.startswith('POST /submit ') for line in requests)
-                assert requests.count('GET /submit 200') == 1
+                assert requests.count('GET /reorganization/approval/' + 'b' * 64 + ' 200') == 1
             return
         if scenario == 'approval':
             # Create the existing synthetic fixture after Docker mounts are stable.
@@ -189,6 +193,59 @@ def test_same_url_service_fallback_and_truthful_browser_states(tmp_path, request
                 assert case_data[0].read_approval(case_data[6], source)['actor'] == 'Edge operator'
             finally:
                 server.should_exit = True; thread.join(10); sock.close(); case_data[1].close()
+            return
+        if scenario.startswith('cleanup-'):
+            # Real Nginx -> Unix host API with app stopped; original E7 callback
+            # and NORMAL are exercised together in browser_flow integration.
+            from dataclasses import replace
+            m, c, _, _, source, approved, _ = request.getfixturevalue('coordinator_setup')
+            c = replace(c, control_dir=control, public_origin=url)
+            host = m.Coordinator(c, run=lambda *args, **kwargs: '', healthy=lambda _: False)
+            host.active_source = source
+            received_decisions = []
+            cleanup_decide = host.cleanup_decide
+            def record_decision(data, *, origin, cookie):
+                received_decisions.append(data)
+                return cleanup_decide(data, origin=origin, cookie=cookie)
+            monkeypatch.setattr(host, 'cleanup_decide', record_decision)
+            record = proposal_record(source, approved)
+            if scenario == 'cleanup-two-browsers':
+                record['proposal']['before_snapshot'] += [dict(path=('対象作品'*29)+f'/{i}/Season 01/source.mkv',
+                    kind='regular',device=1,inode=i+10,mode=33152,uid=1000,gid=1000,nlink=1,
+                    size=10**9,mtime_ns=1794312345678901234,ctime_ns=1794312345678901234,content_sha256=None)
+                    for i in range(5901)]
+                record['proposal']['candidates'] += [dict(path=f'Old empty folder {i}',identity=[1,i+10],
+                    disposition='empty_after_actions') for i in range(278)]
+                record['proposal']['proposal_sha256'] = hashlib.sha256(m.canonical({key:value for key,value in
+                    record['proposal'].items() if key != 'proposal_sha256'})).hexdigest()
+                assert len(m.canonical(record)) > 5_000_000
+            m.write_json(c.ledger / (source + '.cleanup-request.json'), record, exclusive=True)
+            server = m.make_control_server(host)
+            thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+            try:
+                docker('stop', '-t', '1', backend)
+                assert http_request(url)[0] == 503
+                assert http_request(url + '/_service/workflow?source=' + source)[0] == 200
+                with urllib.request.urlopen(url + '/_service/workflow?source=' + source) as response:
+                    assert response.headers.get_content_type() == 'text/html'
+                code, body = http_request(url + '/_service/control/cleanup')
+                assert code == 200 and json.loads(body)['waiting'] is True
+                assert len(body.encode()) < 1024 and 'before_snapshot' not in body
+                proposal_sha = record['proposal']['proposal_sha256']
+                code, detail_body = http_request(url + '/_service/control/cleanup/proposal?sha=' + proposal_sha)
+                assert code == 200 and len(detail_body.encode()) < 250_000 and 'before_snapshot' not in detail_body
+                run_browser(tmp_path, url, public, backend, mode=scenario, source=source,
+                    approved=approved, proposal=proposal_sha)
+                decision = m.read_json(c.ledger / (source + '.cleanup-decision.json'))
+                expected = dict(source_sha256=source,approved_sha256=approved,proposal_sha256=proposal_sha,
+                    actor='Edge cleanup operator',directories=['Old'] if scenario == 'cleanup-delete' else [],confirm=True)
+                if scenario == 'cleanup-stop': expected['decision'] = 'stop'
+                assert decision == expected
+                assert len(received_decisions) == 1
+                assert json.loads(http_request(url + '/_service/control/cleanup')[1])['decision_state'] == 'CONSUMED'
+                assert not list(c.outbox.iterdir())
+            finally:
+                server.shutdown(); server.server_close(); thread.join(5)
             return
         docker('stop', '-t', '1', backend)
         assert http_request(url)[0] == 503

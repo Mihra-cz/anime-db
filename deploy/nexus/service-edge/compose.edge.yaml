@@ -28,7 +28,13 @@ services:
         read_only: true
         bind:
           create_host_path: false
-    # Only static assets and the public derived summary; no state/DB/NAS mounts.
+      - type: bind
+        source: /run/animedb-reorganization
+        target: /run/animedb-control
+        read_only: true
+        bind:
+          create_host_path: false
+    # Static assets, public summary and narrow cleanup socket; no DB/NAS/Docker.
     working_dir: /tmp
     logging:
       driver: local

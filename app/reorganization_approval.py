@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import secrets
 
 from . import target_execution_filesystem as fs
 from . import target_execution_journal as journal
@@ -82,6 +83,34 @@ def write_record(directory, name, raw):
             journal._write_all(fd, data)
             os.fsync(fd)
             os.fsync(parent)
+    return path
+
+
+def publish_record(directory, name, raw):
+    """Create-once mailbox publication, visible only after the full file fsync.
+
+    Polling consumers may run concurrently with the producer. Original approval
+    receipts retain their existing uncertain-write semantics; queue records use
+    the same local evidence checks with an atomic no-replace publication.
+    """
+    path = record_path(directory, name)
+    data = raw.encode('utf-8')
+    if len(data) > MAX_RECORD_BYTES:
+        raise ValueError('approval record too large')
+    temporary = '.mailbox-' + secrets.token_hex(16)
+    with fs._held_evidence_fd(fs._open_absolute(path.parent)) as parent:
+        fs._secure_directory(parent)
+        with fs._held_evidence_fd(os.open(temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600, dir_fd=parent)) as fd:
+            journal._write_all(fd, data)
+            os.fsync(fd)
+        try:
+            fs._rename_noreplace(parent, temporary, parent, path.name)
+            os.fsync(parent)
+        except FileExistsError:
+            os.unlink(temporary, dir_fd=parent)
+            raise
     return path
 
 
@@ -234,6 +263,8 @@ def publish_proposal(*, inbox, database, library_root, share, share_root, manife
     _require_ready(result, allow_unacknowledged=True)
     existing = {e.relative_path for e in snapshot.entries}
     bundle['new_directories'] = [d for d in manifest.payload.directories if d not in existing]
+    # Human review starts after preparation/preflight, not while it is running.
+    bundle['published_at'] = now()
     source = sha256(manifest)
     write_record(inbox, source + '.proposal.json', _json(bundle))
     return source
@@ -318,6 +349,7 @@ def accept_approval(*, inbox, outbox, ledger, source_sha256, approved_sha256, ac
             raise FileExistsError('approval already spent; no execution retry or disabled-claim adoption')
         current = worker_runtime(library_root, share=share, share_root=share_root, runtime=runtime)
         _require_ready(check_proposal(bundle, final, database=database, library_root=library_root, runtime=current))
+        require_current_proposal(bundle)
         if type(for_execution) is not bool:
             raise ValueError('explicit execution claim required')
         accepted = {**receipt, 'state': 'EXECUTION_CLAIMED' if for_execution else 'ACCEPTED_EXECUTION_DISABLED',

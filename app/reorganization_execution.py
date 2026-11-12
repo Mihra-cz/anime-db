@@ -11,7 +11,7 @@ from .tools.reorganize import execute_approved_reorganization, _interactive_clea
 
 def execute_from_approval(*, inbox, outbox, ledger, source_sha256, approved_sha256, actor,
                           database, library_root, share, share_root, runtime, runtime_lock,
-                          writers_stopped=False, progress=None):
+                          writers_stopped=False, progress=None, cleanup_decision=None):
     # The existing create-once ledger consumes even a disabled acceptance. There
     # is no path from ACCEPTED_EXECUTION_DISABLED to this execution claim.
     claim = approval.accept_approval(inbox=inbox, outbox=outbox, ledger=ledger,
@@ -51,7 +51,8 @@ def execute_from_approval(*, inbox, outbox, ledger, source_sha256, approved_sha2
             raise ValueError('execution claim differs from exact canonical approval')
         result = execute_approved_reorganization(database=database, library_root=library_root,
             share=share, share_root=share_root, manifest=manifest, approved_sha256=approved_sha256,
-            runtime=runtime, runtime_lock=runtime_lock, cleanup_decision=_interactive_cleanup(database, actor),
+            runtime=runtime, runtime_lock=runtime_lock,
+            cleanup_decision=cleanup_decision if cleanup_decision is not None else _interactive_cleanup(database, actor),
             progress=observe, admission_check=lambda: approval.require_current_proposal(bundle))
     except BaseException as exc:
         # A killed process cannot publish a result: its spent claim and original

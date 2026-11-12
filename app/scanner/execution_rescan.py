@@ -119,7 +119,17 @@ def verify_execution_rescan(session: Session, root: Path, manifest: ExecutionMan
             raise ValueError('execution source still present')
     if cleanup is not None:
         from app.target_execution_cleanup import restore_cleanup_directories
-        snapshot = restore_cleanup_directories(snapshot, cleanup)
+        database = None
+        if payload.mount_identity.startswith('cifs:'):
+            # The live completion reader uses a mode=ro creator with sqlite://,
+            # so its actual main file, rather than the engine URL, binds E7H.
+            files = [row[2] for row in session.connection().exec_driver_sql('PRAGMA database_list')
+                if row[1] == 'main' and row[2]]
+            if len(files) != 1:
+                raise ValueError('completed cleanup requires its actual database file')
+            database = Path(files[0])
+        snapshot = restore_cleanup_directories(snapshot, cleanup,
+            manifest=manifest, database_path=database)
     if post_state_hash_from_manifest(manifest, context, snapshot) != payload.expected_post_hash:
         raise ValueError('execution post-state changed; incremental routing requires review')
     return len(context.videos)

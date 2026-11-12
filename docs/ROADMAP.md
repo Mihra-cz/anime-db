@@ -227,7 +227,7 @@ odložené; první omezený řez P2C je implementovaný. Fyzický rename
 ani move na NAS zatím nezačal a aplikace je neprovádí. Schválená naming pravidla jsou
 v [V6_NAMING_CONTRACT](V6_NAMING_CONTRACT.md).
 
-### Vývoj a fyzické provedení k 2026-11-09
+### Vývoj a fyzické provedení k 2026-11-10
 
 Datovaný provozní stav, nikoli trvalé nastavení. Skutečnou konfiguraci popisuje
 [architektura instalace](../deploy/nexus/docs/ARCHITECTURE.md).
@@ -235,8 +235,8 @@ Datovaný provozní stav, nikoli trvalé nastavení. Skutečnou konfiguraci popi
 | Oblast | Stav |
 | --- | --- |
 | Backend reorganizace a webová příprava (preview, manifest, schválení) | Implementováno |
-| Aplikace na Nexusu | Běží release `e53e736` z 8. 11. 2026 |
-| Archive Review a selektivní hash archivů (`3d145ee`) | Na GitHubu, na Nexusu **nenasazeno** |
+| Aplikace na Nexusu | Podle zadání běží release `3d145ee`; během tohoto vývoje bez produkční inspekce |
+| Hostitelský koordinátor a webový E7H | Implementace pro izolované ověření, na Nexusu **nenasazeno** |
 | Nginx edge | Nasazený, v reálném E7 neověřený |
 | Fyzická reorganizace NAS | **Neprovedena** |
 | Technické ověření výsledku a closure V6 | Čeká na fyzické provedení |
@@ -464,15 +464,21 @@ Druhý webový řez přidává [schválení přesného canonical manifestu](V6_W
 konkrétní warning acknowledgements, CSRF a jednorázové hostitelské převzetí
 po kontrole originálu, aktuálního stavu, runtime.lock a RW CIFS policy.
 Současná LAN aplikace je administrace bez nových účtů či přihlašování.
-Třetí webový řez propojuje explicitní hostitelský `execute` s původním E7,
-živým CLI schválením E7H, completion do NORMAL a uloženým souhrnným výsledkem
-na původním webu po RO restartu. Počty/fáze terminálu používají potvrzený E1;
-nevzniká nový executor ani paralelní move journal. Historická disabled acceptance
-zůstává spotřebovaná. Web má persistentní jméno správce, PRG a HTML STOP stránky.
-Hostitelský `execute` a E7 jsou ověřené jen lokálně synteticky; provozní ověření
-a fyzicky ověřený NAS výsledek nadále zbývají. Živý odvozený přehled má lokální
-JSON a statickou servisní stránku v nasazeném Nginx edge, který v reálném E7 ještě
-neběžel. Nevzniká aplikační server/daemon, webový RW mount ani povolení k NAS execution.
+Webové dokončení doplňuje asynchronní žádost o přípravu skutečného RW
+manifestu a samostatný start request schváleného SHA. Hostitelský koordinátor
+používá pevný verzovaný worker a původní approval ledger/E7, odstavuje aplikaci
+a writery a po ověřeném NORMAL obnovuje aplikaci. Nginx zůstává nezávislý,
+zobrazuje původní progress.json a přes úzký Unix socket nabízí skutečný živý
+E7H návrh s předvýběrem všech způsobilých prázdných stromů a možností
+zachovat jednotlivé adresáře včetně jejich rodičů. Rozhodnutí používá původní
+CleanupProposal/CleanupApproval, evidence a verifikaci. Nevzniká druhý engine,
+move journal ani webový RW mount. CLI zůstává diagnostickou alternativou.
+
+Průchod je implementovaný pro izolované testy; [jednorázové nasazení
+koordinátoru](../deploy/nexus/docs/V6_COORDINATOR.md), RW mount s existujícím
+druhým účtem, skutečné snapshot/writer integrace a produkční ověření zbývají.
+Není to closure V6 ani povolení k fyzickému provedení. Dosavadní RO přístup
+se zachovává a nové Synology účty se nevytvářejí.
 
 Technické ověření dokončené reorganizace zůstává closure podmínkou V6:
 porovnání skutečných cest a SQLite locatorů se schváleným plánem, zachování

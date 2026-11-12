@@ -1,0 +1,64 @@
+# LAB ONLY base Compose (mirrors deploy/nexus/compose.yaml). Never merge with
+# Nexus files. lab.sh installs a root-owned copy as /srv/animedb-v6-lab/stack/compose.yaml.
+name: animedb-v6-lab
+
+services:
+  app:
+    image: anime-db-lab:unset
+    user: "${ANIMEDB_UID:-1000}:${ANIMEDB_GID:-1000}"
+    working_dir: /app
+    # Lab stand-in for first_run.py: holds the shared /state/runtime.lock across
+    # exec like Nexus, without the Nexus-only NVMe/installation attestation.
+    entrypoint: [python, /lab/lab_entrypoint.py]
+    command: [uvicorn, "app.main:app", --host, 0.0.0.0, --port, "8000"]
+    environment:
+      DATABASE_URL: sqlite:///file:///data/anime.db?mode=rw&uri=true
+      ANIME_PATH: /media/anime
+      REQUIRE_MOUNT: "true"
+      METADATA_ARTWORK_DIRECTORY: /artwork
+      METADATA_ENABLED: "false"
+      ANILIST_ENABLED: "false"
+      METADATA_DOWNLOAD_ARTWORK: "false"
+      METADATA_ALLOW_REMOTE_IMAGES: "false"
+      METADATA_AUTO_CONFIRM: "false"
+    restart: "no"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+    volumes:
+      - type: bind
+        source: /srv/animedb-v6-lab/mnt/ro
+        target: /media/anime
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: /srv/animedb-v6-lab/appdata/db
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/animedb-v6-lab/appdata/state
+        target: /state
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/animedb-v6-lab/appdata/artwork
+        target: /artwork
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/animedb-v6-lab/libexec/lab_entrypoint.py
+        target: /lab/lab_entrypoint.py
+        read_only: true
+        bind:
+          create_host_path: false

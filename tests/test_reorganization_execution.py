@@ -211,18 +211,19 @@ def test_expiry_rechecked_after_admission_lock_is_released(case, monkeypatch):
     from app.reorganization_execution import execute_from_approval
     source = publish(case)
     final = approve(case, source)
+    # Publication age is checked before and after preflight, then at E7 dispatch.
     original = api.require_current_proposal
     calls = []
     def expire_at_dispatch(bundle):
         calls.append(1)
-        if len(calls) == 2:
+        if len(calls) == 3:
             raise ValueError('host proposal expired')
         return original(bundle)
     monkeypatch.setattr(api, 'require_current_proposal', expire_at_dispatch)
     before = snapshot(case[2], case[1].root)
     with pytest.raises(ValueError, match='expired'):
         execute_from_approval(**execution_args(case, source, final))
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert snapshot(case[2], case[1].root) == before
     assert api.read_execution_result(case[5], source, final)['state'] == 'STOP'
 

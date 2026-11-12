@@ -1,7 +1,20 @@
 (() => {
   'use strict';
+  const validity = document.getElementById('manifest-validity');
+  if (validity) {
+    const initial = Number(validity.dataset.remainingSeconds);
+    const received = performance.now();
+    const remaining = () => {
+      const seconds = Math.max(0, initial - Math.floor((performance.now() - received) / 1000));
+      validity.dataset.expired = seconds ? 'no' : 'yes';
+      validity.querySelector('[data-remaining]').textContent = seconds ? `${Math.floor(seconds / 60)} min ${seconds % 60} s` : 'Platnost vypršela';
+      if (!seconds) document.querySelectorAll('form[action$="/prepare"] button[type=submit], form[action$="/approve"] button[type=submit], form[action$="/start"] button[type=submit]').forEach(button => { button.disabled = true; });
+    };
+    remaining(); setInterval(remaining, 1000);
+  }
   const manifest = JSON.parse(document.getElementById('manifest-data').textContent);
   const data = manifest.payload;
+  const presentation = window.ReorganizationPresentation;
   const added = new Set(JSON.parse(document.getElementById('manifest-new-directories').textContent));
   const element = (tag, text) => {
     const node = document.createElement(tag);
@@ -30,8 +43,12 @@
     for (const [key, value] of [['SOURCE', row.source], ['TARGET', row.target]]) {
       paths.append(element('dt', key), element('dd', value));
     }
-    card.append(element('h3', `${row.action} · ${status(row)} · ${row.object_kind} #${row.object_id}`), paths,
-      element('p', `${row.expected_size} B · mtime_ns ${row.expected_mtime_ns} · ${row.criticality} · ${row.failure_policy}`));
+    card.append(element('h3', `${presentation.label(row.action)} · ${presentation.label(status(row))}`), paths);
+    for (const id of row.warning_ids) {
+      const warning = data.warnings.find(item => item.warning_id === id);
+      if (warning) card.append(element('p', presentation.describe(warning.warning_class, 'warning').title));
+    }
+    card.append(presentation.technical(row));
     return card;
   });
   const action = document.getElementById('manifest-action');
@@ -48,13 +65,12 @@
   const selected = new Set();
   const submit = document.getElementById('manifest-prepare-submit');
   const acknowledgements = new Map(manifest.acknowledgements.map(ack => [ack.warning_id, ack]));
-  const ready = () => { if (submit) submit.disabled = selected.size !== data.warnings.length; };
+  const ready = () => { if (submit) submit.disabled = selected.size !== data.warnings.length || validity?.dataset.expired === 'yes'; };
   paginate(document.getElementById('manifest-warnings'), data.warnings, row => {
     const card = element('article', '');
-    card.append(element('p', `${row.warning_class} · ${row.object_kind} #${row.object_id} · ${row.source}`),
-      element('p', `Warning ID: ${row.warning_id}`));
+    card.append(presentation.message(row.warning_class, 'warning'), element('p', row.source), presentation.technical(row));
     if (submit) {
-      const label = element('label', 'Výslovně potvrzuji tento warning ');
+      const label = element('label', 'Zkontroloval/a jsem dopad a výslovně potvrzuji toto upozornění ');
       const check = document.createElement('input');
       check.type = 'checkbox';
       check.checked = selected.has(row.warning_id);
@@ -66,7 +82,7 @@
       card.append(label);
     } else {
       const ack = acknowledgements.get(row.warning_id);
-      card.append(element('p', ack ? `Potvrzeno: ${ack.actor} · ${ack.acknowledged_at}` : 'Nepotvrzeno — STOP'));
+      card.append(element('p', ack ? `Potvrzeno: ${ack.actor} · ${ack.acknowledged_at}` : 'Toto upozornění zatím není potvrzené.'));
     }
     return card;
   });

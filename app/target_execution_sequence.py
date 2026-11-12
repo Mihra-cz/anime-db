@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from functools import wraps
+import json
 import os
 from pathlib import Path
 import threading
@@ -18,7 +19,7 @@ from .target_execution_coordination import (
 from .target_execution_database import _ScratchSequenceDatabase
 from .target_execution_directories import _DirectoryPreparation
 from .target_execution_identity import (
-    ScratchIdentitySession, FileIdentityEvidence, IdentityEvidenceReconciliationRequired, _file_stat, _hash_file, _frame,
+    ScratchIdentitySession, FileIdentityEvidence, FileStatEvidence, IdentityEvidenceReconciliationRequired, _file_stat, _hash_file, _frame,
     _file_evidence,
 )
 from .target_execution_manifest import ExecutionManifest, JournalEntry, manifest_to_json
@@ -751,6 +752,13 @@ class ScratchManifestExecution(_ExecutionSequence):
     @_filesystem_checkpoint
     def _identity_check(self, index, *, moved=None):
         action = self._manifest.payload.actions[index]
+        if (moved is True and index not in self._active_stats
+                and action.action != 'KEEP' and self._production_binding):
+            # A CIFS lease can retain pre-rename ctime even with actimeo=0.
+            # Obtain server metadata while the original inode is still pinned,
+            # before establishing the exact post-rename checkpoint. All later
+            # comparisons (including ctime) retain their original conditions.
+            fs._sync_file_metadata(self._observations[index]._source_fd)
         if index in self._completed_stats:
             # A COMPLETE checkpoint is not replay authority. Its original live
             # owner still checks exact captured bytes/stat on a nofollow reopen.
@@ -823,8 +831,10 @@ class ScratchManifestExecution(_ExecutionSequence):
             resources.callback(context.close)
             result = super()._run_move(index)
             with self._target_file(index) as fd:
-                if _file_stat(os.fstat(fd)) != self._active_stats[index]:
-                    raise ScratchFilesystemReconciliationRequired('STOP: file changed after MOVE identity verification', self._phase)
+                actual = _file_stat(os.fstat(fd))
+                if actual != self._active_stats[index]:
+                    raise self._checkpoint_mismatch('STOP: file changed after MOVE identity verification',
+                        index, self._active_stats[index], actual, checkpoint='active_finalize')
                 self._completed_stats[index] = self._active_stats[index]
             captured, _, _, artifact_stat = self._captures[index]
             self._captures[index] = captured, None, None, artifact_stat
@@ -874,20 +884,26 @@ class ScratchManifestExecution(_ExecutionSequence):
             if verification != self._verifications[index]:
                 raise ScratchFilesystemReconciliationRequired('STOP: active physical state changed', self._phase)
             with self._target_file(index) as fd:
-                if _file_stat(os.fstat(fd)) != self._active_stats[index]:
-                    raise ScratchFilesystemReconciliationRequired('STOP: active content checkpoint changed', self._phase)
+                actual = _file_stat(os.fstat(fd))
+                if actual != self._active_stats[index]:
+                    raise self._checkpoint_mismatch('STOP: active content checkpoint changed',
+                        index, self._active_stats[index], actual, checkpoint='active')
             self._identity_check(index)
             return
         self._identity_check(index)
         action = self._manifest.payload.actions[index]
         with self._target_file(index) as fd:
             expected = self._completed_stats[index]
-            if _file_stat(os.fstat(fd)) != expected:
-                raise ScratchFilesystemReconciliationRequired('STOP: completed file checkpoint changed', self._phase)
+            actual = _file_stat(os.fstat(fd))
+            if actual != expected:
+                raise self._checkpoint_mismatch('STOP: completed file checkpoint changed',
+                    index, expected, actual, checkpoint='completed')
             if full and not self._metadata_rename(index) and _hash_file(fd) != (expected, self._prepared[index][3]):
                 raise ScratchFilesystemReconciliationRequired('STOP: completed file SHA-256 changed', self._phase)
-            if _file_stat(os.fstat(fd)) != expected:
-                raise ScratchFilesystemReconciliationRequired('STOP: target changed during checkpoint', self._phase)
+            actual = _file_stat(os.fstat(fd))
+            if actual != expected:
+                raise self._checkpoint_mismatch('STOP: target changed during checkpoint',
+                    index, expected, actual, checkpoint='completed_post_check')
         if action.action != 'KEEP':
             parent_path = action.source.rsplit('/', 1)[0] if '/' in action.source else ''
             if parent_path not in self._directories.removed:
@@ -895,6 +911,24 @@ class ScratchManifestExecution(_ExecutionSequence):
                     parent = self._filesystem._parent(fs._locator(action.source), paths)
                     fs._absent(parent, fs._locator(action.source)[-1])
         self._identity_check(index)
+
+    def _checkpoint_mismatch(self, message, index, expected, actual, *, checkpoint):
+        """Keep STOP details useful through CLI wrapping without disclosing locators."""
+        differences = {}
+        for attribute in fields(FileStatEvidence):
+            before, after = getattr(expected, attribute.name), getattr(actual, attribute.name)
+            if before != after:
+                differences[attribute.name] = (
+                    {'expected': before, 'actual': after}
+                    if type(before) is int and type(after) is int else {})
+        detail = {'checkpoint': checkpoint, 'action_index': index,
+            'active_action_index': self._active_index, 'phase': self._phase,
+            'differences': differences}
+        error = ScratchFilesystemReconciliationRequired(
+            message + '; CHECKPOINT_MISMATCH_JSON=' + json.dumps(detail, sort_keys=True, separators=(',', ':')),
+            self._phase)
+        error.checkpoint_mismatch = detail
+        return error
 
     def _outcome(self, index, verification):
         action = self._manifest.payload.actions[index]

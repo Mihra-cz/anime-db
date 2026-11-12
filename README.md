@@ -9,7 +9,7 @@ AnimeDB je katalog anime knihovny s běžným read-only přístupem k NAS. Rekur
 - [HISTORY](docs/HISTORY.md) — technická historie významných milníků.
 - [V6_NAMING_CONTRACT](docs/V6_NAMING_CONTRACT.md) — schválená pravidla fyzických názvů a struktury pro V6.
 - [V6 produkční vstup](docs/V6_PRODUCTION_REORGANIZATION.md) — existující knihovna/SQLite, izolovaný RW worker, chráněné IMPORT/Duplicates, E7H a návrat do RO provozu; před provozním použitím vyžaduje Nexus ověření a schválení.
-- [V6 webové schválení](docs/V6_WEB_APPROVAL.md) — canonical schválení, explicitní hostitelský E7, živý E7H cleanup a výsledný report po RO restartu.
+- [V6 webové schválení](docs/V6_WEB_APPROVAL.md) — příprava manifestu, schválení, explicitní webový start E7, E7H rozhodnutí v Nginxu a výsledný report po NORMAL.
 
 ## Spuštění bez Dockeru
 
@@ -43,12 +43,12 @@ FFPROBE_TIMEOUT_SECONDS=60
 MEDIAINFO_TIMEOUT_SECONDS=60
 LIBRARY_ACCESS_TIMEOUT_SECONDS=10
 LIBRARY_HEALTHCHECK_INTERVAL_FILES=25
-REORGANIZATION_PREVIEW_TIMEOUT_SECONDS=120
+REORGANIZATION_PREVIEW_TIMEOUT_SECONDS=600
 METADATA_REQUEST_TIMEOUT_SECONDS=15
 ```
 
 Webový náhled reorganizace má samostatný `REORGANIZATION_PREVIEW_TIMEOUT_SECONDS`
-(výchozí 120 s, konečná kladná hodnota nejvýše 3600 s). Nemění timeout
+(výchozí 600 s, konečná kladná hodnota nejvýše 3600 s). Nemění timeout
 scanneru ani health-checku.
 
 HTTP metadata používají rozdělený timeout pro connect/read/write/pool. `ffprobe` a případné budoucí použití MediaInfo mají vlastní timeout na každý proces.
@@ -182,11 +182,11 @@ warning acknowledgements a externí preconditions.
 ```bash
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.tools.execution_manifest \
   generate-manifest --db data/anime.db --library-root /mnt/nas-anime \
-  --windows-root '\\192.168.11.149\Anime' \
+  --windows-root '\\nas.example.test\Anime' \
   --output /tmp/anime-v6-manifest.json
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.tools.execution_manifest \
   dry-run --db data/anime.db --library-root /mnt/nas-anime \
-  --windows-root '\\192.168.11.149\Anime' \
+  --windows-root '\\nas.example.test\Anime' \
   --manifest /tmp/anime-v6-manifest.json --output /tmp/anime-v6-dry-run.json
 ```
 

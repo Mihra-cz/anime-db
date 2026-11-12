@@ -154,11 +154,12 @@ def test_csrf_is_bound_to_source_and_manifest_sha(web):
     assert not (outbox / f'{source}.approval.json').exists()
 
 
-def test_approval_does_not_offer_execution_or_import_routes(web):
+def test_approval_exposes_explicit_start_without_arbitrary_execution_routes(web):
     case, client, source = web
     paths = {r.path for r in client.app.routes}
     assert f'/reorganization/approval/{{source}}/approve' in paths
-    assert not any(p.startswith('/reorganization') and p.endswith(('/execute', '/start', '/run')) for p in paths)
+    assert '/reorganization/approval/{source}/start' in paths
+    assert not any(p.startswith('/reorganization') and p.endswith(('/execute', '/run')) for p in paths)
     response = client.post(f'/reorganization/approval/{source}/execute', data={})
     assert response.status_code == 404
 
@@ -200,7 +201,7 @@ def test_expired_proposal_has_explicit_stop_and_no_approval_button(web):
     page = EndpointClient(client.app).get(f'/reorganization/approval/{source}')
     assert page.status_code == 200
     assert 'STOP: hostitelská evidence vypršela' in page.text
-    assert '>Schválit tento canonical manifest</button>' not in page.text
+    assert '>Schválit tento přesný návrh</button>' not in page.text
 
 
 def test_non_ascii_csrf_is_rejected_cleanly(web):
@@ -313,7 +314,7 @@ def test_other_routes_remain_available_during_approval_io(web, monkeypatch, oper
     async def exercise():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url='http://testserver', follow_redirects=True) as concurrent:
             task = asyncio.create_task(concurrent.post(path + '/' + operation, data=data,
-                headers={'origin': 'http://testserver', 'cookie': f'reorganization_csrf={csrf(page)}'}))
+                headers={'origin': 'http://testserver', 'cookie': 'reorganization_csrf=' + client.cookies.get('reorganization_csrf')}))
             try:
                 while not entered.is_set():
                     await asyncio.sleep(0.005)

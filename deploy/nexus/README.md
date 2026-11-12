@@ -29,6 +29,7 @@ vývojový Compose se s tímto deploymentem neslučuje.
 - [Provoz, první instalace a ztráta databáze](docs/OPERATIONS.md)
 - [Aktualizace běžící instalace](docs/RELEASE_UPDATE.md)
 - [Nginx edge a servisní stránka](service-edge/README.md)
+- [Jednorázová instalace V6 koordinátoru a běžné webové ovládání](docs/V6_COORDINATOR.md)
 - [Historický návod první instalace](docs/FIRST_RUN.md), nepoužívat pro aktualizaci
 - [Podklady pro cílené review Claude Opus 5.5](docs/FIRST_RUN_REVIEW.md)
 - [Changelog](docs/CHANGELOG.md)

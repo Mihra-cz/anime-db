@@ -2,19 +2,51 @@
 <html lang="cs"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AnimeDB – Servisní přehled</title>
 <style>
-:root{color-scheme:dark;font:16px system-ui,sans-serif;background:#10141d;color:#e2e8f2}body{margin:0;padding:clamp(20px,5vw,64px)}main{max-width:780px;margin:auto}h1{font-size:clamp(24px,4vw,32px);font-weight:600}p{line-height:1.6}table{width:100%;border-collapse:collapse;margin:24px 0}th,td{text-align:left;border-bottom:1px solid #30394a;padding:14px 8px}th{font-weight:500}td{font-family:ui-monospace,monospace}.PASS{color:#8bdab1}.WORK{color:#9dc7ff}.STOP{color:#ffa7a7}.WAIT,small{color:#a6b2c7}#result{font-weight:600}#confirmed{overflow-wrap:anywhere}footer{color:#a6b2c7;font-size:14px}
+:root{color-scheme:dark;font:16px system-ui,sans-serif;background:#10141d;color:#e2e8f2}body{margin:0;padding:clamp(20px,5vw,64px)}main{max-width:900px;margin:auto}h1{font-size:clamp(24px,4vw,32px);font-weight:600}p{line-height:1.6}table{width:100%;border-collapse:collapse;margin:24px 0}th,td{text-align:left;border-bottom:1px solid #30394a;padding:14px 8px}th{font-weight:500}td{overflow-wrap:anywhere}.PASS{color:#8bdab1}.WORK{color:#9dc7ff}.STOP{color:#ffa7a7}.WAIT,small{color:#a6b2c7}#result{font-weight:600}#confirmed,.path{overflow-wrap:anywhere}footer{color:#a6b2c7;font-size:14px}a{color:#9dc7ff}section{border:1px solid #30394a;border-radius:8px;padding:clamp(16px,3vw,28px);margin:24px 0}input,button{font:inherit}input[type=text],input[type=search]{display:block;box-sizing:border-box;width:100%;background:#171f2e;color:inherit;border:1px solid #526079;border-radius:4px;min-height:44px;padding:8px;margin:8px 0 16px}button{min-height:44px;padding:8px 16px;border:1px solid #526079;border-radius:4px;background:#25354e;color:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}.controls{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:16px 0}.candidate{display:flex;gap:12px;align-items:flex-start;border-top:1px solid #30394a;min-height:44px;padding:12px 0}.candidate input,input[type=checkbox]{width:20px;height:20px;flex-shrink:0}pre{white-space:pre-wrap;overflow-wrap:anywhere}summary{min-height:44px;cursor:pointer;display:list-item;padding-block:8px}#cleanup-selected{font-weight:600}details{margin-block:16px}button:focus-visible,summary:focus-visible{outline:3px solid #9dc7ff;outline-offset:3px}[hidden]{display:none!important}#cleanup-feedback{min-height:24px}#cleanup-stop{border-color:#a95862}.danger{border-top:1px solid #526079;margin-top:24px;padding-top:20px}@media(max-width:520px){body{padding:16px}th,td{padding:12px 4px}.controls button{flex:1 1 auto}}
 </style><script defer src="/_service/service.js"></script></head>
 <body><main><h1>AnimeDB – Servisní přehled</h1>
 <p id="message" role="status">Aplikace je momentálně nedostupná. Stav reorganizace není ověřen.</p>
 <p id="result">Stav neověřen</p>
+<p id="workflow-stage" role="status"></p>
 <table aria-label="Průběh reorganizace"><thead><tr><th>Fáze</th><th>Stav</th><th>Potvrzeno</th></tr></thead><tbody>
-<tr data-phase="manifest"><th>Manifest</th><td>WAIT</td><td></td></tr>
-<tr data-phase="folders"><th>Folder Tree</th><td>WAIT</td><td></td></tr>
-<tr data-phase="rename"><th>Rename / MOVE</th><td>WAIT</td><td></td></tr>
-<tr data-phase="sqlite"><th>SQLite a locatory</th><td>WAIT</td><td></td></tr>
-<tr data-phase="cleanup"><th>Cleanup</th><td>WAIT</td><td></td></tr>
-<tr data-phase="verification"><th>Verification / NORMAL</th><td>WAIT</td><td></td></tr>
+<tr data-phase="manifest"><th>Příprava návrhu</th><td>Čeká se</td><td></td></tr>
+<tr data-phase="folders"><th>Cílové adresáře</th><td>Čeká se</td><td></td></tr>
+<tr data-phase="rename"><th>Přesuny souborů</th><td>Čeká se</td><td></td></tr>
+<tr data-phase="sqlite"><th>Aktualizace cest v databázi</th><td>Čeká se</td><td></td></tr>
+<tr data-phase="cleanup"><th>Úklid prázdných adresářů</th><td>Čeká se</td><td></td></tr>
+<tr data-phase="verification"><th>Závěrečné ověření</th><td>Čeká se</td><td></td></tr>
 </tbody></table>
-<p id="confirmed"></p><footer>Odvozený přehled, aktualizace přibližně každých 5 sekund. Autoritou jsou E1/E7 a terminál správce. Tato stránka nic nespouští ani neopakuje.</footer>
+<p id="confirmed"></p>
+<p id="service-completion" hidden></p>
+<section id="cleanup-panel" hidden aria-labelledby="cleanup-heading">
+<h2 id="cleanup-heading">Rozhodnutí o prázdných adresářích</h2>
+<p>Živý E7H návrh vznikl po přesunech. Ponechané adresáře zůstanou zachované. Předvybrané položky vyžadují výslovné schválení.</p>
+<label for="cleanup-actor">Jméno správce pro evidenci</label><input type="text" id="cleanup-actor" maxlength="128" autocomplete="name">
+<p>Všechny způsobilé adresáře jsou předvybrané. Předvýběr není schválení.</p>
+<p id="cleanup-selected" role="status" aria-live="polite"></p>
+<details id="cleanup-list"><summary>Seznam adresářů · celkem <span id="cleanup-total">0</span></summary>
+<label for="cleanup-search">Hledat kandidátní adresář</label><input type="search" id="cleanup-search">
+<p id="cleanup-count"></p>
+<p>Výběr platí pro celý návrh přes všechny stránky a filtry.</p>
+<p>Zachování potomka zachová i jeho rodiče. Výběr rodiče zahrne všechny jeho potomky v návrhu.</p>
+<div class="controls"><button type="button" id="cleanup-all">Vybrat vše</button><button type="button" id="cleanup-none">Zrušit výběr</button></div>
+<div id="cleanup-candidates"></div>
+<nav class="controls" aria-label="Stránkování kandidátů"><button type="button" id="cleanup-prev">Předchozí</button><span id="cleanup-page"></span><button type="button" id="cleanup-next">Další</button></nav>
+
+</details>
+<button type="button" id="cleanup-preserve">Výslovně zachovat všechny adresáře a pokračovat</button>
+<div class="danger"><h3>Odstranit pouze vybrané prázdné adresáře</h3>
+<p class="path">Přesný SHA-256 návrhu: <strong id="cleanup-proposal-sha"></strong></p>
+<label for="cleanup-sha">Pro odstranění opište celý SHA-256 návrhu</label><input type="text" id="cleanup-sha" spellcheck="false" autocomplete="off">
+<label class="candidate"><input type="checkbox" id="cleanup-confirm"><span>Výslovně schvaluji odstranění pouze vybraných adresářů podle přesného živého návrhu. Ostatní zachovat.</span></label>
+<button type="button" id="cleanup-delete">Potvrdit odstranění vybraných a pokračovat</button></div>
+<div class="controls"><button type="button" id="cleanup-stop">Odmítnout cleanup a skončit STOP</button></div>
+<details><summary>Technické podrobnosti návrhu</summary><pre id="cleanup-json"></pre></details>
+</section>
+<p id="cleanup-feedback" role="status"></p>
+<p id="workflow-result" hidden><a href="#">Otevřít výsledek v aplikaci</a></p>
+<details><summary>Technické podrobnosti průběhu</summary><pre id="service-technical"></pre></details>
+<p><a href="/">Zpět do katalogu</a> · <a href="/reorganization/approval">Výsledky a schválené návrhy</a></p>
+<footer>Odvozený přehled, aktualizace přibližně každých 5 sekund. Autoritou jsou E1/E7 a přesná E7H evidence. Požadavky ani execution se automaticky neopakují.</footer>
 <noscript><p>Pro živý přehled zapněte JavaScript. Bez aktualizací zůstává stav neověřený.</p></noscript>
 </main></body></html>

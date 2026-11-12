@@ -23,3 +23,11 @@
 .reorganization-archive-form label { display: flex; align-items: flex-start; gap: .75rem; min-height: 44px; padding-block: .5rem; }
 .reorganization-archive-form input[type="radio"] { flex-shrink: 0; margin-top: .3rem; }
 .reorganization-archive-form span { min-width: 0; overflow-wrap: anywhere; }
+
+.reorganization-message { border-inline-start: 3px solid #7185a5; padding-inline-start: .85rem; margin-block: .75rem; }
+.reorganization-message.error { border-color: #f18b8b; }
+.reorganization-message.warning, .reorganization-message.review { border-color: #e0bc6b; }
+.reorganization-message.info { border-color: #80b5df; }
+.reorganization-message h4 { margin-block: .5rem; }
+.reorganization-technical pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.reorganization summary:focus-visible { outline: 3px solid #80b5df; outline-offset: 3px; }

@@ -132,7 +132,15 @@ def test_existing_database_cleanup_normal_and_ro_startup(production, monkeypatch
     incoming = (owner.root / 'IMPORT/uploading.mkv').read_bytes()
     selected = []
     def decision(proposal):
-        assert all(not p.path.startswith(('IMPORT', 'Duplicates', 'Subs')) for p in proposal.candidates)
+        candidates = {p.path for p in proposal.candidates}
+        assert all(p != root and not p.startswith(root + '/')
+            for p in candidates for root in ('IMPORT', 'Duplicates'))
+        assert candidates.isdisjoint({'.', *manifest.payload.directories})
+        occupied = {str(parent) for entry in proposal.before_snapshot if entry.kind != 'directory'
+            for parent in PurePosixPath(entry.path).parents}
+        assert candidates.isdisjoint(occupied)
+        # This fixture's Subs tree is empty and has no canonical targets.
+        assert {'Subs', 'Subs/empty'} <= candidates
         selected.extend(p.path for p in proposal.candidates if p.path == 'old' or p.path.startswith('old/'))
         return approve_cleanup(proposal, tuple(selected), actor='operator', reason='reviewed original empty paths')
     from app.tools.reorganize import execute_approved_reorganization
@@ -147,6 +155,7 @@ def test_existing_database_cleanup_normal_and_ro_startup(production, monkeypatch
     assert selected and all(not (owner.root / p).exists() for p in selected)
     assert (owner.root / 'IMPORT/uploading.mkv').read_bytes() == incoming
     assert (owner.root / 'Duplicates').is_dir()
+    assert all((owner.root / p).is_dir() for p in manifest.payload.directories)
     secondary = next(a for a in manifest.payload.actions if a.object_kind == 'video' and a.object_id == 101)
     assert secondary.action == 'QUARANTINE'
     assert (owner.root / secondary.target).read_bytes() == b'confirmed secondary video'

@@ -1,8 +1,13 @@
 {% extends "base.html" %}
 {% block title %}STOP – Reorganizace – AnimeDB{% endblock %}
+{% block main_class %}content-shell content-wide reorganization{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', path='reorganization.css') }}">{% endblock %}
 {% block content %}
 <section class="panel"><h1>STOP · Reorganizace</h1>
-<div class="notice error" role="alert">{{ detail }}</div>
+{% if explanations %}<div class="notice error" role="alert">{{ summary }}</div>
+{% for message in explanations %}<article><h2>{{ message.title }}</h2><p>{{ message.reason }}</p><p>Dopad: {{ message.impact }}</p><p>{{ message.action }}</p></article>{% endfor %}
+{% else %}<div class="notice error" role="alert">{{ detail }}</div>{% endif %}
+<details><summary>Technické podrobnosti</summary><pre class="reorganization-path">{{ detail }}</pre></details>
 <p>Požadavek nebyl úspěšně dokončen. Zachovejte existující schválení a provozní evidence; neopakujte fyzickou operaci ani neobnovujte databázi automaticky.</p>
 <p><a href="/reorganization/approval">Finální manifesty a výsledky</a> · <a href="/reorganization">Náhled reorganizace</a></p>
 </section>

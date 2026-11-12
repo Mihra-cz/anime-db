@@ -318,7 +318,7 @@ purge action a uživatelské Completeness UI (V6.5) zůstávají pending.
 `/reorganization` zobrazuje databázové počty přes vlastní SQLite `mode=ro`
 session. Běžný GET se knihovny nedotýká. Explicitní POST náhledu spustí
 existující Target Planner nad fresh filesystem inventory v samostatném procesu
-s vlastním `REORGANIZATION_PREVIEW_TIMEOUT_SECONDS` (default 120 s, konečná
+s vlastním `REORGANIZATION_PREVIEW_TIMEOUT_SECONDS` (default 600 s, konečná
 kladná hodnota nejvýše 3600 s); souběh je omezen
 na jeden náhled na aplikační instanci. Proces neimportuje aplikační startup,
 neprovádí migrace ani scan, neukládá plán a nečte obsah videí.
@@ -356,30 +356,51 @@ změny schema v9. Změna source stat nebo duplicitní DB vazby rozhodnutí
 zneplatní do REVIEW; automatická oprava neprobíhá. Platná vazba se převádí na
 existující `SideAssetEvidence`, WARNING workflow se nemění.
 
-[Webové schválení](V6_WEB_APPROVAL.md) nyní odděleně
-přebírá původní canonical manifest z hostitelského RO inboxu, vytváří konkrétní
-warning acknowledgements a ve druhém kroku jednorázově schvaluje přesný SHA-256.
-POST chrání CSRF; současná LAN aplikace je administrace bez účtů a přihlašování.
-Hostitelský opt-in nástroj ověří originál, lokálně potvrzený SHA, aktuální stav,
-stávající runtime.lock a RW CIFS policy a spotřebuje approval v soukromém ledgeru.
-Web používá fresh DB/FS preflight proti časově omezené zachycené hostitelské runtime
-evidence, nikoli proti domnělému RW bindingu svého RO mountu.
-Explicitní hostitelský `execute` nyní spotřebuje nové schválení ve stejném ledgeru,
-uvolní kontrolní runtime lock a předá canonical manifest původnímu E7, který
-lock/E6B a preflight znovu ověří. Historický `ACCEPTED_EXECUTION_DISABLED` se nikdy
-neaktivuje. Terminál ukazuje fázi/počty z potvrzeného E1 a používá původní živý
-E7H cleanup. Po NORMAL nebo zachytitelném STOP vzniká pouze souhrnný report v RO
-inboxu, dostupný po restartu na původním GET. Chybějící report zůstává nepotvrzený,
-bez retry. Persistované SHA-bound metadata zachovají jméno i bez warningů;
-POST používá 303/GET, HTML STOP stránky a blokující práci v threadpoolu.
-Stávající 900sekundová admission se kontroluje i před E7; není timeoutem běhu.
-Hostitelský start vyžaduje stdin/stdout TTY a načtené readline před claimem.
-Volitelný lokální `progress.json` je pouze odvozený přehled potvrzených E1/E7
-fází a počtů, atomicky aktualizovaný na hranicích fází a přibližně po 5 sekundách.
-[Nasazený Nginx edge](../deploy/nexus/service-edge/README.md) vlastní LAN port
-a obsahuje statickou servisní stránku pro dobu odstávky, s jasným neověřeným stavem
-při zastaralých zprávách. V reálném E7 zatím nebyl ověřen. Nic neobchází startup guard.
-Schema, doménová pravidla ani preview se nemění. Verze a closure podmínky určuje [ROADMAP](ROADMAP.md).
+[Webové dokončení V6](V6_WEB_APPROVAL.md) používá dosavadní canonical manifest,
+warning acknowledgements a jednorázové schválení přesného SHA. Úplný preview
+nabízí asynchronní přípravu finálního manifestu; podepsaný POST publikuje
+konkrétní request do původního outboxu. Oddělený hostitelský koordinátor nad
+skutečným RW pohledem vytvoří manifest a lokální kopii DB, získá skutečný
+snapshot přes instalovanou integraci a po preflightu publikuje původní proposal
+do RO inboxu. Běžná aplikace zůstává na dosavadním RO NAS účtu/mountu.
+
+Web používá fresh DB/FS preflight proti datované hostitelské runtime evidence,
+nikoli proti domnělému RW bindingu svého RO mountu. WARNING mají jednotlivá
+potvrzení a canonical review získá vlastní SHA. Schválení samo nespouští E7;
+vyžaduje samostatný explicitní start request přesného schváleného manifestu.
+Koordinátor má pouze pevné nakonfigurované Docker/Compose operace, odstaví app
+s dalšími writery a předá práci původnímu E7. Approval ledger, runtime.lock,
+E6B, locator-only SQLite, původní E1 a guard zůstávají autoritami. Historická
+disabled acceptance ani přerušený claim se neaktivují a neopakují.
+
+Nezávislý [Nginx edge](../deploy/nexus/service-edge/README.md) zobrazuje původní
+odvozený progress.json a přes úzký Unix socket nabízí skutečný živý E7H proposal.
+Polling přenáší jen malý stav; kandidáti se načtou samostatně podle přesného SHA.
+Bootový socket adresář zajišťuje tmpfiles.d nezávisle na koordinátoru.
+Výchozí stav předvybírá všechny způsobilé prázdné stromy; zachování potomka
+zachová i rodiče. Výběr platí přes stránky a filtry a není schválením. Jednorázové webové rozhodnutí váže
+source, approved a proposal SHA; neprázdný výběr prochází původním
+CleanupApproval, kontrolami kandidátů, E7H evidence a finální verifikací.
+Worker čeká bez HTTP timeoutu a bez terminálu. CLI diagnostický režim zůstává.
+
+Po původním NORMAL a jeho souhrnném výsledku koordinátor obnoví přesný image
+aplikace; Nginx vyžaduje hostitelské app_ready i skutečnou dostupnost /health.
+Výsledek se zobrazí na původním manifestu. E7 STOP zachová evidence i odstávku,
+bez retry nebo automatické opravy. Chyba přípravy může vrátit guarded aplikaci
+k opravám autorit. Persistované jméno správce, CSRF, PRG a HTML STOP zůstávají;
+900sekundová platnost admission začíná publikací po preflightu a není timeoutem
+již zahájeného běhu. UI zobrazuje zbývající čas; stáří se znovu kontroluje i po
+dlouhém preflightu, bez automatického prodlužování. Browserová session cookie
+neinvaliduje formuláře mezi preview a dalšími záložkami.
+
+Koordinátor ani RW mount zatím nejsou na Nexusu nasazené; jednorázové kroky,
+trusted snapshot/writer integrace a oddělení oprávnění popisuje
+[instalační runbook](../deploy/nexus/docs/V6_COORDINATOR.md). Statické capability příznaky jsou pouze povolení; host čte aktuální
+RuntimeEvidence s vazbou na mount session a skutečné writer hooky. Privilegovaný
+Compose používá schválené root-owned kopie týchž tří vstupů, zatímco src/releases
+zůstávají uživatelské. Skutečný E7 na NAS, ACL, CIFS capability a návrat produkce
+zůstávají neověřené. Schema ani doménová
+pravidla se nemění. Verze a closure podmínky určuje [ROADMAP](ROADMAP.md).
 
 [Container locator projection](../app/target_planner.py) zachovává single-leaf
 locator a pro řízený CM/Promo fan-out `extras_promo` jednoho ownera vrací explicitní
@@ -770,7 +791,9 @@ Rootový IMPORT je rezervovaný, scanner/inventory jej neprocházejí a reorgani
 jej nepřijímá jako SOURCE/TARGET ani cleanup kandidáta. Již evidované IMPORT
 locators vyžadují explicitní review místo SQL missing cleanupu. D04 QUARANTINE
 zachovává potvrzené duplicate secondary i ID v Duplicates; directory cleanup
-chrání IMPORT, Duplicates, Subs a systémové namespaces i při prázdném obsahu.
+chrání IMPORT, Duplicates a systémové namespaces i při prázdném obsahu.
+Subs chrání pouze skutečná potřeba canonical cílové struktury; nepotřebné
+prázdné potomky i celé prázdné stromy navrhuje živý E7H snapshot.
 
 E7H se provede po ověření původního post-state a před SCANNING → NORMAL.
 Completion ověří původní E7F/E1 a cleanup chain, přesný directory-only delta,

@@ -145,7 +145,8 @@ def install_reorganization_routes(app, templates, settings):
     app.state.reorganization_stopping_worker = None
     timeout = settings.reorganization_preview_timeout_seconds
 
-    def render(request, *, preview=None, error=None, status_code=200):
+    def render(request, *, preview=None, prepare_form=None, error=None, status_code=200):
+        from .reorganization_presentation import catalog, LABELS, explain_error
         try:
             counts = library_counts(database_path(settings.database_url))
         except ArchiveReviewUnavailable as exc:
@@ -156,13 +157,21 @@ def install_reorganization_routes(app, templates, settings):
             counts = None
             error = error or 'Databáze není dostupná pro read-only náhled.'
             status_code = 503 if status_code == 200 else status_code
+        error_summary, explanations = explain_error(error) if error else (None, [])
         view = preview_presentation(preview) if preview is not None else None
         response = templates.TemplateResponse(request, 'reorganization.html', display_safe({
             'counts': counts, 'library_root': str(settings.anime_path),
+            'presentation_catalog': catalog(), 'presentation_labels': LABELS,
+            'error_summary': error_summary, 'error_explanations': explanations,
             'preview': preview, 'view': view, 'error': error, 'statuses': STATUSES,
             'timeout': timeout, 'preference_return_to': '/reorganization',
             'approval_available': bool(settings.reorganization_approval_inbox),
+            'prepare_form': prepare_form,
         }), status_code=status_code)
+        if prepare_form is not None:
+            from .reorganization_approval_web import COOKIE
+            response.set_cookie(COOKIE, prepare_form['session'], max_age=900, httponly=True,
+                                secure=request.url.scheme == 'https', samesite='strict', path='/reorganization')
         response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -190,10 +199,17 @@ def install_reorganization_routes(app, templates, settings):
                 return render(request, error='Předchozí výpočet se ještě ukončuje. Zkuste požadavek později.', status_code=409)
             app.state.reorganization_stopping_worker = None
             options = {'decision': decision} if decision is not None else {}
-            preview = run_preview(database_path(settings.database_url), settings.anime_path, timeout=timeout,
+            from .reorganization_approval_web import configured
+            from .tools.target_plan import database_fingerprint
+            database = database_path(settings.database_url)
+            before = database_fingerprint(database) if configured(settings) else None
+            preview = run_preview(database, settings.anime_path, timeout=timeout,
                                   require_mount=settings.require_mount, access_timeout=settings.library_access_timeout_seconds,
                                   **options)
-            return render(request, preview=preview)
+            prepare_form = None
+            if before is not None and before == database_fingerprint(database):
+                prepare_form = app.state.reorganization_preview_authorization(preview, before['sha256'], request)
+            return render(request, preview=preview, prepare_form=prepare_form)
         except ArchiveReviewConflict as exc:
             return render(request, error=str(exc), status_code=409)
         except ArchiveReviewUnavailable as exc:

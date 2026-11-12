@@ -36,6 +36,16 @@ class ServiceProgress:
             waiting_for_operator=False, outcome='UNVERIFIED', error=None,
             last_confirmed=None, phases=list(self._rows.values()))
 
+    def workflow(self, stage, detail, *, source_sha256=None, result_url=None):
+        """Derived host/workflow context, never admission or restart authority."""
+        with self._lock:
+            self._data.update(stage=stage, detail=detail, app_ready=False)
+            if source_sha256 is not None:
+                self._data['source_sha256'] = source_sha256
+            if result_url is not None:
+                self._data['result_url'] = result_url
+            self._publish(required=True)
+
     def _publish(self, *, required=False):
         temporary = None
         try:
@@ -150,7 +160,8 @@ class ServiceProgress:
                     if self._rows[phase]['state'] == 'WORK' or phase == current:
                         self._row(phase, 'STOP')
                 code = type(error).__name__ if error is not None else 'ExecutionStopped'
-                self._data['error'] = dict(code=code, message='Běh byl zastaven. Podrobnosti ověřte v terminálu správce.')
+                self._data['error'] = dict(code=code,
+                    message='Běh byl zastaven. Evidence zůstala zachována; podrobnosti jsou v reportu běhu.')
             self._publish()
 
     def close(self):

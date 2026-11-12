@@ -1,5 +1,6 @@
 (() => {
   'use strict';
+  const presentation = window.ReorganizationPresentation;
   const data = JSON.parse(document.getElementById('reorganization-data').textContent);
   const coverage = new Map(data.coverage.files.map(row => [row.path, row]));
   const pageSize = 50;
@@ -7,13 +8,6 @@
     const node = document.createElement(tag);
     node.textContent = text;
     return node;
-  };
-  const reviewMessages = {
-    duplicate_side_asset_association_unresolved: 'Archiv je u potvrzených duplicitních videí. Chybí rozhodnutí, zda patří konkrétní kopii, nebo se má zachovat samostatně v Subs.',
-    archive_review_source_changed: 'Zdrojový archiv se od rozhodnutí změnil nebo již není dostupný. Ověřte jej a rozhodnutí znovu uložte, změňte nebo zrušte.',
-    archive_review_context_changed: 'Archiv již nepatří do původní kolekce nebo podporovaného umístění. Rozhodnutí je nutné znovu posoudit.',
-    archive_review_duplicate_changed: 'Vybrané video nebo jeho potvrzená duplicitní vazba se změnily. Původní rozhodnutí zůstává uložené, ale planner jej nepoužije.',
-    archive_review_target_invalid: 'Cíl uloženého rozhodnutí již není platný nebo koliduje s jiným souborem. Rozhodnutí změňte nebo zrušte; technický důvod je v detailu.',
   };
   const archiveForm = (source, review) => {
     const container = element('div', '');
@@ -60,7 +54,7 @@
     }
     if (!review.candidates.length) options.append(element('p', 'V aktuální kolekci není dostupná platná potvrzená duplicitní kopie.'));
     option('standalone', 'B. Zachovat jako samostatný archiv titulků v Subs s původním názvem.', !review.standalone_allowed);
-    if (review.standalone_reason) options.append(element('p', review.standalone_reason));
+    if (review.standalone_reason) options.append(element('p', 'Samostatné zachování nyní nelze bezpečně navrhnout. Ověřte zdrojový archiv, cílové umístění a kolize.'), presentation.technical(review.standalone_reason));
     option('unresolved', 'C. Nechat nerozhodnuté (zrušit uložené rozhodnutí).');
     form.append(options, element('p', 'Ukládá se pouze rozhodnutí do lokální appdata. Soubor se nepřesouvá. Planner znovu ověří aktuální vazby a cílové kolize.'));
     const save = element('button', 'Uložit rozhodnutí a obnovit náhled');
@@ -76,30 +70,24 @@
   const fileCard = row => {
     const card = element('article', '');
     const disposition = coverage.get(row.source_relative_path)?.disposition || 'REVIEW';
-    card.append(element('h3', `${row.status} · ${disposition}`));
+    card.append(element('h3', `${presentation.label(row.status)} · ${presentation.label(disposition)}`));
     const paths = element('dl', '');
     for (const [label, value] of [['SOURCE', row.source_relative_path], ['TARGET', row.target_relative_path ?? 'Neurčený cíl']]) {
       paths.append(element('dt', label), element('dd', value));
     }
-    card.append(paths, element('p', `${row.object_kind} #${row.object_id} · Návrh planneru: ${row.action}`));
-    const messages = [
-      ...row.blockers, ...row.warnings.map(text => `WARNING: ${text}`), ...row.info,
-      ...(coverage.get(row.source_relative_path)?.reasons || []),
-    ];
-    if (messages.length) {
-      const list = element('ul', '');
-      [...new Set(messages)].forEach(text => list.append(element('li', text)));
-      if (row.status === 'REVIEW') {
-        const detail = element('details', '');
-        detail.append(element('summary', 'Technické důvody'), list);
-        card.append(detail);
-      } else card.append(list);
+    card.append(paths, element('p', `Navržená operace: ${presentation.label(row.action)}`));
+    const messages = new Map();
+    for (const code of row.blockers) messages.set(code, row.status === 'BLOCKED' ? 'error' : 'review');
+    for (const code of row.warnings) messages.set(code, 'warning');
+    for (const code of row.info) messages.set(code, 'info');
+    for (const code of coverage.get(row.source_relative_path)?.reasons || []) {
+      if (!messages.has(code)) messages.set(code, row.status === 'BLOCKED' ? 'error' : 'review');
     }
+    for (const [code, severity] of messages) card.append(presentation.message(code, severity));
+    card.append(presentation.technical({record:row, coverage:coverage.get(row.source_relative_path)}));
     const review = data.archive_reviews?.[row.source_relative_path];
     if (review) {
-      const explanation = row.blockers.map(code => reviewMessages[code]).filter(Boolean);
-      if (explanation.length) card.append(element('p', explanation.join(' ')));
-      else if (review.decision) card.append(element('p', 'Pro archiv je uložené explicitní lidské rozhodnutí.'));
+      if (review.decision) card.append(element('p', 'Pro archiv je uložené explicitní lidské rozhodnutí.'));
       card.append(archiveForm(row.source_relative_path, review));
     } else if (row.status === 'REVIEW') {
       const note = element('p', 'Tato položka se neřeší přiřazením archivu. ');
@@ -150,9 +138,17 @@
     const kind = container.dataset.kind;
     const rows = kind === 'collisions' || kind === 'diagnostics' ? data.plan[kind] : data.coverage[kind];
     paginate(container, rows, row => {
-      const node = element('p', typeof row === 'string' ? row :
-        kind === 'directories' ? `${row.path} · ${row.disposition}${row.required_in_target ? ' · cílový adresář' : ''} · ${row.reasons.join(' · ')}` :
-        kind === 'issues' ? `${row.path} · ${row.code}` : `${row.guard} · ${row.target_paths.join(' · ')}`);
+      const node = element('article', '');
+      if (kind === 'directories') {
+        node.append(element('h3', row.path), element('p', presentation.label(row.disposition)));
+        for (const code of row.reasons) node.append(presentation.message(code,
+          ['PRESERVED','EXCLUDED','TARGET_REQUIRED','MISSING_TARGET_PARENT'].includes(row.disposition) ? 'info' : 'review'));
+      } else if (kind === 'issues') {
+        node.append(element('h3', row.path), presentation.message(row.code, 'review'));
+      } else if (kind === 'collisions') {
+        node.append(presentation.message('target_collision:' + row.guard, 'error'), element('p', row.target_paths.join(' · ')));
+      } else node.append(presentation.message(row, 'review'));
+      node.append(presentation.technical(row));
       node.classList.add('reorganization-path');
       return node;
     });

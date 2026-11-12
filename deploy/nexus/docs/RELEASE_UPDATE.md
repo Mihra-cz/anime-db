@@ -28,12 +28,20 @@ Stávající konfigurace používá Compose **v přesném pořadí**: základní
 
 ## 2. Před každou aktualizací
 
+Aktualizaci nezačínat během přípravy manifestu, aktivního E7/E7H ani při
+nevyhodnoceném STOP. Neodstavovat coordinator s běžícím workerem jako součást
+běžného release. Případnou změnu jeho root-owned scriptů a helperu instalovat
+z konkrétního revidovaného releasu cíleně; živé spouštění Pythonu z user-owned
+checkoutu privilegovaný coordinator nepoužívá. Stávající připravené manifesty
+se nesmějí převádět na novou verzi automaticky.
+
+
 Předem určit a schválit **plný SHA** cílového commitu. Nespouštět update na plovoucí `main`.
 
 ### Předpoklady
 
 - Všechny bloky se spouštějí **na serveru v jedné interaktivní relaci Bash** (nikoli `sh`), postupně: proměnné → A → B → C → D. Blok E je jen pro návrat po selhání.
-- Relace má přístup k Docker socketu, `git` a `python3` a smí zapisovat do `$PROJECT_ROOT` a `$STACK_DIR`. Na současné instalaci to běžný SSH účet nemůže, protože tyto kořeny patří rootu a Docker socket skupině `docker`. Celou relaci proto spustit přes `sudo -i`. Blok B zachová vlastníka aktivního checkoutu.
+- Relace běží pod běžným vývojovým účtem. `src/` i `releases/` zůstávají pod tímto účtem; současný mód `src/` `775` není důvodem pro `chown`. Git a příprava releasu běží bez sudo. Docker, změna root-owned override a případné přejmenování adresářů v root-owned projektovém kořeni používají jen jednotlivé cílené `sudo` příkazy. Celou relaci nespouštět přes `sudo -i`.
 - `$PROJECT_ROOT/src` je Git checkout s remote `origin`, jehož aktivní commit je na tomto remote dostupný. Platí to od V6 release; nejstarší archiv z první instalace je export bez `.git`. Pokud `src/` není Git checkout, tento návod nelze použít: STOP.
 - Produkční override obsahuje právě jeden řádek `image: $IMAGE_REPO:v6-<prvních 7 znaků aktivního SHA>`. Jinak se blok C zastaví.
 - Bloky A–E běží v závorkách se `set -euo pipefail`. Chyba ukončí jen daný blok, relace i proměnné zůstanou. Další blok spustit jen po výpisu `OK` z předchozího.
@@ -88,14 +96,14 @@ test ! -e "$STAGE"
 test ! -e "$ARCHIVE"
 test -z "$(git -C "$SRC" status --porcelain)"
 
-docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config -q
-docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps
+sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config -q
+sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps
 
 # K ověření image a bindů použij skutečné ID běžící služby.
-APP_CONTAINER="$(docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -q "$APP_SERVICE")"
+APP_CONTAINER="$(sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -q "$APP_SERVICE")"
 test -n "$APP_CONTAINER"
-docker inspect --format '{{.Config.Image}} | {{.State.Status}}' "$APP_CONTAINER"
-docker inspect --format '{{range .Mounts}}{{println .Destination .RW}}{{end}}' "$APP_CONTAINER"
+sudo -- /usr/bin/docker inspect --format '{{.Config.Image}} | {{.State.Status}}' "$APP_CONTAINER"
+sudo -- /usr/bin/docker inspect --format '{{range .Mounts}}{{println .Destination .RW}}{{end}}' "$APP_CONTAINER"
 echo "BLOK A: OK"
 )
 ```
@@ -114,10 +122,8 @@ REMOTE="$(git -C "$SRC" remote get-url origin)"
 git clone --no-checkout "$REMOTE" "$STAGE"
 git -C "$STAGE" checkout --detach "$NEW_SHA"
 
-# Pod sudo -i by nový checkout patřil rootu. Převzít vlastníka aktivního src/,
-# aby na něm další aktualizace fungovaly stejně. Pod stejným UID nic nemění.
-# Rozsah je jen tento nový $STAGE; nikdy src/, releases/, appdata, SQLite ani NAS.
-chown -R "$(stat -c '%u:%g' "$SRC")" "$STAGE"
+# Nový checkout vznikl pod stejným běžným účtem jako src/ a releases/.
+# Nepoužívat rekurzivní chown zdrojů, archivů ani appdata.
 test "$(git -C "$STAGE" rev-parse HEAD)" = "$NEW_SHA"
 test -f "$STAGE/Dockerfile"
 
@@ -126,19 +132,19 @@ git -C "$STAGE" diff --stat "$OLD_SHA" "$NEW_SHA" -- deploy/nexus/compose.yaml d
 
 # UID/GID je nutno převzít ze skutečně běžícího kontejneru,
 # nikoli odhadovat nebo zapisovat napevno.
-APP_CONTAINER="$(docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -q "$APP_SERVICE")"
+APP_CONTAINER="$(sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -q "$APP_SERVICE")"
 test -n "$APP_CONTAINER"
-APP_USER="$(docker inspect --format '{{.Config.User}}' "$APP_CONTAINER")"
+APP_USER="$(sudo -- /usr/bin/docker inspect --format '{{.Config.User}}' "$APP_CONTAINER")"
 case "$APP_USER" in
   *:*) APP_UID="${APP_USER%%:*}"; APP_GID="${APP_USER##*:}" ;;
   *) echo 'STOP: UID/GID neni jednoznacne'; exit 1 ;;
 esac
 [[ "$APP_UID" =~ ^[0-9]+$ && "$APP_GID" =~ ^[0-9]+$ ]]
 
-docker build --build-arg "APP_UID=$APP_UID" \
+sudo -- /usr/bin/docker build --build-arg "APP_UID=$APP_UID" \
   --build-arg "APP_GID=$APP_GID" \
   -t "$NEW_IMAGE" "$STAGE"
-docker image inspect "$NEW_IMAGE" --format '{{.Id}}'
+sudo -- /usr/bin/docker image inspect "$NEW_IMAGE" --format '{{.Id}}'
 echo "BLOK B: OK"
 )
 ```
@@ -170,11 +176,11 @@ print("Image tag pripraven pro zmenu:", old, "->", new)
 PY
 
 # Stary zdrojovy checkout zustane archivovany.
-mv -T "$SRC" "$ARCHIVE"
-mv -T "$STAGE" "$SRC"
+sudo mv -T "$SRC" "$ARCHIVE"
+sudo mv -T "$STAGE" "$SRC"
 test "$(git -C "$SRC" rev-parse HEAD)" = "$NEW_SHA"
 
-python3 - "$OVERRIDE" "$IMAGE_REPO:$OLD_TAG" "$NEW_IMAGE" <<'PY'
+sudo python3 - "$OVERRIDE" "$IMAGE_REPO:$OLD_TAG" "$NEW_IMAGE" <<'PY'
 from pathlib import Path
 import os
 import sys
@@ -197,10 +203,38 @@ finally:
         os.unlink(name)
 PY
 
+echo "BLOK C1: zdroje a override pripraveny; aplikace jeste nebyla recreatovana"
+)
+```
+
+Před následujícím C2 určit, zda je V6 coordinator již instalovaný. Je-li
+`$STACK_DIR/reorganization-coordinator.json` přítomný, provést níže uvedené
+[schválení snapshotu](#schválený-vstup-koordinátoru) a v této stejné relaci
+nastavit `REVIEWED_GENERATION` na právě schválenou generaci. Před aktivací také
+cíleně aktualizovat root-owned coordinator image na tentýž `NEW_IMAGE` a
+revidovat související změny jeho konfigurace. Tím se nevytváří druhý ručně
+udržovaný stack; generace se vždy vyrábí z původních tří vstupů.
+
+```bash
+(
+set -euo pipefail
 EDGE_COMPOSE="$SRC/deploy/nexus/service-edge/compose.edge.yaml"
-docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config -q
-test "$(docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config --images "$APP_SERVICE")" = "$NEW_IMAGE"
-docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" up -d --no-deps --no-build "$APP_SERVICE"
+if test -f "$STACK_DIR/reorganization-coordinator.json"; then
+  : "${REVIEWED_GENERATION:?Nejprve schval presnou generaci podle oddilu nize}"
+  DEPLOY_BASE="$REVIEWED_GENERATION/compose.1.yaml"
+  DEPLOY_EDGE="$REVIEWED_GENERATION/compose.2.yaml"
+  DEPLOY_OVERRIDE="$REVIEWED_GENERATION/compose.3.yaml"
+  DEPLOY_ENV="$REVIEWED_GENERATION/.env"
+else
+  DEPLOY_BASE="$BASE_COMPOSE"; DEPLOY_EDGE="$EDGE_COMPOSE"
+  DEPLOY_OVERRIDE="$OVERRIDE"; DEPLOY_ENV="$STACK_DIR/.env"
+fi
+sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$DEPLOY_ENV" -p anime-db \
+  -f "$DEPLOY_BASE" -f "$DEPLOY_EDGE" -f "$DEPLOY_OVERRIDE" config -q
+test "$(sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$DEPLOY_ENV" -p anime-db \
+  -f "$DEPLOY_BASE" -f "$DEPLOY_EDGE" -f "$DEPLOY_OVERRIDE" config --images "$APP_SERVICE")" = "$NEW_IMAGE"
+sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$DEPLOY_ENV" -p anime-db \
+  -f "$DEPLOY_BASE" -f "$DEPLOY_EDGE" -f "$DEPLOY_OVERRIDE" up -d --no-deps --no-build --pull=never "$APP_SERVICE"
 echo "BLOK C: OK"
 )
 ```
@@ -214,13 +248,13 @@ Pozor na edge: běžící edge kontejner drží bind na adresář, který existo
 set -euo pipefail
 
 # -a: i kontejner zastavený po neúspěšném startu musí ukázat stav a logy.
-APP_CONTAINER="$(docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -aq "$APP_SERVICE")"
+APP_CONTAINER="$(sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -aq "$APP_SERVICE")"
 test -n "$APP_CONTAINER"
-docker inspect --format '{{.Config.Image}} | {{.State.Status}} | {{.RestartCount}}' "$APP_CONTAINER"
-docker logs --tail 35 "$APP_CONTAINER"
-docker inspect --format '{{range .Mounts}}{{println .Destination .RW}}{{end}}' "$APP_CONTAINER"
+sudo -- /usr/bin/docker inspect --format '{{.Config.Image}} | {{.State.Status}} | {{.RestartCount}}' "$APP_CONTAINER"
+sudo -- /usr/bin/docker logs --tail 35 "$APP_CONTAINER"
+sudo -- /usr/bin/docker inspect --format '{{range .Mounts}}{{println .Destination .RW}}{{end}}' "$APP_CONTAINER"
 test "$(git -C "$SRC" rev-parse HEAD)" = "$NEW_SHA"
-test "$(docker inspect --format '{{.Config.Image}} {{.State.Status}}' "$APP_CONTAINER")" = "$NEW_IMAGE running"
+test "$(sudo -- /usr/bin/docker inspect --format '{{.Config.Image}} {{.State.Status}}' "$APP_CONTAINER")" = "$NEW_IMAGE running"
 echo "BLOK D: OK"
 )
 ```
@@ -238,19 +272,19 @@ Blok předpokládá dokončený blok C a stejnou relaci s původními proměnný
 set -euo pipefail
 
 OLD_IMAGE="$IMAGE_REPO:$OLD_TAG"
-docker image inspect "$OLD_IMAGE" --format '{{.Id}}'
+sudo -- /usr/bin/docker image inspect "$OLD_IMAGE" --format '{{.Id}}'
 test "$(git -C "$SRC" rev-parse HEAD)" = "$NEW_SHA"
 test "$(git -C "$ARCHIVE" rev-parse HEAD)" = "$OLD_SHA"
 test ! -e "$STAGE"
 test "$(grep -cF "image: $NEW_IMAGE" "$OVERRIDE")" = 1
 
-mv -T "$SRC" "$STAGE"
-mv -T "$ARCHIVE" "$SRC"
-sed -i "s|image: $NEW_IMAGE|image: $OLD_IMAGE|" "$OVERRIDE"
+sudo mv -T "$SRC" "$STAGE"
+sudo mv -T "$ARCHIVE" "$SRC"
+sudo sed -i "s|image: $NEW_IMAGE|image: $OLD_IMAGE|" "$OVERRIDE"
 
-docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config -q
-test "$(docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config --images "$APP_SERVICE")" = "$OLD_IMAGE"
-docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" up -d --no-deps --no-build "$APP_SERVICE"
+sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config -q
+test "$(sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config --images "$APP_SERVICE")" = "$OLD_IMAGE"
+sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" up -d --no-deps --no-build "$APP_SERVICE"
 echo "NAVRAT: OK"
 )
 ```
@@ -271,3 +305,42 @@ Nasazení aplikace **není souhlas s fyzickou reorganizací NAS**. Ta má samost
 ## 4. Opakované použití
 
 Pro příští release vyplnit nové `NEW_SHA` a podle skutečného stavu proměnné `PROJECT_ROOT`, `STACK_DIR`, `APPDATA_DIR`, `DB_FILE`, `MEDIA_DIR`, `APP_SERVICE` a `IMAGE_REPO`. Před akcí potvrdit výsledný Compose. Po úspěšném nasazení zapsat výsledek do release historie. Do repozitáře neukládat lokální `.env`, IP adresy, hesla, tokeny ani osobní SSH aliasy.
+
+## Schválený vstup koordinátoru
+
+Tento krok se používá po instalaci V6 coordinatoru při každém release, který
+mění image nebo kterýkoli z jeho tří Compose vstupů či `.env`. Běžný checkout
+`src/` a archiv `releases/` zůstávají uživatelské; coordinator privilegovaně
+nečte živé YAML pod jejich zapisovatelnými předky. Kořen `$STACK_DIR` a
+administrátorská konfigurace zůstávají root-owned. Podrobnosti prvního nasazení
+jsou v [V6_COORDINATOR](V6_COORDINATOR.md#schválený-snapshot-tří-compose-vstupů).
+
+Po C1 (nové `src/` a root override připravené) root explicitně vytvoří pouze
+kopii vstupů, bez Docker operace:
+
+```bash
+sudo python3 /usr/local/libexec/anime-db/reorganization_deployment.py stage \
+  --compose "$BASE_COMPOSE" \
+  --compose "$SRC/deploy/nexus/service-edge/compose.edge.yaml" \
+  --compose "$OVERRIDE" --env-file "$STACK_DIR/.env"
+```
+
+Zapsat výstupní `generation` jako `REVIEWED_GENERATION`. Správce zkontroluje
+přesné tři kopie `compose.1.yaml`, `compose.2.yaml`, `compose.3.yaml`, `.env`,
+image, bindy a složenou konfiguraci proti schválenému releasu. Potom teprve
+schválí výstupní přesný manifest SHA jako `REVIEWED_DEPLOYMENT_SHA`:
+
+```bash
+sudo python3 /usr/local/libexec/anime-db/reorganization_deployment.py approve \
+  --generation "$REVIEWED_GENERATION" --reviewed-sha256 "$REVIEWED_DEPLOYMENT_SHA"
+```
+
+Koordinátor používá atomicky zvolenou generaci v `$STACK_DIR/approved-v6/current.json`
+a před každým Compose voláním kontroluje root vlastnictví a všechny SHA.
+Původní tři cesty/order jsou v jeho konfiguraci jen přesná provenance, nikoli
+nechráněný runtime vstup. Project zůstává `anime-db`, relativní cesty se stále
+vyhodnocují vůči původnímu `$STACK_DIR`; nevznikne druhá sada kontejnerů.
+Schválené kopie se nikdy needitují a není nutné rekurzivně měnit vlastníka
+`src/` nebo `releases/`. Při návratu k předchozímu releasu musí správce stejně
+znovu vybrat a schválit odpovídající snapshot a root-owned image; nesmí nechat
+coordinator pracovat s jiným releasem než běžná aplikace.

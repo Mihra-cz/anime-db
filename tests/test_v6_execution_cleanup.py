@@ -101,10 +101,8 @@ def test_only_explicit_empty_original_directories_removed_after_original_hash(tm
             observed.update(db=path.read_bytes(), rows=database_rows(path), journal=owner.journal_path.read_bytes(),
                 proposal=proposal, directories=owner.directory_evidence_path.read_bytes())
             assert {'old', 'old/copy', 'old/OST', 'empty/unapproved'} <= {d.path for d in proposal.candidates}
-            # E7C calls an otherwise unused parent containing only directories
-            # REVIEW, not UNRESOLVED_EMPTY. Cleanup must retain that distinction.
-            assert 'empty' not in {d.path for d in proposal.candidates}
-            assert not any(d.path.startswith(('Show', 'Subs', 'Duplicates')) for d in proposal.candidates)
+            assert {'empty', 'Subs', 'Subs/empty'} <= {d.path for d in proposal.candidates}
+            assert not any(d.path.startswith(('Show', 'Duplicates')) for d in proposal.candidates)
             return api.approve_cleanup(proposal, ('old', 'old/copy', 'old/OST'), actor='operator', reason='reviewed scratch cleanup')
 
         outcomes = run(owner, manifest, path, approve)
@@ -470,7 +468,7 @@ def test_declined_cleanup_preserves_every_directory_and_creates_no_cleanup_evide
         assert owner.cleanup_outcome.removed == ()
 
 
-@pytest.mark.parametrize('selected', [('',), ('.',), ('../old',), ('Show',), ('Subs',), ('Subs/empty',),
+@pytest.mark.parametrize('selected', [('',), ('.',), ('../old',), ('Show',), ('Subs',),
     ('old',), ('old/copy', 'old/copy'), ('missing',)])
 def test_invalid_or_protected_directory_approval_never_removes_anything(tmp_path, selected):
     api = cleanup_api()

@@ -64,9 +64,21 @@ IMPORT nesmí být cleanup kandidát, ani když je prázdný.
 Potvrzené duplicate secondary používají současný D04 QUARANTINE do Duplicates.
 Zachovávají ID, rows i související evidence; V6 neimplementuje fyzické mazání
 videí ani titulků. Directory cleanup chrání Duplicates včetně celého podstromu,
-Subs a systémové namespaces. Root Duplicates zůstává i po budoucím vyprázdnění.
+a systémové namespaces. Root Duplicates zůstává i po budoucím vyprázdnění.
+Subs nemá plošnou cleanup ochranu: canonical cílové parents zůstávají,
+nepotřebné prázdné potomky i prázdný root bez cílových souborů lze navrhnout.
+Post-E7 návrh zahrnuje kompletní nepotřebné prázdné stromy z původní inventury;
+rodič je způsobilý pouze se všemi způsobilými potomky. Neznámý obsah není
+autorita k mazání a skutečná změna během schvalování znamená STOP.
 
-## Approval a worker
+## Webové ovládání a diagnostický worker
+
+Běžný provoz po [jednorázové instalaci koordinátoru](../deploy/nexus/docs/V6_COORDINATOR.md)
+probíhá celý [přes web](V6_WEB_APPROVAL.md): příprava, schválení, samostatný start,
+živé E7H rozhodnutí v Nginxu a návrat do AnimeDB. Následující CLI popis zůstává
+pro administrátorskou diagnostiku; není rutinním uživatelským postupem.
+Existující RO přístup i oba NAS účty se zachovají. Připraví se samostatný RW
+mount s již existujícím druhým účtem, bez jeho credentials ve webu.
 
 Nejprve se připraví aktuální preview a finální v2 manifest svázaný s cestami
 a mountem workeru. Schválí se celý canonical envelope včetně jednotlivých
@@ -88,12 +100,12 @@ uvnitř izolovaného prostředí s již připravenými bindy:
 ```bash
 python -m app.tools.reorganize \
   --db /data/anime.db --library-root /media/anime \
-  --share //192.168.11.149/Anime --share-root / \
+  --share //nas.example.test/Anime --share-root / \
   --manifest /data/approved-manifest.json \
   --approve-manifest-sha256 SCHVALENY_CANONICAL_SHA256 \
   --runtime-evidence /data/runtime-evidence.json \
   --runtime-lock /state/runtime.lock \
-  --windows-root '\\192.168.11.149\Anime' --actor SPRAVCE
+  --windows-root '\\nas.example.test\Anime' --actor SPRAVCE
 ```
 
 Příkaz sám nepřipojuje share, nezastavuje služby, nevytváří zálohu/snapshot
@@ -114,7 +126,7 @@ toto schválení, uvolní kontrolní runtime lock a zavolá stejný E7 vstup. Do
 Původní přímý CLI příklad výše zůstává samostatným administrativním vstupem;
 není návodem obcházet jednorázový webový ledger nebo opakovat nejasný běh.
 
-Hostitelský `execute` spouštějte v `tmux` nebo `screen` s přímo připojeným
+Diagnostický CLI `execute` spouštějte v `tmux` nebo `screen` s přímo připojeným
 terminálem na stdin i stdout a s dostupným Python `readline`. CLI ověří a načte
 `readline` ještě před claimem; bez něj se dlouhý JSON cleanupu může v kanonickém
 terminálu oříznout. **Nepoužívat `| tee` ani přesměrování stdout**; CLI takový
@@ -128,7 +140,9 @@ během reálného E7 zatím ověřené nejsou.
 ## Cleanup a dokončení
 
 Po všech MOVE/KEEP/QUARANTINE se nejprve ověří původní finální post-state.
-E7H potom sestaví aktuální cleanup proposal. CLI jej uloží jako nový lokální
+E7H potom sestaví aktuální cleanup proposal. Webový worker čeká na rozhodnutí
+z nezávislého Nginxu; výběr je prázdný, dokud člověk konkrétní kandidáty
+nevybere. Diagnostický CLI jej uloží jako nový lokální
 `<db-stem>.cleanup-proposal.json`, vypíše kandidáty a čeká na explicitní JSON
 seznam konkrétních cest a potvrzení SHA-256 proposal. Prázdný seznam všechny
 adresáře zachová. EOF, nesouhlas nebo neplatný approval znamenají STOP.

@@ -4,65 +4,114 @@
 {% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', path='reorganization.css') }}">{% endblock %}
 {% block content %}
 {% set p = manifest.payload %}
-<h1>Finální canonical manifest</h1>
-<p><a href="/reorganization/approval">Manifesty</a> · <a href="/reorganization">Orientační náhled</a> · Správce pro evidenci: {{ actor }}</p>
+{# Presentation only: the same precedence as the status block below, no new workflow state. #}
+{% if execution_result %}{% set view_state = 'normal' if execution_result.state == 'NORMAL' else 'stop' %}
+{% elif coordinator_status and coordinator_status.state == 'STOP' %}{% set view_state = 'stop' %}
+{% elif accepted and accepted.state == 'EXECUTION_CLAIMED' %}{% set view_state = 'running' %}
+{% elif accepted %}{% set view_state = 'accepted' %}
+{% elif start_requested %}{% set view_state = 'running' %}
+{% elif receipt %}{% set view_state = 'approved' %}
+{% elif reviewed %}{% set view_state = 'reviewed' %}
+{% else %}{% set view_state = 'draft' %}{% endif %}
+<h1>{{ {'normal': 'Reorganizace dokončena', 'stop': 'Reorganizace zastavena', 'running': 'Reorganizace předána ke spuštění', 'accepted': 'Návrh převzatý hostitelem', 'approved': 'Schválený návrh reorganizace'}.get(view_state, 'Návrh reorganizace ke schválení') }}</h1>
+<p><a href="/reorganization/approval">Manifesty</a> · <a href="/reorganization">Orientační náhled</a> · Správce pro evidenci: {{ execution_result.actor if execution_result else actor }}</p>
+<section class="panel" id="manifest-overview" data-view-state="{{ view_state }}"><h2>{{ 'Co se soubory proběhlo' if view_state == 'normal' else 'Co obsahoval schválený návrh' if view_state == 'stop' else 'Co se bude se soubory dělat' }}</h2>
+{% if view_state == 'normal' %}<p>Soubory byly zpracovány podle níže uvedených cílových cest a potvrzených rozhodnutí. Soubory v karanténě jsou zachované v Duplicates; nic se tím nesmazalo.</p>
+{% else %}<p>Návrh používá níže uvedené cílové cesty podle potvrzených rozhodnutí. Soubory v karanténě se zachovají v Duplicates; nic se tím nesmaže.</p>{% endif %}
+<ul class="reorganization-counts">{% for action in ['MOVE','KEEP','QUARANTINE'] %}<li data-operation="{{ action }}"><strong>{{ presentation_labels[action] }}:</strong> {{ p.actions|selectattr('action','equalto',action)|list|length }}</li>{% endfor %}<li>Nové adresáře: {{ bundle.new_directories|length }}</li></ul>
+<p>Upozornění celkem: {{ p.warnings|length }} · Již potvrzeno: {{ manifest.acknowledgements|length }}.</p>
+{% if view_state == 'normal' %}<p><strong>Reorganizace je dokončená.</strong> Výsledek je shrnutý níže v části Výsledek reorganizace; nic dalšího se neschvaluje ani nespouští.</p>
+{% elif view_state == 'stop' %}<p><strong>Reorganizace byla zastavena a vyžaduje zásah správce.</strong> Vysvětlení je uvedeno níže; nic se automaticky neopakuje.</p>
+{% elif view_state == 'running' %}<p><strong>Spuštění bylo předáno hostiteli.</strong> Průběh a rozhodnutí o prázdných adresářích najdete na <a href="/_service/workflow?source={{ source }}">servisní stránce</a>. Spuštění neopakujte.</p>
+{% elif view_state == 'accepted' %}<p><strong>Hostitel návrh převzal se zakázaným spuštěním.</strong> Toto převzetí zůstává spotřebované; nové spuštění vyžaduje nový návrh a schválení.</p>
+{% elif view_state == 'approved' %}<p><strong>Návrh je schválený, reorganizace ale ještě neběží.</strong> Spustí ji až samostatné výslovné spuštění s vlastním potvrzením. O prázdných adresářích rozhodnete až po přesunech.</p>
+{% elif view_state == 'reviewed' %}<p><strong>Schválení návrhu reorganizaci nespouští.</strong> Přesný návrh je připravený; zbývá jej výslovně schválit. Fyzické spuštění je samostatný krok s vlastním potvrzením. O prázdných adresářích rozhodnete až po přesunech.</p>
+{% else %}<p><strong>Schválení návrhu reorganizaci nespouští.</strong> Nejdříve potvrďte upozornění a přesný návrh. Fyzické spuštění je samostatný krok s vlastním potvrzením. O prázdných adresářích rozhodnete až po přesunech.</p>{% endif %}
+</section>
+{% if view_state not in ['normal', 'running', 'accepted'] %}<section class="panel"><h2>Opravit autoritativní rozhodnutí</h2>
+<nav class="reorganization-reviews" aria-label="Editory před reorganizací"><a href="/naming-review">Naming Review · Názvy</a><a href="/naming-review/layout">Layout Review · Rozložení</a><a href="/hierarchy-review">Hierarchy Review · Hierarchie</a></nav>
+<p>Chybný název nebo přiřazení opravte v příslušném editoru. Poté vytvořte nový náhled a nový finální manifest; změna autority zneplatní starý návrh. Přesný JSON návrhu se ručně neupravuje.</p></section>{% endif %}
 <section class="panel">
 {% if execution_result %}<h2>{{ 'Dokončeno · NORMAL' if execution_result.state == 'NORMAL' else 'STOP · Nutný ruční zásah' }}</h2>
+{% elif coordinator_status and coordinator_status.state == 'STOP' %}<h2>STOP · {{ 'Příprava spuštění selhala, E7 nezačalo' if coordinator_status.phase in ['execution_not_started','pre_execution_failed'] else 'Požadavek byl zastaven' }}</h2>
 {% elif accepted and accepted.state == 'EXECUTION_CLAIMED' %}<h2>Předáno ke spuštění · výsledek zatím nepotvrzený</h2>
 {% elif accepted %}<h2>Převzato hostitelem · spuštění deaktivované</h2>
+{% elif start_requested %}<h2>Požadavek na spuštění předán · čeká na hostitele</h2>
 {% elif receipt %}<h2>Schváleno</h2>
 {% elif reviewed %}<h2>Manifest připraven k výslovnému schválení</h2>
-{% else %}<h2>Vyžaduje potvrzení warningů a preflight</h2>{% endif %}
+{% else %}<h2>Nejprve potvrďte upozornění a ověřte návrh</h2>{% endif %}
 {% if execution_result %}<p><strong>Předáno ke spuštění: ano · Spuštěno: {{ 'ano' if execution_result.started else 'nepotvrzeno' }} · Stav: {{ execution_result.state }}</strong></p>
+{% elif coordinator_status and coordinator_status.state == 'STOP' %}<p role="alert">{{ coordinator_status.detail }}</p><p>Požadavek skončil STOP. Fyzickou operaci neopakujte automaticky; nové plánování a schválení jsou samostatný postup.</p>
 {% elif accepted and accepted.state == 'EXECUTION_CLAIMED' %}<p><strong>Předáno ke spuštění: ano · Zahájení a dokončení zatím nepotvrzené.</strong> Chybějící výsledek může znamenat probíhající operaci nebo přerušení. Ověřte původní evidence na hostiteli; znovu nespouštějte.</p>
-{% else %}<p><strong>Předáno ke spuštění: ne · Spuštěno: ne.</strong> Fyzické spuštění vyžaduje explicitní administrátorský příkaz na hostiteli. Web nemá RW mount ani ovládání execution. Historické převzetí se zakázaným spuštěním zůstává spotřebované.</p>{% endif %}
-<p>Canonical SHA-256 celého zobrazeného envelope včetně acknowledgements:</p><p class="reorganization-path"><strong>{{ canonical_sha256 }}</strong></p>
-<p class="reorganization-path">Manifest ID: {{ manifest.manifest_id }}<br>Původní hostitelský SHA: {{ source }}</p>
-<p><a href="/reorganization/approval/{{ source }}/manifest">Stáhnout přesný canonical execution manifest</a></p>
-<ul class="reorganization-counts">{% for action in ['MOVE','KEEP','QUARANTINE'] %}<li>{{ action }}: {{ p.actions|selectattr('action','equalto',action)|list|length }}</li>{% endfor %}<li>Nové adresáře: {{ bundle.new_directories|length }}</li></ul>
-<p>Potřebné cílové adresáře celkem: {{ p.directories|length }}. Fyzické duplicity se nemažou.</p>
-<p class="reorganization-path">Library root: {{ p.library_root }}<br>Windows root: {{ p.windows_root }}<br>RW mount binding: {{ p.mount_identity }}<br>DB SHA-256: {{ p.db_fingerprint.sha256 }}<br>DB velikost: {{ p.db_fingerprint.size }} · mtime_ns: {{ p.db_fingerprint.mtime_ns }} · schema: {{ p.db_fingerprint.user_version }}<br>Filesystem evidence: {{ p.filesystem_hash }}</p>
-<p>Hostitelská runtime evidence zachycena: {{ bundle.published_at }}; platnost nejvýše 15 minut. Web používá vlastní RO pohled na stejné cesty. Neprokazuje aktuální RW mount, runtime výluku ani odstavení writerů.</p>
+{% elif start_requested %}<p><strong>Předáno ke spuštění: ano · Spuštěno: nepotvrzeno.</strong> Požadavek čeká na ověření hostitelem. <a href="/_service/workflow?source={{ source }}">Sledovat průběh</a>. Neopakujte spuštění.</p>
+{% else %}<p><strong>Předáno ke spuštění: ne · Spuštěno: ne.</strong> Po jednorázovém schválení následuje samostatné výslovné spuštění. Historické převzetí se zakázaným spuštěním zůstává spotřebované.</p>{% endif %}
+<details id="manifest-technical"><summary>Technické podrobnosti návrhu</summary>
+<p>SHA-256 přesného návrhu včetně potvrzených upozornění:</p><p class="reorganization-path"><strong>{{ canonical_sha256 }}</strong></p>
+<p class="reorganization-path">Manifest ID: {{ manifest.manifest_id }}<br>Původní hostitelský SHA: {{ source }}<br>Library root: {{ p.library_root }}<br>Windows root: {{ p.windows_root }}<br>RW mount binding: {{ p.mount_identity }}<br>DB SHA-256: {{ p.db_fingerprint.sha256 }}<br>DB velikost: {{ p.db_fingerprint.size }} · mtime_ns: {{ p.db_fingerprint.mtime_ns }} · schema: {{ p.db_fingerprint.user_version }}<br>Filesystem evidence: {{ p.filesystem_hash }}</p>
+<p>Hostitelské podklady zachyceny: {{ bundle.published_at }}. Potřebné cílové adresáře: {{ p.directories|length }}.</p>
+<p><a href="/reorganization/approval/{{ source }}/manifest">Stáhnout přesný návrh (JSON)</a></p>
+</details>
+{% if not execution_result and not accepted %}<p id="manifest-validity" role="status" data-expires-at="{{ expires_at }}" data-server-now="{{ server_now }}" data-remaining-seconds="{{ remaining_seconds }}">Zbývající platnost manifestu: <strong data-remaining>{{ remaining_seconds }} s</strong>. Konec platnosti: {{ expires_at }}. Nové otevření stránky platnost neprodlužuje.</p>{% endif %}
 {% if not current and not accepted %}<p role="alert"><strong>STOP: hostitelská evidence vypršela. Tento manifest již nelze schválit ani předat; správce musí připravit nový původní manifest.</strong></p>{% endif %}
 {% if result %}<p>Čerstvý read-only preflight DB/filesystemu proti zachycené hostitelské runtime evidence: {{ result.outcome }}. Host před jakýmkoliv budoucím spuštěním znovu ověří skutečné provozní podmínky.</p>{% else %}<p>Otevření stránky neprovádí inventuru. Aktuální preflight proběhne při přípravě i při schvalovacím POST; neúspěch nebo stale evidence znamenají STOP.</p>{% endif %}
-{% if p.generation_diagnostics or p.actions|selectattr('criticality','equalto','REVIEW')|list %}<p><strong>STOP: manifest vyžaduje REVIEW/BLOCKED.</strong></p>{% else %}<p>Publikovaný manifest nemá nevyřešené BLOCKED/REVIEW ani kolize. Připravenost ke schválení závisí na úspěšném čerstvém preflightu a přesném potvrzení warningů.</p>{% endif %}
-{% for diagnostic in p.generation_diagnostics %}<p>{{ diagnostic }}</p>{% endfor %}
+{% if p.generation_diagnostics or p.actions|selectattr('criticality','equalto','REVIEW')|list %}<p><strong>Návrh je blokovaný nebo obsahuje položky ke kontrole.</strong></p>{% else %}<p>Návrh nemá nevyřešené blokující problémy ani kolize. Před schválením musí projít aktuálním ověřením a každé upozornění musí být výslovně potvrzené.</p>{% endif %}
+{% for diagnostic in p.generation_diagnostics %}{% set m = describe(diagnostic, 'error') %}<article><h3>{{ m.title }}</h3><p>{{ m.reason }}</p><p>Dopad: {{ m.impact }}</p><p>{{ m.action }}</p><details><summary>Technické podrobnosti</summary><p>{{ diagnostic }}</p></details></article>{% endfor %}
 </section>
 {% if execution_result %}<section class="panel" id="execution-result"><h2>Výsledek reorganizace</h2>
-<p>Stav: <strong>{{ execution_result.state }}</strong> · Fáze: {{ execution_result.phase }} · Dokončeno: {{ execution_result.completed }}/{{ execution_result.total }} · Zbývá: {{ execution_result.remaining }}</p>
+<p><strong>{{ 'Reorganizace dokončena.' if execution_result.state == 'NORMAL' else 'Reorganizace byla zastavena a vyžaduje zásah správce.' }}</strong></p>
+<p>Dokončené souborové operace: {{ execution_result.completed }} z {{ execution_result.total }} · Zbývá: {{ execution_result.remaining }}.</p>
+<p>Databáze: {{ 'Změny cest v databázi ověřeny.' if execution_result.state == 'NORMAL' else 'Úplné dokončení změn není potvrzené; zachovejte původní evidence.' }}</p>
+{% if execution_result.state == 'NORMAL' %}
+{% if coordinator_status and coordinator_status.state == 'NORMAL' and coordinator_status.phase == 'normal' and coordinator_status.app_restart_state == 'available' %}<p>Návrat aplikace byl potvrzen koordinátorem po kontrole dostupnosti.</p>
+{% elif coordinator_status and coordinator_status.app_restart_state == 'failed' %}<p role="alert">Reorganizace je dokončená, ale restart aplikace selhal. Je potřeba zásah správce.</p>
+{% elif coordinator_status and coordinator_status.app_restart_state == 'timed_out' %}<p role="alert">Reorganizace je dokončená, ale vypršel čas pro ověření návratu aplikace. Je potřeba zásah správce.</p>
+{% else %}<p>Návrat aplikace zatím nebyl potvrzen hostitelem.</p>{% endif %}
+{% endif %}
 <p>Správce: {{ execution_result.actor }} · Dokončení reportu: {{ execution_result.finished_at }}</p>
-{% if execution_result.error %}<div class="notice error" role="alert">{{ execution_result.error }}</div><p>Nutný ruční zásah. Žádný automatický retry, rollback ani copy fallback.</p>{% endif %}
-<p>Jednotlivé akce dokládá původní E1 journal; tento report je pouze souhrn.</p>
+{% if execution_result.error %}<div class="notice error" role="alert">{{ coordinator_status.detail if coordinator_status and coordinator_status.state == 'STOP' else 'E7 skončilo STOP. Podrobnosti zůstávají v soukromé provozní evidenci správce.' }}</div><p>Nutný ruční zásah. Žádný automatický retry, rollback ani copy fallback.</p>{% endif %}
 {% if execution_result.removed_directories is not none %}<p>Odstraněné prázdné adresáře: {{ execution_result.removed_directories|length }}.</p>
-<details><summary>Schválený cleanup · odstraněné cesty</summary><pre class="reorganization-path">{{ execution_result.removed_directories|join('\n') }}</pre></details>
-{% else %}<p>Výsledek cleanupu není potvrzený. Případné již provedené odstranění dokládá původní E7H evidence; znovu jej nespouštějte.</p>{% endif %}
-<p class="reorganization-path">E1: {{ execution_result.journal_path }}<br>Guard: {{ execution_result.guard_path }}<br>E7H: {{ execution_result.cleanup_evidence_path }}</p>
+<details><summary>Odstraněné adresáře</summary><pre class="reorganization-path">{{ execution_result.removed_directories|join('\n') }}</pre></details>
+{% else %}<p>Výsledek úklidu není potvrzený. Případné již provedené odstranění dokládá původní E7H evidence; znovu jej nespouštějte.</p>{% endif %}
+<p><a href="/">Zpět do katalogu</a> · <a href="/reorganization/approval/{{ source }}/manifest">Stáhnout schválený návrh</a></p>
+<details><summary>Technické podrobnosti výsledku</summary><p>Stav: {{ execution_result.state }} · Fáze: {{ execution_result.phase }} · Dokončeno: {{ execution_result.completed }}/{{ execution_result.total }}</p>
+<p>Jednotlivé akce dokládá původní E1 journal. E1 journal, guard a E7H doklady zůstávají zachované v soukromé provozní evidenci správce; tento report je pouze souhrn.</p></details>
 </section>{% endif %}
-<section class="panel"><h2>Konkrétní warning acknowledgements</h2>
-{% if not reviewed %}<p>Potvrďte každý warning zvlášť. Tím se připraví canonical envelope s vašimi acknowledgements; jeho nový SHA si prohlédnete před konečným schválením.</p>{% else %}<p>Acknowledgements jsou již součástí zobrazeného canonical SHA. Změna kterékoliv hodnoty zneplatní schválení.</p>{% endif %}
+<section class="panel"><h2>Upozornění k potvrzení</h2>
+{% if not reviewed %}<p>Potvrďte každé upozornění zvlášť. Tím se připraví přesný návrh s vašimi potvrzeními; jeho nový SHA si prohlédnete před konečným schválením.</p>{% else %}<p>Vaše potvrzení jsou již součástí zobrazeného SHA-256. Změna kterékoliv hodnoty zneplatní schválení.</p>{% endif %}
 <form method="post" action="/reorganization/approval/{{ source }}/prepare" id="manifest-prepare">
 <input type="hidden" name="csrf" value="{{ csrf }}">
 {% if not reviewed %}<label>Jméno správce pro evidenci <input name="actor" value="{{ actor }}" maxlength="128" required></label><p>Jde o evidenční údaj v administrátorské LAN aplikaci; nepřihlašujete se k účtu.</p>{% endif %}
-<div id="manifest-warnings" class="reorganization-group"><p data-count></p><div data-page></div><nav class="reorganization-pagination" aria-label="Stránkování warningů"><button type="button" data-prev>Předchozí</button><span data-position></span><button type="button" data-next>Další</button></nav></div>
+<div id="manifest-warnings" class="reorganization-group"><p data-count></p><div data-page></div><nav class="reorganization-pagination" aria-label="Stránkování upozornění"><button type="button" data-prev>Předchozí</button><span data-position></span><button type="button" data-next>Další</button></nav></div>
 {% if not reviewed and current %}<button type="submit" id="manifest-prepare-submit" disabled>Připravit přesný manifest k finálnímu schválení</button><noscript><p>Pro jednotlivá potvrzení a stránkování zapněte JavaScript.</p></noscript>{% endif %}
 </form></section>
 {% if reviewed %}<section class="panel"><h2>Výslovné schválení přesného SHA-256</h2>
 <form method="post" action="/reorganization/approval/{{ source }}/approve">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="sha256" value="{{ canonical_sha256 }}"><input type="hidden" name="actor" value="{{ actor }}">
-{% if not receipt and current %}<label><input type="checkbox" name="confirm" value="yes" required> Schvaluji celý výše uvedený canonical manifest {{ canonical_sha256 }}, včetně SOURCE → TARGET, KEEP/MOVE/QUARANTINE a konkrétních warning acknowledgements.</label>
-<p><button type="submit">Schválit tento canonical manifest</button></p>{% elif receipt %}<p>Jednorázové schválení uloženo: {{ receipt.approved_at }}. Znovu je schválit ani přepsat nelze.</p>{% endif %}
+{% if not receipt and current %}<label><input type="checkbox" name="confirm" value="yes" required> Schvaluji celý výše uvedený přesný návrh {{ canonical_sha256 }}, včetně cest SOURCE → TARGET, přesunů, ponechání, karantény a konkrétních potvrzení upozornění.</label>
+<p><button type="submit">Schválit tento přesný návrh</button></p>{% elif receipt %}<p>Jednorázové schválení uloženo: {{ receipt.approved_at }}. Znovu je schválit ani přepsat nelze.</p>{% endif %}
 </form></section>{% endif %}
+{% if receipt and not accepted and not execution_result and not start_requested and current %}
+<section class="panel"><h2>Výslovné spuštění reorganizace</h2>
+<p>Hostitel znovu ověří manifest, odstaví aplikaci a writery a provede schválené přesuny i aktualizaci SQLite. Průběh i rozhodnutí o prázdných adresářích zůstanou dostupné v tomto prohlížeči.</p>
+<form method="post" action="/reorganization/approval/{{ source }}/start">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="sha256" value="{{ canonical_sha256 }}"><input type="hidden" name="actor" value="{{ actor }}">
+<label><input type="checkbox" name="confirm" value="yes" required> Výslovně spustit schválený návrh {{ canonical_sha256 }} jako {{ actor }}. O úklidu prázdných adresářů rozhodnu samostatně podle živého návrhu.</label>
+<p><button type="submit">Spustit schválenou reorganizaci</button></p>
+</form></section>
+{% endif %}
 <section class="panel"><h2>Soubory · SOURCE → TARGET</h2>
-<p>Data pocházejí přímo z canonical manifestu. Nejvýše 50 položek na stránku.</p>
-<label>Operace <select id="manifest-action"><option value="ALL">Všechny</option>{% for action in ['MOVE','KEEP','QUARANTINE'] %}<option>{{ action }}</option>{% endfor %}</select></label>
-<label>Stav <select id="manifest-status"><option value="ALL">Všechny</option><option>READY</option><option>WARNING</option><option>REVIEW</option></select></label>
+<p>Data pocházejí přímo z přesného návrhu. Nejvýše 50 položek na stránku.</p>
+<label>Operace <select id="manifest-action"><option value="ALL">Všechny</option>{% for action in ['MOVE','KEEP','QUARANTINE'] %}<option value="{{ action }}">{{ presentation_labels[action] }}</option>{% endfor %}</select></label>
+<label>Stav <select id="manifest-status"><option value="ALL">Všechny</option><option value="READY">Připraveno v návrhu</option><option value="WARNING">Upozornění</option><option value="REVIEW">Vyžaduje kontrolu</option></select></label>
 <label>Hledat SOURCE/TARGET <input type="search" id="manifest-search"></label>
 <div id="manifest-actions"><p data-count></p><div data-page></div><nav class="reorganization-pagination" aria-label="Stránkování akcí"><button type="button" data-prev>Předchozí</button><span data-position></span><button type="button" data-next>Další</button></nav></div>
 </section>
 <details class="panel"><summary>Výsledná adresářová struktura</summary><div id="manifest-directories"><p data-count></p><div data-page></div><nav class="reorganization-pagination" aria-label="Stránkování adresářů"><button type="button" data-prev>Předchozí</button><span data-position></span><button type="button" data-next>Další</button></nav></div></details>
-<section class="panel"><h2>Cleanup po přesunech</h2><p>Toto schválení není schválením cleanup proposal. E7H vytvoří živý proposal až po fyzických přesunech. Správce pak přes existující CLI potvrdí konkrétní nepotřebné prázdné adresáře a přesný živý proposal SHA. IMPORT, Duplicates, Subs a systémové adresáře zůstávají chráněné.</p></section>
-<details class="panel"><summary>Celý přesný canonical JSON</summary><pre class="reorganization-path">{{ canonical }}</pre></details>
+{% if view_state != 'normal' %}<section class="panel"><h2>Úklid prázdných adresářů po přesunech</h2><p>Toto schválení není schválením úklidu. Živý návrh úklidu (E7H) vznikne až po fyzických přesunech. Servisní stránka pak zobrazí skutečné kandidáty a přesný SHA-256. Lze výslovně zachovat všechny adresáře, potvrdit odstranění pouze vybraných, nebo reorganizaci zastavit (STOP). IMPORT, Duplicates, potřebné cílové a systémové adresáře zůstávají chráněné. U Subs rozhoduje skutečná potřeba cílové struktury.</p></section>{% endif %}
+<details class="panel"><summary>Celý přesný JSON návrhu</summary><pre class="reorganization-path">{{ canonical }}</pre></details>
 <script type="application/json" id="manifest-data">{{ manifest|tojson }}</script>
 <script type="application/json" id="manifest-new-directories">{{ bundle.new_directories|tojson }}</script>
+<script type="application/json" id="reorganization-messages">{{ presentation_catalog|tojson }}</script>
+<script src="{{ url_for('static', path='reorganization_presentation.js') }}" defer></script>
 <script src="{{ url_for('static', path='reorganization_approval.js') }}" defer></script>
 {% endblock %}

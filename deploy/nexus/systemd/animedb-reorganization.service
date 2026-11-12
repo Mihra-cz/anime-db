@@ -1,0 +1,26 @@
+[Unit]
+Description=AnimeDB fixed V6 host coordinator
+Requires=docker.service
+After=systemd-tmpfiles-setup.service docker.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/srv/nexus/stacks/anime-db/reorganization-coordinator.json
+
+[Service]
+Type=simple
+User=root
+Group=101
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/libexec/anime-db/reorganization_coordinator.py --config /srv/nexus/stacks/anime-db/reorganization-coordinator.json
+Restart=no
+TimeoutStopSec=30
+KillMode=control-group
+NoNewPrivileges=yes
+# Runtime evidence binds the host mount session. Filesystem sandbox options
+# that create another mount namespace would invalidate that identity.
+# Commands, root configuration and executable hooks remain explicitly scoped.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

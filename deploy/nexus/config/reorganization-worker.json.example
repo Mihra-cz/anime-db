@@ -1,0 +1,16 @@
+{
+  "database": "/data/anime.db",
+  "library_root": "/media/anime",
+  "share": "//nas.example.test/Anime",
+  "share_root": "/",
+  "windows_root": "\\\\nas.example.test\\Anime",
+  "inbox": "/approval-inbox",
+  "outbox": "/approval-outbox",
+  "ledger": "/approval-ledger",
+  "runtime_lock": "/state/runtime.lock",
+  "backups": "/backups",
+  "service": "/service-status",
+  "mount_read_write_checked": false,
+  "safe_write_capability_proven": false,
+  "rename_noreplace_capability_proven": false
+}

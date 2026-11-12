@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Příprava reorganizace – AnimeDB{% endblock %}
+{% block main_class %}content-shell content-wide reorganization{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', path='reorganization.css') }}">{% endblock %}
+{% block content %}
+<h1>{{ 'Příprava finálního manifestu' if job.kind == 'prepare' else 'Průběh reorganizace' }}</h1>
+<section class="panel" id="reorganization-job" data-status-url="{{ status_url }}">
+<h2 id="job-state">{{ job.state }}</h2><p id="job-detail" role="status">{{ job.detail }}</p>
+<p>Fáze: <span id="job-phase">{{ job.phase }}</span></p>
+<p class="reorganization-path">Požadavek: {{ job.request_id }}</p>
+<p id="job-result"{% if not job.result_url %} hidden{% endif %}><a href="{{ job.result_url or '#' }}">Otevřít přesný manifest</a></p>
+<p>Požadavek je jednorázový. Při nedostupnosti koordinátoru zůstává čekající; žádné automatické opakování ani potvrzení úspěchu nevzniká.</p>
+</section><p><a href="/reorganization">Zpět na reorganizaci</a></p>
+<noscript><p>Pro živý stav zapněte JavaScript nebo obnovte tuto stránku.</p></noscript>
+<script src="{{ url_for('static', path='reorganization_job.js') }}" defer></script>
+{% endblock %}

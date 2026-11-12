@@ -62,7 +62,7 @@ def test_real_preview_and_sources_unchanged(web):
     assert 'Source/video1.mkv' in response.text
     assert 'Canonical/Season 01/Canonical - S01E01.mkv' in response.text
     assert 'MOVE' in response.text and 'READY' in response.text
-    assert 'Vyžaduje rozhodnutí: cleanup nebo warning' in response.text
+    assert 'Čeká na rozhodnutí o upozorněních a adresářích' in response.text
     assert 'Fyzické spuštění provádí správce na hostiteli' in response.text
     assert {p: fingerprint(p) for p in before} == before
     assert {p: p.stat().st_mtime_ns for p in directories} == directories
@@ -141,10 +141,13 @@ def test_warning_and_protected_scopes(web):
     (media / 'Duplicates/unknown.mkv').write_bytes(b'unprovenanced')
     response = client.post('/reorganization/preview')
     assert response.status_code == 200
-    assert 'subtitle_present_video_missing' in response.text
-    assert 'EXCLUDED' in response.text
+    import json, re
+    data=json.loads(re.search(r'id="reorganization-data">(.*?)</script>',response.text,re.S)[1])
+    records={row['source_relative_path']:row for row in data['plan']['records']}
+    assert 'subtitle_present_video_missing' in records['Source/lost03.ass']['warnings']
+    assert {'IMPORT','#recycle'} <= {row['path'] for row in data['coverage']['directories'] if row['disposition']=='EXCLUDED'}
     assert 'do-not-inventory.mkv' not in response.text
-    assert 'unprovenanced_or_unexpected_technical_lane_asset' in response.text
+    assert 'unprovenanced_or_unexpected_technical_lane_asset' in records['Duplicates/unknown.mkv']['blockers']
 
 
 def test_inaccessible_library_is_incomplete(web, monkeypatch):
@@ -184,9 +187,13 @@ def test_preview_reads_no_file_contents(web, monkeypatch):
 def test_preview_is_fresh_and_worker_errors_hide_partial_results(web, monkeypatch):
     app, client, _, media = web
     populate(app, media)
-    assert 'source_missing_or_not_regular' not in client.post('/reorganization/preview').text
+    import json, re
+    def blockers(response):
+        data=json.loads(re.search(r'id="reorganization-data">(.*?)</script>',response.text,re.S)[1])
+        return {code for row in data['plan']['records'] for code in row['blockers']}
+    assert 'source_missing_or_not_regular' not in blockers(client.post('/reorganization/preview'))
     (media / 'Source/video1.mkv').unlink()
-    assert 'source_missing_or_not_regular' in client.post('/reorganization/preview').text
+    assert 'source_missing_or_not_regular' in blockers(client.post('/reorganization/preview'))
     from app import reorganization_web as module
     def failed(*a, **kw):
         raise subprocess.CalledProcessError(1, 'preview', output='partial', stderr='private detail')
@@ -450,7 +457,7 @@ def test_preview_passes_separate_timeout_and_mount_requirements(web, monkeypatch
         raise subprocess.CalledProcessError(1, 'unavailable')
     monkeypatch.setattr(module, 'run_preview', capture)
     assert client.post('/reorganization/preview').status_code == 503
-    assert received == dict(timeout=120, require_mount=False, access_timeout=10)
+    assert received == dict(timeout=600, require_mount=False, access_timeout=10)
 
 
 def test_partial_inventory_state_and_coverage_detail_agree(web, monkeypatch):
@@ -473,7 +480,7 @@ def test_partial_inventory_state_and_coverage_detail_agree(web, monkeypatch):
 def test_default_timeout_and_direct_settings_validation():
     from app.config import Settings
     from pathlib import Path
-    assert Settings(Path('/tmp'), 'sqlite://').reorganization_preview_timeout_seconds == 120
+    assert Settings(Path('/tmp'), 'sqlite://').reorganization_preview_timeout_seconds == 600
     with pytest.raises(ValueError):
         Settings(Path('/tmp'), 'sqlite://', reorganization_preview_timeout_seconds=float('nan'))
 
