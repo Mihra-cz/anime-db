@@ -17,7 +17,7 @@ soubory v `deploy/nexus/`.
 | CIFS | `/srv/animedb-v6-lab/mnt/ro` (lab_scan, `ro`) → app; `/srv/animedb-v6-lab/mnt/rw` (lab_worker, `rw`) → pouze worker |
 | Data | `/srv/animedb-v6-lab/appdata/*`; golden kopie v `/srv/animedb-v6-lab/golden` |
 | Koordinátor | transientní systemd unit `animedb-v6-lab-coordinator`, root kopie v `/srv/animedb-v6-lab/libexec` |
-| Socket | `/run/animedb-v6-lab/coordinator.sock` (`root:101 0660`, adresář `0750`) |
+| Socket | `/run/animedb-v6-lab/coordinator.sock` (`root:<CONTROL_GID> 0660`, adresář `0750`) |
 | Compose pro koordinátor | schválená root generace v `/srv/animedb-v6-lab/stack/approved-v6` |
 
 Nikdy se nepoužívá produkční `data/anime.db` (vyloučeno i z image přes
@@ -94,3 +94,5 @@ semantika Synology neověřeny), lab snapshot místo Synology snapshotu, writer
 hooky bez skutečných externích writerů, `lab_entrypoint.py` místo `first_run.py`
 (NVMe a instalační evidence neověřeny), amd64 místo ARM64, výkon a časování
 Raspberry Pi 5 neověřeny.
+
+Socket má vlastní číselný `CONTROL_GID` (příklad 2001, přepis `ANIMEDB_LAB_CONTROL_GID`). Před setup ověřit, že zvolený GID nemá nesouvisející členy. Nginx zůstává `101:101`, socket group dostává přes `group_add`; `_ssh` se nemění. Helper instaluje také sdílený trusted `host_io.py`. Tato úprava sama LAB nespouští ani nemění jeho existující data.

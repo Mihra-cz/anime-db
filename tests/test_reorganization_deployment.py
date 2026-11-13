@@ -99,7 +99,7 @@ def test_external_compose_inputs_are_not_silently_left_live(deployment, text):
 def test_boot_tmpfiles_directory_exists_without_coordinator_and_can_be_recreated(tmp_path):
     shipped = Path(__file__).parents[1]/'deploy/nexus/tmpfiles.d/animedb-reorganization.conf'
     rule = shipped.read_text()
-    assert 'd /run/animedb-reorganization 0750 root 101 - -' in rule
+    assert 'd /run/animedb-reorganization 0750 root animedb-control - -' in rule
     # Exercise real tmpfiles under an alternate root, substituting only the
     # unavailable root/group ownership with this test user's UID/GID.
     root = tmp_path/'boot'; conf = root/'etc/tmpfiles.d'; conf.mkdir(parents=True)
@@ -127,7 +127,7 @@ def test_docker_boot_order_and_service_permissions_do_not_depend_on_coordinator(
                    'ProtectKernelTunables=', 'ProtectKernelModules=', 'ProtectControlGroups='):
         assert option not in unit
     assert 'RuntimeDirectory=' not in unit
-    assert 'Group=101' in unit
+    assert 'Group=animedb-control' in unit
 
 
 def test_yaml_key_alias_cannot_reintroduce_a_live_compose_include(deployment):
@@ -164,3 +164,43 @@ def test_approved_copies_keep_same_compose_model_and_relative_path_context(deplo
     assert rendered(resolved.files,resolved.env_file)==original
     assert original['name']=='anime-db' and original['services']['app']['image']=='anime-db:v6-abcdef0'
     assert original['services']['app']['volumes'][0]['source']==str(files[0].parent/'db')
+
+
+def test_separate_approved_root_keeps_mutable_project_directory(deployment, monkeypatch):
+    m, files, env = deployment
+    root = files[0].parent.parent/'trusted-generations'
+    root.mkdir(mode=0o700)
+    old = m._trusted_path
+    def trust(path, *, directory=False):
+        if Path(path) == root or Path(path).is_relative_to(root):
+            info = Path(path).lstat()
+            if stat.S_ISLNK(info.st_mode) or info.st_mode & 0o022:
+                raise ValueError('unsafe generation')
+        else:
+            old(path, directory=directory)
+    monkeypatch.setattr(m, '_trusted_path', trust)
+    owner = files[0].parent.stat()
+    generation = m.stage_deployment(files, env_file=env, approved_root=root)
+    m.approve_deployment(generation, reviewed_sha256=m.generation_sha256(generation))
+    resolved = m.resolve_deployment(files, approved_root=root)
+    assert resolved.project_directory == files[0].parent
+    assert [p.read_bytes() for p in resolved.files] == [p.read_bytes() for p in files]
+    assert (files[0].parent.stat().st_uid, files[0].parent.stat().st_mode) == (owner.st_uid, owner.st_mode)
+
+
+@pytest.mark.parametrize('source', ['./db:/data', '../db:/data', 'relative:/data'])
+def test_separate_root_rejects_relative_bind_sources(deployment, source):
+    m, files, env = deployment
+    files[0].write_text('services:\n  app:\n    volumes:\n      - '+source+'\n')
+    with pytest.raises(ValueError, match='absolute'):
+        m._check_inputs([p.read_bytes() for p in files], env.read_bytes(), absolute_binds=True)
+
+
+@pytest.mark.parametrize('text',[
+    'services:\n  app:\n    volumes:\n      - ./db:/data # comment\n',
+    'services:\n  app:\n    volumes:\n    - ./db:/data\n',
+    'services:\n  app:\n    volumes:\n      - /absolute:/data\n',
+])
+def test_private_bind_generation_rejects_implicit_or_relative_creation(deployment,text):
+    m,_,env=deployment
+    with pytest.raises(ValueError):m._check_inputs([text.encode()],env.read_bytes(),absolute_binds=True)

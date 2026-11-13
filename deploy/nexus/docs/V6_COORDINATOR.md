@@ -38,7 +38,7 @@ opravit uložené autority. Chyba po startu E7 aplikaci automaticky neobnovuje.
 | `backups/pre-change` | `/backups` RW, app potřebuje odpovídající RO bind |
 | `service` | `/service-status` RW, edge má RO `/public-status` |
 | Root worker JSON | RO `/coordinator-config/worker.json` |
-| `coordinator` | root-only claims, chyby a snapshot receipts; worker nemountuje |
+| `/var/lib/anime-db/coordinator` | root-only claims, chyby a snapshot receipts; worker nemountuje |
 | `/run/animedb-reorganization` | edge RO `/run/animedb-control`, socket `coordinator.sock` |
 
 Všechny relativní host cesty v tabulce jsou pod
@@ -73,17 +73,17 @@ Publikovaný proposal obsahuje runtime evidence, které používá stávající 
    `releases/` rovněž zůstává uživatelský. Git a příprava zdrojů nepoužívají root.
    Privilegovaný coordinator nečte živé YAML z tohoto zapisovatelného stromu.
    Používá přesné, samostatně schválené kopie těchto tří vstupů a `.env` pod
-   root-owned `$STACK_DIR/approved-v6/`. Nejde o další stack: původní vstupy jsou
-   jediným editovaným zdrojem a schválená generace je jejich byte-exact snapshot.
+   root-owned `/var/lib/anime-db/approved-v6/`. Nejde o další stack: původní vstupy jsou
+   jediným editovaným zdrojem a schválená generace je jejich odvozená, samostatně schválená generace: pouze nezabezpečené bind sources se přepíší na root-private descriptorové kotvy. Manifest obsahuje SHA původních vstupů i výsledných kopií a identity bindů.
    Před každým Docker/Compose voláním se ověří root vlastnictví a SHA všech kopií.
    Stejný project name `anime-db`, původní `--project-directory` a pořadí tří `-f`
    zachovají identitu existujícího deploymentu. Podrobnosti jsou níže a v
    [release runbooku](RELEASE_UPDATE.md#schválený-vstup-koordinátoru).
    Žádný rekurzivní `chown src/` nebo `releases/` není potřeba ani přípustný.
 4. Root JSON podle [coordinator příkladu](../config/reorganization-coordinator.json.example)
-   uložit jako `$STACK_DIR/reorganization-coordinator.json` s módem `0600`.
+   uložit jako `/etc/anime-db/reorganization-coordinator.json` s módem `0600`.
    Nahradit image a exact public origin skutečnými hodnotami. Worker JSON podle
-   [příkladu](../config/reorganization-worker.json.example) uložit vedle s módem
+   [příkladu](../config/reorganization-worker.json.example) uložit jako `/etc/anime-db/reorganization-worker.json` s módem
    `0644` (root-owned, non-root worker jej musí číst). JSON je konfigurace,
    nikoli místo pro credentials. Statické capability příznaky jsou pouze
    konfigurační povolení, nikdy provozní důkaz. Existující RuntimeEvidence se
@@ -91,11 +91,11 @@ Publikovaný proposal obsahuje runtime evidence, které používá stávající 
    získaný důkaz pro aktuální mount identity, včetně mount session. Remount nebo
    změna identity starý důkaz zneplatní a vyžaduje nové ověření. Scanner a další
    writeři se dokládají skutečným aktuálním výsledkem coordinatoru/hooků.
-5. Privátní host adresář `coordinator/` musí být root `0700`. DB/state,
+5. Privátní host adresář `/var/lib/anime-db/coordinator/` musí být root `0700`. DB/state,
    `approval/{inbox,outbox,ledger}`, `backups/pre-change` a `service` musí
    patřit runtime UID/GID bez group/other zápisu; běžně `0700`, veřejný `service`
    `0755`. Každý je samostatný existující adresář, nikoli symlink ani vnořený
-   kořen jiné role. Předkové musí zůstat pod kontrolou root. `runtime.lock`
+   kořen jiné role. Předkové runtime adresářů mohou patřit root nebo runtime UID, bez group/other zápisu; důvěryhodné vstupy, private a control stále vyžadují root předky. `runtime.lock`
    se zachovává; nedělat nový soubor místo současného runtime locku.
 6. Připravit níže popsaný samostatný RW mount a skutečné trusted snapshot/writer
    hooks. Bez nich službu neaktivovat jako funkční V6. Automatický reset,
@@ -136,8 +136,7 @@ samostatné disposable testovací soubory. Žádný probe nad existujícími mé
 Změnu skutečných dat knihovny tato instalace neschvaluje.
 
 Pro opakované browser workflow mount připravit při jednorázové instalaci a
-udržovat v provozním okně. Coordinator nic nemountuje, neumountuje ani nečte
-credentials. Neexistující nebo RO mount zastaví žádost před odstavením app.
+udržovat v provozním okně. Coordinator nepřipojuje CIFS, neodpojuje NAS ani nečte credentials. Pouze vytváří lokální bind kotvy runtime adresářů z otevřených deskriptorů pod root-owned evidence roots. Neexistující nebo RO mount zastaví žádost před odstavením app.
 Po skončení schváleného V6 provozního okna se zastaví coordinator a správce
 samostatně odpojí pouze tento RW mount; nesmí zasáhnout původní RO mount.
 
@@ -191,7 +190,9 @@ bez přepsání, kontroluje fingerprint a váže ji k manifestu.
 
 ## Instalace host služby a edge
 
-Po splnění prerequisites správce může instalovat revidované soubory:
+Po splnění prerequisites postupovat podle [instalačního pořadí B5/GID](#instalace-b5-a-povinného-gid).
+Následující blok je jeho krok pro coordinator unit a tmpfiles, nikoli samostatný
+bootstrap bez vytvořené skupiny a připraveného `.env`:
 
 ```bash
 sudo install -d -m 0755 /usr/local/libexec/anime-db
@@ -199,12 +200,16 @@ sudo install -o root -g root -m 0755 \
   deploy/nexus/reorganization_coordinator.py \
   /usr/local/libexec/anime-db/reorganization_coordinator.py
 sudo install -o root -g root -m 0644 \
+  deploy/nexus/host_io.py /usr/local/libexec/anime-db/host_io.py
+sudo install -o root -g root -m 0644 \
   deploy/nexus/reorganization_deployment.py \
   /usr/local/libexec/anime-db/reorganization_deployment.py
 sudo install -o root -g root -m 0644 \
   deploy/nexus/systemd/animedb-reorganization.service \
   /etc/systemd/system/animedb-reorganization.service
-sudo install -d -o root -g root -m 0700 /srv/nexus/appdata/anime-db/coordinator
+sudo install -d -o root -g root -m 0700 /var/lib/anime-db
+sudo install -d -o root -g root -m 0700 /var/lib/anime-db/coordinator
+# Dedicated group must already exist before tmpfiles; no existing ownership changes.
 sudo install -o root -g root -m 0644 \
   deploy/nexus/tmpfiles.d/animedb-reorganization.conf \
   /etc/tmpfiles.d/animedb-reorganization.conf
@@ -212,22 +217,25 @@ sudo install -d -o root -g root -m 0755 /etc/systemd/system/docker.service.d
 sudo install -o root -g root -m 0644 \
   deploy/nexus/systemd/docker.service.d/animedb-runtime.conf \
   /etc/systemd/system/docker.service.d/animedb-runtime.conf
+# Nejprve založit/ověřit skupinu a GID podle instalačního pořadí níže.
+getent group animedb-control
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/animedb-reorganization.conf
 stat -c '%U %g %a %n' /run/animedb-reorganization
 ```
 
 Unit používá host Python standard library a `/usr/bin/docker`; neimportuje app
 ani SQLAlchemy, nespouští startup a nemá Python dependencies k instalaci.
-`tmpfiles.d` vytvoří adresář jako root:101 `0750` při každém bootu před Dockerem,
-nezávisle na aktivitě coordinatoru. Numeric GID `101` musí odpovídat skutečnému
-GID non-root edge image a `socket_gid` konfigurace; hostitelské jméno skupiny není
-rozhodující. Jiný edge GID vyžaduje konzistentně změnit tyto tři hodnoty a unit
-`Group=`. Drop-in Dockeru výslovně řadí start za `systemd-tmpfiles-setup.service`;
-instalace nevolá restart Dockeru ani se nedotýká ostatních kontejnerů.
-Unit coordinatoru adresář nevytváří ani neodstraňuje. Zastavený coordinator tedy
-nebere běžné AnimeDB její edge bind; pouze cleanup API není dostupné a nic se
-nespustí samo. Po rebootu vznikne nový adresář před startem edge.
-Unix socket coordinator vytváří v něm jako root:101 `0660`.
+`tmpfiles.d` vytvoří adresář jako root:animedb-control `0750` při každém
+bootu před Dockerem, nezávisle na aktivitě coordinatoru. Vyhrazenou skupinu
+správce nově založí s volným GID; příklad `2001` není rezervace. Skutečný číselný
+GID zapíše do `socket_gid` v root JSON a `ANIMEDB_CONTROL_GID` v původním `.env`,
+potom znovu schválí generaci. `edge` ponechá primární UID/GID `101:101` a získá
+pouze tuto doplňkovou skupinu. Unit použije `Group=animedb-control`, socket
+root:animedb-control `0660`. Skupina `_ssh` ani SSH se nemění.
+Drop-in Dockeru výslovně řadí start za `systemd-tmpfiles-setup.service`;
+instalace nevolá restart Dockeru. Unit coordinatoru adresář neodstraňuje.
+Zastavený coordinator tedy nebere běžné AnimeDB její edge bind; pouze cleanup
+API není dostupné. Po rebootu vznikne nový adresář před startem edge.
 `Restart=no` zabraňuje tichým retry. Po ručním startu se rozpracované claims
 vyhodnotí jako STOP a přesně pojmenované osiřelé worker kontejnery zastaví.
 
@@ -249,7 +257,8 @@ sám. Před nasazením ověřit sloučenou konfiguraci všech tří souborů. Ni
 nepoužívat samotný base Compose ani `compose down`.
 
 ```bash
-docker compose \
+docker compose --project-directory /srv/nexus/stacks/anime-db \
+  --env-file /srv/nexus/stacks/anime-db/.env -p anime-db \
   -f /srv/nexus/stacks/anime-db/compose.yaml \
   -f /srv/nexus/projects/anime-db/src/deploy/nexus/service-edge/compose.edge.yaml \
   -f /srv/nexus/stacks/anime-db/compose.v6.yaml config -q
@@ -258,24 +267,25 @@ sudo systemctl start animedb-reorganization.service
 sudo systemctl status animedb-reorganization.service --no-pager
 ```
 
-Případné boot enable je samostatná provozní volba až po ověřené aktivaci a
-trvalé mount integraci; jednorázový ruční mount po rebootu chybí a musí bezpečně
-STOPnout. Unit sama mount ani V6 start neprovádí. Neaktivovat novou službu s
-historickým nezkontrolovaným obsahem outboxu: všechny čekající prepare/start
-žádosti musí správce zrevidovat; jejich expiraci kontroluje worker.
+Coordinator se při bootu automaticky nespouští a unit nemá sekci Install.
+Po ručním startu zůstává původní obnova rozpracovaných claims jako STOP.
+Neaktivovat službu s historickým nezkontrolovaným outboxem; jeho obsah vyžaduje
+kontrolu správce. Boot běžné app a edge řeší existující `anime-db.service`,
+nikoli tato služba; viz [host compatibility report](../../../docs/V6_NEXUS_HOST_COMPATIBILITY_REVIEW.md).
 
 ## Schválený snapshot tří Compose vstupů
 
 Helper `reorganization_deployment.py` má dvě explicitní administrátorské fáze.
 Neprovádí Docker příkazy, startup aplikace ani změnu DB/NAS. Nejprve root vytvoří
-novou generaci z přesných tří aktuálních souborů ve stávajícím pořadí a `.env`:
+novou generaci z tří aktuálních souborů ve stávajícím pořadí a `.env`:
 
 ```bash
 sudo python3 /usr/local/libexec/anime-db/reorganization_deployment.py stage \
   --compose "$STACK_DIR/compose.yaml" \
   --compose "$PROJECT_ROOT/src/deploy/nexus/service-edge/compose.edge.yaml" \
   --compose "$STACK_DIR/compose.v6.yaml" \
-  --env-file "$STACK_DIR/.env"
+  --env-file "$STACK_DIR/.env" \
+  --approved-root /var/lib/anime-db/approved-v6
 ```
 
 Výstup obsahuje `generation` a `reviewed_sha256`. Správce zkontroluje všechny
@@ -290,7 +300,7 @@ sudo python3 /usr/local/libexec/anime-db/reorganization_deployment.py approve \
 ```
 
 `current.json` se atomicky přepne pouze po kontrolách. Generace se needituje;
-jakákoli byte změna následně znamená STOP. Změna živého user-owned `src/` sama
+jakákoli byte změna schválených kopií následně znamená STOP. V2 manifest obsahuje také původní SHA, mapu bind sources a dev/inode; bind sources pod uživatelskými předky odkazují v odvozených kopiích jen do `generation-*/binds/`. Změna živého user-owned `src/` sama
 nezmění privilegovaný vstup. Původní tři cesty v coordinator JSON slouží jako
 přesná provenance; helper dodá schválené cesty a porovná je s touto trojicí.
 Starší generace zůstávají k auditu. Při každém dalším release se snapshot
@@ -298,7 +308,7 @@ regeneruje z původních zdrojů a znovu schválí; neopravuje se zvlášť druh
 
 Podporovaný současný kontrakt používá block YAML bez dalších `include`,
 `extends`, `env_file`, `label_file`, `configs` nebo `secrets` readerů, YAML anchors/aliases a `.env`
-obsahuje jen číselné `ANIMEDB_UID`/`ANIMEDB_GID`. Helper tyto nepřímé živé vstupy
+obsahuje jen číselné `ANIMEDB_UID`/`ANIMEDB_GID`/`ANIMEDB_CONTROL_GID`. Bind sources musí být absolutní a literal; relativní cesty nejsou pro oddělený approved root podporované. Helper tyto nepřímé živé vstupy
 odmítá, místo aby po schválení načítal další měnitelné soubory. Pokud je produkce
 opravdu potřebuje, je nutné konkrétní rozšíření předem revidovat. Aplikační
 paths a současný Compose build context zůstávají přesně podle původního stacku;
@@ -413,3 +423,99 @@ Při expiraci je potřeba nový návrh, nikoli obejití admission. Worker má st
 24 h, včetně čekání na živé E7H rozhodnutí. Snapshot hook zůstává 600 s.
 Nginx cleanup status/POST 5 s, detail 30 s a health 3 s jsou krátké lokální
 transporty, nikoli čekání na dokončení reorganizace; jejich limity se nemění.
+
+## Bezpečné runtime zápisy na uživatelském Nexusu
+
+`host_io.py` prochází každou komponentu přes `openat(O_NOFOLLOW|O_DIRECTORY)`.
+Coordinator připne deskriptory sedmi runtime adresářů. Čtení i atomická publikace
+používají jejich `dir_fd`, nikoli opětovně sestavenou hostitelskou cestu. Zápis
+provádí nový `/usr/bin/python3 -I` pod runtime UID/GID bez supplementary groups;
+root nenastavuje vlastnictví runtime souborů dodatečným chown. Temp soubor má
+O_EXCL/NOFOLLOW, publikace fsync a replace nebo RENAME_NOREPLACE uvnitř stejného
+připnutého adresáře. Symlink v cílovém basename se nenásleduje.
+Kontrola identity před tick/worker startem je dodatečný STOP při výměně adresáře,
+nikoli ochrana zápisu před TOCTOU. Připnutý deskriptor a ztráta privilegií drží
+hranici i při výměně předka po kontrole. Runtime UID zůstává autoritou svých dat;
+toto není ochrana proti jeho úmyslnému poškození vlastní SQLite/evidence.
+Unit potřebuje CAP_SETUID/CAP_SETGID pro nevratný přechod child procesu a CAP_SYS_ADMIN pro vytvoření lokálních bind kotev. Mount namespace se nemění.
+
+Docker nikdy nedostává původní runtime cestu pod uživatelsky měnitelnými předky.
+Schválená V2 generace nahrazuje tyto Compose bind sources root-private kotevními
+cestami. `ensure_bindings` otevře původní adresář po komponentách, ověří schválené
+dev/inode a provede MS_BIND z `/proc/self/fd/N` na root-private cíl. Po otevření
+už zdrojovou cestu nevyhodnocuje. Zápisy runtime JSON dál používají non-root
+child a dirfd, nikoli root alias. Worker dostává obdobné kotvy pod private_dir.
+Kotvy zachovávají stejné inode, data ani vlastnictví se nekopírují a nemění.
+Cílový root parent chrání mountpoint před výměnou uživatelem. Lokální flock na
+parent fd serializuje vytvoření; již odpovídající bind se nevytváří znovu.
+Původní root-controlled RO/RW NAS mountpointy se nepřipojují znovu ani nemění.
+Kotvy zůstávají po zastavení coordinatoru kvůli app/edge; reboot odstraní pouze
+mounty a boot helper je po validaci explicitně znovu vytvoří. Staré generace se
+nesmějí automaticky mazat ani unmountovat; jejich případný úklid je samostatná
+administrátorská práce. Změna schváleného source inode znamená STOP a revalidaci.
+
+## Instalace B5 a povinného GID
+
+Pouze pro samostatně schválené nasazení; tento návod nyní nic na hostiteli nemění.
+Před výměnou host helperů ověřit idle a zachované claims. Běžící coordinator má
+config v paměti: po ověření, že neběží worker ani čekající práce, jej odstavit a
+během release neaktivovat. Nikdy neodstavovat živé E7/E7H jako aktualizační krok.
+
+1. Z revidovaného releasu připravit nové root trust cesty a helpery. Instalace
+   helperů nemění aktuální ExecStart a nic nespouští. Neměnit vlastnictví /srv/nexus:
+
+   ```bash
+   sudo install -d -o root -g root -m 0700 /etc/anime-db /var/lib/anime-db
+   sudo install -d -o root -g root -m 0700 /var/lib/anime-db/approved-v6 /var/lib/anime-db/coordinator
+   sudo install -d -o root -g root -m 0755 /usr/local/libexec/anime-db
+   sudo install -o root -g root -m 0644 deploy/nexus/host_io.py /usr/local/libexec/anime-db/host_io.py
+   sudo install -o root -g root -m 0644 deploy/nexus/reorganization_deployment.py /usr/local/libexec/anime-db/reorganization_deployment.py
+   sudo install -o root -g root -m 0644 deploy/nexus/reorganization_coordinator.py /usr/local/libexec/anime-db/reorganization_coordinator.py
+   sudo install -o root -g root -m 0644 deploy/nexus/reorganization_autostart.py /usr/local/libexec/anime-db/reorganization_autostart.py
+   sudo install -o root -g root -m 0755 deploy/nexus/scripts/autostart.sh /usr/local/libexec/anime-db/autostart.sh
+   ```
+
+2. Založit/ověřit `animedb-control`, získat skutečný GID, ověřit nepřítomnost
+   lidských/systémových účtů a jiných vlastníků stejného GID. Bez zásahu do _ssh.
+   Následně bezpečně doplnit původní `.env`; přesné příkazy jsou v
+   [socketovém předkroku](RELEASE_UPDATE.md#socketový-předkrok--před-a-i-před-c1).
+   To musí předcházet jakémukoli Compose čtení nového edge, včetně config/ps/logs.
+3. Připravit root JSON se skutečným verzovaným image, cestami a stejným socket_gid;
+   worker JSON podle výše uvedeného kontraktu. Pak instalovat coordinator unit,
+   tmpfiles a Docker ordering drop-in podle předchozího instalačního bloku.
+   Teprve po existenci skupiny provést tmpfiles --create. Ověřit Group v unitu,
+   group control_dir a číslo v JSON/env/group_add. Neprovádět restart Dockeru.
+   `sudo systemctl daemon-reload` nyní načte coordinator unit, ale nic nespouští;
+   B5 drop-in se instaluje až v kroku 5.
+4. Nové aktivní `src/`, původní trojici a `.env` stage/review/approve. Pro kontrolu
+   lze použít read-only config nad třemi kopiemi; žádné raw up nad V2 generací.
+   Start je vždy `reorganization_autostart.py start`, který nejprve zkontroluje
+   release a připraví bindy. Snapshot/writer hooky a RW capability evidence zůstávají
+   samostatnými integracemi; B5 start je nevolá a nevyžaduje jejich simulace.
+5. **Až po root JSON a schválené generaci** instalovat B5 drop-in existující služby:
+
+   ```bash
+   sudo install -d -o root -g root -m 0755 /etc/systemd/system/anime-db.service.d
+   sudo install -o root -g root -m 0644 deploy/nexus/systemd/anime-db.service.d/approved-production.conf /etc/systemd/system/anime-db.service.d/approved-production.conf
+   sudo systemctl daemon-reload
+   systemctl cat anime-db.service
+   systemctl show anime-db.service -p ExecStart -p ExecStop -p TimeoutStartUSec
+   ```
+
+   Bez restartu služby/Dockeru nebo rebootu. Předčasná instalace drop-inu by při
+   dalším bootu záměrně skončila STOP, protože nemá fallback. Firewallové a mount
+   závislosti původní unity zůstávají zděděné. Případný start/recreace app+edge
+   vyžaduje schválený release krok; coordinator se bootem nezapíná.
+
+Health smyčka po startu čeká nejvýše přibližně 900 s, aby pokryla NORMAL admission.
+Drop-in má TimeoutStartSec=1500 pro RO gate, nejvýše tři 120s Compose volání a
+900s health čekání s rezervou. Žádný nový up/retry v health smyčce. Při změně
+provozního budgetu je nutné revidovat oba limity; limit není nový důkaz NORMAL.
+
+
+Před skutečnou aktivací na Nexusu je nadále potřeba úplný průchod v izolovaném
+LAB s approved_root/V2 a reálným Docker/Compose. Legacy LAB průchod ani izolované
+root syscall testy samy nejsou dokladem tohoto end-to-end gate. Revalidační testy
+ověřují produkční větev, skutečné kotvy a child zápisy a reálnou Compose interpolaci;
+nespouštějí tím E7 ani produkční aplikaci. Tento gate nesmí být označen PASS bez
+samostatné evidence celého LAB průchodu.

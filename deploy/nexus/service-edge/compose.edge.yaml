@@ -5,6 +5,8 @@ services:
   edge:
     image: nginx:stable-alpine@sha256:583b7f2fce1cdb8da5ad5c39ebd3c33b98b87d493190e548bdee1fa8c619c311
     user: "101:101"
+    group_add:
+      - "${ANIMEDB_CONTROL_GID:?set dedicated host socket group GID}"
     entrypoint: [nginx]
     command: [-c, /service/nginx.conf, -g, "daemon off;"]
     ports:

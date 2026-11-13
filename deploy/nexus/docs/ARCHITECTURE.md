@@ -182,3 +182,14 @@ srovnávací model. Zůstávají neaktivní a nejsou závislostí této instalac
 nepřesměrovávat je na nové cesty bez samostatného zadání. Podrobnosti jsou
 zachované v [historickém N4A dokumentu](SQLITE_BACKUP.md) a
 [historickém N4B1 dokumentu](SQLITE_RESTIC.md).
+
+## Připravená hostitelská kompatibilita V6 (nenasazeno)
+
+Host coordinator podporuje uživatelské předky runtime dat bez změny vlastnictví
+Nexusu. Konfigurace patří do `/etc/anime-db/`, privátní evidence a schválené
+Compose generace do `/var/lib/anime-db/`. Runtime publikace používá připnuté
+dirfd a non-root child. Socket používá samostatnou `animedb-control` skupinu,
+kterou edge dostává doplňkově; jeho primární `101:101` se nemění. Připravený
+app-only stop a boot app+edge používají tutéž generaci existujícího projektu.
+Podrobnosti, limity validace a stav nasazení jsou v
+[reportu](../../../docs/V6_NEXUS_HOST_COMPATIBILITY_REVIEW.md).

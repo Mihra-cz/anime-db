@@ -575,11 +575,11 @@ def test_historical_requests_do_not_rewrite_claims_each_tick(setup,monkeypatch):
     m,c,host,*_=setup
     request(c)
     host.tick()
-    original=m.write_json
+    original=host.write_json
     def write(path,*args,**kwargs):
         assert not str(path).endswith('-claim.json')
         return original(path,*args,**kwargs)
-    monkeypatch.setattr(m,'write_json',write)
+    monkeypatch.setattr(host,'write_json',write)
     host.tick();host.tick()
 
 
@@ -613,11 +613,11 @@ def test_failed_cleanup_publication_becomes_explicit_stop(setup,monkeypatch):
     record=proposal_record(source,approved);save(c.ledger/(source+'.cleanup-request.json'),record)
     view,cookie=host.cleanup_proposal(None,record['proposal']['proposal_sha256'])
     body=dict(source_sha256=source,approved_sha256=approved,proposal_sha256=record['proposal']['proposal_sha256'],actor='Mirek',directories=[],confirm=True,csrf=view['csrf'])
-    original=m.write_json
+    original=host.write_json
     def write(path,*args,**kwargs):
         if str(path).endswith('.cleanup-decision.json'):raise OSError('disk unavailable')
         return original(path,*args,**kwargs)
-    monkeypatch.setattr(m,'write_json',write)
+    monkeypatch.setattr(host,'write_json',write)
     with pytest.raises(OSError):host.cleanup_decide(body,origin=c.public_origin,cookie=cookie)
     assert m.read_json(c.ledger/(source+'.cleanup-stop.json'))['reason']=='EVIDENCE_UNCERTAIN'
     state,_=host.cleanup_view(cookie)
@@ -705,11 +705,11 @@ def test_corrupt_cleanup_evidence_signals_stop_instead_of_waiting(setup):
 def test_cleanup_stop_marker_failure_stops_only_active_fixed_worker(setup,monkeypatch):
     m,c,host,calls,source,*_=setup
     host.active_source=source
-    original=m.write_json
+    original=host.write_json
     def no_marker(path,*args,**kwargs):
         if str(path).endswith('.cleanup-stop.json'):raise OSError('no evidence space')
         return original(path,*args,**kwargs)
-    monkeypatch.setattr(m,'write_json',no_marker)
+    monkeypatch.setattr(host,'write_json',no_marker)
     host.stop_cleanup(source)
     assert calls[-1][0]==['/usr/bin/docker','stop','--time=10',host.container_name(source,'start','execute')]
 
@@ -753,11 +753,11 @@ def test_restart_wait_uses_health_and_runtime_without_repeating_execution(setup,
     assert [a[-3] for a, _ in calls if 'app.tools.reorganization_worker' in a]==['check-start','execute']
     if startup=='slow':
         assert data['phase']=='normal' and progress['app_ready'] is True
-        assert elapsed[0]==180 and data['app_restart_state']=='available'
+        assert elapsed[0]==pytest.approx(180, abs=0.1) and data['app_restart_state']=='available'
     else:
         assert data['phase']=='app_restart_failed' and progress['app_ready'] is False
         assert data['app_restart_state']==('timed_out' if startup=='timeout' else 'failed')
-        assert elapsed[0]==(900 if startup=='timeout' else 0)
+        assert elapsed[0]==pytest.approx(900 if startup=='timeout' else 0, abs=0.1)
         assert not any(a[0]==str(c.writers_start_hook) for a, _ in calls)
     before = list(calls); host.tick(); assert calls==before
 
@@ -820,7 +820,10 @@ def test_real_command_timeout_distinguishes_runtime_failure_from_maximum_wait(se
     host.health_timeout=budget
     host.healthy=lambda _:False
     original=host.run
+    real_subprocess=m.subprocess.run
     def subprocess_timeout(argv, **kwargs):
+        if argv[0] != '/usr/bin/docker':
+            return real_subprocess(argv, **kwargs)
         elapsed[0]+=kwargs['timeout']
         raise m.subprocess.TimeoutExpired(argv,kwargs['timeout'])
     monkeypatch.setattr(m.subprocess,'run',subprocess_timeout)

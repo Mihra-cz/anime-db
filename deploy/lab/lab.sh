@@ -28,7 +28,7 @@ SHARE=//127.0.0.1/animelab
 ORIGIN=http://127.0.0.1:18080
 LAB_UID=1000
 LAB_GID=1000
-EDGE_GID=101
+CONTROL_GID=${ANIMEDB_LAB_CONTROL_GID:-2001}
 CIFS_OPTS="vers=3.1.1,port=1445,uid=$LAB_UID,gid=$LAB_GID,nosuid,nodev,noexec"
 
 say() { printf '[lab] %s\n' "$*"; }
@@ -104,6 +104,7 @@ cmd_setup() {
 install_trusted_files() {
     local image="$1"
     install -o root -g root -m 0755 "$REPO/deploy/nexus/reorganization_coordinator.py" "$LAB/libexec/reorganization_coordinator.py"
+    install -o root -g root -m 0644 "$REPO/deploy/nexus/host_io.py" "$LAB/libexec/host_io.py"
     install -o root -g root -m 0644 "$REPO/deploy/nexus/reorganization_deployment.py" "$LAB/libexec/reorganization_deployment.py"
     install -o root -g root -m 0644 "$REPO/deploy/lab/lab_entrypoint.py" "$LAB/libexec/lab_entrypoint.py"
     install -o root -g root -m 0755 "$REPO/deploy/lab/lab_capability.py" "$LAB/libexec/lab_capability.py"
@@ -116,16 +117,16 @@ install_trusted_files() {
     install -o root -g root -m 0644 "$REPO/deploy/lab/compose.yaml" "$LAB/stack/compose.yaml"
     sed "s|image: LAB_IMAGE|image: $image|" "$REPO/deploy/lab/compose.v6.yaml" \
         | install -o root -g root -m 0644 /dev/stdin "$LAB/stack/compose.v6.yaml"
-    printf 'ANIMEDB_UID=%s\nANIMEDB_GID=%s\n' $LAB_UID $LAB_GID | install -o root -g root -m 0644 /dev/stdin "$LAB/stack/.env"
-    python3 - "$LAB" "$REPO" "$image" "$SHARE" "$ORIGIN" "$RUN" <<'PY' | install -o root -g root -m 0600 /dev/stdin "$LAB/stack/reorganization-coordinator.json"
+    printf 'ANIMEDB_UID=%s\nANIMEDB_GID=%s\nANIMEDB_CONTROL_GID=%s\n' $LAB_UID $LAB_GID $CONTROL_GID | install -o root -g root -m 0644 /dev/stdin "$LAB/stack/.env"
+    python3 - "$LAB" "$REPO" "$image" "$SHARE" "$ORIGIN" "$RUN" "$CONTROL_GID" <<'PY' | install -o root -g root -m 0600 /dev/stdin "$LAB/stack/reorganization-coordinator.json"
 import json, sys
-lab, repo, image, share, origin, run = sys.argv[1:]
+lab, repo, image, share, origin, run, control_gid = sys.argv[1:]
 a = lab + '/appdata'
 print(json.dumps({'version': 1, 'image': image, 'uid': 1000, 'gid': 1000, 'public_origin': origin,
     'compose_files': [lab + '/stack/compose.yaml', repo + '/deploy/lab/compose.edge.yaml', lab + '/stack/compose.v6.yaml'],
     'worker_config': lab + '/stack/reorganization-worker.json', 'snapshot_hook': lab + '/libexec/v6-snapshot',
     'writers_stop_hook': lab + '/libexec/v6-stop-writers', 'writers_start_hook': lab + '/libexec/v6-start-writers',
-    'socket_gid': 101, 'nas_source': share, 'database_dir': a + '/db', 'state_dir': a + '/state',
+    'socket_gid': int(control_gid), 'nas_source': share, 'database_dir': a + '/db', 'state_dir': a + '/state',
     'media_ro': lab + '/mnt/ro', 'media_rw': lab + '/mnt/rw', 'inbox': a + '/approval/inbox',
     'outbox': a + '/approval/outbox', 'ledger': a + '/approval/ledger', 'backups': a + '/backups',
     'service_status': a + '/service', 'control_dir': run, 'private_dir': a + '/coordinator',
@@ -174,10 +175,10 @@ start_coordinator() {
     systemctl reset-failed "$UNIT" 2>/dev/null || true
     # Same process properties as deploy/nexus/systemd/animedb-reorganization.service.
     systemd-run --unit="$UNIT" --description='AnimeDB V6 LAB coordinator' --collect \
-        -p User=root -p Group=$EDGE_GID -p UMask=0077 -p Restart=no -p TimeoutStopSec=30 \
+        -p User=root -p Group=$CONTROL_GID -p UMask=0077 -p Restart=no -p TimeoutStopSec=30 \
         -p KillMode=control-group -p NoNewPrivileges=yes -p LockPersonality=yes \
         -p 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
-        -p 'CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER' \
+        -p 'CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_SYS_ADMIN' \
         /usr/bin/python3 "$LAB/libexec/reorganization_coordinator.py" --config "$LAB/stack/reorganization-coordinator.json"
 }
 
@@ -187,7 +188,7 @@ cmd_resume() {
     # generation and no app start; a STOP state stays inspectable as it is.
     need_root resume
     [[ -f $LAB/stack/approved-v6/current.json ]] || die "no approved deployment; use sudo $0 start"
-    install -d -o root -g $EDGE_GID -m 0750 "$RUN"
+    install -d -o root -g $CONTROL_GID -m 0750 "$RUN"
     compose_smb up -d smb
     mount_views
     compose_lab up -d --no-build --pull=never edge
@@ -212,7 +213,7 @@ cmd_start() {
         cp -a "$LAB/golden/library/." "$LAB/smb/share/"
     fi
     install_trusted_files "$image"
-    install -d -o root -g $EDGE_GID -m 0750 "$RUN"
+    install -d -o root -g $CONTROL_GID -m 0750 "$RUN"
     compose_smb up -d smb
     mount_views
     python3 "$LAB/libexec/lab_capability.py" --rw "$LAB/mnt/rw" --ro "$LAB/mnt/ro" --share "$SHARE" \
@@ -292,7 +293,7 @@ cmd_status() {
     done
     docker ps -a --filter 'name=^anime-db-v6-' --format '  worker {{.Names}}  {{.Status}}'
     say "coordinator unit: $(systemctl is-active "$UNIT" 2>/dev/null || true)"
-    # The regular user is intentionally outside GID 101; check the socket as the edge sees it.
+    # The regular user is intentionally outside the dedicated control GID; check the socket as the edge sees it.
     printf '  socket (seen by edge): '
     docker exec animedb-v6-lab-edge-1 stat -c '%U:%G %a %F' /run/animedb-control/coordinator.sock 2>/dev/null || echo missing
     for view in ro rw; do

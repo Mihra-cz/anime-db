@@ -73,15 +73,40 @@ vlastní `edge`. Proměnné jsou stejné jako v [RELEASE_UPDATE](RELEASE_UPDATE.
 `APP_URL` je skutečná interní adresa z místní konfigurace. Přístup k Dockeru
 vyžaduje privilegovanou relaci, běžný SSH účet ho nemá.
 
+Před prvním Compose příkazem musí být dokončen
+[socketový předkrok](RELEASE_UPDATE.md#socketový-předkrok--před-a-i-před-c1):
+vyhrazená skupina bez lidských členů, skutečný GID v původním `.env`, shoda
+systemd/tmpfiles/root JSON a `group_add`. Není dovoleno odstranit povinnou
+interpolaci ani použít samotný base. Nové `.env` znamená nové V2 schválení.
+Režim `DEPLOY_MODE` se určí předem podle nasazené instalace, nikdy fallbackem
+po selhání root helperu. Všechny příkazy níže předpokládají tuto kontrolu.
+
 ```bash
-dc=(docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE")
+dc=(sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE")
 "${dc[@]}" config -q
 "${dc[@]}" ps -a
 "${dc[@]}" logs --tail 80 "$APP_SERVICE"
-"${dc[@]}" up -d --no-deps --no-build "$APP_SERVICE"
+if test "$DEPLOY_MODE" = approved; then
+  # Verify release -> pin bindings -> validate model -> edge then app.
+  sudo -- /usr/bin/python3 /usr/local/libexec/anime-db/reorganization_autostart.py start
+else
+  test "$DEPLOY_MODE" = legacy
+  "${dc[@]}" up -d --no-deps --no-build --pull=never "$APP_SERVICE"
+fi
 curl --fail --silent --show-error --max-time 5 "$APP_URL/health"
-"${dc[@]}" stop "$APP_SERVICE"
+if test "$DEPLOY_MODE" = approved; then
+  sudo -- /usr/bin/python3 /usr/local/libexec/anime-db/reorganization_autostart.py stop
+else
+  test "$DEPLOY_MODE" = legacy
+  "${dc[@]}" stop -t 30 "$APP_SERVICE"
+fi
 ```
+
+`config/ps/logs` výše jsou read-only diagnostika původních tří vstupů.
+Raw Compose `up` nad `generation-*/compose.N.yaml` není podporovaný provozní
+postup: bez bezpečného ingressu mohou být kotvy ještě prázdné. Approved start
+může při nové generaci recreatovat edge; stop ponechává edge dostupný. Před
+startem ověřit idle a žádný nevyhodnocený E7/E7H; start není recovery ani retry.
 
 `up -d` ani samotné `/health` nepotvrzují integritu DB či dostupnost NAS.
 Preflight při chybě STOPne a `restart: no` zabraňuje opakování v chybové smyčce.

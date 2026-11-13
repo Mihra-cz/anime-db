@@ -26,6 +26,13 @@ import time
 from urllib.parse import urlsplit, parse_qs
 from urllib.request import urlopen
 
+try:
+    from host_io import RuntimeDirectory, open_file, ensure_bindings
+except ImportError:
+    from deploy.nexus.host_io import RuntimeDirectory, open_file, ensure_bindings
+
+RUNTIME_DIRECTORIES = ('database_dir','state_dir','inbox','outbox','ledger','backups','service_status')
+
 MAX_REQUEST = 64 * 1024
 MAX_PROPOSAL = 64 * 1024 * 1024
 MAX_DECISION = 2 * 1024 * 1024
@@ -58,8 +65,8 @@ def strict_json(raw):
         parse_constant=lambda value: (_ for _ in ()).throw(ValueError('non-finite JSON')))
 
 
-def read_json(path, limit=MAX_REQUEST):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+def read_json(path, limit=MAX_REQUEST, *, fd=None):
+    fd = open_file(path) if fd is None else fd
     try:
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit:
@@ -148,6 +155,7 @@ class Config:
     private_dir: Path
     runtime_evidence: Path | None = None
     app_health_timeout_seconds: int = 900
+    approved_root: Path | None = None
 
     def __post_init__(self):
         if type(self.app_health_timeout_seconds) is not int or not 0 < self.app_health_timeout_seconds <= 3600:
@@ -160,7 +168,7 @@ def load_config(path):
     value = read_json(path)
     names = {f.name for f in fields(Config)}
     if (type(value) is not dict or set(value) - names
-            or names - {'app_health_timeout_seconds'} - set(value)):
+            or names - {'app_health_timeout_seconds','approved_root'} - set(value)):
         raise ValueError('exact coordinator config fields required')
     if type(value['version']) is not int or value['version'] != 1:
         raise ValueError('config version 1 required')
@@ -188,7 +196,9 @@ def load_config(path):
     if type(value['compose_files']) is not list or len(value['compose_files']) != 3:
         raise ValueError('the three production Compose files in order are required')
     value['compose_files'] = tuple(Path(p) for p in value['compose_files'])
-    resolve_deployment(value['compose_files'])
+    if value.get('approved_root') is not None:
+        value['approved_root'] = Path(value['approved_root'])
+    resolve_deployment(value['compose_files'], approved_root=value.get('approved_root'))
     for item in (value['worker_config'], value['runtime_evidence']):
         secure_root_path(item)
     for name in ('snapshot_hook', 'writers_stop_hook', 'writers_start_hook'):
@@ -208,14 +218,19 @@ def load_config(path):
     if stat.S_IMODE(value['private_dir'].stat().st_mode) != 0o700:
         raise ValueError('host claims require private mode 0700')
     for directory in directories:
+        runtime = directory in [value[name] for name in RUNTIME_DIRECTORIES]
         for parent in directory.parents:
             info = parent.lstat()
-            if info.st_uid != 0 or info.st_mode & 0o022:
-                raise ValueError('deployment directory ancestors must be root controlled')
+            allowed = {0, value['uid']} if runtime and value.get('approved_root') is not None else {0}
+            if info.st_uid not in allowed or info.st_mode & 0o022:
+                raise ValueError('deployment directory ancestors have unsafe ownership or permissions')
     for name in ('database_dir','state_dir','inbox','outbox','ledger','backups','service_status'):
         info = value[name].stat()
         if info.st_uid != value['uid'] or info.st_mode & 0o022:
             raise ValueError('worker evidence directories require runtime ownership without group/other writes')
+    if value.get('approved_root') is not None:
+        if value['socket_gid'] in (101,value['gid']) or value['control_dir'].stat().st_gid != value['socket_gid']:
+            raise ValueError('dedicated control socket GID must match control directory and differ from app/nginx groups')
     config = Config(**value)
     verify_worker_config(config)
     return config
@@ -293,13 +308,13 @@ def run_command(argv, *, input=None, timeout=120):
     return result.stdout
 
 
-def resolve_deployment(compose_files):
+def resolve_deployment(compose_files, *, approved_root=None):
     # Installed host helper is a trusted sibling; repo tests use its package path.
     try:
         from reorganization_deployment import resolve_deployment as resolve
     except ImportError:
         from deploy.nexus.reorganization_deployment import resolve_deployment as resolve
-    return resolve(compose_files)
+    return resolve(compose_files, approved_root=approved_root)
 
 
 def check_health(url):
@@ -375,6 +390,8 @@ class Forbidden(ValueError):
 class Coordinator:
     def __init__(self, config, *, run=run_command, healthy=check_health):
         self.config, self.run, self.healthy = config, run, healthy
+        self._runtime = {getattr(config,name): RuntimeDirectory(getattr(config,name),config.uid,config.gid)
+            for name in RUNTIME_DIRECTORIES}
         self.active_source = None
         self.health_timeout = config.app_health_timeout_seconds
         self.app_restart_state = None
@@ -391,15 +408,44 @@ class Coordinator:
         self.metrics = {}
         secret = config.private_dir / 'csrf-secret.json'
         try:
-            write_json(secret, {'key': secrets.token_hex(32)}, exclusive=True)
+            self.write_json(secret, {'key': secrets.token_hex(32)}, exclusive=True)
         except FileExistsError:
             pass
-        self._key = bytes.fromhex(read_json(secret)['key'])
+        self._key = bytes.fromhex(self.read_json(secret)['key'])
         if len(self._key) != 32:
             raise ValueError('invalid private CSRF key')
 
+    def write_json(self, path, value, *, exclusive=False, mode=0o600, owner=None):
+        runtime = self._runtime.get(path.parent)
+        if runtime is not None:
+            return runtime.write(path.name, value, exclusive=exclusive, mode=mode)
+        return write_json(path, value, exclusive=exclusive, mode=mode, owner=owner)
+
+    def read_json(self, path, limit=MAX_REQUEST):
+        runtime = self._runtime.get(path.parent)
+        return read_json(path, limit, fd=runtime.read(path.name) if runtime else None)
+
+    def runtime_exists(self, path):
+        try:
+            os.stat(path.name, dir_fd=self._runtime[path.parent].fd, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def check_runtime(self):
+        for runtime in self._runtime.values():
+            runtime.check()
+
     def compose(self, *args):
-        deployment = resolve_deployment(self.config.compose_files)
+        deployment = (resolve_deployment(self.config.compose_files, approved_root=self.config.approved_root)
+            if self.config.approved_root is not None else resolve_deployment(self.config.compose_files))
+        if self.config.approved_root is not None:
+            try:
+                from reorganization_deployment import verify_active_release
+            except ImportError:
+                from deploy.nexus.reorganization_deployment import verify_active_release
+            verify_active_release(deployment,self.config.compose_files,self.config.image)
+        ensure_bindings(getattr(deployment,'bindings',()))
         argv = ['/usr/bin/docker', 'compose', '--project-directory', str(deployment.project_directory),
             '--env-file', str(deployment.env_file), '-p', deployment.project_name]
         for path in deployment.files:
@@ -415,7 +461,19 @@ class Coordinator:
         return 'anime-db-v6-' + kind + '-' + request_id + '-' + verb
 
     def worker(self, verb, request_id, kind, *, receipt=None):
+        self.check_runtime()
         c = self.config
+        runtime_sources={}
+        if c.approved_root is not None:
+            root=c.private_dir/'worker-binds'
+            root.mkdir(mode=0o700,exist_ok=True)
+            for name in RUNTIME_DIRECTORIES:
+                original=getattr(c,name)
+                target=root/name
+                if not target.exists():target.mkdir(mode=0o700)
+                runtime=self._runtime[original]
+                ensure_bindings([dict(source=str(original),target=str(target),dev=runtime.identity[0],ino=runtime.identity[1])])
+                runtime_sources[original]=target
         self._worker_dispatched = False
         self._worker_stop_confirmed = False
         if verb in {'plan', 'publish', 'execute'}:
@@ -430,7 +488,7 @@ class Coordinator:
                 (c.outbox,'/approval-outbox',True), (c.ledger,'/approval-ledger',False),
                 (c.backups,'/backups',False), (c.service_status,'/service-status',False),
                 (c.worker_config,'/coordinator-config/worker.json',True)):
-            argv += ['--mount', f'type=bind,src={host},dst={inside}' + (',readonly' if ro else '')]
+            argv += ['--mount', f'type=bind,src={runtime_sources.get(host,host)},dst={inside}' + (',readonly' if ro else '')]
         if receipt is not None:
             argv.append('--interactive')
         argv += [c.image, '-m', 'app.tools.reorganization_worker', '--config',
@@ -452,7 +510,7 @@ class Coordinator:
         if self.config.runtime_evidence is None:
             raise failure('CAPABILITIES_UNVERIFIED')
         try:
-            proof=read_json(self.config.runtime_evidence)
+            proof=self.read_json(self.config.runtime_evidence)
             if (type(proof)!=dict or set(proof)!=RUNTIME_KEYS
                     or any(proof.get(key) is not True for key in
                         ('mount_read_write_checked','safe_write_capability_proven','rename_noreplace_capability_proven'))
@@ -472,7 +530,7 @@ class Coordinator:
         if self._snapshot_receipt is not None:
             proof.update(self._snapshot_receipt)
             proof['snapshot_capable']=bool(self._snapshot_receipt.get('snapshot_id'))
-        write_json(self.config.ledger/f'{request_id}.{verb}-runtime.json',proof,
+        self.write_json(self.config.ledger/f'{request_id}.{verb}-runtime.json',proof,
             exclusive=True,owner=(self.config.uid,self.config.gid))
 
     def measured_worker(self, verb, request_id, kind, **kwargs):
@@ -485,7 +543,7 @@ class Coordinator:
             result.get(key)==data[key] for key in ('source_sha256','approved_sha256','manifest_id')))
 
     def status(self, request_id, kind, state, phase, detail, source=None, **extra):
-        write_json(self.config.inbox / f'{request_id}.{kind}-status.json', dict(version=1,
+        self.write_json(self.config.inbox / f'{request_id}.{kind}-status.json', dict(version=1,
             kind=kind, request_id=request_id, state=state, phase=phase, detail=detail, source_sha256=source, **extra),
             owner=(self.config.uid,self.config.gid))
 
@@ -495,7 +553,7 @@ class Coordinator:
         data = None
         if source is not None:
             try:
-                existing = read_json(path)
+                existing = self.read_json(path)
                 if existing.get('source_sha256') == source:
                     data = existing
             except (OSError, ValueError):
@@ -511,21 +569,21 @@ class Coordinator:
             for row in data['phases']:
                 if row['state'] == 'WORK':
                     row['state'] = 'STOP'
-        write_json(path,data,mode=0o644,owner=(self.config.uid,self.config.gid))
+        self.write_json(path,data,mode=0o644,owner=(self.config.uid,self.config.gid))
 
     def begin_heartbeat(self):
         self.end_heartbeat()
         self._heartbeat_stop.clear()
         path=self.config.service_status/'progress.json'
-        run_id=read_json(path)['run_id']
+        run_id=self.read_json(path)['run_id']
         def beat():
             while not self._heartbeat_stop.wait(HEARTBEAT_SECONDS):
                 try:
-                    data=read_json(path)
+                    data=self.read_json(path)
                     if data.get('run_id')!=run_id or not data.get('active'):
                         return
                     data['updated_at']=time.time()
-                    write_json(path,data,mode=0o644,owner=(self.config.uid,self.config.gid))
+                    self.write_json(path,data,mode=0o644,owner=(self.config.uid,self.config.gid))
                 except (OSError,ValueError):
                     return
         self._heartbeat_thread=threading.Thread(target=beat,daemon=True)
@@ -599,7 +657,7 @@ class Coordinator:
             self.end_heartbeat()
 
     def done(self, request_id, kind, state):
-        write_json(self.config.private_dir / f'{request_id}.{kind}-done.json',
+        self.write_json(self.config.private_dir / f'{request_id}.{kind}-done.json',
             dict(version=1,request_id=request_id,kind=kind,state=state),exclusive=True)
 
     def recover(self):
@@ -648,7 +706,7 @@ class Coordinator:
         claim=self.config.private_dir / f'{request_id}.{kind}-claim.json'
         if claim.exists():return
         try:
-            write_json(claim,dict(version=1,kind=kind,request_id=request_id),exclusive=True)
+            self.write_json(claim,dict(version=1,kind=kind,request_id=request_id),exclusive=True)
         except FileExistsError:return
         source=request_id if kind=='start' else None
         phase='request'
@@ -662,7 +720,7 @@ class Coordinator:
         execution_returned=False
         data=None
         try:
-            data=read_json(path)
+            data=self.read_json(path)
             self.validate_request(data,request_id,kind)
             phase='mount'
             try:require_rw_mount(self.config.media_rw,self.config.nas_source)
@@ -702,7 +760,7 @@ class Coordinator:
                         or datetime.fromisoformat(receipt['snapshot_at'].replace('Z','+00:00')).tzinfo is None):
                     raise failure('SNAPSHOT_FAILED')
                 self._snapshot_receipt=receipt
-                write_json(self.config.private_dir/f'{request_id}.snapshot.json',receipt,exclusive=True)
+                self.write_json(self.config.private_dir/f'{request_id}.snapshot.json',receipt,exclusive=True)
                 phase='publish'
                 publication=self.measured_worker('publish',request_id,kind,receipt=receipt)
                 if publication!={'source_sha256':source}:
@@ -723,7 +781,7 @@ class Coordinator:
                 execution_attempted=True
                 result=self.measured_worker('execute',request_id,kind)
                 execution_returned=True
-                original=read_json(self.config.inbox/(source+'.result.json'),MAX_PROPOSAL)
+                original=self.read_json(self.config.inbox/(source+'.result.json'),MAX_PROPOSAL)
                 if not all(self.valid_identity_result(row,data,'NORMAL') for row in (result,original)):
                     raise failure('EVIDENCE_UNCERTAIN')
                 self.active_source=None
@@ -780,7 +838,7 @@ class Coordinator:
             private=dict(phase=phase,error=type(error).__name__,detail=str(error)[:MAX_DIAGNOSTIC],
                 stderr=getattr(error,'stderr','')[-MAX_DIAGNOSTIC:],stdout=getattr(error,'stdout','')[-MAX_DIAGNOSTIC:],
                 returncode=getattr(error,'returncode',None))
-            try:write_json(self.config.private_dir/f'{request_id}.{kind}-error.json',private,exclusive=True)
+            try:self.write_json(self.config.private_dir/f'{request_id}.{kind}-error.json',private,exclusive=True)
             finally:
                 self.status(request_id,kind,'STOP',phase,detail,source,error_code=code,e7_started=e7_started,
                     app_restart_state=self.app_restart_state,
@@ -793,10 +851,12 @@ class Coordinator:
         finally:
             self.end_heartbeat()
             self.active_source=None
-            write_json(self.config.private_dir/f'{request_id}.{kind}-timing.json',dict(self.metrics),exclusive=True)
+            self.write_json(self.config.private_dir/f'{request_id}.{kind}-timing.json',dict(self.metrics),exclusive=True)
 
     def tick(self):
-        for path in sorted(self.config.outbox.iterdir()):
+        self.check_runtime()
+        for name in sorted(os.listdir(self._runtime[self.config.outbox].fd)):
+            path = self.config.outbox/name
             match=REQUEST.fullmatch(path.name)
             if match:
                 self.process(path,*match.groups())
@@ -805,7 +865,7 @@ class Coordinator:
         self._cleanup_stopped.add(source)
         marker=self.config.ledger/(source+'.cleanup-stop.json')
         try:
-            write_json(marker,dict(version=1,source_sha256=source,reason='EVIDENCE_UNCERTAIN'),
+            self.write_json(marker,dict(version=1,source_sha256=source,reason='EVIDENCE_UNCERTAIN'),
                 exclusive=True,owner=(self.config.uid,self.config.gid))
         except FileExistsError:pass
         except OSError:
@@ -818,13 +878,13 @@ class Coordinator:
         if source is None:return None
         path=self.config.ledger/(source+'.cleanup-request.json')
         try:
-            info=path.lstat()
+            info=os.stat(path.name,dir_fd=self._runtime[path.parent].fd,follow_symlinks=False)
         except FileNotFoundError:return None
         key=(source,info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
         if self._cleanup_cache is not None and self._cleanup_cache[0]==key:
             return self._cleanup_cache[1]
         try:
-            record=read_json(path,MAX_PROPOSAL)
+            record=self.read_json(path,MAX_PROPOSAL)
             if (type(record)!=dict or set(record)!={'source_sha256','approved_sha256','proposal'}
                     or record['source_sha256']!=source):
                 raise ValueError('invalid current cleanup request')
@@ -843,8 +903,8 @@ class Coordinator:
             raise
 
     def cleanup_decision_state(self, source):
-        if source in self._cleanup_stopped or (self.config.ledger/(source+'.cleanup-stop.json')).exists():return 'STOP'
-        if (self.config.ledger/(source+'.cleanup-decision.json')).exists():return 'CONSUMED'
+        if source in self._cleanup_stopped or self.runtime_exists(self.config.ledger/(source+'.cleanup-stop.json')):return 'STOP'
+        if self.runtime_exists(self.config.ledger/(source+'.cleanup-decision.json')):return 'CONSUMED'
         if (self.config.private_dir/(source+'.cleanup-claim.json')).exists():
             self.stop_cleanup(source)
             return 'STOP'
@@ -915,12 +975,12 @@ class Coordinator:
             # Host-private one-use claim survives any uncertainty publishing the
             # worker-visible decision; a second POST can never become a retry.
             try:
-                write_json(self.config.private_dir/(record['source_sha256']+'.cleanup-claim.json'),
+                self.write_json(self.config.private_dir/(record['source_sha256']+'.cleanup-claim.json'),
                     decision,exclusive=True)
             except FileExistsError as exc:
                 raise Conflict('cleanup decision already consumed') from exc
             try:
-                write_json(self.config.ledger/(record['source_sha256']+'.cleanup-decision.json'),decision,
+                self.write_json(self.config.ledger/(record['source_sha256']+'.cleanup-decision.json'),decision,
                     exclusive=True,owner=(self.config.uid,self.config.gid))
             except OSError:
                 self.stop_cleanup(record['source_sha256'])

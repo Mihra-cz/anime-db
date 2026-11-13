@@ -24,7 +24,7 @@
 
 **Data zůstávají mimo `src/` a `releases/`.** Aktualizace mění zdrojový checkout, tag Docker image a referenci v produkčním Compose override. Nepřesouvá SQLite, artwork, stav ani soubory na NAS.
 
-Stávající konfigurace používá Compose **v přesném pořadí**: základní → edge → produkční override. Pozdější soubor může měnit hodnoty z předchozích souborů. Při aktualizaci běžné aplikace nerecreatovat edge.
+Stávající konfigurace používá Compose **v přesném pořadí**: základní → edge → produkční override. Pozdější soubor může měnit hodnoty z předchozích souborů. V legacy režimu se aktualizuje jen app. V režimu approved se používá bezpečný start app+edge; nová generace mění bind sources i u edge a může jej recreatovat.
 
 ## 2. Před každou aktualizací
 
@@ -40,7 +40,7 @@ Předem určit a schválit **plný SHA** cílového commitu. Nespouštět update
 
 ### Předpoklady
 
-- Všechny bloky se spouštějí **na serveru v jedné interaktivní relaci Bash** (nikoli `sh`), postupně: proměnné → A → B → C → D. Blok E je jen pro návrat po selhání.
+- Všechny bloky se spouštějí **na serveru v jedné interaktivní relaci Bash** (nikoli `sh`), postupně: proměnné → socketový předkrok → A → B → C → D. Blok E je jen pro návrat po selhání.
 - Relace běží pod běžným vývojovým účtem. `src/` i `releases/` zůstávají pod tímto účtem; současný mód `src/` `775` není důvodem pro `chown`. Git a příprava releasu běží bez sudo. Docker, změna root-owned override a případné přejmenování adresářů v root-owned projektovém kořeni používají jen jednotlivé cílené `sudo` příkazy. Celou relaci nespouštět přes `sudo -i`.
 - `$PROJECT_ROOT/src` je Git checkout s remote `origin`, jehož aktivní commit je na tomto remote dostupný. Platí to od V6 release; nejstarší archiv z první instalace je export bez `.git`. Pokud `src/` není Git checkout, tento návod nelze použít: STOP.
 - Produkční override obsahuje právě jeden řádek `image: $IMAGE_REPO:v6-<prvních 7 znaků aktivního SHA>`. Jinak se blok C zastaví.
@@ -59,6 +59,8 @@ V této relaci nejprve přiřadit hodnoty proměnným níže (`PROJECT_ROOT=…`
 : "${APP_SERVICE:?Nastav jmeno Compose sluzby aplikace}"
 : "${IMAGE_REPO:?Nastav nazev Docker image bez tagu}"
 : "${NEW_SHA:?Nastav schvaleny plny Git commit SHA}"
+: "${DEPLOY_MODE:?Nastav approved pro host helper nebo legacy pro puvodni instalaci}"
+case "$DEPLOY_MODE" in approved|legacy) ;; *) echo "STOP: neplatny DEPLOY_MODE"; exit 1;; esac
 
 SRC="$PROJECT_ROOT/src"
 RELEASES="$PROJECT_ROOT/releases"
@@ -76,7 +78,141 @@ ARCHIVE="$RELEASES/$OLD_TAG"
 NEW_IMAGE="$IMAGE_REPO:$NEW_TAG"
 ```
 
+Režim `approved` je povinný, pokud instalace používá root konfiguraci nebo B5 drop-in;
+chybějící JSON není důvod přepnout na legacy. Režim určete z inventury předem,
+nikoli podle neprivilegovaného `test -f` v root `0700` adresáři.
+
 Žádné heslo ani token nevkládat přímo do příkazů, dokumentace nebo Git remote URL. Použít existující správně nastavené autentizační prostředky.
+
+### Socketový předkrok – před A i před C1
+
+Jde o jednorázovou **schválenou instalační změnu**, ne součást read-only A.
+Při opakované aktualizaci ověřit existující stav; skupinu ani hodnotu neodhadovat.
+Nepoužívat GID 101 (`_ssh`) ani GID app. Existující lidské účty do skupiny nepatří.
+
+1. Založit chybějící skupinu a ověřit její skutečný GID a členství:
+
+   ```bash
+   (
+   set -euo pipefail
+   if ! getent group animedb-control >/dev/null; then
+     sudo groupadd --system animedb-control
+   fi
+   getent group animedb-control
+   )
+   CONTROL_GID="$(getent group animedb-control | cut -d: -f3)"
+   export CONTROL_GID
+   (
+   set -euo pipefail
+   [[ "$CONTROL_GID" =~ ^[1-9][0-9]*$ ]]
+   test "$CONTROL_GID" != 101
+   test "$(getent group | awk -F: -v gid="$CONTROL_GID" '$3 == gid {print $1}')" = animedb-control
+   test -z "$(getent group animedb-control | cut -d: -f4)"
+   test -z "$(getent passwd | awk -F: -v gid="$CONTROL_GID" '$4 == gid {print $1}')"
+   echo "SOCKET GROUP: OK"
+   )
+   ```
+
+2. Do původního `$STACK_DIR/.env` doplnit přesně jednu číselnou hodnotu
+   `ANIMEDB_CONTROL_GID`. Zachovat UID/GID řádky, vlastníka a mód; neobnovovat
+   soubor ze starého releasu. Následující cílený updater používá trusted helper,
+   per-component NOFOLLOW, připnutý parent fd a atomickou publikaci. Při user-owned
+   stacku před zápisem trvale přejde na vlastníka souboru. Nepoužívá root zápis
+   přes znovu vyhodnocenou cestu. Helpery podle [instalačního pořadí](V6_COORDINATOR.md#instalace-b5-a-povinného-gid)
+   musí být nejprve nainstalované; samotná instalace helperů nespouští služby.
+
+   ```bash
+   sudo /usr/bin/python3 -I - "$STACK_DIR" "$CONTROL_GID" <<'PY'
+   import os, secrets, stat, sys
+   sys.path.insert(0, '/usr/local/libexec/anime-db')
+   from host_io import open_directory
+   from reorganization_deployment import _check_inputs
+   parent = open_directory(sys.argv[1])
+   gid = int(sys.argv[2])
+   if gid <= 0 or gid == 101: raise SystemExit('STOP: dedicated GID required')
+   fd = os.open('.env', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+   try:
+       before = os.fstat(fd)
+       directory = os.fstat(parent)
+       caller = int(os.environ.get('SUDO_UID', '0'))
+       if (directory.st_uid not in (0, caller) or directory.st_mode & 0o022
+           or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+           or before.st_size > 65536 or before.st_uid != directory.st_uid):
+           raise SystemExit('STOP: unexpected stack/env ownership or type; no ownership repair')
+       raw = os.read(fd, 65537)
+   finally: os.close(fd)
+   _check_inputs([], raw)
+   lines = raw.decode().splitlines()
+   if sum(line.startswith('ANIMEDB_CONTROL_GID=') for line in lines) > 1:
+       raise SystemExit('STOP: duplicate CONTROL_GID')
+   app_gid = [line.split('=', 1)[1] for line in lines if line.startswith('ANIMEDB_GID=')]
+   if app_gid == [str(gid)]: raise SystemExit('STOP: control GID equals app GID')
+   updated = ('\n'.join(line for line in lines if not line.startswith('ANIMEDB_CONTROL_GID='))
+              + '\nANIMEDB_CONTROL_GID=' + str(gid) + '\n').encode()
+   if updated == raw: raise SystemExit(0)
+   if before.st_uid != 0:
+       os.setgroups([]); os.setgid(before.st_gid); os.setuid(before.st_uid)
+   temp = '.env.' + secrets.token_hex(12)
+   out = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+   try:
+       os.fchown(out, before.st_uid, before.st_gid)
+       os.fchmod(out, stat.S_IMODE(before.st_mode))
+       with os.fdopen(out, 'wb', closefd=False) as stream:
+           stream.write(updated); stream.flush(); os.fsync(out)
+       current = os.stat('.env', dir_fd=parent, follow_symlinks=False)
+       if (current.st_ino, current.st_size, current.st_mtime_ns) != (before.st_ino, before.st_size, before.st_mtime_ns):
+           raise SystemExit('STOP: env changed concurrently')
+       os.replace(temp, '.env', src_dir_fd=parent, dst_dir_fd=parent); os.fsync(parent)
+   finally:
+       os.close(out)
+       try: os.unlink(temp, dir_fd=parent)
+       except FileNotFoundError: pass
+       os.close(parent)
+   PY
+   ```
+
+   Pokud stack/env mají jiného vlastníka nebo nebezpečný mód, STOP; tento postup
+   jejich vlastnictví ani strukturu neopravuje. Po změně `.env` je dosavadní V2
+   approval úmyslně zastaralý: před jakýmkoli startem udělat nové stage/review/approve.
+   Diagnostické `config/ps/logs` nad původními vstupy nic nespouštějí.
+
+3. Před prvním Compose příkazem zkontrolovat konzistenci: jméno skupiny v
+   `Group=animedb-control` a tmpfiles, skutečný GID v `.env` a root JSON
+   `socket_gid`, v Compose Nginx `101:101` plus `group_add` s tímto GID. V approved
+   režimu musí být připraven root JSON podle instalačního pořadí a platí:
+
+   ```bash
+   (
+   set -euo pipefail
+   if test "$DEPLOY_MODE" = approved; then
+     sudo /usr/bin/python3 -I - "$CONTROL_GID" <<'PY'
+   import json, sys
+   from pathlib import Path
+   sys.path.insert(0, '/usr/local/libexec/anime-db')
+   from reorganization_coordinator import secure_root_path, read_json
+   p = Path('/etc/anime-db/reorganization-coordinator.json')
+   secure_root_path(p); c = read_json(p)
+   if c['socket_gid'] != int(sys.argv[1]) or c['gid'] == c['socket_gid']:
+       raise SystemExit('STOP: coordinator socket GID differs')
+   if Path(c['control_dir']).stat().st_gid != c['socket_gid']:
+       raise SystemExit('STOP: tmpfiles control directory group differs')
+   PY
+     test "$(systemctl show animedb-reorganization.service -p Group --value)" = animedb-control
+     test "$(stat -c %g /run/animedb-reorganization)" = "$CONTROL_GID"
+     test "$(stat -c %a /run/animedb-reorganization)" = 750
+   fi
+   # První Compose operace je pouze render; nový edge ve STAGE ověřit
+   # po B a před C1 se stejným explicitním env a project contextem. Žádný fallback na samotný base při chybě interpolace.
+   sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db \
+     -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config -q
+   )
+   ```
+
+V legacy režimu ověřit Group/tmpfiles/JSON v připravených instalačních podkladech;
+pokud socket bind už používá `/run/animedb-reorganization`, skupina a tmpfiles musí
+být nainstalované před jeho startem. Všechny příkazy A–E používají explicitní
+`--env-file "$STACK_DIR/.env"`, `--project-directory` a project `anime-db`.
+Chybějící proměnná v novém edge musí skončit chybou už při `config -q`.
 
 ### A. Krátká kontrola skutečného stavu (read-only)
 
@@ -96,11 +232,11 @@ test ! -e "$STAGE"
 test ! -e "$ARCHIVE"
 test -z "$(git -C "$SRC" status --porcelain)"
 
-sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config -q
-sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps
+sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config -q
+sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps
 
 # K ověření image a bindů použij skutečné ID běžící služby.
-APP_CONTAINER="$(sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -q "$APP_SERVICE")"
+APP_CONTAINER="$(sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -q "$APP_SERVICE")"
 test -n "$APP_CONTAINER"
 sudo -- /usr/bin/docker inspect --format '{{.Config.Image}} | {{.State.Status}}' "$APP_CONTAINER"
 sudo -- /usr/bin/docker inspect --format '{{range .Mounts}}{{println .Destination .RW}}{{end}}' "$APP_CONTAINER"
@@ -130,9 +266,13 @@ test -f "$STAGE/Dockerfile"
 # Vypíše změny, které tento postup do běžícího stacku nepřenese.
 git -C "$STAGE" diff --stat "$OLD_SHA" "$NEW_SHA" -- deploy/nexus/compose.yaml deploy/nexus/service-edge
 
+# Nový edge musí již nyní přijmout připravené .env (před C1).
+sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db \
+  -f "$BASE_COMPOSE" -f "$STAGE/deploy/nexus/service-edge/compose.edge.yaml" -f "$OVERRIDE" config -q
+
 # UID/GID je nutno převzít ze skutečně běžícího kontejneru,
 # nikoli odhadovat nebo zapisovat napevno.
-APP_CONTAINER="$(sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -q "$APP_SERVICE")"
+APP_CONTAINER="$(sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -q "$APP_SERVICE")"
 test -n "$APP_CONTAINER"
 APP_USER="$(sudo -- /usr/bin/docker inspect --format '{{.Config.User}}' "$APP_CONTAINER")"
 case "$APP_USER" in
@@ -151,7 +291,11 @@ echo "BLOK B: OK"
 
 Když cílový commit není dostupný, **nepřecházet automaticky na nejnovější `main`**. Když výpis `git diff --stat` není prázdný, release mění základní Compose nebo edge: zastavit a posoudit samostatně, protože `$STACK_DIR/compose.yaml` ani běžící edge tyto změny nepřevezmou. Nedokončený `$STAGE` po selhání vyhodnotit a teprve potom řízeně odstranit, jinak se blok A zastaví.
 
-### C. Aktivace: archiv starých zdrojů, aktualizace override, recreace jen aplikace
+### C. Aktivace: archiv zdrojů, override a bezpečný start
+
+Před C1 ověřit idle a odstavit pouze neaktivní coordinator, je-li spuštěný.
+Jeho starý config je v paměti; samotná změna root JSON jej neaktualizuje.
+Není dovoleno pokračovat s aktivním/pending E7/E7H nebo nevyhodnoceným STOP.
 
 ```bash
 (
@@ -207,8 +351,9 @@ echo "BLOK C1: zdroje a override pripraveny; aplikace jeste nebyla recreatovana"
 )
 ```
 
-Před následujícím C2 určit, zda je V6 coordinator již instalovaný. Je-li
-`$STACK_DIR/reorganization-coordinator.json` přítomný, provést níže uvedené
+Coordinator během C2 zůstává odstavený; po release se sám nespouští.
+
+V režimu `approved` před následujícím C2 provést níže uvedené
 [schválení snapshotu](#schválený-vstup-koordinátoru) a v této stejné relaci
 nastavit `REVIEWED_GENERATION` na právě schválenou generaci. Před aktivací také
 cíleně aktualizovat root-owned coordinator image na tentýž `NEW_IMAGE` a
@@ -219,27 +364,30 @@ udržovaný stack; generace se vždy vyrábí z původních tří vstupů.
 (
 set -euo pipefail
 EDGE_COMPOSE="$SRC/deploy/nexus/service-edge/compose.edge.yaml"
-if test -f "$STACK_DIR/reorganization-coordinator.json"; then
-  : "${REVIEWED_GENERATION:?Nejprve schval presnou generaci podle oddilu nize}"
-  DEPLOY_BASE="$REVIEWED_GENERATION/compose.1.yaml"
-  DEPLOY_EDGE="$REVIEWED_GENERATION/compose.2.yaml"
-  DEPLOY_OVERRIDE="$REVIEWED_GENERATION/compose.3.yaml"
-  DEPLOY_ENV="$REVIEWED_GENERATION/.env"
+test "$APP_SERVICE" = app
+if test "$DEPLOY_MODE" = approved; then
+  # load_boot resolves and verifies release/source_sha256, then start pins all
+  # bindings before invoking Compose. No raw up over generation-*/binds.
+  sudo -- /usr/bin/python3 /usr/local/libexec/anime-db/reorganization_autostart.py start
 else
-  DEPLOY_BASE="$BASE_COMPOSE"; DEPLOY_EDGE="$EDGE_COMPOSE"
-  DEPLOY_OVERRIDE="$OVERRIDE"; DEPLOY_ENV="$STACK_DIR/.env"
+  sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db \
+    -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config -q
+  test "$(sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db \
+    -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config --images "$APP_SERVICE")" = "$NEW_IMAGE"
+  sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db \
+    -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" up -d --no-deps --no-build --pull=never "$APP_SERVICE"
 fi
-sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$DEPLOY_ENV" -p anime-db \
-  -f "$DEPLOY_BASE" -f "$DEPLOY_EDGE" -f "$DEPLOY_OVERRIDE" config -q
-test "$(sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$DEPLOY_ENV" -p anime-db \
-  -f "$DEPLOY_BASE" -f "$DEPLOY_EDGE" -f "$DEPLOY_OVERRIDE" config --images "$APP_SERVICE")" = "$NEW_IMAGE"
-sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$DEPLOY_ENV" -p anime-db \
-  -f "$DEPLOY_BASE" -f "$DEPLOY_EDGE" -f "$DEPLOY_OVERRIDE" up -d --no-deps --no-build --pull=never "$APP_SERVICE"
 echo "BLOK C: OK"
 )
 ```
 
-Pozor na edge: běžící edge kontejner drží bind na adresář, který existoval při jeho startu. Po přesunu tedy dál čte soubory z archivovaného checkoutu, nikoli z nového `src/`, a změny v `deploy/nexus/service-edge/` se projeví až při samostatně schválené recreaci edge. Edge kontejner se zbytečně nerecreatuje. Staré image ani archivované zdroje neodstraňovat. **Nepoužívat** `docker compose down`, `--remove-orphans` nebo `docker system prune`.
+V režimu `approved` start používá právě schválený `current.json`; samotný
+`REVIEWED_GENERATION` v shellu jej nevybírá. Při jakémkoli selhání C2 STOP,
+žádný raw Compose ani legacy fallback. Pokud app dosud běží, samotná příprava
+kotev ji neodstavuje; při pozdějším selhání zachovat data a použít řízený E.
+Nové bind sources generace znamenají recreaci edge při tomto startu či bootu.
+
+Pozor na legacy edge: běžící edge kontejner drží bind na adresář, který existoval při jeho startu. Po přesunu tedy dál čte soubory z archivovaného checkoutu, nikoli z nového `src/`, a změny v `deploy/nexus/service-edge/` se projeví až při samostatně schválené recreaci edge. Edge kontejner se zbytečně nerecreatuje. Staré image ani archivované zdroje neodstraňovat. **Nepoužívat** `docker compose down`, `--remove-orphans` nebo `docker system prune`.
 
 ### D. Ověření po aktualizaci
 
@@ -248,7 +396,7 @@ Pozor na edge: běžící edge kontejner drží bind na adresář, který existo
 set -euo pipefail
 
 # -a: i kontejner zastavený po neúspěšném startu musí ukázat stav a logy.
-APP_CONTAINER="$(sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -aq "$APP_SERVICE")"
+APP_CONTAINER="$(sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" ps -aq "$APP_SERVICE")"
 test -n "$APP_CONTAINER"
 sudo -- /usr/bin/docker inspect --format '{{.Config.Image}} | {{.State.Status}} | {{.RestartCount}}' "$APP_CONTAINER"
 sudo -- /usr/bin/docker logs --tail 35 "$APP_CONTAINER"
@@ -265,7 +413,10 @@ Při selhání aktualizace neopakovat instalační provision, migraci ani reorga
 
 ### E. Návrat k předchozí verzi
 
-Blok předpokládá dokončený blok C a stejnou relaci s původními proměnnými. Pokud se blok C přerušil uprostřed, tento blok nespouštět a stav dořešit ručně podle skutečných cest.
+Blok předpokládá dokončený C1 a stejnou relaci s původními proměnnými.
+Lze jej použít po neúspěšném C2, pokud kontroly níže potvrdí přesně nový src a
+starý archiv. Při částečném C1 nebo jiné topologii STOP a ruční inventura;
+žádný automatický přesun podle odhadu.
 
 ```bash
 (
@@ -282,9 +433,33 @@ sudo mv -T "$SRC" "$STAGE"
 sudo mv -T "$ARCHIVE" "$SRC"
 sudo sed -i "s|image: $NEW_IMAGE|image: $OLD_IMAGE|" "$OVERRIDE"
 
-sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config -q
-test "$(sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config --images "$APP_SERVICE")" = "$OLD_IMAGE"
-sudo -- /usr/bin/docker compose -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" up -d --no-deps --no-build "$APP_SERVICE"
+echo "NAVRAT E1: puvodni src a image obnoveny; zatim zadny start"
+)
+```
+
+V `approved` režimu nyní aktualizovat root JSON image na `OLD_IMAGE` (odvozený
+z `IMAGE_REPO:OLD_TAG`) a zkontrolovat socket GID. Pro obnovené aktivní `src/`,
+override a **současné** `.env` znovu provést
+[stage/review/approve](#schválený-vstup-koordinátoru). Neobnovovat staré `.env`
+bez `ANIMEDB_CONTROL_GID`, claims ani DB. Starou generaci nevybírat naslepo:
+archiv/vrácené `src/` musí odpovídat schváleným SHA i source inode. Coordinator
+zůstává zastavený. Teprve potom pokračovat:
+
+```bash
+(
+set -euo pipefail
+OLD_IMAGE="$IMAGE_REPO:$OLD_TAG"
+EDGE_COMPOSE="$SRC/deploy/nexus/service-edge/compose.edge.yaml"
+if test "$DEPLOY_MODE" = approved; then
+  sudo -- /usr/bin/python3 /usr/local/libexec/anime-db/reorganization_autostart.py start
+else
+  sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db \
+    -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config -q
+  test "$(sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db \
+    -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" config --images "$APP_SERVICE")" = "$OLD_IMAGE"
+  sudo -- /usr/bin/docker compose --project-directory "$STACK_DIR" --env-file "$STACK_DIR/.env" -p anime-db \
+    -f "$BASE_COMPOSE" -f "$EDGE_COMPOSE" -f "$OVERRIDE" up -d --no-deps --no-build --pull=never "$APP_SERVICE"
+fi
 echo "NAVRAT: OK"
 )
 ```
@@ -297,7 +472,7 @@ Neúspěšný checkout zůstane ve `$STAGE` k diagnostice a nový image se neods
 - NAS mount, jeho práva a obsah knihovny.
 - Datové bindy a artwork.
 - Schvalovací evidence a runtime lock.
-- Compose topologie, Nginx edge a porty.
+- Compose topologie a porty; approved start smí recreatovat edge kvůli nové generaci bind sources.
 - Předchozí verzované image a checkouty.
 
 Nasazení aplikace **není souhlas s fyzickou reorganizací NAS**. Ta má samostatný postup a schválení.
@@ -311,8 +486,7 @@ Pro příští release vyplnit nové `NEW_SHA` a podle skutečného stavu promě
 Tento krok se používá po instalaci V6 coordinatoru při každém release, který
 mění image nebo kterýkoli z jeho tří Compose vstupů či `.env`. Běžný checkout
 `src/` a archiv `releases/` zůstávají uživatelské; coordinator privilegovaně
-nečte živé YAML pod jejich zapisovatelnými předky. Kořen `$STACK_DIR` a
-administrátorská konfigurace zůstávají root-owned. Podrobnosti prvního nasazení
+nečte živé YAML pod jejich zapisovatelnými předky. Vlastnictví `$STACK_DIR`, projektů a appdata zůstává beze změny. Administrátorská konfigurace patří do `/etc/anime-db/`, schválené generace a privátní evidence do `/var/lib/anime-db/`, s root-owned předky. Podrobnosti prvního nasazení
 jsou v [V6_COORDINATOR](V6_COORDINATOR.md#schválený-snapshot-tří-compose-vstupů).
 
 Po C1 (nové `src/` a root override připravené) root explicitně vytvoří pouze
@@ -322,12 +496,13 @@ kopii vstupů, bez Docker operace:
 sudo python3 /usr/local/libexec/anime-db/reorganization_deployment.py stage \
   --compose "$BASE_COMPOSE" \
   --compose "$SRC/deploy/nexus/service-edge/compose.edge.yaml" \
-  --compose "$OVERRIDE" --env-file "$STACK_DIR/.env"
+  --compose "$OVERRIDE" --env-file "$STACK_DIR/.env" \
+  --approved-root /var/lib/anime-db/approved-v6
 ```
 
 Zapsat výstupní `generation` jako `REVIEWED_GENERATION`. Správce zkontroluje
-přesné tři kopie `compose.1.yaml`, `compose.2.yaml`, `compose.3.yaml`, `.env`,
-image, bindy a složenou konfiguraci proti schválenému releasu. Potom teprve
+tři odvozené kopie `compose.1.yaml`, `compose.2.yaml`, `compose.3.yaml`, `.env`,
+image, původní SHA, descriptorové bind kotvy a složenou konfiguraci proti schválenému releasu. Pouze sources pod nedůvěryhodnými předky se deterministicky přepíší na root-private kotvy; původní tři vstupy se needitují. Potom teprve
 schválí výstupní přesný manifest SHA jako `REVIEWED_DEPLOYMENT_SHA`:
 
 ```bash
@@ -335,12 +510,29 @@ sudo python3 /usr/local/libexec/anime-db/reorganization_deployment.py approve \
   --generation "$REVIEWED_GENERATION" --reviewed-sha256 "$REVIEWED_DEPLOYMENT_SHA"
 ```
 
-Koordinátor používá atomicky zvolenou generaci v `$STACK_DIR/approved-v6/current.json`
+Koordinátor používá atomicky zvolenou generaci v `/var/lib/anime-db/approved-v6/current.json`
 a před každým Compose voláním kontroluje root vlastnictví a všechny SHA.
 Původní tři cesty/order jsou v jeho konfiguraci jen přesná provenance, nikoli
-nechráněný runtime vstup. Project zůstává `anime-db`, relativní cesty se stále
-vyhodnocují vůči původnímu `$STACK_DIR`; nevznikne druhá sada kontejnerů.
+nechráněný runtime vstup. Project zůstává `anime-db` a project directory původní `$STACK_DIR`; bind sources musí být absolutní, nevznikne druhá sada kontejnerů.
 Schválené kopie se nikdy needitují a není nutné rekurzivně měnit vlastníka
 `src/` nebo `releases/`. Při návratu k předchozímu releasu musí správce stejně
 znovu vybrat a schválit odpovídající snapshot a root-owned image; nesmí nechat
 coordinator pracovat s jiným releasem než běžná aplikace.
+
+## Autostart existující služby
+
+Připravený drop-in `systemd/anime-db.service.d/approved-production.conf` platí
+pro skutečně auditovanou `anime-db.service`. Nenahrazuje její firewallové ani
+mount závislosti. Root-owned `scripts/autostart.sh` se instaluje do
+`/usr/local/libexec/anime-db/`, mimo uživatelské předky, spolu s
+`reorganization_autostart.py` a jeho trusted moduly. Jde o podklad budoucího
+schváleného deploymentu, nikoli o provedenou změnu Nexusu.
+
+Boot načte stejnou root konfiguraci a generaci jako coordinator, porovná živé
+tři vstupy a `.env` se schválenými původními SHA a snapshotem prostředí a ověří Git HEAD aktivního `src/` proti
+verzovanému image. Git ani hooky ze zdrojů nespouští. Při neshodě STOP bez
+fallbacku. Spustí nejprve edge, potom app s původním first-run/execution guard
+entrypointem, vždy no-build/no-pull. `ExecStop` zachovává app-only stop `-t 30`;
+Nginx zůstává dostupný při reorganizaci. Coordinator ani E7/E7H se bootem
+nespouštějí. Předchozí src patří do releases a nové schválené src převezme
+aktivní cestu; generace se při tom znovu vytvoří a schválí.
