@@ -57,8 +57,8 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: /srv/animedb-v6-lab/libexec/lab_entrypoint.py
-        target: /lab/lab_entrypoint.py
+        source: /srv/animedb-v6-lab/libexec
+        target: /lab
         read_only: true
         bind:
           create_host_path: false

@@ -9,6 +9,7 @@
 #   deploy/lab/lab.sh data               # user: (re)generate golden synthetic data
 #   sudo deploy/lab/lab.sh setup         # root, once: directories, configs, secrets
 #   sudo deploy/lab/lab.sh start         # root: SMB, CIFS mounts, proof, stack, coordinator
+#   sudo deploy/lab/lab.sh coordinator   # root: validate existing V2 state, restore coordinator only
 #   sudo deploy/lab/lab.sh resume        # root: after reboot, restore SMB/mounts/edge/coordinator only
 #   deploy/lab/lab.sh status             # user: read-only status
 #   deploy/lab/lab.sh smoke              # user: non-destructive smoke test
@@ -29,6 +30,9 @@ ORIGIN=http://127.0.0.1:18080
 LAB_UID=1000
 LAB_GID=1000
 CONTROL_GID=${ANIMEDB_LAB_CONTROL_GID:-2001}
+CONTROL_GROUP=animedb-v6-lab-control
+APPROVED="$LAB/approved-v2"
+SRC="$LAB/release/src"
 CIFS_OPTS="vers=3.1.1,port=1445,uid=$LAB_UID,gid=$LAB_GID,nosuid,nodev,noexec"
 
 say() { printf '[lab] %s\n' "$*"; }
@@ -39,18 +43,24 @@ need_user() { [[ $EUID -ne 0 ]] || die "run as the regular user (docker group), 
 image_tag() {
     # Content hash of exactly the Docker build inputs (see .dockerignore).
     (cd "$REPO" && find pyproject.toml README.md LICENSE app deploy/nexus/preflight.py deploy/nexus/first_run.py \
-        -type f ! -path '*/__pycache__/*' ! -name '*.py[cod]' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)
+        -type f ! -path '*/__pycache__/*' ! -name '*.py[cod]' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)
 }
 # The tag is recomputed from the current build inputs, so a stale image is never used.
-lab_image() { printf 'anime-db-lab:v6-%s\n' "$(image_tag)"; }
+release_commit() {
+    python3 - "$1" "$REPO/deploy/nexus" <<'PYCOMMIT'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from reorganization_deployment import active_commit
+print(active_commit(Path(sys.argv[1])))
+PYCOMMIT
+}
+lab_image() { printf 'anime-db-lab-%s:v6-%s\n' "$(image_tag)" "$(release_commit "$REPO")"; }
 
 compose_lab() {
-    # Same approved root-owned generation that the coordinator uses.
-    local current gen
-    current="$LAB/stack/approved-v6/current.json"
-    gen="$LAB/stack/approved-v6/$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["generation"])' "$current")"
-    /usr/bin/docker compose --project-directory "$LAB/stack" --env-file "$gen/.env" -p "$PROJECT" \
-        -f "$gen/compose.1.yaml" -f "$gen/compose.2.yaml" -f "$gen/compose.3.yaml" "$@"
+    # Shared V2 resolution, original/derived SHA and release verification precede
+    # anchor creation and every privileged Compose dispatch. No legacy fallback.
+    python3 "$LAB/libexec/lab_host.py" compose "$@"
 }
 compose_smb() { /usr/bin/docker compose -p "$SMB_PROJECT" -f "$REPO/deploy/lab/compose.smb.yaml" "$@"; }
 
@@ -78,17 +88,37 @@ cmd_data() {
 
 install_dir() { install -d -o "$2" -g "$3" -m "$4" "$1"; }
 
+check_control_group() {
+    [[ $CONTROL_GID =~ ^[1-9][0-9]*$ && $CONTROL_GID != 101 && $CONTROL_GID != $LAB_GID ]] || die "dedicated socket GID required"
+    python3 - "$CONTROL_GID" "$CONTROL_GROUP" <<'PYGID'
+import grp, pwd, sys
+gid = int(sys.argv[1])
+matching = [g for g in grp.getgrall() if g.gr_gid == gid]
+if len(matching) != 1 or matching[0].gr_name != sys.argv[2]:
+    raise SystemExit('STOP: LAB control group missing or name/GID mismatch; create the dedicated group first')
+if any(g.gr_gid == gid and g.gr_mem for g in grp.getgrall()) or any(p.pw_gid == gid for p in pwd.getpwall()):
+    raise SystemExit('STOP: control GID has unrelated users')
+if len([g for g in grp.getgrall() if g.gr_gid == gid]) > 1:
+    raise SystemExit('STOP: control GID aliases')
+PYGID
+}
+
 cmd_setup() {
     need_root setup
+    check_control_group
     local user_dirs=(appdata/db appdata/state appdata/artwork appdata/backups
         appdata/approval/inbox appdata/approval/outbox appdata/approval/ledger)
     install_dir "$LAB" root root 0755
-    for d in stack libexec edge appdata appdata/approval mnt mnt/ro mnt/rw smb; do install_dir "$LAB/$d" root root 0755; done
+    for d in stack libexec edge mnt mnt/ro mnt/rw smb release; do install_dir "$LAB/$d" root root 0755; done
+    # Mirror the runtime-owned ancestors on Nexus, exercising real V2 aliases.
+    install_dir "$LAB/release" $LAB_UID $LAB_GID 0755
+    install_dir "$LAB/appdata" $LAB_UID $LAB_GID 0755
+    install_dir "$LAB/appdata/approval" $LAB_UID $LAB_GID 0700
     for d in "${user_dirs[@]}"; do install_dir "$LAB/$d" $LAB_UID $LAB_GID 0700; done
     install_dir "$LAB/appdata/service" $LAB_UID $LAB_GID 0755
     install_dir "$LAB/smb/share" $LAB_UID $LAB_GID 0755
     install_dir "$LAB/golden" $LAB_UID $LAB_GID 0755
-    for d in appdata/coordinator smb/secrets snapshots logs; do install_dir "$LAB/$d" root root 0700; done
+    for d in coordinator smb/secrets snapshots logs; do install_dir "$LAB/$d" root root 0700; done
     for user in lab_scan lab_worker; do
         if [[ ! -f $LAB/smb/secrets/$user.pass ]]; then
             (umask 077; head -c 24 /dev/urandom | base64 | tr -d '/+=' > "$LAB/smb/secrets/$user.pass")
@@ -103,7 +133,17 @@ cmd_setup() {
 
 install_trusted_files() {
     local image="$1"
+    # An ordinary local clone gives the unchanged production verifier a real
+    # active src/HEAD. Only its edge Compose is adapted for isolated LAB paths.
+    if [[ ! -e $SRC ]]; then
+        runuser -u "$(id -nu $LAB_UID)" -- git clone --local --no-hardlinks --no-checkout "$REPO" "$SRC"
+    fi
+    [[ $(release_commit "$SRC") == $(release_commit "$REPO") ]] || die "LAB src release differs; preserve and recreate the LAB release clone"
+    install -d -o $LAB_UID -g $LAB_GID -m 0755 "$SRC/deploy/nexus/service-edge"
+    install -o $LAB_UID -g $LAB_GID -m 0644 "$REPO/deploy/lab/compose.edge.yaml" "$SRC/deploy/nexus/service-edge/compose.edge.yaml"
     install -o root -g root -m 0755 "$REPO/deploy/nexus/reorganization_coordinator.py" "$LAB/libexec/reorganization_coordinator.py"
+    install -o root -g root -m 0644 "$REPO/deploy/nexus/reorganization_autostart.py" "$LAB/libexec/reorganization_autostart.py"
+    install -o root -g root -m 0644 "$REPO/deploy/lab/lab_host.py" "$LAB/libexec/lab_host.py"
     install -o root -g root -m 0644 "$REPO/deploy/nexus/host_io.py" "$LAB/libexec/host_io.py"
     install -o root -g root -m 0644 "$REPO/deploy/nexus/reorganization_deployment.py" "$LAB/libexec/reorganization_deployment.py"
     install -o root -g root -m 0644 "$REPO/deploy/lab/lab_entrypoint.py" "$LAB/libexec/lab_entrypoint.py"
@@ -123,13 +163,14 @@ import json, sys
 lab, repo, image, share, origin, run, control_gid = sys.argv[1:]
 a = lab + '/appdata'
 print(json.dumps({'version': 1, 'image': image, 'uid': 1000, 'gid': 1000, 'public_origin': origin,
-    'compose_files': [lab + '/stack/compose.yaml', repo + '/deploy/lab/compose.edge.yaml', lab + '/stack/compose.v6.yaml'],
+    'compose_files': [lab + '/stack/compose.yaml', lab + '/release/src/deploy/nexus/service-edge/compose.edge.yaml', lab + '/stack/compose.v6.yaml'],
+    'approved_root': lab + '/approved-v2',
     'worker_config': lab + '/stack/reorganization-worker.json', 'snapshot_hook': lab + '/libexec/v6-snapshot',
     'writers_stop_hook': lab + '/libexec/v6-stop-writers', 'writers_start_hook': lab + '/libexec/v6-start-writers',
     'socket_gid': int(control_gid), 'nas_source': share, 'database_dir': a + '/db', 'state_dir': a + '/state',
     'media_ro': lab + '/mnt/ro', 'media_rw': lab + '/mnt/rw', 'inbox': a + '/approval/inbox',
     'outbox': a + '/approval/outbox', 'ledger': a + '/approval/ledger', 'backups': a + '/backups',
-    'service_status': a + '/service', 'control_dir': run, 'private_dir': a + '/coordinator',
+    'service_status': a + '/service', 'control_dir': run, 'private_dir': lab + '/coordinator',
     'runtime_evidence': lab + '/stack/runtime-evidence.json'}, indent=2))
 PY
     python3 - "$SHARE" <<'PY' | install -o root -g root -m 0644 /dev/stdin "$LAB/stack/reorganization-worker.json"
@@ -147,7 +188,7 @@ approve_deployment() {
     # and approve exactly the staged generation by its manifest SHA.
     local out gen sha
     out="$(cd "$LAB/libexec" && python3 reorganization_deployment.py stage --project-name "$PROJECT" \
-        --compose "$LAB/stack/compose.yaml" --compose "$REPO/deploy/lab/compose.edge.yaml" \
+        --approved-root "$APPROVED" --compose "$LAB/stack/compose.yaml" --compose "$SRC/deploy/nexus/service-edge/compose.edge.yaml" \
         --compose "$LAB/stack/compose.v6.yaml" --env-file "$LAB/stack/.env")"
     gen="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["generation"])' "$out")"
     sha="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["reviewed_sha256"])' "$out")"
@@ -170,16 +211,77 @@ unmount_views() {
     return 0
 }
 
+unmount_aliases() {
+    # Only after the LAB containers/coordinator stop; never delete through binds.
+    while IFS= read -r target; do
+        if [[ $target == "$APPROVED/"* || $target == "$LAB/coordinator/worker-binds/"* ]]; then
+            umount "$target"
+        fi
+    done < <(findmnt -rn -o TARGET | sort -r)
+}
+
+coordinator_ready() {
+    systemctl is-active --quiet "$UNIT" && [[ -S $RUN/coordinator.sock ]] &&
+        curl -fsS -m 3 "$ORIGIN/_service/control/cleanup" >/dev/null
+}
+
 start_coordinator() {
+    check_control_group
     systemctl is-active --quiet "$UNIT" && return 0
     systemctl reset-failed "$UNIT" 2>/dev/null || true
     # Same process properties as deploy/nexus/systemd/animedb-reorganization.service.
     systemd-run --unit="$UNIT" --description='AnimeDB V6 LAB coordinator' --collect \
-        -p User=root -p Group=$CONTROL_GID -p UMask=0077 -p Restart=no -p TimeoutStopSec=30 \
+        -p User=root -p Group=$CONTROL_GROUP -p UMask=0077 -p Restart=no -p TimeoutStopSec=30 \
         -p KillMode=control-group -p NoNewPrivileges=yes -p LockPersonality=yes \
         -p 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
         -p 'CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_SYS_ADMIN' \
+        -p 'AmbientCapabilities=CAP_SETUID CAP_SETGID' \
         /usr/bin/python3 "$LAB/libexec/reorganization_coordinator.py" --config "$LAB/stack/reorganization-coordinator.json"
+}
+
+cmd_coordinator() {
+    # Restore only the missing coordinator after a partial host start. This
+    # admission reads the current generation/proof/anchors; it creates none.
+    need_root coordinator
+    check_control_group
+    python3 - "$LAB" "$CONTROL_GID" <<'PYCHECK'
+import json, os, sys
+from pathlib import Path
+lab = Path(sys.argv[1])
+sys.path.insert(0, str(lab / 'libexec'))
+from reorganization_coordinator import load_config, read_json, host_mount_identity, RUNTIME_KEYS
+from reorganization_deployment import resolve_deployment, verify_active_release, _read, _json
+c = load_config(lab / 'stack/reorganization-coordinator.json')
+d = resolve_deployment(c.compose_files, approved_root=c.approved_root)
+verify_active_release(d, c.compose_files, c.image)
+metadata = _json(_read(d.files[0].parent / 'deployment.json'))
+if (c.approved_root != lab / 'approved-v2' or metadata['version'] != 2
+        or d.project_name != 'animedb-v6-lab' or c.socket_gid != int(sys.argv[2])):
+    raise ValueError('fixed LAB V2 profile required')
+mounted = {line.split()[4] for line in Path('/proc/self/mountinfo').read_text().splitlines()}
+for row in d.bindings:
+    info = Path(row['target']).stat()
+    original = Path(row['source']).stat()
+    if (row['target'] not in mounted or (info.st_dev, info.st_ino) != (row['dev'], row['ino'])
+            or (original.st_dev, original.st_ino) != (row['dev'], row['ino'])):
+        raise ValueError('existing approved bind anchor missing or changed')
+proof = read_json(c.runtime_evidence)
+if (set(proof) != RUNTIME_KEYS or proof['mount_identity'] != host_mount_identity(c.media_rw, c.nas_source)
+        or any(proof[k] is not True for k in ('mount_read_write_checked', 'safe_write_capability_proven', 'rename_noreplace_capability_proven'))):
+    raise ValueError('current mount-bound capability evidence required')
+ro = [line.split(' - ') for line in Path('/proc/self/mountinfo').read_text().splitlines()
+      if line.split()[4] == str(c.media_ro)]
+if len(ro) != 1 or ro[0][1].split()[:2] != ['cifs', c.nas_source] or 'ro' not in ro[0][0].split()[5].split(','):
+    raise ValueError('existing read-only LAB CIFS view required')
+print(json.dumps(dict(generation=str(d.files[0].parent), version=metadata['version'],
+    bindings=len(d.bindings), source_sha256=metadata['source_sha256'],
+    derived_sha256=[r['sha256'] for r in metadata['files']], runtime_proof='valid', socket_gid=c.socket_gid)))
+PYCHECK
+    start_coordinator
+    for _ in $(seq 1 30); do coordinator_ready && break; sleep 1; done
+    coordinator_ready || die "coordinator socket missing; see journalctl -u $UNIT"
+    curl -fsS "$ORIGIN/_service/app-health" >/dev/null || die "existing app health unavailable"
+    say "OK coordinator restored; approved generation, mounts, app and edge retained"
 }
 
 cmd_resume() {
@@ -187,14 +289,14 @@ cmd_resume() {
     # No reseed, no capability probe (it writes to the library), no new deployment
     # generation and no app start; a STOP state stays inspectable as it is.
     need_root resume
-    [[ -f $LAB/stack/approved-v6/current.json ]] || die "no approved deployment; use sudo $0 start"
+    [[ -f $APPROVED/current.json ]] || die "no approved deployment; use sudo $0 start"
     install -d -o root -g $CONTROL_GID -m 0750 "$RUN"
     compose_smb up -d smb
     mount_views
     compose_lab up -d --no-build --pull=never edge
     start_coordinator
-    for _ in $(seq 1 30); do [[ -S $RUN/coordinator.sock ]] && break; sleep 1; done
-    [[ -S $RUN/coordinator.sock ]] || die "coordinator socket missing; see journalctl -u $UNIT"
+    for _ in $(seq 1 30); do coordinator_ready && break; sleep 1; done
+    coordinator_ready || die "coordinator socket missing; see journalctl -u $UNIT"
     say "OK resumed without changes; the app was not started (runtime evidence is stale after remount by design)"
 }
 
@@ -217,24 +319,33 @@ cmd_start() {
     compose_smb up -d smb
     mount_views
     python3 "$LAB/libexec/lab_capability.py" --rw "$LAB/mnt/rw" --ro "$LAB/mnt/ro" --share "$SHARE" \
-        --evidence "$LAB/stack/runtime-evidence.json" --report "$LAB/appdata/coordinator/lab-capability-report.json" >/dev/null
+        --evidence "$LAB/stack/runtime-evidence.json" --report "$LAB/coordinator/lab-capability-report.json" >/dev/null
     say "capability proof written for the current RW mount identity"
     approve_deployment
     compose_lab config -q
-    compose_lab up -d --no-build --pull=never app edge
+    python3 "$LAB/libexec/lab_host.py" start
     start_coordinator
     for _ in $(seq 1 60); do
-        curl -fsS "$ORIGIN/_service/app-health" >/dev/null 2>&1 && [[ -S $RUN/coordinator.sock ]] && break; sleep 1
+        curl -fsS "$ORIGIN/_service/app-health" >/dev/null 2>&1 && coordinator_ready && break; sleep 1
     done
     curl -fsS "$ORIGIN/_service/app-health" >/dev/null || die "app health through edge not confirmed"
-    [[ -S $RUN/coordinator.sock ]] || die "coordinator socket missing; see journalctl -u $UNIT"
+    coordinator_ready || die "coordinator socket missing; see journalctl -u $UNIT"
     say "OK lab running: open $ORIGIN/reorganization"
 }
 
 cmd_stop() {
     need_root stop
     systemctl stop "$UNIT" 2>/dev/null || true
-    [[ -f $LAB/stack/approved-v6/current.json ]] && compose_lab down || true
+    if [[ -f $APPROVED/current.json ]]; then
+        python3 "$LAB/libexec/lab_host.py" stop
+        python3 "$LAB/libexec/lab_host.py" down
+    else
+        # A failed first start may have created only SMB/CIFS resources. Clean
+        # those up when no app stack is running, without reading legacy Compose.
+        [[ -z "$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT")" ]] || die "V2 approval missing with running LAB stack; inspect before cleanup (no legacy fallback)"
+        say "V2 approval missing: no Compose dispatch or legacy fallback"
+    fi
+    unmount_aliases
     unmount_views
     compose_smb down || true
     say "OK lab stopped (data, evidence and images kept)"
@@ -253,7 +364,7 @@ cmd_reset() {
     find "$LAB/smb/share" -mindepth 1 -delete
     cp -a "$LAB/golden/library/." "$LAB/smb/share/"
     for d in appdata/db appdata/state appdata/artwork appdata/backups appdata/service \
-             appdata/approval/inbox appdata/approval/outbox appdata/approval/ledger appdata/coordinator snapshots; do
+             appdata/approval/inbox appdata/approval/outbox appdata/approval/ledger coordinator snapshots; do
         find "$LAB/$d" -mindepth 1 -delete
     done
     install -o $LAB_UID -g $LAB_GID -m 0600 "$LAB/golden/anime.db" "$LAB/appdata/db/anime.db"
@@ -318,7 +429,7 @@ cmd_up() {
 }
 
 case "${1:-}" in
-    up) cmd_up ;; resume) cmd_resume ;;
+    up) cmd_up ;; resume) cmd_resume ;; coordinator) cmd_coordinator ;;
     build) cmd_build ;; data) cmd_data ;; setup) cmd_setup ;; start) cmd_start ;; stop) cmd_stop ;;
     reset) cmd_reset ;; hook-mode) cmd_hook_mode "${2:-}" ;; teardown) cmd_teardown "${2:-}" ;;
     status) cmd_status ;; smoke) cmd_smoke ;;

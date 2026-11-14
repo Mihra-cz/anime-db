@@ -25,21 +25,23 @@ def compose(deployment):
 
 
 
-def load_boot(path, *, verify_live=True):
+def load_boot(path, *, verify_live=True, project_name='anime-db'):
     secure_root_path(path)
     config = read_json(path)
     files = tuple(Path(p) for p in config['compose_files'])
     root = Path(config['approved_root'])
     deployment = resolve_deployment(files,approved_root=root)
-    if deployment.project_name != 'anime-db':
-        raise ValueError('existing anime-db production project required')
+    if project_name not in ('anime-db', 'animedb-v6-lab') or deployment.project_name != project_name:
+        raise ValueError('approved deployment project differs from explicit host profile')
     if not verify_live:
         return deployment,config
     verify_active_release(deployment,files,config['image'])
     return deployment,config
 
 
-def autostart(deployment, config, action, *, run=run_command):
+def autostart(deployment, config, action, *, run=run_command, project_name='anime-db'):
+    if project_name not in ('anime-db', 'animedb-v6-lab') or deployment.project_name != project_name:
+        raise ValueError('approved deployment project differs from explicit host profile')
     argv = compose(deployment)
     if action == 'stop':
         # An app shutdown for maintenance must leave the service page available.
@@ -49,9 +51,11 @@ def autostart(deployment, config, action, *, run=run_command):
     model = _json(run(argv+['config','--format','json']))
     services = model.get('services',{})
     app,edge = services.get('app',{}),services.get('edge',{})
-    if (model.get('name') != 'anime-db' or app.get('image') != config['image']
+    entrypoint = (['python','/usr/local/libexec/anime-db/nexus_first_run.py']
+        if project_name == 'anime-db' else ['python','/lab/lab_entrypoint.py'])
+    if (model.get('name') != project_name or app.get('image') != config['image']
             or app.get('user') != f"{config['uid']}:{config['gid']}"
-            or app.get('entrypoint') != ['python','/usr/local/libexec/anime-db/nexus_first_run.py']
+            or app.get('entrypoint') != entrypoint
             or edge.get('user') != '101:101'
             or str(config['socket_gid']) not in [str(g) for g in edge.get('group_add',[])]
             or not re.fullmatch(r'nginx:[^@]+@sha256:[0-9a-f]{64}',edge.get('image',''))):

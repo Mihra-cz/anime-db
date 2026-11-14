@@ -18,7 +18,7 @@ soubory v `deploy/nexus/`.
 | Data | `/srv/animedb-v6-lab/appdata/*`; golden kopie v `/srv/animedb-v6-lab/golden` |
 | Koordinátor | transientní systemd unit `animedb-v6-lab-coordinator`, root kopie v `/srv/animedb-v6-lab/libexec` |
 | Socket | `/run/animedb-v6-lab/coordinator.sock` (`root:<CONTROL_GID> 0660`, adresář `0750`) |
-| Compose pro koordinátor | schválená root generace v `/srv/animedb-v6-lab/stack/approved-v6` |
+| Compose pro koordinátor | V2 root generace v `/srv/animedb-v6-lab/approved-v2` |
 
 Nikdy se nepoužívá produkční `data/anime.db` (vyloučeno i z image přes
 `.dockerignore`), `/mnt/nas-anime`, Synology účty, Nexus cesty ani projekt
@@ -29,19 +29,46 @@ Nikdy se nepoužívá produkční `data/anime.db` (vyloučeno i z image přes
 | Soubor | Účel |
 | --- | --- |
 | `compose.yaml`, `compose.v6.yaml` | lab base a override; root kopie v `/srv/animedb-v6-lab/stack/` (obdoba root stacku na Nexusu) |
-| `compose.edge.yaml` | lab edge; zůstává uživatelský zdroj v repozitáři (obdoba `src/`), koordinátor používá jen schválenou root kopii |
+| `compose.edge.yaml` | lab edge; instaluje se do uživatelského lokálního klonu `release/src/deploy/nexus/service-edge/compose.edge.yaml`, koordinátor používá jen schválenou root kopii |
 | `compose.smb.yaml`, `smb/` | lab SMB server (Alpine + Samba, pinned digest) |
 | `lab_entrypoint.py` | drží sdílený `/state/runtime.lock` jako `first_run.py`, bez Nexus NVMe/instalační attestation |
 | `hooks/` | lab snapshot (nezávislá serverová kopie + fingerprint) a writer fence; režim selhání přes `hook-mode` |
 | `lab_capability.py` | jednorázové zkoušky na RW CIFS (fsync, `RENAME_NOREPLACE`, cross-dir rename), RO odmítnutí zápisu, poté mount-bound runtime evidence |
 | `make_lab_data.py` | syntetická knihovna a SQLite v9 z existujících fixture helperů; ověřeno plannerem |
 | `lab_smoke.py` | nedestruktivní smoke test včetně krátké odstávky lab app |
+| `lab_host.py` | explicitní LAB profil sdíleného approved host startu; žádný legacy fallback |
 | `lab.sh` | ovládání |
 
 Syntetická knihovna: Show, Lab Alpha, Lab Beta (2 sezóny); 10× MOVE
 (videa i titulky), 3× KEEP, 1× QUARANTINE (potvrzený duplikát → `Duplicates`),
 1× WARNING (`subtitle_present_video_missing`), chráněné `IMPORT` a `Subs`,
 po přesunech prázdné adresáře pro E7H cleanup.
+
+## V2 schválení a hostitelský start
+
+`stage --approved-root /srv/animedb-v6-lab/approved-v2` vytváří V2 metadata s
+původními `source_sha256` a SHA odvozených tří Compose kopií. Root-controlled
+předci schvalovacího kořene jsou oddělení od runtime-owned `appdata`.
+Odvozené kopie proto používají privátní bind kotvy; také sedm worker runtime
+adresářů používá skutečné kotvy původního koordinátoru.
+
+`lab_host.py` volá sdílený `load_boot` a `autostart` s explicitním projektem
+`animedb-v6-lab`. Pořadí startu je resolve → ověření aktivního releasu a původních
+SHA/env → vytvoření/ověření kotev → Compose model → edge → app. Produkční CLI
+zůstává pevně na `anime-db` a jeho `nexus_first_run.py`; LAB profil vyžaduje
+`lab_entrypoint.py`. Koordinátor a jeho release/bind kontroly se nemění.
+
+Release verifier dostává obyčejný lokální Git clone `release/src` se skutečným
+HEAD výchozího checkoutu; LAB edge má Nexus relativní umístění, ale výhradně LAB
+obsah a cesty. Image `anime-db-lab-<build-input-hash>:v6-<HEAD>` váže aktuální
+build inputs i release identitu. Při změně HEAD se starý clone automaticky
+nepřepisuje: zachovat jej a připravit nový LAB release. Žádná kontrola se
+nemockuje a `stack/approved-v6` se jako náhrada nepoužívá.
+
+Před prvním přechodem ze starého LAB zachovat pracovní DB, share, schválené
+generace, privátní evidenci a snapshoty v izolovaném archivu. Golden data
+nepřegenerovávat a historické výsledky nemazat. Samotný upgrade helperů ještě
+není dokladem kompletního V2 běhu. M8 vyžaduje skutečnou evidenci průchodu.
 
 ## Ovládání
 
@@ -96,3 +123,16 @@ hooky bez skutečných externích writerů, `lab_entrypoint.py` místo `first_ru
 Raspberry Pi 5 neověřeny.
 
 Socket má vlastní číselný `CONTROL_GID` (příklad 2001, přepis `ANIMEDB_LAB_CONTROL_GID`). Před setup ověřit, že zvolený GID nemá nesouvisející členy. Nginx zůstává `101:101`, socket group dostává přes `group_add`; `_ssh` se nemění. Helper instaluje také sdílený trusted `host_io.py`. Tato úprava sama LAB nespouští ani nemění jeho existující data.
+
+Pro částečný start, kdy app/edge a aktuální CIFS mounty už běží, ale koordinátor
+chybí: `sudo deploy/lab/lab.sh coordinator`. Příkaz pouze přečte/ověří aktuální V2
+generaci, původní i odvozené SHA, zdrojové/cílové identity existujících kotev a
+mount-bound capability evidence. Potom založí pouze chybějící transientní unitu;
+nevytváří nové kotvy, nepřipojuje CIFS a nespouští Compose up.
+
+Před `setup` a každým startem koordinátoru musí existovat skupina
+`animedb-v6-lab-control` se zvoleným `CONTROL_GID`, bez aliasů, členů a primárních
+uživatelů. Chybějící nebo nesouhlasící skupina znamená STOP ještě před systemd.
+Výpočet image tagu používá C řazení nezávisle na locale uživatelského/sudo shellu.
+
+Doložený skutečný průchod a stav M8: [V2 LAB report](../../docs/V6_M8_V2_LAB_REVALIDATION.md).

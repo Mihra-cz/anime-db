@@ -1,4 +1,6 @@
 """Real root/non-root boundary tests; disposable /run tree only, no services."""
+import ctypes
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,6 +10,42 @@ import sys
 import tempfile
 
 import pytest
+
+
+def test_lab_three_layers_stage_v2_with_runtime_anchors(tree):
+    """Exercise the actual LAB bind grammar, including its app entrypoint mount."""
+    from deploy.nexus import reorganization_deployment as d
+    repo = Path(__file__).resolve().parents[1]
+    lab = tree / 'lab'
+    lab.mkdir()
+    (lab / 'appdata/approval').mkdir(parents=True)
+    for directory in (lab / 'appdata', lab / 'appdata/approval'):
+        os.chown(directory, 1000, 1000)
+    files = []
+    for name in ('compose.yaml', 'compose.edge.yaml', 'compose.v6.yaml'):
+        raw = (repo / 'deploy/lab' / name).read_text().replace('/srv/animedb-v6-lab', str(lab))
+        raw = raw.replace('/run/animedb-v6-lab', str(lab / 'control'))
+        for _, source in d._bind_sources(raw):
+            source = Path(source)
+            if source.suffix == '.py':
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text('# LAB entrypoint\n')
+            else:
+                source.mkdir(parents=True, exist_ok=True)
+        path = lab / name
+        path.write_text(raw)
+        files.append(path)
+    env = lab / '.env'
+    env.write_text('ANIMEDB_UID=1000\nANIMEDB_GID=1000\nANIMEDB_CONTROL_GID=2001\n')
+    generation = d.stage_deployment(files, env_file=env, project_name='animedb-v6-lab',
+        approved_root=tree / 'approved')
+    d.approve_deployment(generation, reviewed_sha256=d.generation_sha256(generation))
+    selected = d.resolve_deployment(files, approved_root=tree / 'approved')
+    metadata = json.loads((generation / 'deployment.json').read_text())
+    assert metadata['version'] == 2 and selected.project_name == 'animedb-v6-lab'
+    assert metadata['source_sha256'] == [hashlib.sha256(p.read_bytes()).hexdigest() for p in files]
+    assert len(selected.bindings) == 7
+    assert all(str(lab / 'appdata') in row['source'] for row in selected.bindings)
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from deploy.nexus import reorganization_coordinator as c
 from deploy.nexus import reorganization_deployment as d
@@ -19,6 +57,26 @@ pytestmark = pytest.mark.skipif(os.geteuid() != 0, reason='isolated root privile
 def tree():
     with tempfile.TemporaryDirectory(prefix='animedb-host-test-',dir='/run') as name:
         yield Path(name)
+
+
+def test_wrong_root_private_same_filesystem_anchor_is_refused(tree):
+    """A bind mount must be detected even when st_dev matches its parent."""
+    source, other, target = (tree / name for name in ('expected', 'wrong', 'anchor'))
+    for path in (source, other, target):
+        path.mkdir(mode=0o700)
+    info, wrong = source.stat(), other.stat()
+    row = dict(source=str(source), target=str(target), dev=info.st_dev, ino=info.st_ino)
+    d.ensure_bindings([dict(source=str(other), target=str(target), dev=wrong.st_dev, ino=wrong.st_ino)])
+    try:
+        assert target.stat().st_dev == target.parent.stat().st_dev
+        with pytest.raises(ValueError, match='unexpected existing bind anchor'):
+            d.ensure_bindings([row])
+    finally:
+        # The regression used to stack a second mount; release both in this
+        # disposable namespace before TemporaryDirectory removes the tree.
+        while any(line.split()[4] == str(target) for line in Path('/proc/self/mountinfo').read_text().splitlines()):
+            if ctypes.CDLL(None, use_errno=True).umount2(os.fsencode(target), 0):
+                raise OSError(ctypes.get_errno(), 'failed to release test mount')
 
 
 def test_real_root_config_trust_and_user_owned_project(tree):

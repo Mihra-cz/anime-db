@@ -66,6 +66,8 @@ def test_socket_group_is_independent_of_nginx_primary_group():
     assert 'Group=animedb-control' in unit
     assert '0750 root animedb-control' in tmpfiles
     assert 'CAP_SETUID CAP_SETGID' in unit
+    assert 'AmbientCapabilities=CAP_SETUID CAP_SETGID' in unit
+    assert 'AmbientCapabilities=CAP_SETUID CAP_SETGID' in (root.parent/'lab/lab.sh').read_text()
     assert 'WantedBy=' not in unit
 
 

@@ -20,6 +20,8 @@ NoNewPrivileges=yes
 # Commands, root configuration and executable hooks remain explicitly scoped.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_SYS_ADMIN
+# Preserve credential-drop capabilities across the interpreter exec with NNP.
+AmbientCapabilities=CAP_SETUID CAP_SETGID
 LockPersonality=yes
 
 # Manual start only; never enable at boot.

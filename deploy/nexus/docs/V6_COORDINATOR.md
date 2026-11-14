@@ -519,3 +519,5 @@ root syscall testy samy nejsou dokladem tohoto end-to-end gate. Revalidační te
 ověřují produkční větev, skutečné kotvy a child zápisy a reálnou Compose interpolaci;
 nespouštějí tím E7 ani produkční aplikaci. Tento gate nesmí být označen PASS bez
 samostatné evidence celého LAB průchodu.
+
+Samostatná evidence notebookového V2 LAB průchodu je v [M8 reportu](../../../docs/V6_M8_V2_LAB_REVALIDATION.md). Nezávislá Claude revalidace čeká; report nenahrazuje Nexus/Synology ověření ani povolení aktivace.

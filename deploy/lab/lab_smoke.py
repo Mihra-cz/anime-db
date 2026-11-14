@@ -54,7 +54,7 @@ def healthy(deadline):
 
 stack = LAB / 'stack'
 config = run('docker', 'compose', '--project-directory', str(stack), '--env-file', str(stack / '.env'),
-    '-p', 'animedb-v6-lab', '-f', str(stack / 'compose.yaml'), '-f', str(REPO / 'deploy/lab/compose.edge.yaml'),
+    '-p', 'animedb-v6-lab', '-f', str(stack / 'compose.yaml'), '-f', str(LAB / 'release/src/deploy/nexus/service-edge/compose.edge.yaml'),
     '-f', str(stack / 'compose.v6.yaml'), 'config', '-q')
 check('compose configuration valid (three lab sources, project animedb-v6-lab)', config.returncode == 0, config.stderr.strip())
 names = set(run('docker', 'ps', '--format', '{{.Names}}').stdout.split())
@@ -74,7 +74,8 @@ check('coordinator reachable via Nginx → Unix socket', status == 200 and json.
 check('coordinator unit active', run('systemctl', 'is-active', 'animedb-v6-lab-coordinator').stdout.strip() == 'active')
 control = Path('/run/animedb-v6-lab')
 directory = control.stat()
-check('socket directory root:101 0750', (directory.st_uid, directory.st_gid, directory.st_mode & 0o777) == (0, 101, 0o750))
+control_gid = int(os.environ.get('ANIMEDB_LAB_CONTROL_GID', '2001'))
+check('dedicated socket directory root:CONTROL_GID 0750', control_gid not in (101, 1000) and (directory.st_uid, directory.st_gid, directory.st_mode & 0o777) == (0, control_gid, 0o750))
 try:
     (control / 'coordinator.sock').stat()
     denied = False
@@ -82,7 +83,7 @@ except PermissionError:
     denied = True
 check('regular user cannot reach the control socket', denied)
 seen = run('docker', 'exec', EDGE, 'stat', '-c', '%u %g %a %F', '/run/animedb-control/coordinator.sock').stdout.strip()
-check('edge (UID/GID 101) sees socket root:101 0660', seen == '0 101 660 socket', seen)
+check('edge (101:101) sees socket root:CONTROL_GID 0660', seen == f'0 {control_gid} 660 socket', seen)
 with sqlite3.connect(f'file:{LAB}/appdata/db/anime.db?mode=ro', uri=True) as db:
     version = db.execute('PRAGMA user_version').fetchone()[0]
     videos = db.execute('SELECT count(*) FROM videos').fetchone()[0]

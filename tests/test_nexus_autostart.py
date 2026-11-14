@@ -7,6 +7,39 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 
+def test_explicit_lab_profile_uses_shared_start_and_cannot_select_production(tmp_path):
+    from deploy.nexus import reorganization_autostart as a
+    deployment = SimpleNamespace(project_directory=tmp_path, env_file=tmp_path / '.env',
+        project_name='animedb-v6-lab', files=tuple(tmp_path / str(n) for n in range(3)))
+    config = dict(image='anime-db-lab:v6-2144e43', uid=1000, gid=1000, socket_gid=2001)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return json.dumps(dict(name='animedb-v6-lab', services=dict(
+            app=dict(image=config['image'], user='1000:1000', entrypoint=['python', '/lab/lab_entrypoint.py']),
+            edge=dict(image='nginx:stable-alpine@sha256:' + 'a' * 64, user='101:101', group_add=['2001']))))
+
+    a.autostart(deployment, config, 'start', run=run, project_name='animedb-v6-lab')
+    assert [call[-1] for call in calls[-2:]] == ['edge', 'app']
+    assert all(call[call.index('-p') + 1] == 'animedb-v6-lab' for call in calls)
+    calls.clear()
+    with pytest.raises(ValueError, match='project'):
+        a.autostart(deployment, config, 'start', run=run)
+    assert calls == []
+
+
+def test_lab_boot_requires_explicit_selection_and_keeps_release_check(boot):
+    a, config, files, env, src, deployment = boot
+    deployment.project_name = 'animedb-v6-lab'
+    with pytest.raises(ValueError, match='project'):
+        a.load_boot(config)
+    assert a.load_boot(config, project_name='animedb-v6-lab')[0] is deployment
+    (src / '.git/HEAD').write_text('f' * 40)
+    with pytest.raises(ValueError, match='release'):
+        a.load_boot(config, project_name='animedb-v6-lab')
+
+
 def test_boot_and_stop_keep_one_project_and_never_build_or_stop_edge(tmp_path):
     from deploy.nexus import reorganization_autostart as a
     deployment = SimpleNamespace(project_directory=tmp_path/'stack',env_file=tmp_path/'approved/.env',

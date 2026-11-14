@@ -121,6 +121,15 @@ class RuntimeDirectory:
         self.close()
 
 
+def _descriptor_mount_id(fd):
+    values = [line.split(':', 1)[1].strip()
+        for line in Path(f'/proc/self/fdinfo/{fd}').read_text().splitlines()
+        if line.startswith('mnt_id:')]
+    if len(values) != 1 or not values[0].isdigit():
+        raise ValueError('bind anchor mount identity unavailable')
+    return values[0]
+
+
 def ensure_bindings(bindings):
     """Publish stable root-private bind aliases from descriptors, never live paths.
 
@@ -147,8 +156,14 @@ def ensure_bindings(bindings):
                 leaf=os.stat(target.name,dir_fd=parent,follow_symlinks=False)
                 if not stat.S_ISDIR(leaf.st_mode):raise ValueError('unsafe bind anchor')
                 if (leaf.st_dev,leaf.st_ino)==identity:continue
-                if leaf.st_uid!=0 or leaf.st_mode & 0o077 or os.path.ismount(target):
-                    raise ValueError('unexpected existing bind anchor')
+                leaf_fd=os.open(target.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent)
+                try:
+                    # Same-device bind mounts are invisible to ismount(). A
+                    # different mount ID must never be covered by another bind.
+                    if (leaf.st_uid!=0 or leaf.st_mode & 0o077
+                            or _descriptor_mount_id(leaf_fd)!=_descriptor_mount_id(parent)):
+                        raise ValueError('unexpected existing bind anchor')
+                finally:os.close(leaf_fd)
                 destination=f'/proc/self/fd/{parent}/{target.name}'
                 if mount(os.fsencode(f'/proc/self/fd/{source}'),os.fsencode(destination),None,4096,None):
                     code=ctypes.get_errno()
