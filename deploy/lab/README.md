@@ -60,8 +60,8 @@ zůstává pevně na `anime-db` a jeho `nexus_first_run.py`; LAB profil vyžaduj
 
 Release verifier dostává obyčejný lokální Git clone `release/src` se skutečným
 HEAD výchozího checkoutu; LAB edge má Nexus relativní umístění, ale výhradně LAB
-obsah a cesty. Image `anime-db-lab-<build-input-hash>:v6-<HEAD>` váže aktuální
-build inputs i release identitu. Při změně HEAD se starý clone automaticky
+obsah a cesty. Název image má tvar
+`anime-db-lab-<build-input-hash>:v6-<HEAD>`. Při změně HEAD se starý clone automaticky
 nepřepisuje: zachovat jej a připravit nový LAB release. Žádná kontrola se
 nemockuje a `stack/approved-v6` se jako náhrada nepoužívá.
 
@@ -69,6 +69,27 @@ Před prvním přechodem ze starého LAB zachovat pracovní DB, share, schválen
 generace, privátní evidenci a snapshoty v izolovaném archivu. Golden data
 nepřegenerovávat a historické výsledky nemazat. Samotný upgrade helperů ještě
 není dokladem kompletního V2 běhu. M8 vyžaduje skutečnou evidenci průchodu.
+
+## Vývojový build a budoucí release LAB
+
+Současný `lab.sh build` je vývojový build z aktuálního pracovního stromu.
+Zahrnuje i necommitnuté změny a nesledované moduly pod `app/`, pokud je
+nevyloučí `.dockerignore`; například `app/installation_state.py` a
+`app/tools/nexus_db.py`. Obsahový hash zachycuje vybrané soubory včetně těchto
+nesledovaných modulů, ale není úplným otiskem Docker buildu. Nezahrnuje
+`Dockerfile`, `.dockerignore` ani všechna metadata, například oprávnění souborů.
+Samotný hash ani Git HEAD v tagu nedokazují shodu obsahu image s Git releasem.
+
+Budoucí release LAB má sestavovat image z čerstvého obyčejného klonu konkrétního
+schváleného plného SHA, s ověřeným HEAD a čistotou pracovního stromu i indexu,
+včetně absence nesledovaných a Git-ignorovaných souborů. Image i release identita
+mají vycházet z téhož čistého releasu. Tento režim zatím není v `lab.sh`
+implementovaný; vývojový build tuto záruku neposkytuje.
+
+M8 zůstává platným důkazem skutečného V2 runtime průchodu, nikoli důkazem čistého
+release image. Toto zpřesnění dokumentace nevyžaduje reset existujícího LABu,
+změnu jeho schválené generace ani regenerování golden dat; data a evidence se
+zachovávají.
 
 ## Ovládání
 

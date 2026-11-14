@@ -281,6 +281,19 @@ case "$APP_USER" in
 esac
 [[ "$APP_UID" =~ ^[0-9]+$ && "$APP_GID" =~ ^[0-9]+$ ]]
 
+# Posledni kontrola schvaleneho checkoutu bezprostredne pred buildem.
+test -d "$STAGE"
+test -d "$STAGE/.git"
+test "$(git -C "$STAGE" rev-parse --is-inside-work-tree)" = true
+[[ "$NEW_SHA" =~ ^[0-9a-f]{40}$ ]]
+test "$(git -C "$STAGE" rev-parse HEAD)" = "$NEW_SHA"
+STAGE_STATUS="$(git -C "$STAGE" status --porcelain --untracked-files=all --ignored)"
+if test -n "$STAGE_STATUS"; then
+  printf '%s\n' "$STAGE_STATUS"
+  echo 'STOP: STAGE obsahuje zmeny nebo nesledovane/ignorovane soubory'
+  exit 1
+fi
+
 sudo -- /usr/bin/docker build --build-arg "APP_UID=$APP_UID" \
   --build-arg "APP_GID=$APP_GID" \
   -t "$NEW_IMAGE" "$STAGE"
@@ -290,6 +303,12 @@ echo "BLOK B: OK"
 ```
 
 Když cílový commit není dostupný, **nepřecházet automaticky na nejnovější `main`**. Když výpis `git diff --stat` není prázdný, release mění základní Compose nebo edge: zastavit a posoudit samostatně, protože `$STACK_DIR/compose.yaml` ani běžící edge tyto změny nepřevezmou. Nedokončený `$STAGE` po selhání vyhodnotit a teprve potom řízeně odstranit, jinak se blok A zastaví.
+
+Poslední kontrola před buildem vyžaduje nový obyčejný Git checkout přesného
+schváleného plného SHA, čistý pracovní strom i index. Odmítá všechny nesledované
+soubory včetně Git-ignorovaných: `.gitignore` neurčuje Docker build context.
+Jakýkoli nesoulad nebo chyba Git příkazu ukončí blok B před buildem díky
+`set -euo pipefail`; kontrola žádné soubory neodstraňuje ani neopravuje.
 
 ### C. Aktivace: archiv zdrojů, override a bezpečný start
 

@@ -513,11 +513,16 @@ Drop-in má TimeoutStartSec=1500 pro RO gate, nejvýše tři 120s Compose volán
 provozního budgetu je nutné revidovat oba limity; limit není nový důkaz NORMAL.
 
 
-Před skutečnou aktivací na Nexusu je nadále potřeba úplný průchod v izolovaném
+Aktivační gate pro Nexus vyžaduje úplný průchod v izolovaném
 LAB s approved_root/V2 a reálným Docker/Compose. Legacy LAB průchod ani izolované
 root syscall testy samy nejsou dokladem tohoto end-to-end gate. Revalidační testy
 ověřují produkční větev, skutečné kotvy a child zápisy a reálnou Compose interpolaci;
 nespouštějí tím E7 ani produkční aplikaci. Tento gate nesmí být označen PASS bez
 samostatné evidence celého LAB průchodu.
 
-Samostatná evidence notebookového V2 LAB průchodu je v [M8 reportu](../../../docs/V6_M8_V2_LAB_REVALIDATION.md). Nezávislá Claude revalidace čeká; report nenahrazuje Nexus/Synology ověření ani povolení aktivace.
+Samostatná evidence notebookového V2 LAB průchodu je v
+[M8 reportu](../../../docs/V6_M8_V2_LAB_REVALIDATION.md). Nezávislá Claude
+revalidace M8 skončila **PASS s poznámkami**; výsledný commit M8 je `ee11a9a`.
+Následné vyčištění testů a dokumentace je zachyceno výsledným commitem `ab30fc8`.
+Produkční Nexus ani Synology nebyly tímto LABem ověřeny; report nenahrazuje
+jejich ověření ani povolení produkčního nasazení nebo aktivace.
