@@ -256,9 +256,12 @@ def test_sealing_api_without_cli_composition_fails_closed_in_dry_run(
 
 
 def test_generation_cli_is_the_only_production_human_criticality_composition():
-    """build_execution_manifest seals given evidence; preflight re-projects sealed authorities."""
+    """Only sealed re-projection, the CLI and its fixed worker compose authority."""
     import ast
     from pathlib import Path
+    from app.tools import execution_manifest as cli, reorganization_worker as worker
+
+    assert worker._approved_criticality_decisions is cli._approved_criticality_decisions
     root = Path(__file__).parents[1]
     calls = []
     for path in sorted((root / 'app').rglob('*.py')):
@@ -271,6 +274,7 @@ def test_generation_cli_is_the_only_production_human_criticality_composition():
         ('app/target_execution_manifest.py',
             '{(a.object_kind, a.object_id): (a.severity, a.reason, a.actor) for a in p.criticality_authorities}'),
         ('app/tools/execution_manifest.py', '_approved_criticality_decisions(context, plan)'),
+        ('app/tools/reorganization_worker.py', '_approved_criticality_decisions(context, target)'),
     ]
 
 

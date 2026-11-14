@@ -444,13 +444,27 @@ def test_unapproved_schema_or_user_version_change_aborts_final_transaction(conta
     monkeypatch.setattr(database, '_apply_locator_updates', tampered)
     gc.collect()
     with ScratchMaintenance(path, owner.root).maintenance() as lease:
-        with pytest.raises(ScratchDatabaseReconciliationRequired, match='unapproved side effect'):
+        # The SQL authorizer rejects the forbidden statement before it can
+        # become a schema/data side effect of the final locator transaction.
+        with pytest.raises(ScratchDatabaseReconciliationRequired, match=r'^STOP: not authorized$') as stopped:
             owner.execute(manifest, maintenance_owner=lease)
+        assert stopped.value.phase == 'DB_UPDATE'
+        assert stopped.value.action_index == len(manifest.payload.actions) - 1
+        assert isinstance(stopped.value.__cause__, sqlite3.DatabaseError)
+        assert stopped.value.__cause__.sqlite_errorcode == sqlite3.SQLITE_AUTH
+        journal = owner.journal_path.read_bytes()
+        with pytest.raises(ScratchDatabaseReconciliationRequired, match='spent/closed; no retry or resume'):
+            owner.execute(manifest, maintenance_owner=lease)
+        assert owner.journal_path.read_bytes() == journal
     keys = {(a.object_kind, a.object_id) for a in manifest.payload.actions[:-1]}
     patches = tuple(p for p in manifest.payload.locator_patches if (p.object_kind, p.object_id) in keys)
     assert database_rows(path) == expected_rows(original, patches)
     with sqlite3.connect(path) as connection:
         assert database._schema(connection) == schema
+    from app.target_execution_journal import load_journal
+    final = len(manifest.payload.actions) - 1
+    assert [e.state for e in load_journal(owner.journal_path, manifest).entries if e.action_index == final] == [
+        'PENDING', 'FS_APPLIED', 'FS_VERIFIED']
 
 
 def test_external_data_version_change_after_final_commit_is_a_stop(container_case, monkeypatch):
@@ -477,12 +491,27 @@ def test_external_data_version_change_after_final_commit_is_a_stop(container_cas
         return connect(*args, **kwargs)
     monkeypatch.setattr(sqlite3, 'connect', connected)
     original = database_rows(path)
+    with connect(path) as connection:
+        schema = database._schema(connection)
     gc.collect()
     with ScratchMaintenance(path, owner.root).maintenance() as lease:
-        with pytest.raises(ScratchDatabaseReconciliationRequired, match='acknowledged prefix commit'):
+        with pytest.raises(ScratchDatabaseReconciliationRequired,
+                match=r'^STOP: another SQLite writer committed during the reservation gap$') as stopped:
             owner.execute(manifest, maintenance_owner=lease)
+        assert stopped.value.phase == 'DB_COMMIT'
+        assert stopped.value.action_index == len(manifest.payload.actions) - 1
+        journal = owner.journal_path.read_bytes()
+        with pytest.raises(ScratchDatabaseReconciliationRequired, match='spent/closed; no retry or resume'):
+            owner.execute(manifest, maintenance_owner=lease)
+        assert owner.journal_path.read_bytes() == journal
     assert changed == [True]
     assert database_rows(path) == expected_rows(original, manifest.payload.locator_patches)
+    with connect(path) as connection:
+        assert database._schema(connection) == schema
+    from app.target_execution_journal import load_journal
+    final = len(manifest.payload.actions) - 1
+    assert [e.state for e in load_journal(owner.journal_path, manifest).entries if e.action_index == final] == [
+        'PENDING', 'FS_APPLIED', 'FS_VERIFIED']
 
 
 def test_future_video_quarantine_projects_its_exact_sealed_fields_without_physical_authority(all_locators):
