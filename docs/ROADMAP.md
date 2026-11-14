@@ -25,11 +25,11 @@ Průběžné test counts, session logy a jednotlivé commity sem nepatří.
 | V3 | Hotovo | Překlady a ruční validace |
 | V4 | Hotovo | Použitelné webové rozhraní |
 | V5 | Hotovo | Stabilní hierarchie, metadata a číslování včetně navazující stabilizace |
-| V6 | Probíhá | Kompletní backend a frontend řízené reorganizace, včetně technického ověření výsledku |
-| V6.5 | Plánováno | Completeness UI, optimalizace, SHA-256 katalog a konsolidace testů |
-| V7 | Plánováno | Import scanner pouze pro Anime/IMPORT, nová DB evidence a deduplikace nad workflow V6 |
+| V6 | Probíhá | Jednorázová reorganizace existující knihovny, včetně backendu, frontendu a technického ověření výsledku |
+| V6.5 | Plánováno / neimplementováno | Completeness UI, postupný SHA-256 katalog všech evidovaných videí, optimalizace a odložené úkoly |
+| V7 | Plánováno | Ručně spuštěný scan Anime/IMPORT, rozpracované dávky, Review a explicitní dokončení importu |
 | V7.5 | Plánováno | Release Tracking a pokročilé sledování pokračování |
-| V8 | Orientační / k revizi | Automatické sledování NASu |
+| V8 | Neschváleno | Historický námět automatického sledování NASu |
 | V9 | Orientační / k revizi | Jellyfin / Shoko integrace |
 | V10 | Orientační / k revizi | Vizuální anime knihovna |
 
@@ -176,6 +176,10 @@ Platí `člověk > automatika; nejistota → Review`.
 ## V6 – Řízená reorganizace knihovny na NAS
 
 Stav: **Probíhá** (od uzavření Pre-V6 gate 2026-09-27).
+
+V6 řeší jednorázovou reorganizaci existující knihovny a technické ověření
+jejího výsledku. Není průběžným importem nových souborů. Bezpečné komponenty
+V6 lze později znovu použít ve V7; samo o sobě to nepovoluje nový provozní běh.
 
 Aktuální fáze: Naming (61 choices, actionable 0) a Physical Layout Review
 (32 choices, actionable 0, basis mismatch 0) jsou uzavřené. P1A/P1B jsou committed
@@ -486,9 +490,10 @@ identit, kompatibility titulků, chráněných IMPORT/Duplicates/systémových s
 vyúčtování operací a bezpečný návrat do RO/běžného provozu. Chybějící soubor,
 kolize nebo neúplná evidence musí zůstat viditelným problémem.
 
-## V6.5 – Completeness UI a konsolidace
+## V6.5 – Completeness UI, SHA-256 katalog a odložené úkoly
 
-Stav: Plánováno. Samostatná etapa po V6; její UI není podmínkou uzavření V6.
+Stav: **Plánováno, dosud neimplementováno.** Samostatná etapa po V6;
+její UI není podmínkou uzavření V6.
 
 - Uživatelská stránka Completeness: konkrétní chybějící standardní epizody,
   nerozpoznané identity a konflikty lokálního/providerového scope. Vychází
@@ -497,9 +502,13 @@ Stav: Plánováno. Samostatná etapa po V6; její UI není podmínkou uzavření
   počet logických epizod. Absence supplementary obsahu není chybějící běžný
   díl; „bez CZ/SK“ je chybějící překlad, nikoli epizoda. Chybějící běžný díl
   a nevysvětlená kolize standardní identity jsou závažné; nejistota → Review.
-- Optimalizace, persistentní SHA-256 katalog a konsolidace testů. Konkrétní
-  schema a hashing lifecycle vyžadují návrh této etapy; webový náhled V6
-  nevyžaduje hashování MKV a žádný hash katalog nyní nezavádí.
+- Postupně budovaný perzistentní SHA-256 katalog všech evidovaných videí.
+  Konkrétní schema, průběžné doplňování a ověřování platnosti hashů vyžadují
+  návrh této etapy; webový náhled V6 nevyžaduje hashování MKV a žádný hash
+  katalog nyní nezavádí. Dokončení katalogu všech videí není jednorázovou
+  podmínkou closure V6; nemění to identity a hash kontroly konkrétních E7 operací.
+- Optimalizace, konsolidace testů a další odložené úkoly s rozsahem určeným
+  před implementací. Odklad neruší bezpečnostní a technické closure podmínky V6.
 
 Historické podklady (například subtitle bez video targetu a vyšší providerový
 počet epizod) zůstávají v [PROJECT_STATUS](PROJECT_STATUS.md#pre-v6-closure-checkpoint).
@@ -512,21 +521,49 @@ Stav: Plánováno. Začíná až po closure V6; Completeness UI patří do V6.5.
 Navazuje na ověřenou hierarchii a řízenou cílovou strukturu, nikoli na nové
 hádání identity při kopírování. Import není implementován.
 
+Schválený funkční záměr popisuje [Koncept ručně řízeného importu](V7_IMPORT_WORKFLOW.md).
+Technický návrh a konkrétní datový model teprve vzniknou.
+
 - Cíl: bezpečně zpracovat neuspořádané zdroje z PC, archivy, zálohy, obnovy HDD,
   opakované downloady, různé encody/repacky/remuxy, poškozená videa a samostatné titulky.
 - Uživatel ukládá incoming soubory přímo na Synology do trvale chráněného
   `Anime/IMPORT`. AnimeDB/Nexus nezprostředkovávají upload ani kopírování.
   Import analyzuje pouze tento scope přes RO účet, používá společné komponenty
-  a Review; po potvrzení dokončeného kopírování a fyzického plánu worker provede
-  MOVE v jednom RW mountu stejného share. Aktualizuje dotčené záznamy bez
-  automatického full scanu; kořen IMPORT se nikdy neodstraňuje.
-- Nový importní scanner má discovery scope výhradně `Anime/IMPORT`, vlastní
-  novou DB evidenci incoming souborů a deduplikace. Pro následné review,
-  plánování a organizaci znovu používá hotové V6 workflow; nevytváří druhé
-  reorganizační jádro. Běžný scanner knihovny tím nepřebírá discovery importu.
+  a Review; po potvrzení dokončeného kopírování, konkrétního fyzického plánu
+  a explicitním kroku **Dokončit import** worker provede MOVE v jednom RW
+  mountu stejného share. Aktualizuje dotčené záznamy bez automatického full scanu;
+  kořen IMPORT se nikdy neodstraňuje.
+- Scan spouští výhradně uživatel a jeho discovery scope je pouze `Anime/IMPORT`.
+  Jde o budoucí explicitní režim existujícího scanneru a parseru, nikoli druhý
+  scanner či reorganizační engine. Současný běžný scanner knihovny IMPORT
+  nadále vynechává. V7 znovu použije existující editory, Review a bezpečné
+  části V6 pro plánování, preview a schvalování fyzických operací.
+- Rozpracované importní dávky mají perzistentní kontext navázaný na dosavadní
+  model Video/ExternalSubtitle. Napříč přehledy je dostupný filtr **Nový import** /
+  konkrétní dávka. Soubory během Review zůstávají v IMPORT; jejich cesta není
+  finálním locatorem knihovny.
+  Ruční rozhodnutí a průběh přežijí opuštění stránky i restart aplikace.
+  Uživatel postupně řeší autority a nejasnosti existujícími editory a Review;
+  samotný scan dávku nedokončuje. Přesný datový model a lifecycle určí návrh V7,
+  bez paralelní katalogové databáze či nových authority heuristik.
+  Perzistence dávky sama nezakládá automatické resume přerušených fyzických operací.
+- Žádný automatický watcher ani pravidelné skenování IMPORTu nejsou součástí
+  V7. Scan ani pozdější dokončení importu se nespouštějí automaticky.
 - Před zařazením provést preflight **celého importního batche**:
   inventura → hash/technická analýza → porovnání s katalogem → návrh identit,
   duplicit/náhrad a subtitle vazeb → kompletní plán a preview → rozhodnutí uživatele.
+- **Dokončit import** se nabízí až po vyřešení blokujících nejasností dávky.
+  Před fyzickým provedením ukáže přesný plán SOURCE → TARGET a vyžaduje lidské
+  potvrzení. Přesouvají se jen schválené soubory dávky z IMPORT do cílového stromu,
+  bez přepisu existujícího cíle a bez celoknihovní V6 migrace. Kolize nebo
+  neschválená duplicita znamenají Review/STOP. V7 nepřebírá automaticky všechny
+  provozní kroky jednorázové V6 migrace; bezpečnou orchestraci určí technický návrh.
+- Po ověření výsledku lze uklidit pouze skutečně prázdné zdrojové podsložky
+  patřící schválené dávce. Kořen IMPORT, neznámé soubory a neprázdné složky se
+  nemažou. Dokončení importu automaticky neodstraňuje obsah Duplicates;
+  řízené odstranění potvrzených duplicit níže je samostatné explicitní workflow.
+- Nové soubory dávky se porovnávají s platnými uloženými hash výsledky V6.5;
+  každý import nemá znovu hashovat celou knihovnu. Chybějící hash není shoda.
 - Shoda spolehlivého hashe celého souboru je důkaz exact duplicate s bezpečným
   výchozím „nekopírovat“. Filename je hint; stejná epizoda v jiné kvalitě,
   variantě nebo s jinými streamy nesmí být odmítnuta jen podle čísla.
@@ -561,13 +598,12 @@ Provider relations a tento workflow dosud nejsou implementované.
 
 ## V8 – Automatické sledování NASu
 
-Stav: Orientační / k revizi. Dosud neimplementovaný dlouhodobý směr.
-
-Cílem je watcher pro nové soubory, čekání na dokončení kopírování a následné
-technické zpracování, subtitle evidence, přiřazení, aktualizace DB/metadat/obalu
-a upozornění na změny. Ochrana před neúplnými kopiemi je nutnou podmínkou;
-automatické sledování nesmí být záminkou k obejití ručních autorit a bezpečnosti.
-Před zahájením je nutné znovu vymezit rozsah a návaznost na hotový scanner/import.
+Stav: **Neschváleno, neimplementováno.** Historický námět automatického
+sledování NASu není schváleným plánem ani závaznou navazující etapou V7.
+V7 používá pouze ručně spuštěný scan IMPORTu a explicitní dokončení importu.
+Případný budoucí návrh watcheru nebo pravidelného skenu vyžaduje nové výslovné
+rozhodnutí o potřebě a rozsahu; nesmí obejít lidskou autoritu ani bezpečnostní
+kontrakty. Tato roadmapa jeho implementaci neschvaluje.
 
 ## V9 – Jellyfin / Shoko integrace
 
@@ -599,12 +635,15 @@ Původní V6 nadpis „Úplnost knihovny“ nepřebíráme jako poslední scope:
 Season/Part/Media Part a supplementary podklady počítají s fyzickými návrhy
 a aktuální rozhodnutí při docs review určuje V6 jako řízenou reorganizaci NAS.
 Rozhodnutí z 2026-09-27 zařadilo audit úplnosti na závěr V6. Nové schválené
-rozdělení toto členění zpřesňuje: V6 dokončuje backend/frontend reorganizace
-a technické ověření, V6.5 přebírá Completeness UI, optimalizace, SHA-256 katalog
-a konsolidaci testů; V7 přidává IMPORT discovery/DB evidenci/deduplikaci nad V6
-a V7.5 pokročilý Release Tracking. Historické doménové kontrakty tím nezanikají.
-V7 zachovává konkrétně rozpracovaný importní kontrakt; V8–V10 zůstávají původními
-stručnými směry bez nového detailního odsouhlasení, proto mají orientační stav.
+rozdělení toto členění zpřesňuje: V6 dokončuje jednorázovou reorganizaci existující
+knihovny a technické ověření. V6.5 přebírá dosud neimplementované Completeness UI,
+postupný perzistentní SHA-256 katalog všech evidovaných videí, optimalizace,
+konsolidaci testů a další odložené úkoly. V7 přidává ručně spuštěný IMPORT scan,
+rozpracované dávky, Review a explicitní dokončení s opětovným použitím scanneru,
+parseru, editorů a bezpečných částí V6; V7.5 pokročilý Release Tracking.
+Historické doménové kontrakty deduplikace, titulků a lidské autority tím nezanikají.
+V8 je neschválený historický námět; V9–V10 zůstávají stručnými orientačními směry
+bez nového detailního odsouhlasení.
 
 Technická chronologie zůstává v HISTORY. Tato rekonstrukce žádnou budoucí
 funkci neimplementuje ani automaticky nezahajuje další etapu.
