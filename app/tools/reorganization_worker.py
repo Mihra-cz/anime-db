@@ -18,7 +18,8 @@ from app.reorganization_cleanup_web import WebCleanupDecision
 from app.reorganization_execution import execute_from_approval
 from app.reorganization_service import ServiceProgress
 from app.target_execution_manifest import (
-    RuntimeEvidence, build_execution_manifest, manifest_from_json, manifest_to_json, _strict_json_load, _decode_type,
+    RuntimeEvidence, OperatorAttestation, validate_operator_attestation,
+    build_execution_manifest, manifest_from_json, manifest_to_json, _strict_json_load, _decode_type,
 )
 from app.tools.execution_manifest import (
     _read_current, _approved_criticality_decisions, validate_local_output,
@@ -43,6 +44,7 @@ class WorkerConfig:
     mount_read_write_checked: bool = False
     safe_write_capability_proven: bool = False
     rename_noreplace_capability_proven: bool = False
+    protection_mode: str = 'automatic'
 
     @classmethod
     def load(cls, path):
@@ -57,6 +59,8 @@ class WorkerConfig:
                     raise ValueError('private regular host worker configuration required')
                 data = _strict_json_load(os.pread(fd, info.st_size + 1, 0).decode())
         names = {f.name for f in fields(cls)}
+        if type(data) is dict and 'protection_mode' not in data:
+            data = {**data, 'protection_mode': 'automatic'}
         if type(data) is not dict or set(data) != names:
             raise ValueError('exact worker configuration fields required')
         paths = {'database', 'library_root', 'inbox', 'outbox', 'ledger', 'runtime_lock', 'backups', 'service'}
@@ -67,6 +71,8 @@ class WorkerConfig:
                 if type(data[key]) is not bool: raise ValueError('boolean host capability required')
             elif type(data[key]) is not str or not data[key]:
                 raise ValueError('nonempty host binding required')
+        if data['protection_mode'] not in {'automatic', 'manual_one_shot'}:
+            raise ValueError('known protection mode required')
         return cls(**data)
 
 
@@ -100,6 +106,8 @@ def read_request(config, request_id, kind, *, check_age=True):
     value = _strict_json_load(approval.read_record(config.outbox, request_id + '.' + kind + '-request.json'))
     required = ({'preview_db_sha256'} if kind == 'prepare' else
                 {'source_sha256', 'approved_sha256', 'manifest_id'})
+    if kind == 'start' and config.protection_mode == 'manual_one_shot':
+        required.add('operator_attestation_sha256')
     if (type(value) is not dict or set(value) != {'version', 'kind', 'request_id', 'actor', 'requested_at'} | required
             or type(value['version']) is not int or value['version'] != 1 or value['kind'] != kind
             or value['request_id'] != request_id or type(value['actor']) is not str
@@ -136,6 +144,8 @@ def _runtime(config, request_id, stage):
         raise WorkerStopped('CAPABILITIES_UNVERIFIED', 'actual RW mount capabilities are not proven')
     if not runtime.scanner_paused_through_verification or not runtime.inventory_writer_paused_through_verification:
         raise WorkerStopped('WRITERS_NOT_STOPPED', 'current writer exclusion is not proven')
+    if config.protection_mode == 'automatic' and runtime.operator_attestation is not None:
+        raise WorkerStopped('WRITERS_NOT_STOPPED', 'automatic mode cannot use operator attestation')
     return runtime
 
 
@@ -208,15 +218,27 @@ def publish(config, request_id, snapshot):
 
 
 def _publish(config, request_id, snapshot):
-    read_request(config, request_id, 'prepare')
     runtime = _runtime(config, request_id, 'publish')
     manifest = manifest_from_json(approval.read_record(config.ledger, request_id + '.planned.json'))
-    if (type(snapshot) is not dict or set(snapshot) != {'snapshot_id', 'snapshot_at', 'snapshot_manifest_id'}
-            or any(type(v) is not str or not v.strip() for v in snapshot.values())
-            or snapshot['snapshot_manifest_id'] != manifest.manifest_id):
-        raise WorkerStopped('SNAPSHOT_FAILED', 'exact independently created snapshot receipt required')
+    if config.protection_mode == 'manual_one_shot':
+        attestation = _decode_type(OperatorAttestation, snapshot)
+        validate_operator_attestation(manifest, attestation, share=config.share, request_id=request_id)
+        if runtime.operator_attestation != attestation:
+            raise WorkerStopped('SNAPSHOT_FAILED', 'operator attestation differs from host stage evidence')
+        # Only preparation may outlive queue admission while a bounded live
+        # manual decision is pending. The original timestamp is never renewed.
+        read_request(config, request_id, 'prepare', check_age=False)
+        runtime = replace(runtime, snapshot_capable=False, snapshot_id=None,
+            snapshot_at=None, snapshot_manifest_id=None)
+    else:
+        read_request(config, request_id, 'prepare')
+        if (type(snapshot) is not dict or set(snapshot) != {'snapshot_id', 'snapshot_at', 'snapshot_manifest_id'}
+                or any(type(v) is not str or not v.strip() for v in snapshot.values())
+                or snapshot['snapshot_manifest_id'] != manifest.manifest_id):
+            raise WorkerStopped('SNAPSHOT_FAILED', 'exact independently created snapshot receipt required')
+        runtime = replace(runtime, snapshot_capable=bool(snapshot['snapshot_id']), **snapshot)
     p = manifest.payload.db_fingerprint
-    runtime = replace(runtime, snapshot_capable=bool(snapshot['snapshot_id']), **snapshot,
+    runtime = replace(runtime,
         db_backup_path=str(config.backups / (request_id + '.sqlite')), db_backup_sha256=p.sha256,
         db_backup_size=p.size, db_backup_user_version=p.user_version, db_backup_manifest_id=manifest.manifest_id,
         actual_windows_root=config.windows_root)
@@ -229,12 +251,17 @@ def _start_inputs(config, request_id, *, check_age=True):
     request = read_request(config, request_id, 'start', check_age=check_age)
     bundle = approval.read_proposal(config.inbox, request_id)
     final = approval.read_review(config.outbox, request_id)
+    protection = approval.operator_attestation_sha256(bundle)
+    if ((protection is not None) != (config.protection_mode == 'manual_one_shot')
+            or request.get('operator_attestation_sha256') != protection):
+        raise WorkerStopped('APPROVAL_INVALID', 'operator attestation differs from worker mode or start')
     if (approval.sha256(final) != request['approved_sha256'] or final.manifest_id != request['manifest_id']
             or request['actor'] != approval.read_review_actor(config.outbox, request_id, final)):
         raise WorkerStopped('APPROVAL_INVALID', 'start request differs from exact reviewed approval')
     approval.validate_review(bundle, final, actor=request['actor'])
     receipt = approval.read_approval(config.outbox, request_id)
     if (receipt.get('state') != 'APPROVED' or receipt.get('actor') != request['actor']
+            or receipt.get('operator_attestation_sha256') != protection
             or any(receipt.get(key) != request[key] for key in ('source_sha256', 'approved_sha256', 'manifest_id'))):
         raise WorkerStopped('APPROVAL_INVALID', 'exact approval receipt differs from requested start')
     if (bundle['runtime']['actual_windows_root'] != config.windows_root or final.payload.library_root != str(config.library_root)
@@ -282,9 +309,11 @@ def execute(config, request_id):
     request, bundle, final = _start_inputs(config, request_id)
     approval.require_current_proposal(bundle)
     fresh = _runtime(config, request_id, 'execute')
+    if fresh.operator_attestation != _decode_type(RuntimeEvidence, bundle['runtime']).operator_attestation:
+        raise WorkerStopped('WRITERS_NOT_STOPPED', 'current host operator attestation differs from approved protection')
     # Snapshot/backup remain bound to the reviewed manifest. Current capability
     # and writer observations replace dated runtime assertions for admission.
-    runtime = replace(RuntimeEvidence(**bundle['runtime']),
+    runtime = replace(_decode_type(RuntimeEvidence, bundle['runtime']),
         scanner_paused_through_verification=fresh.scanner_paused_through_verification,
         inventory_writer_paused_through_verification=fresh.inventory_writer_paused_through_verification,
         mount_read_write_checked=fresh.mount_read_write_checked,

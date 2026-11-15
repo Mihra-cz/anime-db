@@ -252,6 +252,26 @@ class ExecutionManifest:
 
 
 @dataclass(frozen=True)
+class OperatorAttestation:
+    """Human observations, never a machine snapshot receipt or SMB fence."""
+    provenance: str
+    request_id: str
+    source_sha256: str
+    manifest_id: str
+    share: str
+    snapshot_id: str
+    snapshot_at: str
+    snapshot_locked: bool
+    windows_smb_disconnected: bool
+    no_other_writers: bool
+    keep_disconnected_through_normal: bool
+    actor: str
+    waiting_since: str
+    deadline_at: str
+    confirmed_at: str
+
+
+@dataclass(frozen=True)
 class RuntimeEvidence:
     """External assertions for a future operator; this module never performs probes."""
     scanner_paused_through_verification: bool = False
@@ -272,6 +292,7 @@ class RuntimeEvidence:
     rename_noreplace_capability_proven: bool = False
     mount_identity: str | None = None
     free_bytes: int | None = None
+    operator_attestation: OperatorAttestation | None = None
 
 
 @dataclass(frozen=True)
@@ -686,6 +707,11 @@ def _decode_type(annotation, value):
             raise ValueError('expected null')
         return None
     if hasattr(annotation, '__dataclass_fields__'):
+        # The original automatic RuntimeEvidence has exactly these fields less
+        # the optional manual provenance. No other missing/unknown key is legal.
+        if (annotation is RuntimeEvidence and type(value) is dict
+                and set(value) == {f.name for f in fields(RuntimeEvidence)} - {'operator_attestation'}):
+            value = {**value, 'operator_attestation': None}
         if type(value) is not dict or set(value) != {f.name for f in fields(annotation)}:
             raise ValueError('unknown or missing field')
         hints = _dataclass_hints(annotation)
@@ -761,6 +787,38 @@ def post_state_hash_from_manifest(manifest: ExecutionManifest, context: PlannerC
     return _semantic_post_hash(context, snapshot, duplicate_execution_evidence(manifest), root)
 
 
+def validate_operator_attestation(manifest, attestation, *, share=None, request_id=None):
+    """Validate binding/times of a human assertion, not the NAS facts asserted."""
+    if type(attestation) is not OperatorAttestation or attestation.provenance != 'operator_attested':
+        raise ValueError('operator_attested protection required')
+    original = replace(manifest, acknowledgements=())
+    source = hashlib.sha256(manifest_to_json(original).encode()).hexdigest()
+    if (attestation.manifest_id != manifest.manifest_id or attestation.source_sha256 != source
+            or not re.fullmatch('[0-9a-f]{64}', attestation.request_id)
+            or (request_id is not None and attestation.request_id != request_id)
+            or not re.fullmatch(r'//[^/\s]+/[^/\s]+', attestation.share)
+            or (share is not None and attestation.share != share)):
+        raise ValueError('operator attestation binding differs')
+    for value, limit in ((attestation.actor, 128), (attestation.snapshot_id, 256)):
+        if not value.strip() or len(value) > limit or any(ord(c) < 32 for c in value):
+            raise ValueError('explicit operator and snapshot identity required')
+    if not all(getattr(attestation, key) is True for key in ('snapshot_locked',
+            'windows_smb_disconnected', 'no_other_writers', 'keep_disconnected_through_normal')):
+        raise ValueError('incomplete operator protection confirmation')
+    def dated(value):
+        result = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if result.tzinfo is None:
+            raise ValueError('timezone-aware operator evidence required')
+        return result
+    baseline, snapshot, waiting, deadline, confirmed = map(dated, (
+        manifest.created_at, attestation.snapshot_at, attestation.waiting_since,
+        attestation.deadline_at, attestation.confirmed_at))
+    if (not baseline <= snapshot <= confirmed <= datetime.now(timezone.utc)
+            or not baseline <= waiting <= confirmed <= deadline
+            or not 0 < (deadline - waiting).total_seconds() <= 3600):
+        raise ValueError('operator snapshot or confirmation time differs from bounded wait')
+
+
 def _runtime_checks(manifest: ExecutionManifest, runtime: RuntimeEvidence) -> list[str]:
     p = manifest.payload
     missing = []
@@ -769,7 +827,14 @@ def _runtime_checks(manifest: ExecutionManifest, runtime: RuntimeEvidence) -> li
     if not runtime.inventory_writer_paused_through_verification:
         missing.append('inventory_writer_maintenance_not_proven')
     valid_snapshot_time = False
-    if runtime.snapshot_at:
+    if runtime.operator_attestation is not None:
+        try:
+            validate_operator_attestation(manifest, runtime.operator_attestation)
+            if any((runtime.snapshot_capable, runtime.snapshot_id, runtime.snapshot_at, runtime.snapshot_manifest_id)):
+                raise ValueError('manual evidence cannot claim a machine snapshot receipt')
+        except (ValueError, TypeError):
+            missing.append('operator_attestation_invalid')
+    elif runtime.snapshot_at:
         try:
             valid_snapshot_time = (datetime.fromisoformat(_iso(runtime.snapshot_at)[:-1] + '+00:00')
                 >= datetime.fromisoformat(_iso(manifest.created_at)[:-1] + '+00:00'))
@@ -777,7 +842,7 @@ def _runtime_checks(manifest: ExecutionManifest, runtime: RuntimeEvidence) -> li
             pass
         if not valid_snapshot_time:
             missing.append('snapshot_time_invalid_or_prebaseline')
-    if not (runtime.snapshot_capable and runtime.snapshot_id and valid_snapshot_time
+    if runtime.operator_attestation is None and not (runtime.snapshot_capable and runtime.snapshot_id and valid_snapshot_time
             and runtime.snapshot_manifest_id == manifest.manifest_id):
         missing.append('bound_snapshot_not_proven')
     if not (runtime.db_backup_sha256 == p.db_fingerprint.sha256

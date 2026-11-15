@@ -76,6 +76,34 @@ let ws, stderr = '';
     }
     return;
   }
+  if(config.mode==='manual-protection') {
+    await call('Page.navigate',{url:config.url+'/_service/workflow'},s);
+    await wait('document.getElementById("protection-panel") && !document.getElementById("protection-panel").hidden');
+    if(!await evaluate('document.getElementById("protection-panel").textContent.includes("operator_attested")'))throw Error('Manual provenance missing');
+    for(const [width,height,mobile] of [[1366,768,false],[1600,900,false],[1920,1080,false],[2560,1440,false],[820,1180,true],[1180,820,true]]) {
+      await call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile},s);
+      await call('Emulation.setTouchEmulationEnabled',{enabled:mobile,maxTouchPoints:5},s);
+      if(await evaluate('document.documentElement.scrollWidth>innerWidth+1'))throw Error('Manual form overflow '+width);
+      const point=await evaluate('(()=>{const n=document.getElementById("protection-snapshot-locked");n.scrollIntoView({block:"center"});const r=n.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()');
+      const before=await evaluate('document.getElementById("protection-snapshot-locked").checked');
+      if(mobile) {
+        await call('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point]},s);
+        await call('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]},s);
+      } else await evaluate('document.getElementById("protection-snapshot-locked").click();true');
+      if(await evaluate('document.getElementById("protection-snapshot-locked").checked')===before)throw Error('Manual checkbox did not respond');
+      const shot=await call('Page.captureScreenshot',{format:'png'},s);
+      fs.writeFileSync(config.directory+'/manual-'+width+'x'+height+'.png',Buffer.from(shot.data,'base64'));
+    }
+    await evaluate(`(()=>{document.getElementById('protection-actor').value='Edge operator';
+      document.getElementById('protection-snapshot-id').value='Manually verified DSM snapshot';
+      document.getElementById('protection-snapshot-at').value=new Date().toISOString();
+      for(const id of ['snapshot-locked','smb-disconnected','no-other-writers','keep-disconnected'])document.getElementById('protection-'+id).checked=true;
+      document.getElementById('protection-confirm').click();return true;})()`);
+    await wait('document.getElementById("protection-feedback").textContent.includes("Ruční potvrzení předáno")');
+    if(requests.filter(r=>r.method==='POST' && r.url.endsWith('/_service/control/protection')).length!==1)throw Error('Manual decision replayed');
+    console.log(JSON.stringify({manualProtection:true,operatorAttested:true,viewports:6,touch:true}));
+    return;
+  }
   if(config.mode?.startsWith('cleanup-')) {
     const terminalMode=config.mode.startsWith('cleanup-terminal-'), latePost=config.mode.endsWith('-late-post');
     const countResponses=path=>responses.filter(row=>row.url===config.url+path).length;

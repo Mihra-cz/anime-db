@@ -97,6 +97,169 @@ def status(config, request_id, kind):
     return json.loads((config.inbox / f'{request_id}.{kind}-status.json').read_bytes())
 
 
+def test_manual_snapshot_wait_is_exact_one_use_and_keeps_exclusion_through_review(setup, monkeypatch):
+    from dataclasses import replace
+    import time
+    m, c, _, calls, source, _, manifest = setup
+    monkeypatch.setattr(m,'HEARTBEAT_SECONDS',.02)
+    c = replace(c, protection_mode='manual_one_shot', manual_snapshot_timeout_seconds=5)
+    host = m.Coordinator(c, run=setup[2].run, healthy=lambda _: True)
+    request(c)
+    running = threading.Thread(target=host.tick, daemon=True)
+    running.start()
+    deadline = time.monotonic() + 3
+    view = {'waiting': False}
+    while not view['waiting'] and running.is_alive() and time.monotonic() < deadline:
+        view, cookie = host.protection_view(None)
+        time.sleep(.01)
+    assert view['waiting'] and host.app_stopped
+    while m.read_json(c.service_status/'progress.json').get('stage')!='manual_snapshot' and time.monotonic()<deadline:
+        time.sleep(.01)
+    first_heartbeat=m.read_json(c.service_status/'progress.json')['updated_at']
+    time.sleep(.1)
+    heartbeat_advanced=m.read_json(c.service_status/'progress.json')['updated_at']>first_heartbeat
+    assert not any(argv[0] in {str(c.snapshot_hook), str(c.writers_stop_hook), str(c.writers_start_hook)} for argv, _ in calls)
+    body = {key: view[key] for key in ('request_id', 'manifest_id', 'source_sha256', 'challenge', 'csrf')}
+    body.update(actor='Mirek', snapshot_id='DSM snapshot 2026', snapshot_at=datetime.now(timezone.utc).isoformat(),
+        snapshot_locked=True, windows_smb_disconnected=True, no_other_writers=True,
+        keep_disconnected_through_normal=True)
+    with pytest.raises(m.Conflict):
+        host.protection_decide({**body, 'manifest_id': '0' * 64}, origin=c.public_origin, cookie=cookie)
+    with pytest.raises(m.Forbidden):
+        host.protection_decide(body, origin='http://wrong.test', cookie=cookie)
+    for changed in ({'snapshot_at':'2020-01-01T00:00:00Z'}, {'snapshot_at':'2099-01-01T00:00:00Z'},
+            {'snapshot_at':'2026-11-15T12:00:00'}, {'snapshot_at':None}, {'snapshot_locked':False},
+            {'windows_smb_disconnected':False}, {'no_other_writers':False}, {'keep_disconnected_through_normal':False},
+            {'share':'//untrusted/Anime'}):
+        with pytest.raises(ValueError):
+            host.protection_decide({**body,**changed},origin=c.public_origin,cookie=cookie)
+    with pytest.raises(m.Forbidden):
+        host.protection_decide({**body,'csrf':'0'*64},origin=c.public_origin,cookie=cookie)
+    with pytest.raises(m.Conflict):
+        host.protection_decide({**body,'challenge':'0'*64},origin=c.public_origin,cookie=cookie)
+    host.protection_decide(body, origin=c.public_origin, cookie=cookie)
+    running.join(5)
+    assert not running.is_alive()
+    assert heartbeat_advanced
+    assert status(c, 'a' * 64, 'prepare')['state'] == 'READY'
+    record = m.read_json(c.ledger / ('a' * 64 + '.operator-attestation.json'))
+    assert record['provenance'] == 'operator_attested' and record['manifest_id'] == manifest
+    stage = m.read_json(c.ledger / ('a' * 64 + '.publish-runtime.json'))
+    assert stage['operator_attestation'] == record
+    assert stage['snapshot_capable'] is False and stage['snapshot_id'] is None
+    assert not any(argv[0] == str(c.writers_start_hook) for argv, _ in calls)
+    with pytest.raises(m.Conflict):
+        host.protection_decide(body, origin=c.public_origin, cookie=cookie)
+
+
+def test_manual_snapshot_timeout_stops_before_publish_and_does_not_run_hooks(setup):
+    from dataclasses import replace
+    m, c, original, calls, *_ = setup
+    c = replace(c, protection_mode='manual_one_shot', manual_snapshot_timeout_seconds=1)
+    host = m.Coordinator(c, run=original.run, healthy=lambda _: True)
+    request(c)
+    host.tick()
+    state = status(c, 'a' * 64, 'prepare')
+    assert state['state'] == 'STOP' and state['error_code'] == 'SNAPSHOT_FAILED'
+    assert not any('app.tools.reorganization_worker' in argv and argv[-3] in {'publish', 'execute'} for argv, _ in calls)
+    assert not list(c.ledger.glob('*.operator-attestation.json'))
+    assert not host.protection_view(None)[0]['waiting']
+
+
+def test_manual_worker_policy_and_deadline_are_explicit(setup):
+    from dataclasses import replace
+    m,c,*_=setup
+    with pytest.raises(ValueError):replace(c,protection_mode='unknown')
+    for value in (0,-1,3601,True,1.5):
+        with pytest.raises(ValueError):replace(c,manual_snapshot_timeout_seconds=value)
+    expected=dict(database='/data/anime.db',library_root='/media/anime',share=c.nas_source,share_root='/',
+        inbox='/approval-inbox',outbox='/approval-outbox',ledger='/approval-ledger',runtime_lock='/state/runtime.lock',
+        backups='/backups',service='/service-status',windows_root=r'\\nas.test\Anime',mount_read_write_checked=True,
+        safe_write_capability_proven=True,rename_noreplace_capability_proven=True)
+    save(c.worker_config,expected)
+    m.verify_worker_config(c)
+    with pytest.raises(ValueError):m.verify_worker_config(replace(c,protection_mode='manual_one_shot'))
+    save(c.worker_config,{**expected,'protection_mode':'manual_one_shot'})
+    m.verify_worker_config(replace(c,protection_mode='manual_one_shot'))
+    with pytest.raises(ValueError):m.verify_worker_config(c)
+
+
+def test_failed_manual_progress_publication_cannot_leave_a_live_confirmation(setup,monkeypatch):
+    from dataclasses import replace
+    m,c,original,_,source,_,manifest=setup
+    c=replace(c,protection_mode='manual_one_shot')
+    host=m.Coordinator(c,run=original.run,healthy=lambda _:True)
+    def unavailable(**kwargs):raise OSError('progress publication failed')
+    monkeypatch.setattr(host,'progress',unavailable)
+    with pytest.raises(OSError):
+        host.wait_for_protection('a'*64,dict(manifest_id=manifest,source_sha256=source,
+            created_at=datetime.now(timezone.utc).isoformat()))
+    assert host.protection_view(None)==({'waiting':False},None)
+
+
+@pytest.mark.parametrize('fault',['matching','foreign_sha','missing_sha','machine_provenance','automatic_extra'])
+def test_manual_start_binds_exact_published_attestation_before_host_action(setup,fault):
+    from dataclasses import replace
+    m,c,original,calls,source,approved,manifest=setup
+    c=replace(c,protection_mode='automatic' if fault=='automatic_extra' else 'manual_one_shot')
+    host=m.Coordinator(c,run=original.run,healthy=lambda _:True)
+    attestation=dict(provenance='machine_verified' if fault=='machine_provenance' else 'operator_attested',
+        request_id='a'*64,source_sha256=source,manifest_id=manifest,snapshot_id='DSM snapshot')
+    save(c.inbox/(source+'.proposal.json'),{'runtime':{'operator_attestation':attestation}})
+    data=request(c,'start',source,approved,manifest)
+    if fault!='missing_sha':
+        data['operator_attestation_sha256']='0'*64 if fault=='foreign_sha' else hashlib.sha256(encode(attestation)).hexdigest()
+        save(c.outbox/f'{source}.start-request.json',data)
+    host.tick()
+    state=status(c,source,'start')
+    hooks={str(c.snapshot_hook),str(c.writers_stop_hook),str(c.writers_start_hook)}
+    if fault=='matching':
+        assert state['state']=='NORMAL',state
+        stage=m.read_json(c.ledger/(source+'.execute-runtime.json'))
+        assert stage['operator_attestation']==attestation and stage['snapshot_capable'] is False
+        assert not any(argv[0] in hooks for argv,_ in calls)
+    else:
+        assert state['state']=='STOP' and state['e7_started'] is False,state
+        assert not any('app.tools.reorganization_worker' in argv and argv[-3]=='execute' for argv,_ in calls)
+        assert not (c.ledger/(source+'.execute-runtime.json')).exists()
+
+
+def test_uncertain_manual_attestation_write_stops_without_publication_or_retry(setup,monkeypatch):
+    from dataclasses import replace
+    import time
+    m,c,original,calls,*_=setup
+    c=replace(c,protection_mode='manual_one_shot',manual_snapshot_timeout_seconds=5)
+    host=m.Coordinator(c,run=original.run,healthy=lambda _:True)
+    write=host.write_json
+    def uncertain(path,value,**kwargs):
+        if path.name.endswith('.operator-attestation.json'):raise OSError('ledger write uncertain')
+        return write(path,value,**kwargs)
+    monkeypatch.setattr(host,'write_json',uncertain)
+    request(c)
+    running=threading.Thread(target=host.tick,daemon=True)
+    running.start()
+    deadline=time.monotonic()+3
+    view={'waiting':False}
+    while not view['waiting'] and running.is_alive() and time.monotonic()<deadline:
+        view,cookie=host.protection_view(None)
+        time.sleep(.01)
+    assert view['waiting']
+    body={key:view[key] for key in ('request_id','manifest_id','source_sha256','challenge','csrf')}
+    body.update(actor='Mirek',snapshot_id='DSM snapshot',snapshot_at=datetime.now(timezone.utc).isoformat(),
+        snapshot_locked=True,windows_smb_disconnected=True,no_other_writers=True,keep_disconnected_through_normal=True)
+    with pytest.raises(OSError):
+        host.protection_decide(body,origin=c.public_origin,cookie=cookie)
+    running.join(5)
+    assert not running.is_alive()
+    state=status(c,'a'*64,'prepare')
+    assert state['state']=='STOP' and state['phase']=='snapshot',state
+    assert not any('app.tools.reorganization_worker' in argv and argv[-3]=='publish' for argv,_ in calls)
+    assert (c.private_dir/('a'*64+'.protection-claim.json')).exists() and not host.app_stopped
+    assert not host.protection_view(None)[0]['waiting']
+    with pytest.raises(m.Conflict):
+        host.protection_decide(body,origin=c.public_origin,cookie=cookie)
+
+
 def test_prepare_claim_precedes_all_actions_and_restarts_only_after_publication(setup):
     m, c, host, calls, source, _, _ = setup
     request(c)
@@ -624,8 +787,12 @@ def test_failed_cleanup_publication_becomes_explicit_stop(setup,monkeypatch):
     assert state['decision_state']=='STOP' and not state['waiting']
 
 
-def test_runtime_capability_receipt_is_bound_to_live_mount_and_current_writer_fence(setup,monkeypatch):
+@pytest.mark.parametrize('protection_mode',['automatic','manual_one_shot'])
+def test_runtime_capability_receipt_is_bound_to_live_mount_and_current_writer_fence(setup,monkeypatch,protection_mode):
+    from dataclasses import replace
     m,c,host,*_=setup
+    c=replace(c,protection_mode=protection_mode)
+    host=m.Coordinator(c,run=host.run,healthy=lambda _:True)
     # Static policy assertions cannot replace the bound runtime record.
     proof=m.read_json(c.runtime_evidence)
     with pytest.raises(ValueError):host.write_stage_runtime('a'*64,'plan')
@@ -733,8 +900,10 @@ def test_restart_wait_uses_health_and_runtime_without_repeating_execution(setup,
     m, c, host, calls, source, approved, manifest = setup
     request(c, 'start', source, approved, manifest)
     elapsed = [0.0]
-    monkeypatch.setattr(m.time, 'monotonic', lambda: elapsed[0])
-    monkeypatch.setattr(m.time, 'sleep', lambda seconds: elapsed.__setitem__(0, elapsed[0]+seconds))
+    # Only the coordinator's health loop uses virtual time. Patching the
+    # shared stdlib clock also advances it in RuntimeDirectory subprocess wait.
+    monkeypatch.setattr(m, 'time', SimpleNamespace(time=m.time.time,
+        monotonic=lambda: elapsed[0], sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0]+seconds)))
     host.healthy = lambda url: startup=='slow' and elapsed[0]>=180
     original = host.run
     def runtime(argv, **kwargs):

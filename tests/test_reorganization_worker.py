@@ -10,6 +10,152 @@ from app import reorganization_approval as approval
 from test_reorganization_approval import production, case, snapshot, digest
 
 
+def manual_attestation(manifest, request_id='a' * 64, **changes):
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    value = dict(provenance='operator_attested', request_id=request_id,
+        source_sha256=approval.sha256(manifest), manifest_id=manifest.manifest_id,
+        share='//synology.test/Anime', snapshot_id='DSM real snapshot ID',
+        snapshot_at=now.isoformat(), snapshot_locked=True,
+        windows_smb_disconnected=True, no_other_writers=True,
+        keep_disconnected_through_normal=True, actor='operator',
+        waiting_since=now.isoformat(), deadline_at=(now + timedelta(seconds=1800)).isoformat(),
+        confirmed_at=now.isoformat())
+    value.update(changes)
+    return value
+
+
+def test_manual_runtime_uses_attestation_without_machine_snapshot_claim(case):
+    from app.target_execution_manifest import RuntimeEvidence, _decode_type
+    api, owner, db, manifest, runtime, *_ = case
+    raw = asdict(runtime)
+    raw.update(snapshot_capable=False, snapshot_id=None, snapshot_at=None, snapshot_manifest_id=None,
+        operator_attestation=manual_attestation(manifest))
+    manual = _decode_type(RuntimeEvidence, raw)
+    source = api.publish_proposal(inbox=case[5], database=db, library_root=owner.root,
+        share='//synology.test/Anime', share_root='/', manifest=manifest, runtime=manual)
+    bundle = api.read_proposal(case[5], source)
+    final = api.prepare_review(bundle, actor='operator', warning_ids=[w.warning_id for w in manifest.payload.warnings])
+    assert api.check_proposal(bundle, final, database=db, library_root=owner.root).outcome == 'READY_FOR_EXECUTION'
+    assert bundle['runtime']['snapshot_capable'] is False
+    assert bundle['runtime']['snapshot_id'] is None
+    assert bundle['runtime']['operator_attestation']['provenance'] == 'operator_attested'
+
+
+@pytest.mark.parametrize('changes', [
+    {'manifest_id': '0' * 64}, {'source_sha256': '0' * 64},
+    {'snapshot_at': '2020-01-01T00:00:00Z'}, {'snapshot_at': '2099-01-01T00:00:00Z'},
+    {'snapshot_locked': False}, {'windows_smb_disconnected': False},
+    {'no_other_writers': False}, {'keep_disconnected_through_normal': False},
+    {'provenance': 'machine_verified'}, {'confirmed_at': '2099-01-01T00:00:00Z'},
+    {'deadline_at': '2020-01-01T00:00:00Z'}, {'waiting_since': '2020-01-01T00:00:00Z'},
+])
+def test_manual_runtime_rejects_incomplete_or_foreign_attestation(case, changes):
+    from app.target_execution_manifest import RuntimeEvidence, _decode_type, _runtime_checks
+    manifest, runtime = case[3:5]
+    raw = asdict(runtime)
+    raw.update(snapshot_capable=False, snapshot_id=None, snapshot_at=None, snapshot_manifest_id=None,
+        operator_attestation=manual_attestation(manifest, **changes))
+    manual = _decode_type(RuntimeEvidence, raw)
+    assert 'operator_attestation_invalid' in _runtime_checks(manifest, manual)
+
+
+def test_legacy_runtime_remains_strictly_decodable():
+    from app.target_execution_manifest import RuntimeEvidence, _decode_type
+    raw = asdict(RuntimeEvidence())
+    raw.pop('operator_attestation', None)
+    assert _decode_type(RuntimeEvidence, raw) == RuntimeEvidence()
+    with pytest.raises(ValueError):
+        _decode_type(RuntimeEvidence, {**raw, 'unknown': True})
+
+
+def test_manual_worker_publishes_after_request_age_without_renewing_it(case, monkeypatch):
+    from dataclasses import replace
+    from datetime import datetime, timedelta
+    from app.tools import reorganization_worker as worker
+    from app.target_execution_manifest import OperatorAttestation, manifest_from_json
+    config = replace(config_for(case), protection_mode='manual_one_shot')
+    request_id = request_prepare(case)
+    runtime_receipt(config, request_id, 'plan', case[4])
+    worker.plan(config, request_id)
+    manifest = manifest_from_json(approval.read_record(config.ledger, request_id + '.planned.json'))
+    attestation = manual_attestation(manifest, request_id)
+    runtime = replace(case[4], snapshot_capable=False, snapshot_id=None, snapshot_at=None,
+        snapshot_manifest_id=None, operator_attestation=OperatorAttestation(**attestation))
+    runtime_receipt(config, request_id, 'publish', runtime)
+    before = (config.outbox / (request_id + '.prepare-request.json')).read_bytes()
+    class Later(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(seconds=1000)
+    monkeypatch.setattr(worker, 'datetime', Later)
+    with pytest.raises(worker.WorkerStopped, match='expired'):
+        worker.read_request(config, request_id, 'prepare')
+    source = worker.publish(config, request_id, attestation)['source_sha256']
+    assert source == approval.sha256(manifest)
+    assert (config.outbox / (request_id + '.prepare-request.json')).read_bytes() == before
+    assert approval.read_proposal(config.inbox, source)['runtime']['operator_attestation'] == attestation
+
+
+def test_automatic_worker_refuses_operator_runtime(case):
+    from dataclasses import replace
+    from app.tools import reorganization_worker as worker
+    from app.target_execution_manifest import OperatorAttestation
+    config = config_for(case)
+    request_id = request_prepare(case)
+    runtime_receipt(config, request_id, 'plan', replace(case[4],
+        operator_attestation=OperatorAttestation(**manual_attestation(case[3]))))
+    with pytest.raises(worker.WorkerStopped, match='mode'):
+        worker.plan(config, request_id)
+
+
+@pytest.mark.parametrize('fault', ['automatic_worker', 'start_sha', 'approval_sha', 'execute_attestation', 'execute_automatic'])
+def test_manual_start_stops_before_e7_for_mismatched_mode_or_attestation(case, monkeypatch, fault):
+    from dataclasses import replace
+    from app.target_execution_manifest import OperatorAttestation, manifest_from_json
+    from app.tools import reorganization_worker as worker
+    config = replace(config_for(case), protection_mode='manual_one_shot')
+    request = request_prepare(case)
+    runtime_receipt(config, request, 'plan', case[4])
+    worker.plan(config, request)
+    planned = manifest_from_json(approval.read_record(config.ledger, request + '.planned.json'))
+    receipt = manual_attestation(planned, request)
+    runtime = replace(case[4], snapshot_capable=False, snapshot_id=None, snapshot_at=None,
+        snapshot_manifest_id=None, operator_attestation=OperatorAttestation(**receipt))
+    runtime_receipt(config, request, 'publish', runtime)
+    source = worker.publish(config, request, receipt)['source_sha256']
+    bundle = approval.read_proposal(config.inbox, source)
+    final = approval.prepare_review(bundle, actor='operator', warning_ids=[w.warning_id for w in planned.payload.warnings])
+    approval.write_review(config.outbox, source, final, actor='operator')
+    protection = approval.operator_attestation_sha256(bundle)
+    approval.write_approval(config.outbox, source, final, actor='operator', approved_sha256=digest(final),
+        operator_attestation_sha256=None if fault == 'approval_sha' else protection)
+    approval.write_record(config.outbox, source + '.start-request.json', approval._json(dict(
+        version=1, kind='start', request_id=source, source_sha256=source, approved_sha256=digest(final),
+        manifest_id=final.manifest_id, actor='operator', requested_at=approval.now(),
+        operator_attestation_sha256='0' * 64 if fault == 'start_sha' else protection)))
+    current = {'execute_attestation': replace(runtime, operator_attestation=replace(
+        runtime.operator_attestation, snapshot_id='another DSM snapshot')),
+        'execute_automatic': replace(runtime, operator_attestation=None)}.get(fault, runtime)
+    runtime_receipt(config, source, 'execute', current)
+    if fault == 'automatic_worker':
+        config = replace(config, protection_mode='automatic')
+    def admitted(**kwargs):
+        raise AssertionError('original E7 admission reached')
+    monkeypatch.setattr(worker, 'execute_from_approval', admitted)
+    case[1].close()
+    before = snapshot(config.database, config.library_root)
+    with pytest.raises(ValueError) as stopped:
+        worker.execute(config, source)
+    expected = {'automatic_worker': None, 'start_sha': 'APPROVAL_INVALID', 'approval_sha': 'APPROVAL_INVALID',
+        'execute_attestation': 'WRITERS_NOT_STOPPED', 'execute_automatic': 'WRITERS_NOT_STOPPED'}[fault]
+    assert getattr(stopped.value, 'error_code', None) == expected, stopped.value
+    assert snapshot(config.database, config.library_root) == before
+    assert not (config.ledger / (final.manifest_id + '.accepted.json')).exists()
+    assert not (config.inbox / (source + '.acceptance.json')).exists()
+    assert not config.database.with_suffix('.journal.jsonl').exists()
+
+
 def config_for(case):
     from app.tools.reorganization_worker import WorkerConfig
     _, owner, database, manifest, runtime, inbox, outbox, ledger, lock = case
@@ -82,28 +228,40 @@ def test_prepare_stops_without_execution_for_invalid_runtime(case, monkeypatch, 
 
 
 @pytest.mark.parametrize('selection', ['preserve', 'selected', 'all', 'stale', 'decline', 'transport_failure'])
-def test_original_e7_waits_for_exact_web_cleanup_then_normal_or_stop(case, selection):
+@pytest.mark.parametrize('protection_mode', ['automatic', 'manual_one_shot'])
+def test_original_e7_waits_for_exact_web_cleanup_then_normal_or_stop(case, selection, protection_mode):
+    from dataclasses import replace
+    from app.target_execution_manifest import OperatorAttestation, manifest_from_json
     from app.tools.reorganization_worker import plan, publish, execute
     from app.target_execution_guard import NormalOperation, _require_no_evidence
-    config = config_for(case)
+    config = replace(config_for(case), protection_mode=protection_mode)
     if selection == 'all':
         for directory in ('nested-unused', 'nested-unused/a', 'nested-unused/a/b'):
             (config.library_root/directory).mkdir(mode=0o700)
     request = request_prepare(case)
     runtime_receipt(config, request, 'plan', case[4])
-    runtime_receipt(config, request, 'publish', case[4])
     binding = plan(config, request)
-    source = publish(config, request, dict(snapshot_id='fixture', snapshot_at=approval.now(),
-        snapshot_manifest_id=binding['manifest_id']))['source_sha256']
+    runtime = case[4]
+    receipt = dict(snapshot_id='fixture', snapshot_at=approval.now(), snapshot_manifest_id=binding['manifest_id'])
+    if protection_mode == 'manual_one_shot':
+        planned = manifest_from_json(approval.read_record(config.ledger, request + '.planned.json'))
+        receipt = manual_attestation(planned, request)
+        runtime = replace(runtime, snapshot_capable=False, snapshot_id=None, snapshot_at=None,
+            snapshot_manifest_id=None, operator_attestation=OperatorAttestation(**receipt))
+    runtime_receipt(config, request, 'publish', runtime)
+    source = publish(config, request, receipt)['source_sha256']
     bundle = approval.read_proposal(config.inbox, source)
     original = approval.manifest_from_json(bundle['manifest'])
     final = approval.prepare_review(bundle, actor='operator', warning_ids=[w.warning_id for w in original.payload.warnings])
     approval.write_review(config.outbox, source, final, actor='operator')
-    approval.write_approval(config.outbox, source, final, actor='operator', approved_sha256=digest(final))
+    approval.write_approval(config.outbox, source, final, actor='operator', approved_sha256=digest(final),
+        operator_attestation_sha256=approval.operator_attestation_sha256(bundle))
+    protection = ({'operator_attestation_sha256': approval.operator_attestation_sha256(bundle)}
+        if protection_mode == 'manual_one_shot' else {})
     approval.write_record(config.outbox, source + '.start-request.json', approval._json(dict(
         version=1, kind='start', request_id=source, source_sha256=source,
-        approved_sha256=digest(final), manifest_id=final.manifest_id, actor='operator', requested_at=approval.now())))
-    runtime_receipt(config, source, 'execute', case[4])
+        approved_sha256=digest(final), manifest_id=final.manifest_id, actor='operator', requested_at=approval.now(), **protection)))
+    runtime_receipt(config, source, 'execute', runtime)
     case[1].close()
     entered = threading.Event()
     # Real worker in another thread: no terminal input, no substituted E7 engine.

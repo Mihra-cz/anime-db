@@ -18,6 +18,21 @@
 </tbody></table>
 <p id="confirmed"></p>
 <p id="service-completion" hidden></p>
+<section id="protection-panel" hidden aria-labelledby="protection-heading">
+<h2 id="protection-heading">Ruční snapshot a provozní výluka</h2>
+<p>V DSM vytvořte nový snapshot sdílené složky Anime a uzamkněte jej. Snapshot musí vzniknout až po níže uvedeném manifestu.</p>
+<p><strong>operator_attested · ruční ověření správcem.</strong> AnimeDB existenci ani uzamčení snapshotu a odpojení Windows nezávisle strojově neověřuje.</p>
+<p id="protection-binding" class="path"></p><p id="protection-remaining" role="status"></p>
+<label for="protection-actor">Jméno správce pro evidenci</label><input type="text" id="protection-actor" maxlength="128" autocomplete="name">
+<label for="protection-snapshot-id">Skutečné ID snapshotu z DSM</label><input type="text" id="protection-snapshot-id" maxlength="256" autocomplete="off">
+<label for="protection-snapshot-at">Skutečný čas snapshotu včetně časového pásma</label><input type="text" id="protection-snapshot-at" placeholder="2026-11-15T14:30:00+01:00" autocomplete="off">
+<label class="candidate"><input type="checkbox" id="protection-snapshot-locked"><span>V DSM jsem ověřil tento snapshot Anime, jeho čas a uzamčení.</span></label>
+<label class="candidate"><input type="checkbox" id="protection-smb-disconnected"><span>Konkrétní sdílení Anime je ve Windows odpojené.</span></label>
+<label class="candidate"><input type="checkbox" id="protection-no-other-writers"><span>Nejsou známé další služby, úlohy ani klienti zapisující do Anime; během reorganizace nebude nikdo jiný zapisovat.</span></label>
+<label class="candidate"><input type="checkbox" id="protection-keep-disconnected"><span>Sdílení ponechám odpojené přes review i celé E7/E7H až do NORMAL a závěrečné kontroly. Návrat aplikace ke schválení výluku neukončuje.</span></label>
+<div class="controls"><button type="button" id="protection-confirm">Potvrdit ruční ochranu a pokračovat k review</button><button type="button" id="protection-stop">Odmítnout a skončit STOP</button></div>
+</section>
+<p id="protection-feedback" role="status"></p>
 <section id="cleanup-panel" hidden aria-labelledby="cleanup-heading">
 <h2 id="cleanup-heading">Rozhodnutí o prázdných adresářích</h2>
 <p>Živý E7H návrh vznikl po přesunech. Ponechané adresáře zůstanou zachované. Předvybrané položky vyžadují výslovné schválení.</p>

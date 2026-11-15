@@ -46,6 +46,64 @@ def prepare(web):
     return path, response, final
 
 
+@pytest.fixture
+def manual_web(case, monkeypatch):
+    from dataclasses import asdict
+    from app.target_execution_manifest import RuntimeEvidence, _decode_type
+    from test_reorganization_worker import manual_attestation
+    raw = asdict(case[4])
+    raw.update(snapshot_capable=False, snapshot_id=None, snapshot_at=None, snapshot_manifest_id=None,
+        operator_attestation=manual_attestation(case[3]))
+    manual_case = (*case[:4], _decode_type(RuntimeEvidence, raw), *case[5:])
+    return web.__wrapped__(manual_case, monkeypatch)
+
+
+def test_manual_approval_binds_human_evidence_and_start_reconfirms_exclusion(manual_web):
+    import json
+    from app import reorganization_approval as api
+    case, client, source = manual_web
+    path, page, final = prepare(manual_web)
+    assert 'operator_attested' in page.text
+    assert 'nezávisle strojově' in page.text
+    response = client.post(path + '/approve', data={'csrf': csrf(page), 'sha256': digest(final),
+        'confirm': 'yes', 'actor': 'operator'}, headers={'origin': 'http://testserver'})
+    assert response.status_code == 200, response.text
+    receipt = api.read_approval(case[6], source)
+    bundle = api.read_proposal(case[5], source)
+    assert receipt['operator_attestation_sha256'] == api.operator_attestation_sha256(bundle)
+    data = {'csrf': csrf(response), 'actor': 'operator', 'sha256': digest(final), 'confirm': 'yes'}
+    rejected = client.post(path + '/start', data=data, headers={'origin': 'http://testserver'})
+    assert rejected.status_code == 422
+    assert not (case[6] / (source + '.start-request.json')).exists()
+    page = client.get(path)
+    response = client.post(path + '/start', data={**data, 'csrf': csrf(page), 'manual_protection_confirm': 'yes'},
+        headers={'origin': 'http://testserver'}, follow_redirects=False)
+    assert response.status_code == 303
+    request = json.loads(api.read_record(case[6], source + '.start-request.json'))
+    assert request['operator_attestation_sha256'] == receipt['operator_attestation_sha256']
+
+
+@pytest.mark.parametrize('fault',['database','filesystem'])
+def test_manual_preflight_still_rejects_changed_db_or_filesystem_without_writes(manual_web,fault):
+    import sqlite3
+    case,client,source=manual_web
+    api,owner,db,manifest,_,_,outbox,*_=case
+    path=f'/reorganization/approval/{source}'
+    page=client.get(path)
+    if fault=='database':
+        with sqlite3.connect(db) as connection:
+            connection.execute("UPDATE videos SET filename=filename || ' changed' WHERE id=100")
+    else:
+        (owner.root/manifest.payload.actions[0].source).write_bytes(b'changed after manual snapshot')
+    before=snapshot(db,owner.root)
+    response=client.post(path+'/prepare',data={'csrf':csrf(page),'actor':'operator',
+        'warnings':[w.warning_id for w in manifest.payload.warnings]},headers={'origin':'http://testserver'})
+    assert response.status_code==409,response.text
+    assert snapshot(db,owner.root)==before
+    assert not list(outbox.glob('*.review.json')) and not list(outbox.glob('*.approval.json'))
+    assert not db.with_suffix('.journal.jsonl').exists()
+
+
 def test_lan_administration_needs_no_login_and_requires_csrf(web):
     case, client, source = web
     path = f'/reorganization/approval/{source}'

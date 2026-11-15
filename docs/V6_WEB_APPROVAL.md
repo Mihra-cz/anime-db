@@ -56,7 +56,7 @@ a nakonfigurované writery. Worker pod původním runtime.lock:
 1. Ověří existující rollback-mode SQLite v9 bez sidecarů; nic nemigruje.
 2. Načte aktuální autority a plnou filesystem evidenci existujícím generátorem.
 3. Vytvoří canonical manifest s živým RW bindingem a nezávislou lokální kopií DB.
-4. Hostitelská snapshot integrace vytvoří skutečný snapshot po manifest baseline
+4. V automatickém režimu snapshot integrace vytvoří skutečný snapshot po manifest baseline
    a vrátí jeho ID, čas a vazbu na manifest. Chybějící integrace znamená STOP.
 5. Publikace znovu ověří aktuální stav, zálohu, runtime a preflight. Připouští
    jen dosud nepotvrzené konkrétní WARNING, nikoli jiné NOT_READY/STALE/ERROR.
@@ -70,6 +70,44 @@ UI ukazuje zbývající čas a žádné otevření stránky jej neprodlužuje. B
 platnost kontroluje také po dlouhém schvalovacím preflightu, před spotřebováním
 execution claimu a znovu při původní E7 admission. Pro změnu délky okna zatím
 neexistuje skutečné měření na Nexusu; jeho délka se nezvyšuje.
+
+## Jednorázová ruční ochrana
+
+Výchozí `automatic` zachovává snapshot a writer hooky. Explicitní
+`manual_one_shot` v root konfiguraci koordinátoru a workeru dovoluje ruční DSM
+krok; není fallbackem při chybě hooku. Správce odpojí konkrétní SMB sdílení
+Anime ve Windows a nepoužívá je přes review ani celé E7/E7H. Windows může
+zůstat zapnutý. Potvrdí také nepřítomnost dalších writerů.
+
+Po původním `plan` a nezávislé kopii SQLite se na stejném Nginxu objeví
+formulář s konkrétním manifest/source SHA, share, baseline a odpočtem. Teprve
+nyní správce vytvoří a uzamkne nový snapshot Anime v DSM, ověří jeho skutečné
+ID a čas s časovým pásmem a potvrdí provozní podmínky. Snapshot musí být
+alespoň z času baseline a nesmí být budoucí.
+
+Záznam je `operator_attested`: AnimeDB stav DSM ani Windows nezávisle
+strojově neověřuje. Strojová snapshot pole zůstávají prázdná/false; ruční
+záznam není snapshot hook receipt ani strojový SMB fence. Odstavení lokální
+aplikace a původní runtime.lock se nadále skutečně ověřují.
+
+Čekání má vlastní `manual_snapshot_timeout_seconds` (výchozí 1800 s, rozsah
+1–3600 s), monotónní deadline a heartbeat. Jediné rozhodnutí vážou Origin,
+session cookie a CSRF na živý challenge/request/source/manifest. Cizí, staré
+nebo opakované potvrzení se nepřebírá. Timeout, odmítnutí nebo nejisté uložení
+znamenají STOP bez retry, resume či prodloužení. Přípravná žádost musí být
+čerstvá při převzetí i `plan`; pouze `publish` po platném omezeném ručním
+čekání smí překročit původních 900 s stáří přípravné fronty. Timestampy se
+nepřepisují. Platnost proposal/admission zůstává 900 s od publikace po
+preflightu, včetně času návratu aplikace.
+
+Před publikací se znovu ověří aktuální mount/capability evidence, DB,
+filesystem a SQLite kopie. Neměnný ruční záznam patří do existujícího ledgeru
+a RuntimeEvidence; jeho SHA je navázaný na approval i start, canonical
+manifest se nepřesealuje. Aplikace se vrátí k review bez uvolnění ruční výluky.
+Start navíc vyžaduje potvrzení, že stejný snapshot zůstává uzamčený a Windows
+sdílení je stále odpojené. Po původním E7/E7H a NORMAL následuje kontrola
+reportu, SQLite, cílových souborů a dostupnosti aplikace před opětovným
+připojením Windows. Po STOP se výluka neuvolňuje bez kontroly správce.
 
 ## Opravy, WARNING a schválení
 
@@ -196,7 +234,8 @@ Tři konfigurační capability příznaky jsou pouze povolení workflow. Koordin
 s aktuálním hostitelským mountem, mount ID, mountinfo a boot ID. Remount nebo
 reboot vyžaduje nové skutečné ověření. Statické `true` nestačí. Pro každý krok
 workeru předá tentýž RuntimeEvidence typ, včetně skutečného výsledku odstavení
-app a writer hooku; worker nepředpokládá odstavení zapisovatelů.
+app a v automatickém režimu writer hooku. Ruční režim přenáší oddělenou
+operator attestation, nikoli domnělé strojové odstavení vzdáleného SMB klienta.
 
 Hostitelský souhrn `timings_seconds` měří odděleně přípravu, publikaci, online
 check-start a execution. App INFO logy `V6 timing` rozlišují warning_preflight,

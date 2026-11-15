@@ -196,7 +196,8 @@ def install_approval_routes(app, templates, settings):
         try:
             receipt = approval.read_approval(outbox, source)
             if (final is None or receipt.get('approved_sha256') != digest or (actors and receipt.get('actor') != actor)
-                    or receipt.get('source_sha256') != source or receipt.get('state') != 'APPROVED'):
+                    or receipt.get('source_sha256') != source or receipt.get('state') != 'APPROVED'
+                    or receipt.get('operator_attestation_sha256') != approval.operator_attestation_sha256(bundle)):
                 raise ValueError('approval differs')
         except FileNotFoundError:
             receipt = None
@@ -404,11 +405,15 @@ def install_approval_routes(app, templates, settings):
         except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc))
         if command == 'start':
+            protection = approval.operator_attestation_sha256(bundle)
+            if protection is not None and fields.get('manual_protection_confirm') != ['yes']:
+                raise HTTPException(422, 'Potvrďte, že stejný snapshot zůstává uzamčený a Windows SMB sdílení je stále odpojené až do NORMAL.')
             try:
                 receipt = approval.read_approval(outbox, source)
                 if (type(receipt) is not dict or receipt.get('state') != 'APPROVED'
                         or receipt.get('source_sha256') != source or receipt.get('approved_sha256') != approval.sha256(existing)
-                        or receipt.get('manifest_id') != existing.manifest_id or receipt.get('actor') != actor):
+                        or receipt.get('manifest_id') != existing.manifest_id or receipt.get('actor') != actor
+                        or receipt.get('operator_attestation_sha256') != protection):
                     raise ValueError('exact approval required')
                 for name in (source + '.acceptance.json', source + '.result.json'):
                     try:
@@ -419,13 +424,17 @@ def install_approval_routes(app, templates, settings):
             except (ValueError, OSError):
                 raise HTTPException(409, 'STOP: vyžadováno platné, dosud nepřevzaté jednorázové schválení.')
             fresh(source, existing, 'start_preflight')
-            write_request('start', source, {'version': 1, 'kind': 'start', 'request_id': source,
+            record = {'version': 1, 'kind': 'start', 'request_id': source,
                 'source_sha256': source, 'approved_sha256': approval.sha256(existing),
-                'manifest_id': existing.manifest_id, 'actor': actor, 'requested_at': approval.now()})
+                'manifest_id': existing.manifest_id, 'actor': actor, 'requested_at': approval.now()}
+            if protection is not None:
+                record['operator_attestation_sha256'] = protection
+            write_request('start', source, record)
             return
         fresh(source, existing, 'approval_preflight')
         try:
-            approval.write_approval(outbox, source, existing, actor=actor, approved_sha256=fields['sha256'][0])
+            approval.write_approval(outbox, source, existing, actor=actor, approved_sha256=fields['sha256'][0],
+                operator_attestation_sha256=approval.operator_attestation_sha256(bundle))
         except FileExistsError:
             raise HTTPException(409, 'Manifest byl již jednorázově schválen.')
         except (ValueError, OSError):

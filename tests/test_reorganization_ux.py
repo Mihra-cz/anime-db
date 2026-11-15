@@ -225,6 +225,56 @@ document.body.dataset.test='PASS';
     assert 'data-test="PASS"' in result.stdout,re.findall(r'data-test="[^"]*"',result.stdout)+[result.stderr[-500:]]
 
 
+@pytest.mark.parametrize('width,height', [(1366,768),(1600,900),(1920,1080),(2560,1440),(820,1180),(1180,820)])
+def test_chromium_manual_protection_form_and_operator_provenance(tmp_path, width, height):
+    import shutil, subprocess
+    from pathlib import Path
+    chromium=shutil.which('chromium')
+    if not chromium:pytest.skip('Chromium unavailable')
+    assets=Path('deploy/nexus/service-edge')
+    protection=dict(waiting=True,request_id='a'*64,manifest_id='b'*64,source_sha256='c'*64,
+        challenge='d'*64,csrf='e'*64,share='//test/Anime',created_at='2026-11-15T10:00:00Z',
+        waiting_since='2026-11-15T10:00:00Z',deadline_at='2026-11-15T10:30:00Z',remaining_seconds=1200)
+    setup='''const pollers=[];window.setInterval=(fn,ms)=>{if(ms===5000)pollers.push(fn);return 0};const protection='''+json.dumps(protection)+''';let posted=null;
+window.fetch=async (url,options={})=>{
+ if(url.endsWith('/protection')){if(options.method==='POST'){posted=JSON.parse(options.body);return new Response('{"accepted":true}');}return new Response(JSON.stringify(protection));}
+ return new Response('{"waiting":false}',{status:url.endsWith('app-health')?503:200});};
+'''
+    checks='''(async()=>{try{
+ const check=(test,message)=>{if(!test)throw Error(message)};
+ for(let i=0;document.getElementById('protection-panel')?.hidden!==false;i++){
+  if(i===100)throw Error('manual panel missing');await new Promise(r=>setTimeout(r,10));}
+ check(document.getElementById('protection-panel').textContent.includes('operator_attested'),'provenance missing');
+ check(document.getElementById('protection-panel').textContent.includes('nezávisle strojově'),'machine verification falsely implied');
+ document.getElementById('protection-actor').value='Mirek';
+ document.getElementById('protection-snapshot-id').value='DSM snapshot';
+ document.getElementById('protection-snapshot-at').value='2026-11-15T10:05:00+00:00';
+ for(const id of ['snapshot-locked','smb-disconnected','no-other-writers','keep-disconnected'])document.getElementById('protection-'+id).checked=true;
+ document.getElementById('protection-confirm').click();
+ for(let i=0;!posted;i++){if(i===100)throw Error('manual POST missing');await new Promise(r=>setTimeout(r,10));}
+ check(posted.manifest_id===protection.manifest_id && posted.challenge===protection.challenge,'binding lost');
+ check(posted.snapshot_at==='2026-11-15T10:05:00+00:00','actual snapshot time changed');
+ check(posted.windows_smb_disconnected && posted.keep_disconnected_through_normal,'exclusion lost');
+ check(!('confirmed_at' in posted) && !('deadline_at' in posted),'browser can choose trusted deadline');
+ check(document.documentElement.scrollWidth<=innerWidth,'horizontal overflow');
+ check([...document.querySelectorAll('#protection-panel button')].every(b=>b.getBoundingClientRect().height>=44),'touch target too small');
+ for(let i=0;!document.getElementById('protection-feedback').textContent.includes('Ruční potvrzení předáno');i++){
+  if(i===100)throw Error('manual decision not acknowledged');await new Promise(r=>setTimeout(r,10));}
+ protection.waiting=false;await pollers[0]();
+ protection.waiting=true;protection.challenge='f'.repeat(64);await pollers[0]();
+ check(document.getElementById('protection-snapshot-id').value==='','old snapshot retained for new challenge');
+ check(document.querySelectorAll('#protection-panel input:checked').length===0,'old confirmations retained for new challenge');
+ document.body.dataset.test='PASS';
+ }catch(error){document.body.dataset.test=error.message}})();'''
+    page=tmp_path/'manual.html'
+    html=(assets/'index.html').read_text().replace('<script defer src="/_service/service.js"></script>','')
+    page.write_text(html.replace('</body>','<script>'+setup+(assets/'service.js').read_text()+checks+'</script></body>'))
+    result=subprocess.run([chromium,'--headless','--no-sandbox','--disable-gpu','--disable-dev-shm-usage',
+        f'--window-size={width},{height}','--virtual-time-budget=3500','--dump-dom',page.as_uri()],
+        text=True,capture_output=True,timeout=20)
+    assert 'data-test="PASS"' in result.stdout,re.findall(r'data-test="[^"]*"',result.stdout)+[result.stderr[-500:]]
+
+
 def test_preview_validation_suffix_has_czech_explanation_and_unchanged_conflict(web, monkeypatch):
     from app import reorganization_web as module
     from app.reorganization_archive_review import ArchiveReviewConflict

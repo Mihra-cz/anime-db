@@ -97,8 +97,9 @@ Publikovaný proposal obsahuje runtime evidence, které používá stávající 
    `0755`. Každý je samostatný existující adresář, nikoli symlink ani vnořený
    kořen jiné role. Předkové runtime adresářů mohou patřit root nebo runtime UID, bez group/other zápisu; důvěryhodné vstupy, private a control stále vyžadují root předky. `runtime.lock`
    se zachovává; nedělat nový soubor místo současného runtime locku.
-6. Připravit níže popsaný samostatný RW mount a skutečné trusted snapshot/writer
-   hooks. Bez nich službu neaktivovat jako funkční V6. Automatický reset,
+6. Připravit níže popsaný samostatný RW mount a pro výchozí `automatic` skutečné
+   trusted snapshot/writer hooks; pro ruční režim splnit níže uvedený explicitní
+   kontrakt. Bez příslušných podmínek službu neaktivovat jako funkční V6. Automatický reset,
    fake snapshot ID ani `true` místo writer fence nejsou validní integrace.
 
 ## Oddělený RW mount se stávajícím druhým účtem
@@ -187,6 +188,52 @@ musí být pro konkrétní Synology nakonfigurován a integračně ověřen pře
 nasazením; chybějící hook je blokující prerequisite. Lokální nezávislou DB
 kopii vytváří původní worker automaticky do `/backups/<request_id>.sqlite`
 bez přepsání, kontroluje fingerprint a váže ji k manifestu.
+
+## Explicitní manual_one_shot
+
+Pro jednorázové uspořádání osobního archivu lze v root coordinator JSON
+výslovně doplnit tento fragment; nejde o samostatnou úplnou konfiguraci:
+
+```json
+{
+  "protection_mode": "manual_one_shot",
+  "manual_snapshot_timeout_seconds": 1800,
+  "snapshot_hook": null,
+  "writers_stop_hook": null,
+  "writers_start_hook": null
+}
+```
+
+Do root-owned worker JSON současně přidat `"protection_mode": "manual_one_shot"`.
+Neshoda je STOP. Vynechaný mode zachovává `automatic` a jeho původní povinné
+hooky. Runtime capability soubor, skutečný mount/session binding, povolení
+capabilities, approved V2 deployment a původní bezpečnostní hranice zůstávají.
+Nezadávat fiktivní snapshot ani obecné `true` místo konkrétní evidence.
+
+Po vytvoření finálního manifestu a DB kopie host čeká na `/protection` přes
+dosavadní control socket; Nginx zpřístupňuje jen
+`/_service/control/protection` GET/POST s limitem 64 KiB. Snapshot ID, skutečný
+čas včetně pásma a všechna ruční potvrzení patří k aktuálnímu challenge a
+manifestu. Host vlastní waiting/deadline/confirmed timestamps. Lhůta čekání
+je 1–3600 s, výchozí 1800 s, běží monotónně a nepřežívá restart služby jako
+resume authority. Při nejasném uložení jednorázový privátní claim brání retry.
+Záznam `<request>.operator-attestation.json` je v existujícím ledgeru;
+RuntimeEvidence jej přenáší jako `operator_attested`, nikoli strojový snapshot
+receipt. Původní automatické RuntimeEvidence bez tohoto pole zůstávají čitelné.
+
+Pouze publish platné již převzaté přípravy smí po tomto čekání přesáhnout
+900sekundové stáří fronty. Platnost přípravy při převzetí/plan a všechny
+900sekundové proposal/start/approval admission brány se zachovají; žádné
+timestampy se neposouvají. Před publikací proběhnou znovu původní kontroly.
+SHA ruční evidence váže approval a start; start znovu potvrdí trvání výluky.
+
+Koordinátor v tomto režimu strojově zastaví pouze lokální aplikaci. Nevolá
+writer hooky ani při návratu k review či NORMAL a netvrdí, že řídí Windows.
+Správce drží konkrétní Windows SMB sdílení Anime odpojené a nepoužívané přes
+review i E7/E7H. Před opětovným připojením po NORMAL zkontroluje výsledek,
+SQLite, cílový filesystem a dostupnost aplikace. Snapshot a backup ponechá;
+při STOP zachová výluku i evidence pro diagnostiku. Podrobný uživatelský
+postup je ve [webovém workflow](../../../docs/V6_WEB_APPROVAL.md#jednorázová-ruční-ochrana).
 
 ## Instalace host služby a edge
 

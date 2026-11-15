@@ -18,7 +18,7 @@ from . import target_execution_journal as journal
 from . import target_execution_mounts as mounts
 from .target_execution_manifest import (
     RuntimeEvidence, WarningAcknowledgement, manifest_from_json, manifest_to_json,
-    preflight_execution_manifest, _strict_json_load, _decode_type,
+    preflight_execution_manifest, validate_operator_attestation, _strict_json_load, _decode_type,
 )
 from .tools.execution_manifest import _read_current, observe_runtime, validate_local_output
 
@@ -218,7 +218,12 @@ def _check_proposal(bundle, final, *, database, library_root, runtime=None):
     if str(fs._absolute(database)) != bundle['database'] or str(library_root) != original.payload.library_root:
         raise ValueError('database/library binding differs')
     _check_sqlite_input(database)
-    evidence = runtime if runtime is not None else RuntimeEvidence(**bundle['runtime'])
+    published = _decode_type(RuntimeEvidence, bundle['runtime'])
+    evidence = runtime if runtime is not None else published
+    if evidence.operator_attestation != published.operator_attestation:
+        raise ValueError('operator attestation differs from immutable proposal')
+    if evidence.operator_attestation is not None:
+        validate_operator_attestation(final, evidence.operator_attestation, share=bundle['share'])
     if evidence.db_backup_path:
         _check_sqlite_input(Path(evidence.db_backup_path), execution_database=False)
     context, snapshot, _plan, fingerprint, _metrics = _read_current(
@@ -306,11 +311,18 @@ def read_review(outbox, source_sha256):
     return final
 
 
-def write_approval(outbox, source_sha256, final, *, actor, approved_sha256):
+def operator_attestation_sha256(bundle):
+    evidence = _decode_type(RuntimeEvidence, bundle['runtime']).operator_attestation
+    return hashlib.sha256(_json(asdict(evidence)).encode()).hexdigest() if evidence is not None else None
+
+
+def write_approval(outbox, source_sha256, final, *, actor, approved_sha256, operator_attestation_sha256=None):
     if not actor.strip() or identity(approved_sha256) != sha256(final):
         raise ValueError('exact canonical SHA and named operator required')
     receipt = {'source_sha256': identity(source_sha256), 'approved_sha256': approved_sha256,
         'manifest_id': final.manifest_id, 'actor': actor, 'approved_at': now(), 'state': 'APPROVED'}
+    if operator_attestation_sha256 is not None:
+        receipt['operator_attestation_sha256'] = identity(operator_attestation_sha256)
     write_record(outbox, source_sha256 + '.approval.json', _json(receipt))
     return receipt
 
@@ -339,6 +351,8 @@ def accept_approval(*, inbox, outbox, ledger, source_sha256, approved_sha256, ac
     final = read_review(outbox, source_sha256)
     validate_review(bundle, final, actor=actor)
     receipt = read_approval(outbox, source_sha256)
+    if receipt.get('operator_attestation_sha256') != operator_attestation_sha256(bundle):
+        raise ValueError('approval operator attestation differs from immutable proposal')
     if (not actor.strip() or receipt.get('actor') != actor or receipt.get('state') != 'APPROVED'
             or receipt.get('source_sha256') != source_sha256 or receipt.get('manifest_id') != final.manifest_id
             or receipt.get('approved_sha256') != identity(approved_sha256) or sha256(final) != approved_sha256

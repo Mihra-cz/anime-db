@@ -28,6 +28,15 @@
 {% elif view_state == 'reviewed' %}<p><strong>Schválení návrhu reorganizaci nespouští.</strong> Přesný návrh je připravený; zbývá jej výslovně schválit. Fyzické spuštění je samostatný krok s vlastním potvrzením. O prázdných adresářích rozhodnete až po přesunech.</p>
 {% else %}<p><strong>Schválení návrhu reorganizaci nespouští.</strong> Nejdříve potvrďte upozornění a přesný návrh. Fyzické spuštění je samostatný krok s vlastním potvrzením. O prázdných adresářích rozhodnete až po přesunech.</p>{% endif %}
 </section>
+{% if bundle.runtime.operator_attestation %}{% set protection = bundle.runtime.operator_attestation %}
+<section class="panel" id="manual-protection"><h2>Ruční ochrana jednorázové reorganizace</h2>
+<p><strong>operator_attested · ručně ověřeno správcem.</strong> AnimeDB tyto údaje nezávisle strojově neověřuje.</p>
+<p class="reorganization-path">Snapshot: {{ protection.snapshot_id }} · čas: {{ protection.snapshot_at }} · sdílení: {{ protection.share }}.</p>
+<p>Správce {{ protection.actor }} potvrdil uzamčení snapshotu, odpojení Windows SMB sdílení a nepřítomnost dalších writerů v {{ protection.confirmed_at }}.</p>
+{% if view_state == 'normal' %}<p><strong>Před opětovným připojením Windows zkontrolujte výsledný report, SQLite, cílové soubory a dostupnost aplikace.</strong> Snapshot a zálohu zachovejte pro následnou kontrolu.</p>
+{% else %}<p>Windows sdílení ponechte odpojené přes schvalování i celé E7/E7H. Návrat aplikace ke schvalování tuto provozní výluku neukončuje. Při STOP sdílení nepřipojujte před kontrolou správce.</p>{% endif %}
+<p>SQLite backup a aktuální DB/FS, mount a capability podmínky se kontrolují stávajícím mechanismem.</p></section>
+{% endif %}
 {% if view_state not in ['normal', 'running', 'accepted'] %}<section class="panel"><h2>Opravit autoritativní rozhodnutí</h2>
 <nav class="reorganization-reviews" aria-label="Editory před reorganizací"><a href="/naming-review">Naming Review · Názvy</a><a href="/naming-review/layout">Layout Review · Rozložení</a><a href="/hierarchy-review">Hierarchy Review · Hierarchie</a></nav>
 <p>Chybný název nebo přiřazení opravte v příslušném editoru. Poté vytvořte nový náhled a nový finální manifest; změna autority zneplatní starý návrh. Přesný JSON návrhu se ručně neupravuje.</p></section>{% endif %}
@@ -94,6 +103,7 @@
 <section class="panel"><h2>Výslovné spuštění reorganizace</h2>
 <p>Hostitel znovu ověří manifest, odstaví aplikaci a writery a provede schválené přesuny i aktualizaci SQLite. Průběh i rozhodnutí o prázdných adresářích zůstanou dostupné v tomto prohlížeči.</p>
 <form method="post" action="/reorganization/approval/{{ source }}/start">
+{% if bundle.runtime.operator_attestation %}<label><input type="checkbox" name="manual_protection_confirm" value="yes" required> Stejný snapshot zůstává uzamčený, Windows SMB sdílení je stále odpojené a nebude používáno až do dokončení a závěrečné kontroly.</label>{% endif %}
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="sha256" value="{{ canonical_sha256 }}"><input type="hidden" name="actor" value="{{ actor }}">
 <label><input type="checkbox" name="confirm" value="yes" required> Výslovně spustit schválený návrh {{ canonical_sha256 }} jako {{ actor }}. O úklidu prázdných adresářů rozhodnu samostatně podle živého návrhu.</label>
 <p><button type="submit">Spustit schválenou reorganizaci</button></p>

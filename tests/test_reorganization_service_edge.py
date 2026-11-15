@@ -42,7 +42,7 @@ def http_request(url, *, data=None, origin=None):
         return response.code, response.read().decode()
 
 
-@pytest.mark.parametrize('scenario', ['status', 'large', 'application-504', 'post-outage', 'approval', 'cleanup-preserve', 'cleanup-delete', 'cleanup-stop', 'cleanup-two-browsers',
+@pytest.mark.parametrize('scenario', ['status', 'large', 'application-504', 'post-outage', 'approval', 'manual-protection', 'cleanup-preserve', 'cleanup-delete', 'cleanup-stop', 'cleanup-two-browsers',
     'cleanup-terminal-stop', 'cleanup-terminal-normal', 'cleanup-terminal-stop-late-post', 'cleanup-terminal-normal-late-post'])
 def test_same_url_service_fallback_and_truthful_browser_states(tmp_path, request, monkeypatch, scenario):
     assert docker('context', 'inspect', 'default', '--format', '{{.Endpoints.docker.Host}}') == 'unix:///var/run/docker.sock'
@@ -193,6 +193,32 @@ def test_same_url_service_fallback_and_truthful_browser_states(tmp_path, request
                 assert case_data[0].read_approval(case_data[6], source)['actor'] == 'Edge operator'
             finally:
                 server.should_exit = True; thread.join(10); sock.close(); case_data[1].close()
+            return
+        if scenario == 'manual-protection':
+            from dataclasses import replace
+            m,c,_,_,source,_,manifest=request.getfixturevalue('coordinator_setup')
+            c=replace(c,control_dir=control,public_origin=url,protection_mode='manual_one_shot',manual_snapshot_timeout_seconds=120)
+            host=m.Coordinator(c,run=lambda *args,**kwargs:'',healthy=lambda _:False)
+            server=m.make_control_server(host)
+            serving=threading.Thread(target=server.serve_forever,daemon=True);serving.start()
+            results=[]
+            def wait_for_snapshot():
+                results.append(host.wait_for_protection('a'*64,dict(manifest_id=manifest,
+                    created_at=m.datetime.now(m.timezone.utc).isoformat(),source_sha256=source)))
+            waiting=threading.Thread(target=wait_for_snapshot,daemon=True);waiting.start()
+            try:
+                docker('stop','-t','1',backend)
+                assert http_request(url)[0]==503
+                run_browser(tmp_path,url,public,backend,mode=scenario)
+                waiting.join(5)
+                assert not waiting.is_alive() and len(results)==1
+                record=m.read_json(c.ledger/('a'*64+'.operator-attestation.json'))
+                assert record==results[0] and record['provenance']=='operator_attested'
+                assert record['windows_smb_disconnected'] and record['keep_disconnected_through_normal']
+                assert json.loads(http_request(url+'/_service/control/protection')[1])=={'waiting':False}
+            finally:
+                if waiting.is_alive():host._manual_error=ValueError('test stopped');host._manual_event.set();waiting.join(5)
+                server.shutdown();server.server_close();serving.join(5)
             return
         if scenario.startswith('cleanup-'):
             # Real Nginx -> Unix host API with app stopped; original E7 callback

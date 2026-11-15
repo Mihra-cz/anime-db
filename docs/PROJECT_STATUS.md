@@ -393,13 +393,23 @@ již zahájeného běhu. UI zobrazuje zbývající čas; stáří se znovu kontr
 dlouhém preflightu, bez automatického prodlužování. Browserová session cookie
 neinvaliduje formuláře mezi preview a dalšími záložkami.
 
-Koordinátor ani RW mount zatím nejsou na Nexusu nasazené; jednorázové kroky,
+Explicitní `manual_one_shot` zachovává tento průchod, ale po plánu/DB backupu
+čeká na omezené webové potvrzení skutečně ručně vytvořeného a uzamčeného DSM
+snapshotu a odpojeného Windows SMB sdílení. `operator_attested` se neoznačuje
+za strojové ověření DSM ani externí fence; runtime a approval/start vážou
+neměnnou ruční evidenci ke konkrétnímu manifestu. Ruční výluka pokračuje přes
+review i celé E7/E7H, návrat aplikace ji neuvolňuje. Automatický režim a jeho
+hooky zůstávají výchozí. Samostatná lhůta čekání neposouvá timestampy ani
+900sekundovou platnost proposal po publikaci. Detaily určuje webový runbook.
+
+Koordinátor zatím není produkčně aktivovaný; jednorázové kroky,
 trusted snapshot/writer integrace a oddělení oprávnění popisuje
 [instalační runbook](../deploy/nexus/docs/V6_COORDINATOR.md). Statické capability příznaky jsou pouze povolení; host čte aktuální
-RuntimeEvidence s vazbou na mount session a skutečné writer hooky. Privilegovaný
+RuntimeEvidence s vazbou na mount session a podle režimu skutečné writer hooky
+nebo výslovnou ruční provozní evidenci. Privilegovaný
 Compose používá schválené root-owned kopie týchž tří vstupů, zatímco src/releases
-zůstávají uživatelské. Skutečný E7 na NAS, ACL, CIFS capability a návrat produkce
-zůstávají neověřené. Schema ani doménová
+zůstávají uživatelské. Tento kontrakt sám nedokládá produkční E7 ani konkrétní
+ACL či CIFS capability; readiness vychází z aktuálních provozních dokladů. Schema ani doménová
 pravidla se nemění. Verze a closure podmínky určuje [ROADMAP](ROADMAP.md).
 
 [Container locator projection](../app/target_planner.py) zachovává single-leaf

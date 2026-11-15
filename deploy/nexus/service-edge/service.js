@@ -23,6 +23,9 @@
   let cleanup = null, cleanupPage = 0, decidedProposal = null, submitting = false;
   let selectionProposal = null, submissionState = null, decisionEpoch = 0, polling = false;
   let cleanupSource = sha(requestedSource) ? requestedSource : null, cleanupOutcome = null;
+  let protection = null, protectionSent = null, protectionSubmitting = false, protectionChallenge = null;
+  const protectionPanel = document.getElementById('protection-panel');
+  const protectionFeedback = document.getElementById('protection-feedback');
   const element = (tag, text) => {
     const node = document.createElement(tag); node.textContent = text; return node;
   };
@@ -60,7 +63,8 @@
       cells[2].textContent = data.total !== null && ['rename', 'sqlite'].includes(row.id)
         ? `${row.id === 'rename' ? data.rename_completed : data.completed} / ${data.total}` : '';
     }
-    stage.textContent = data.waiting_for_operator ? 'Čeká se na vaše výslovné rozhodnutí o prázdných adresářích.'
+    stage.textContent = data.operator_wait === 'manual_snapshot' ? 'Čeká se na ručně ověřený snapshot a potvrzení odpojeného Windows sdílení.'
+      : data.waiting_for_operator ? 'Čeká se na vaše výslovné rozhodnutí o prázdných adresářích.'
       : phaseLabels[data.stage] || (!data.active && ['NORMAL','STOP'].includes(data.outcome) ? phaseLabels[data.outcome === 'NORMAL' ? 'normal' : 'stopped'] : null) || phaseLabels[data.current_phase] || 'Průběh a potvrzené změny jsou uvedené níže.';
     document.getElementById('service-technical').textContent = JSON.stringify({stage:data.stage, current_phase:data.current_phase,
       outcome:data.outcome, detail:data.detail, source_sha256:data.source_sha256, phases:data.phases, last_confirmed:data.last_confirmed}, null, 2);
@@ -94,10 +98,60 @@
     } else {
       result.textContent = 'Reorganizace knihovny';
       message.textContent = data.waiting_for_operator
-        ? 'Worker čeká na výslovné rozhodnutí o živém návrhu cleanupu níže.'
+        ? (data.operator_wait === 'manual_snapshot' ? 'Připravte snapshot v DSM a potvrďte provozní výluku níže.' : 'Worker čeká na výslovné rozhodnutí o živém návrhu cleanupu níže.')
         : 'Hostitel zpracovává požadavek. Fáze a potvrzené změny jsou uvedeny níže.';
     }
+    if (data.protection_mode === 'manual_one_shot' && !data.active && data.outcome === 'NORMAL') {
+      message.textContent += ' Před opětovným připojením Windows zkontrolujte report, SQLite, cílové soubory a dostupnost aplikace.';
+    }
   }
+  function showProtection(data) {
+    if (!data || typeof data.waiting !== 'boolean') throw Error('invalid protection state');
+    if (!data.waiting) { protectionPanel.hidden = true; protection = null; return; }
+    if (![data.request_id,data.source_sha256,data.manifest_id,data.challenge].every(sha) || typeof data.csrf !== 'string' ||
+        typeof data.share !== 'string' || typeof data.created_at !== 'string' || !Number.isInteger(data.remaining_seconds) ||
+        (requestedJob && requestedJob !== data.request_id) || requestedSource) throw Error('foreign protection state');
+    if (protectionChallenge !== data.challenge) {
+      for (const input of protectionPanel.querySelectorAll('input')) { input.value = ''; input.checked = false; }
+      protectionFeedback.textContent = '';
+    }
+    protectionChallenge = data.challenge;
+    protection = data;
+    protectionPanel.hidden = protectionSent === data.challenge;
+    document.getElementById('protection-binding').textContent = `Sdílení: ${data.share} · Manifest: ${data.manifest_id} · Baseline: ${data.created_at} · SHA: ${data.source_sha256}`;
+    document.getElementById('protection-remaining').textContent = `Zbývá nejvýše ${data.remaining_seconds} s. Konec čekání: ${data.deadline_at}. Obnovení stránky lhůtu neprodlužuje.`;
+    for (const id of ['confirm','stop']) document.getElementById('protection-'+id).disabled = protectionSubmitting || protectionSent === data.challenge;
+  }
+  async function decideProtection(stop) {
+    if (!protection || protectionSubmitting || protectionSent === protection.challenge) return;
+    const get = id => document.getElementById('protection-'+id);
+    const actor = get('actor').value.trim();
+    const body = {request_id:protection.request_id,source_sha256:protection.source_sha256,manifest_id:protection.manifest_id,
+      challenge:protection.challenge,csrf:protection.csrf,actor,snapshot_id:get('snapshot-id').value.trim(),
+      snapshot_at:get('snapshot-at').value.trim(),snapshot_locked:get('snapshot-locked').checked,
+      windows_smb_disconnected:get('smb-disconnected').checked,no_other_writers:get('no-other-writers').checked,
+      keep_disconnected_through_normal:get('keep-disconnected').checked};
+    if (!actor || (!stop && (!body.snapshot_id || !body.snapshot_at || !body.snapshot_locked ||
+        !body.windows_smb_disconnected || !body.no_other_writers || !body.keep_disconnected_through_normal))) {
+      protectionFeedback.textContent = 'Vyplňte skutečné údaje snapshotu, jméno správce a všechna ruční potvrzení.'; return;
+    }
+    if (stop) body.decision = 'stop';
+    protectionSubmitting = true;
+    for (const id of ['confirm','stop']) get(id).disabled = true;
+    protectionFeedback.textContent = 'Předávám jednorázové ruční potvrzení…';
+    try {
+      const response = await fetch('/_service/control/protection', {method:'POST',credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(5000)});
+      if (!response.ok || (await response.json()).accepted !== true) throw Error('protection decision unconfirmed');
+      protectionSent = body.challenge; protectionPanel.hidden = true;
+      protectionFeedback.textContent = stop ? 'Odmítnutí předáno; čeká se na STOP.' : 'Ruční potvrzení předáno. Windows sdílení ponechte odpojené i po návratu aplikace ke schvalování.';
+    } catch (_) {
+      protectionFeedback.textContent = 'Předání není potvrzené. Nic se automaticky neopakuje; ověřuji aktuální stav hostitele.';
+      protectionPanel.hidden = true;
+    } finally { protectionSubmitting = false; }
+  }
+  document.getElementById('protection-confirm').addEventListener('click',()=>decideProtection(false));
+  document.getElementById('protection-stop').addEventListener('click',()=>decideProtection(true));
   function renderCandidates() {
     if (!cleanup) return;
     const query = document.getElementById('cleanup-search').value.toLocaleLowerCase();
@@ -261,10 +315,11 @@
     if (polling) return;
     polling = true;
     const epoch = decisionEpoch;
-    const [status, health, control] = await Promise.allSettled([
+    const [status, health, control, manual] = await Promise.allSettled([
       fetch('/_service/progress.json', {cache: 'no-store', signal: AbortSignal.timeout(3000)}),
       fetch('/_service/app-health', {cache: 'no-store', signal: AbortSignal.timeout(3000)}),
-      fetch('/_service/control/cleanup', {cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(3000)})
+      fetch('/_service/control/cleanup', {cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(3000)}),
+      fetch('/_service/control/protection', {cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(3000)})
     ]);
     reachable = false;
     if (status.status === 'fulfilled' && status.value.ok) {
@@ -280,6 +335,12 @@
       try { await showCleanup(await control.value.json()); }
       catch (_) { disableDecision(true); feedback.textContent = 'Živý cleanup stav není potvrzený.'; }
     } else if (!submitting && epoch === decisionEpoch) { disableDecision(true); }
+    if (!protectionSubmitting) {
+      try {
+        if (manual.status !== 'fulfilled' || !manual.value.ok) throw Error('manual state unavailable');
+        showProtection(await manual.value.json());
+      } catch (_) { protectionPanel.hidden = true; protection = null; }
+    }
     render();
     const canonicalResult = snapshot && sha(snapshot.source_sha256) &&
       snapshot.result_url === '/reorganization/approval/' + snapshot.source_sha256;

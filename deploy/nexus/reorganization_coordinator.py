@@ -5,7 +5,7 @@ Only trusted deployment configuration determines executables, images and mounts.
 Requests and cleanup decisions are data. Spent claims are never retried.
 """
 from dataclasses import dataclass, fields
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import argparse
 import ctypes
 import fcntl
@@ -156,10 +156,16 @@ class Config:
     runtime_evidence: Path | None = None
     app_health_timeout_seconds: int = 900
     approved_root: Path | None = None
+    protection_mode: str = 'automatic'
+    manual_snapshot_timeout_seconds: int = 1800
 
     def __post_init__(self):
         if type(self.app_health_timeout_seconds) is not int or not 0 < self.app_health_timeout_seconds <= 3600:
             raise ValueError('app_health_timeout_seconds must be an integer in [1, 3600]')
+        if self.protection_mode not in {'automatic', 'manual_one_shot'}:
+            raise ValueError('known protection mode required')
+        if type(self.manual_snapshot_timeout_seconds) is not int or not 0 < self.manual_snapshot_timeout_seconds <= 3600:
+            raise ValueError('manual_snapshot_timeout_seconds must be an integer in [1, 3600]')
 
 
 def load_config(path):
@@ -168,7 +174,7 @@ def load_config(path):
     value = read_json(path)
     names = {f.name for f in fields(Config)}
     if (type(value) is not dict or set(value) - names
-            or names - {'app_health_timeout_seconds','approved_root'} - set(value)):
+            or names - {'app_health_timeout_seconds','approved_root','protection_mode','manual_snapshot_timeout_seconds'} - set(value)):
         raise ValueError('exact coordinator config fields required')
     if type(value['version']) is not int or value['version'] != 1:
         raise ValueError('config version 1 required')
@@ -184,6 +190,8 @@ def load_config(path):
     if type(value['nas_source']) is not str or not re.fullmatch(r'//[^/\s]+/[^/\s]+', value['nas_source']):
         raise ValueError('exact CIFS share required')
     for name in PATH_FIELDS:
+        if name in {'snapshot_hook','writers_stop_hook','writers_start_hook'} and value.get('protection_mode') == 'manual_one_shot' and value[name] is None:
+            continue
         if type(value[name]) is not str:
             raise ValueError('absolute deployment paths required')
         value[name] = Path(value[name])
@@ -202,7 +210,8 @@ def load_config(path):
     for item in (value['worker_config'], value['runtime_evidence']):
         secure_root_path(item)
     for name in ('snapshot_hook', 'writers_stop_hook', 'writers_start_hook'):
-        secure_root_path(value[name], executable=True)
+        if value[name] is not None:
+            secure_root_path(value[name], executable=True)
     directories = [value[name] for name in PATH_FIELDS if name not in (
         'worker_config', 'snapshot_hook', 'writers_stop_hook', 'writers_start_hook', 'runtime_evidence')]
     for directory in directories:
@@ -242,6 +251,10 @@ def verify_worker_config(config):
         inbox='/approval-inbox',outbox='/approval-outbox',ledger='/approval-ledger',
         runtime_lock='/state/runtime.lock',backups='/backups',service='/service-status')
     flags = {'mount_read_write_checked','safe_write_capability_proven','rename_noreplace_capability_proven'}
+    if type(data) == dict and 'protection_mode' in data:
+        expected['protection_mode'] = config.protection_mode
+    elif config.protection_mode != 'automatic':
+        raise ValueError('manual worker policy must match coordinator mode')
     if (type(data) != dict or set(data) != set(expected)|flags|{'windows_root'}
             or any(data.get(k) != v for k,v in expected.items())
             or any(type(data[k]) != bool for k in flags)
@@ -342,7 +355,7 @@ RUNTIME_KEYS = {'scanner_paused_through_verification','inventory_writer_paused_t
     'snapshot_id','snapshot_at','snapshot_manifest_id','snapshot_capable','db_backup_path',
     'db_backup_sha256','db_backup_size','db_backup_user_version','db_backup_manifest_id',
     'actual_windows_root','mount_read_write_checked','mount_read_only_now','safe_write_capability_proven',
-    'rename_noreplace_capability_proven','mount_identity','free_bytes'}
+    'rename_noreplace_capability_proven','mount_identity','free_bytes','operator_attestation'}
 
 
 def host_mount_identity(path, nas_source):
@@ -405,6 +418,10 @@ class Coordinator:
         self._scanner_stopped = False
         self._writers_stopped = False
         self._snapshot_receipt = None
+        self._manual_pending = None
+        self._manual_event = threading.Event()
+        self._manual_error = None
+        self._manual_result = None
         self.metrics = {}
         secret = config.private_dir / 'csrf-secret.json'
         try:
@@ -511,7 +528,7 @@ class Coordinator:
             raise failure('CAPABILITIES_UNVERIFIED')
         try:
             proof=self.read_json(self.config.runtime_evidence)
-            if (type(proof)!=dict or set(proof)!=RUNTIME_KEYS
+            if (type(proof)!=dict or set(proof) not in (RUNTIME_KEYS, RUNTIME_KEYS-{'operator_attestation'})
                     or any(proof.get(key) is not True for key in
                         ('mount_read_write_checked','safe_write_capability_proven','rename_noreplace_capability_proven'))
                     or proof.get('mount_identity')!=host_mount_identity(self.config.media_rw,self.config.nas_source)):
@@ -523,11 +540,17 @@ class Coordinator:
 
     def write_stage_runtime(self, request_id, verb):
         proof=self.runtime_proof()
-        if not self._scanner_stopped or not self._writers_stopped:
+        manual = self.config.protection_mode == 'manual_one_shot'
+        if not self._scanner_stopped or (not manual and not self._writers_stopped):
             raise failure('WRITERS_NOT_STOPPED')
         proof.update(scanner_paused_through_verification=self._scanner_stopped,
-            inventory_writer_paused_through_verification=self._writers_stopped,mount_identity=None)
-        if self._snapshot_receipt is not None:
+            inventory_writer_paused_through_verification=self._scanner_stopped if manual else self._writers_stopped,mount_identity=None)
+        if manual:
+            # These booleans describe the stopped local app/inventory process.
+            # External SMB exclusion is ONLY the separate human assertion.
+            proof.update(snapshot_capable=False,snapshot_id=None,snapshot_at=None,snapshot_manifest_id=None,
+                operator_attestation=self._snapshot_receipt)
+        elif self._snapshot_receipt is not None:
             proof.update(self._snapshot_receipt)
             proof['snapshot_capable']=bool(self._snapshot_receipt.get('snapshot_id'))
         self.write_json(self.config.ledger/f'{request_id}.{verb}-runtime.json',proof,
@@ -548,7 +571,7 @@ class Coordinator:
             owner=(self.config.uid,self.config.gid))
 
     def progress(self, *, stage, detail, source=None, outcome='UNVERIFIED', active=True, app_ready=False, result_url=None,
-                 app_restart_state=None):
+                 app_restart_state=None, operator_wait=None):
         path = self.config.service_status / 'progress.json'
         data = None
         if source is not None:
@@ -563,7 +586,8 @@ class Coordinator:
                 total=None, current_phase='manifest', waiting_for_operator=False, error=None,
                 last_confirmed=None, phases=[dict(id=p,state='WORK' if p=='manifest' else 'WAIT') for p in PHASES])
         data.update(stage=stage,detail=detail,source_sha256=source,outcome=outcome,active=active,
-            app_ready=app_ready,app_restart_state=app_restart_state,updated_at=time.time(),waiting_for_operator=False,
+            app_ready=app_ready,app_restart_state=app_restart_state,updated_at=time.time(),waiting_for_operator=operator_wait is not None,
+            operator_wait=operator_wait,protection_mode=self.config.protection_mode,
             result_url=result_url or ('/reorganization/approval/' + source if source else None))
         if outcome == 'STOP':
             for row in data['phases']:
@@ -601,6 +625,8 @@ class Coordinator:
         self._scanner_stopped = not self.run(self.compose('ps','--status','running','--quiet','app')).strip()
         if not self._scanner_stopped:
             raise failure('EVIDENCE_UNCERTAIN')
+        if self.config.protection_mode == 'manual_one_shot':
+            return
         self._writers_stopped = strict_json(self.run([str(self.config.writers_stop_hook)])) == {'writers_stopped':True}
         if not self._writers_stopped:
             raise failure('EVIDENCE_UNCERTAIN')
@@ -645,7 +671,7 @@ class Coordinator:
             self.app_stopped = False
             self._scanner_stopped = False
             self._writers_stopped = False
-            if strict_json(self.run([str(self.config.writers_start_hook)])) != {'writers_started':True}:
+            if self.config.protection_mode == 'automatic' and strict_json(self.run([str(self.config.writers_start_hook)])) != {'writers_started':True}:
                 raise ValueError('writer restart acknowledgement required')
             self.app_restart_state = 'available'
         except Exception as error:
@@ -684,6 +710,8 @@ class Coordinator:
     def validate_request(self, data, request_id, kind):
         common={'version','kind','request_id','actor','requested_at'}
         expected=common|({'preview_db_sha256'} if kind=='prepare' else {'source_sha256','approved_sha256','manifest_id'})
+        if kind=='start' and self.config.protection_mode=='manual_one_shot':
+            expected.add('operator_attestation_sha256')
         if (type(data) is not dict or set(data)!=expected or type(data['version']) is not int
                 or data['version']!=1 or data['kind']!=kind or data['request_id']!=request_id):
             raise ValueError('exact immutable request required')
@@ -699,6 +727,8 @@ class Coordinator:
         else:
             for name in ('source_sha256','approved_sha256','manifest_id'):
                 require_sha(data[name])
+            if self.config.protection_mode=='manual_one_shot':
+                require_sha(data['operator_attestation_sha256'])
             if data['source_sha256']!=request_id:
                 raise ValueError('start request source differs')
 
@@ -734,6 +764,13 @@ class Coordinator:
                 checked=self.measured_worker('check-start',request_id,kind)
                 if not self.valid_identity_result(checked,data,'READY'):
                     raise failure('APPROVAL_INVALID')
+                if self.config.protection_mode=='manual_one_shot':
+                    bundle=self.read_json(self.config.inbox/(source+'.proposal.json'),MAX_PROPOSAL)
+                    attestation=bundle['runtime'].get('operator_attestation')
+                    if (type(attestation)!=dict or attestation.get('provenance')!='operator_attested'
+                            or hashlib.sha256(canonical(attestation)).hexdigest()!=data['operator_attestation_sha256']):
+                        raise failure('APPROVAL_INVALID')
+                    self._snapshot_receipt=attestation
             phase='writers'
             self.status(request_id,kind,'RUNNING',phase,'Zastavují se nakonfigurovaní zapisovatelé.',source)
             self.progress(stage='preparing' if kind=='prepare' else 'execution',detail='Zastavují se nakonfigurovaní zapisovatelé.',source=source)
@@ -752,15 +789,17 @@ class Coordinator:
                 phase='snapshot'
                 self.status(request_id,kind,'RUNNING',phase,'Připravuje se NAS snapshot vázaný k manifestu.',source)
                 started=time.monotonic()
-                receipt=strict_json(self.run([str(self.config.snapshot_hook)],input=canonical(plan).decode(),timeout=600))
+                receipt=(self.wait_for_protection(request_id,plan) if self.config.protection_mode == 'manual_one_shot' else
+                    strict_json(self.run([str(self.config.snapshot_hook)],input=canonical(plan).decode(),timeout=600)))
                 self.metrics['snapshot']=round(time.monotonic()-started,6)
-                if (type(receipt)!=dict or set(receipt)!={'snapshot_id','snapshot_at','snapshot_manifest_id'}
+                if self.config.protection_mode == 'automatic' and (type(receipt)!=dict or set(receipt)!={'snapshot_id','snapshot_at','snapshot_manifest_id'}
                         or receipt['snapshot_manifest_id']!=plan['manifest_id']
                         or type(receipt['snapshot_id'])!=str or not receipt['snapshot_id'].strip()
                         or datetime.fromisoformat(receipt['snapshot_at'].replace('Z','+00:00')).tzinfo is None):
                     raise failure('SNAPSHOT_FAILED')
                 self._snapshot_receipt=receipt
-                self.write_json(self.config.private_dir/f'{request_id}.snapshot.json',receipt,exclusive=True)
+                if self.config.protection_mode == 'automatic':
+                    self.write_json(self.config.private_dir/f'{request_id}.snapshot.json',receipt,exclusive=True)
                 phase='publish'
                 publication=self.measured_worker('publish',request_id,kind,receipt=receipt)
                 if publication!={'source_sha256':source}:
@@ -860,6 +899,87 @@ class Coordinator:
             match=REQUEST.fullmatch(path.name)
             if match:
                 self.process(path,*match.groups())
+
+    def wait_for_protection(self, request_id, plan):
+        now = datetime.now(timezone.utc)
+        pending = dict(request_id=request_id, **plan, share=self.config.nas_source,
+            challenge=secrets.token_hex(32), waiting_since=now.isoformat(),
+            deadline_at=(now+timedelta(seconds=self.config.manual_snapshot_timeout_seconds)).isoformat())
+        with self._cleanup_lock:
+            self._manual_event.clear()
+            self._manual_result = self._manual_error = None
+            self._manual_deadline = time.monotonic()+self.config.manual_snapshot_timeout_seconds
+            self._manual_pending = pending
+        try:
+            self.progress(stage='manual_snapshot',detail='V DSM vytvořte a uzamkněte nový snapshot; potvrďte odpojené Windows SMB sdílení.',
+                source=plan['source_sha256'],operator_wait='manual_snapshot')
+            self.begin_heartbeat()
+            if not self._manual_event.wait(max(0,self._manual_deadline-time.monotonic())):
+                raise failure('SNAPSHOT_FAILED')
+            if self._manual_error is not None:
+                raise self._manual_error
+            return self._manual_result
+        finally:
+            with self._cleanup_lock:
+                self._manual_pending = None
+
+    def protection_view(self, cookie):
+        with self._cleanup_lock:
+            pending = self._manual_pending
+            if pending is None or self._manual_event.is_set() or time.monotonic() >= self._manual_deadline:
+                return {'waiting':False},None
+            if type(cookie)!=str or not SHA.fullmatch(cookie):cookie=secrets.token_hex(32)
+            csrf=hmac.new(self._key,canonical([pending,cookie]),hashlib.sha256).hexdigest()
+            return dict(waiting=True,**pending,csrf=csrf,
+                remaining_seconds=max(0,int(self._manual_deadline-time.monotonic()))),cookie
+
+    def protection_decide(self, data, *, origin, cookie):
+        with self._cleanup_lock:
+            if origin!=self.config.public_origin or type(cookie)!=str or not SHA.fullmatch(cookie):
+                raise Forbidden('same Origin and session cookie required')
+            view,_=self.protection_view(cookie)
+            if not view['waiting']:
+                raise Conflict('manual protection decision expired or consumed')
+            expected={'request_id','manifest_id','source_sha256','challenge','csrf','actor','snapshot_id','snapshot_at',
+                'snapshot_locked','windows_smb_disconnected','no_other_writers','keep_disconnected_through_normal'}
+            if type(data)!=dict or set(data) not in (expected,expected|{'decision'}):
+                raise ValueError('exact manual protection decision required')
+            if any(data[key]!=view[key] for key in ('request_id','manifest_id','source_sha256','challenge')):
+                raise Conflict('manual protection belongs to another preparation')
+            if type(data['csrf'])!=str or not hmac.compare_digest(data['csrf'],view['csrf']):
+                raise Forbidden('manual protection bound CSRF required')
+            require_actor(data['actor'])
+            if data.get('decision') not in (None,'stop'):
+                raise ValueError('unknown manual protection decision')
+            if data.get('decision')=='stop':
+                self._manual_error=failure('SNAPSHOT_FAILED')
+                self._manual_event.set()
+                return
+            if (type(data['snapshot_id'])!=str or type(data['snapshot_at'])!=str
+                    or not data['snapshot_id'].strip() or len(data['snapshot_id'])>256
+                    or any(ord(c)<32 for c in data['snapshot_id'])
+                    or any(data[key] is not True for key in ('snapshot_locked','windows_smb_disconnected',
+                        'no_other_writers','keep_disconnected_through_normal'))):
+                raise ValueError('explicit snapshot and Windows exclusion confirmations required')
+            now=datetime.now(timezone.utc)
+            snapshot=datetime.fromisoformat(data['snapshot_at'].replace('Z','+00:00'))
+            baseline=datetime.fromisoformat(view['created_at'].replace('Z','+00:00'))
+            if snapshot.tzinfo is None or not baseline<=snapshot<=now:
+                raise ValueError('actual snapshot must be post-baseline and nonfuture with timezone')
+            record={key:data[key] for key in expected-{'challenge','csrf'}}
+            record.update(provenance='operator_attested',share=view['share'],waiting_since=view['waiting_since'],
+                deadline_at=view['deadline_at'],confirmed_at=now.isoformat())
+            try:
+                self.write_json(self.config.private_dir/(view['request_id']+'.protection-claim.json'),
+                    dict(request_id=view['request_id'],source_sha256=view['source_sha256']),exclusive=True)
+                self.write_json(self.config.ledger/(view['request_id']+'.operator-attestation.json'),record,
+                    exclusive=True,owner=(self.config.uid,self.config.gid))
+                self._manual_result=record
+            except OSError as exc:
+                self._manual_error=exc
+                raise
+            finally:
+                self._manual_event.set()
 
     def stop_cleanup(self, source):
         self._cleanup_stopped.add(source)
@@ -1021,10 +1141,13 @@ def make_control_server(coordinator):
                 return None
         def do_GET(self):
             parsed=urlsplit(self.path)
-            if parsed.path not in {'/cleanup','/cleanup/proposal'}:
+            if parsed.path not in {'/cleanup','/cleanup/proposal','/protection'}:
                 return self.response(404,{'error':'Neznámý endpoint.'})
             try:
-                if parsed.path=='/cleanup':
+                if parsed.path=='/protection':
+                    if parsed.query:raise ValueError('protection query rejected')
+                    view,cookie=coordinator.protection_view(self.cookie())
+                elif parsed.path=='/cleanup':
                     if parsed.query:raise ValueError('status query rejected')
                     view,cookie=coordinator.cleanup_view(self.cookie())
                 else:
@@ -1038,7 +1161,7 @@ def make_control_server(coordinator):
             except (ValueError,OSError):
                 self.response(409,{'error':'Aktuální návrh úklidu není dostupný; stav vyžaduje STOP.'})
         def do_POST(self):
-            if self.path!='/cleanup':
+            if self.path not in {'/cleanup','/protection'}:
                 return self.response(404,{'error':'Neznámý endpoint.'})
             try:
                 length=self.headers.get('Content-Length')
@@ -1049,7 +1172,11 @@ def make_control_server(coordinator):
                 raw=self.rfile.read(int(length))
                 if len(raw)!=int(length):
                     raise ValueError('incomplete request')
-                coordinator.cleanup_decide(strict_json(raw),origin=self.headers.get('Origin'),cookie=self.cookie())
+                if self.path=='/protection':
+                    if int(length)>MAX_REQUEST:raise ValueError('manual protection decision too large')
+                    coordinator.protection_decide(strict_json(raw),origin=self.headers.get('Origin'),cookie=self.cookie())
+                else:
+                    coordinator.cleanup_decide(strict_json(raw),origin=self.headers.get('Origin'),cookie=self.cookie())
                 self.response(200,{'accepted':True})
             except Forbidden:
                 self.response(403,{'error':'Je vyžadován stejný Origin a CSRF vázané k návrhu.'})

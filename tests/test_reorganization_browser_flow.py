@@ -33,9 +33,11 @@ class UnixConnection(http.client.HTTPConnection):
 
 
 @pytest.mark.parametrize('cleanup_choice', ['keep', 'selected', 'stop', 'before_claim'])
-def test_browser_can_prepare_approve_start_and_finish_original_e7(web, tmp_path, monkeypatch, cleanup_choice):
+@pytest.mark.parametrize('protection_mode', ['automatic', 'manual_one_shot'])
+def test_browser_can_prepare_approve_start_and_finish_original_e7(web, tmp_path, monkeypatch, cleanup_choice, protection_mode, request):
+    from dataclasses import replace
     case, client, _ = web
-    config = config_for(case)
+    config = replace(config_for(case), protection_mode=protection_mode)
     from v6_database_case import database_rows
     rows = database_rows(config.database)
     page = client.post('/reorganization/preview')
@@ -55,7 +57,7 @@ def test_browser_can_prepare_approve_start_and_finish_original_e7(web, tmp_path,
         writers_stop_hook=tmp_path / 'stop-writers', writers_start_hook=tmp_path / 'start-writers',
         socket_gid=os.getgid(), nas_source=config.share, runtime_evidence=tmp_path/'runtime-evidence.json', database_dir=config.database.parent,
         media_rw=config.library_root, inbox=config.inbox,outbox=config.outbox,ledger=config.ledger,
-        backups=config.backups,service_status=config.service,**dirs)
+        backups=config.backups,service_status=config.service,protection_mode=protection_mode,**dirs)
     monkeypatch.setattr(host_module, 'require_rw_mount', lambda *args: None)
     monkeypatch.setattr(host_module, 'host_mount_identity', lambda *args: 'fixture-host-mount')
     monkeypatch.setattr(host_module, 'resolve_deployment', lambda files: SimpleNamespace(files=files,env_file=tmp_path/'.env',project_directory=tmp_path,project_name='anime-db'))
@@ -96,7 +98,48 @@ def test_browser_can_prepare_approve_start_and_finish_original_e7(web, tmp_path,
             return json.dumps(result)
         return ''
     host = host_module.Coordinator(host_config, run=runtime, healthy=lambda _: application['running'])
-    host.tick()
+    server = host_module.make_control_server(host)
+    serving = threading.Thread(target=server.serve_forever,daemon=True)
+    serving.start()
+    closed = False
+    def close_server():
+        nonlocal closed
+        if not closed:
+            server.shutdown();server.server_close();serving.join(5)
+            closed = True
+    request.addfinalizer(close_server)
+    if protection_mode == 'manual_one_shot':
+        preparation = threading.Thread(target=host.tick,daemon=True)
+        preparation.start()
+        deadline = time.monotonic()+10
+        manual = None
+        while time.monotonic()<deadline and preparation.is_alive():
+            connection = UnixConnection(host_config.control_dir/'coordinator.sock')
+            try:
+                connection.request('GET','/protection')
+                reply=connection.getresponse();view=json.loads(reply.read());cookie=reply.getheader('Set-Cookie')
+            finally:connection.close()
+            if view.get('waiting'):
+                manual=view
+                break
+            time.sleep(.03)
+        assert manual is not None and not application['running']
+        data={key:manual[key] for key in ('request_id','manifest_id','source_sha256','challenge','csrf')}
+        data.update(actor='operator',snapshot_id='manually checked DSM snapshot',snapshot_at=approval.now(),
+            snapshot_locked=True,windows_smb_disconnected=True,no_other_writers=True,keep_disconnected_through_normal=True)
+        connection=UnixConnection(host_config.control_dir/'coordinator.sock')
+        try:
+            connection.request('POST','/protection',body=json.dumps(data),headers={
+                'Origin':'http://testserver','Content-Type':'application/json','Cookie':cookie.split(';',1)[0]})
+            reply=connection.getresponse()
+            assert reply.status==200,reply.read()
+            reply.read()
+        finally:connection.close()
+        preparation.join(20)
+        assert not preparation.is_alive()
+        assert not any(argv[0] in {str(host_config.snapshot_hook),str(host_config.writers_stop_hook),str(host_config.writers_start_hook)} for argv in calls)
+    else:
+        host.tick()
     state = client.get(request_page.headers['location'] + '/status').json()
     assert state['state'] == 'READY', state
     assert application['running']
@@ -115,13 +158,11 @@ def test_browser_can_prepare_approve_start_and_finish_original_e7(web, tmp_path,
         'confirm':'yes'},headers=ORIGIN)
     assert page.status_code == 200, page.text
     assert not list(config.ledger.glob('*.accepted.json'))
+    extra = {'manual_protection_confirm':'yes'} if protection_mode=='manual_one_shot' else {}
     response = client.post(path + '/start',data={'csrf':csrf(page),'actor':'operator','sha256':approval.sha256(final),
-        'confirm':'yes'},headers=ORIGIN,follow_redirects=False)
+        'confirm':'yes',**extra},headers=ORIGIN,follow_redirects=False)
     assert response.status_code == 303 and response.headers['location'].startswith('/_service/workflow')
     case[1].close()
-    server = host_module.make_control_server(host)
-    serving = threading.Thread(target=server.serve_forever,daemon=True)
-    serving.start()
     running = threading.Thread(target=host.tick,daemon=True)
     running.start()
     if cleanup_choice=='before_claim':
@@ -138,7 +179,7 @@ def test_browser_can_prepare_approve_start_and_finish_original_e7(web, tmp_path,
             assert report.status_code==200 and 'E7 nezačalo' in report.text
             assert 'Požadavek čeká na ověření hostitelem' not in report.text
         finally:
-            server.shutdown();server.server_close();serving.join(5)
+            close_server()
         return
     try:
         deadline=time.monotonic()+35
@@ -198,10 +239,12 @@ def test_browser_can_prepare_approve_start_and_finish_original_e7(web, tmp_path,
             with TestClient(create_app(settings)) as restarted:
                 report=restarted.get(path)
                 assert report.status_code==200 and 'Výsledek reorganizace' in report.text and 'NORMAL' in report.text
+                if protection_mode=='manual_one_shot':
+                    assert 'operator_attested' in report.text and 'opětovným připojením Windows' in report.text
             from test_v6_execution_projection import expected_rows
             assert database_rows(config.database)==expected_rows(rows,final.payload.locator_patches)
         call_count=len(calls)
         host.tick()
         assert len(calls)==call_count
     finally:
-        server.shutdown();server.server_close();serving.join(5)
+        close_server()

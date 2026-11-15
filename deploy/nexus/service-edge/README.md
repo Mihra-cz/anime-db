@@ -30,6 +30,7 @@ koordinátoru přes Unix socket; nemá obecné ovládání hostitele.
 | `/_service/progress.json` | `/public-status/progress.json`, bez souboru 404 |
 | `/_service/workflow?source=SHA` | Přímo `/service/index.html`, nezávisle na aplikaci |
 | `/_service/control/cleanup` GET/POST | Unix HTTP `/cleanup` na `/run/animedb-control/coordinator.sock` |
+| `/_service/control/protection` GET/POST | Pouze živé jednorázové ruční potvrzení snapshotu/Windows výluky; Unix HTTP `/protection`, limit 64 KiB |
 | `/_service/control/cleanup/proposal?sha=SHA` GET | Jednorázově načtení kandidátů a CSRF pro přesný živý návrh |
 | Ostatní `/_service/*` | 404 |
 | Chyba proxy 502/504 | HTTP 503 a `/service/index.html` |
