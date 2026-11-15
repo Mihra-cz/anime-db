@@ -478,9 +478,12 @@ zachovat jednotlivé adresáře včetně jejich rodičů. Rozhodnutí používá
 CleanupProposal/CleanupApproval, evidence a verifikaci. Nevzniká druhý engine,
 move journal ani webový RW mount. CLI zůstává diagnostickou alternativou.
 
-Průchod je implementovaný pro izolované testy; [jednorázové nasazení
-koordinátoru](../deploy/nexus/docs/V6_COORDINATOR.md), RW mount s existujícím
-druhým účtem, skutečné snapshot/writer integrace a produkční ověření zbývají.
+Vedle izolovaných testů prošel skutečný `manual_one_shot` v existujícím M8 V2
+LABu s `approved_root`, Docker workery a CIFS: [M11 PASS](V6_M11_MANUAL_LAB_REVALIDATION.md).
+Snapshot a Windows výluka byly výslovně simulované LAB assertions; nejde o
+důkaz Synology snapshotu. Produkční použití nadále vyžaduje samostatně schválené
+[nasazení koordinátoru](../deploy/nexus/docs/V6_COORDINATOR.md), aktuální
+RO/RW mount-bound evidence a ochranné kroky podle zvoleného režimu.
 Není to closure V6 ani povolení k fyzickému provedení. Dosavadní RO přístup
 se zachovává a nové Synology účty se nevytvářejí.
 

@@ -41,8 +41,9 @@ Nikdy se nepoužívá produkční `data/anime.db` (vyloučeno i z image přes
 
 Syntetická knihovna: Show, Lab Alpha, Lab Beta (2 sezóny); 10× MOVE
 (videa i titulky), 3× KEEP, 1× QUARANTINE (potvrzený duplikát → `Duplicates`),
-1× WARNING (`subtitle_present_video_missing`), chráněné `IMPORT` a `Subs`,
-po přesunech prázdné adresáře pro E7H cleanup.
+1× WARNING (`subtitle_present_video_missing`), chráněné `IMPORT` a `Duplicates`,
+prázdné `Subs` a další adresáře pro výslovně schválený E7H cleanup. `Subs` nemá
+plošnou ochranu; zachovává se podle skutečných canonical cílů.
 
 ## V2 schválení a hostitelský start
 
